@@ -281,7 +281,7 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         reject_compact(options)?;
-        if openapi::should_execute(auth, &request.model) {
+        if openapi::should_execute_request(self.config.as_deref(), auth, &request.model, options) {
             let (request, options) = openapi::normalize_request(request, options);
             let executor = self.openapi_executor(auth).await?;
             return executor
@@ -336,7 +336,7 @@ impl VertexExecutor {
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
         reject_compact(options)?;
-        if openapi::should_execute(auth, &request.model) {
+        if openapi::should_execute_request(self.config.as_deref(), auth, &request.model, options) {
             let (request, options) = openapi::normalize_request(request, options);
             let executor = self.openapi_executor(auth).await?;
             return executor
@@ -395,7 +395,7 @@ impl VertexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        if openapi::should_execute(auth, &request.model) {
+        if openapi::should_execute_request(self.config.as_deref(), auth, &request.model, options) {
             let (request, options) = openapi::normalize_request(request, options);
             return self
                 .openapi_compat()

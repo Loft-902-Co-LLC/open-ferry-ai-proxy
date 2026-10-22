@@ -2397,3 +2397,178 @@ fn vertex_declared_openapi_names_and_aliases_are_registered() {
             .any(|m| m.id == "partner" && m.metadata_model_id == "qwen/qwen-test")
     );
 }
+
+// Ported from service_vertex_openapi_capabilities_test.go and
+// auth/vertex_openapi_capabilities_test.go (v8.0.38, MIT).
+#[test]
+fn vertex_openapi_registration_ownership_and_reasoning() {
+    use crate::config::{Config, VertexCompatKey, VertexCompatModel};
+    for (name, credential, model, explicit, owner, levels) in [
+        (
+            "partner/custom",
+            None,
+            None,
+            None,
+            "partner",
+            vec!["low", "medium", "high"],
+        ),
+        (
+            "publishers/Meta/models/custom",
+            None,
+            None,
+            None,
+            "meta",
+            vec!["low", "medium", "high"],
+        ),
+        (
+            "custom",
+            Some(true),
+            None,
+            None,
+            "google",
+            vec!["low", "medium", "high"],
+        ),
+        ("partner/model", Some(false), None, None, "partner", vec![]),
+        (
+            "custom",
+            Some(false),
+            Some(true),
+            None,
+            "google",
+            vec!["low", "medium", "high"],
+        ),
+        (
+            "partner/model",
+            Some(true),
+            Some(false),
+            None,
+            "partner",
+            vec![],
+        ),
+        ("GoOgLe/custom", None, None, None, "google", vec![]),
+        (
+            "partner/model",
+            None,
+            None,
+            Some(vec!["high"]),
+            "partner",
+            vec!["high"],
+        ),
+    ] {
+        let cfg = Config {
+            vertex_api_key: vec![VertexCompatKey {
+                api_key: "dummy".into(),
+                openapi: credential,
+                models: vec![
+                    VertexCompatModel::default(),
+                    VertexCompatModel {
+                        name: name.into(),
+                        alias: "public".into(),
+                        openapi: model,
+                        thinking: explicit.map(|levels| crate::config::ThinkingSupport {
+                            levels: levels.into_iter().map(str::to_owned).collect(),
+                            ..crate::config::ThinkingSupport::default()
+                        }),
+                        ..VertexCompatModel::default()
+                    },
+                    VertexCompatModel {
+                        name: "ignored/duplicate".into(),
+                        alias: "public".into(),
+                        openapi: Some(true),
+                        ..VertexCompatModel::default()
+                    },
+                ],
+                ..VertexCompatKey::default()
+            }],
+            ..Config::default()
+        };
+        let credential = auth("vertex", "vertex", &[("api_key", "dummy")]);
+        let AuthModels::Register { models, .. } =
+            auth_models(&credential, &RegistrationRules::from(&cfg))
+        else {
+            panic!("unregistered {name}");
+        };
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "public");
+        assert_eq!(models[0].owned_by, owner);
+        assert_eq!(
+            models[0]
+                .thinking
+                .as_ref()
+                .map(|t| t.levels.clone())
+                .unwrap_or_default(),
+            levels,
+            "{name}"
+        );
+        let registry = ModelRegistry::new();
+        registry.register_client("vertex", "vertex", &models);
+        assert_eq!(
+            registry.model_info("public", "vertex"),
+            Some(models[0].clone())
+        );
+    }
+    let cfg = Config {
+        vertex_api_key: vec![VertexCompatKey {
+            api_key: "dummy".into(),
+            openapi: Some(true),
+            models: vec![VertexCompatModel {
+                name: "gemini-2.5-pro".into(),
+                alias: "public".into(),
+                ..VertexCompatModel::default()
+            }],
+            ..VertexCompatKey::default()
+        }],
+        ..Config::default()
+    };
+    let credential = auth("vertex", "vertex", &[("api_key", "dummy")]);
+    let AuthModels::Register { models, .. } =
+        auth_models(&credential, &RegistrationRules::from(&cfg))
+    else {
+        panic!("unregistered");
+    };
+    assert_eq!(
+        models[0].thinking,
+        StaticCatalog::current()
+            .lookup("gemini-2.5-pro")
+            .unwrap()
+            .thinking
+    );
+}
+
+#[test]
+fn vertex_mixed_file_models_register_aliases_and_normalized_publishers() {
+    let context = crate::auth::synthesizer::SynthesisContext::new("", chrono::Utc::now());
+    let credential = crate::auth::synthesizer::file::synthesize_auth_file(&context,std::path::Path::new("vertex.json"),br#"{"type":"vertex","models":["gemini-2.5-flash",{"name":"publishers/Meta/models/custom","alias":"public","openapi":true},{"name":"qwen/model"}]}"#).unwrap().unwrap();
+    let AuthModels::Register { models, .. } =
+        auth_models(&credential, &RegistrationRules::default())
+    else {
+        panic!("unregistered");
+    };
+    let public = models.iter().find(|m| m.id == "public").unwrap();
+    assert_eq!(public.owned_by, "meta");
+    assert_eq!(
+        public.thinking.as_ref().unwrap().levels,
+        ["low", "medium", "high"]
+    );
+    assert!(models.iter().any(|m| m.id == "gemini-2.5-pro"));
+    assert!(
+        models
+            .iter()
+            .any(|m| m.id == "qwen/model" && m.owned_by == "qwen")
+    );
+}
+
+#[test]
+fn vertex_publisher_matches_openapi_model_normalization() {
+    for (model, publisher) in [
+        ("publishers/Meta/models/custom(high)", "meta"),
+        ("GoOgLe/custom", "GoOgLe"),
+        ("models/custom", "google"),
+        ("publishers/custom", "publishers"),
+        ("publishers/", "google"),
+        ("/custom", "google"),
+        ("custom", "google"),
+    ] {
+        assert_eq!(vertex_publisher(model), publisher);
+    }
+}

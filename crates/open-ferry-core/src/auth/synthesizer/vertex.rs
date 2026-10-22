@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/config.go
 // (synthesizeVertexCompat), ComputeVertexCompatModelsHash in
 // internal/modelconfig/model_hash.go and the vertex-api-key part of
-// ValidateCredentialWeights in internal/config/weight.go (v8.0.36, MIT).
+// ValidateCredentialWeights in internal/config/weight.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the config's `vertex-api-key` list: API keys for Vertex AI's
@@ -109,6 +109,15 @@ pub fn vertex_auth(
     if !models_hash.is_empty() {
         attrs.insert("models_hash".to_owned(), models_hash);
     }
+    if let Some(openapi) = entry.openapi {
+        attrs.insert("openapi".to_owned(), openapi.to_string());
+    }
+    if !entry.openapi_location.trim().is_empty() {
+        attrs.insert(
+            "openapi_location".to_owned(),
+            entry.openapi_location.trim().to_owned(),
+        );
+    }
     if entry.interactions == Some(true) {
         attrs.insert("interactions".to_owned(), "true".to_owned());
     }
@@ -144,11 +153,15 @@ pub fn compute_vertex_models_hash(models: &[VertexCompatModel]) -> String {
                 return None;
             }
             Some(format!(
-                "{}|{}|{}|force-mapping={}|thinking={}",
+                "{}|{}|{}|force-mapping={}{}|thinking={}",
                 to_lower(name),
                 to_lower(alias),
                 model.display_name.trim(),
                 model.force_mapping,
+                model
+                    .openapi
+                    .map(|v| format!("|openapi={v}"))
+                    .unwrap_or_default(),
                 thinking_json(model.thinking.as_ref()),
             ))
         })
@@ -157,6 +170,74 @@ pub fn compute_vertex_models_hash(models: &[VertexCompatModel]) -> String {
         return String::new();
     }
     sha256_hex(lines.join("\n").as_bytes())
+}
+
+/// Projects Vertex credential-file routing settings into runtime attributes,
+/// retaining name-only rules and explicit false independently of alias lists.
+pub(super) fn apply_openapi_settings(
+    auth: &mut Auth,
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) {
+    use open_ferry_translate::go::equal_fold;
+    use serde_json::{Value, json};
+    use std::collections::HashSet;
+    if auth.provider != VERTEX {
+        return;
+    }
+    let enabled = metadata.get("openapi").and_then(|value| {
+        value.as_bool().or_else(|| {
+            value
+                .as_str()
+                .and_then(|s| super::super::go::parse_bool(&to_lower(s.trim())))
+        })
+    });
+    if let Some(enabled) = enabled {
+        auth.attributes
+            .insert("openapi".into(), enabled.to_string());
+    }
+    for key in ["openapi_location", "openapi-location"] {
+        if let Some(location) = metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            auth.attributes
+                .insert("openapi_location".into(), location.into());
+            break;
+        }
+    }
+    let mut seen_alias = HashSet::new();
+    let mut seen_name = HashSet::new();
+    let mut rules = Vec::new();
+    for key in ["model_aliases", "model-aliases", "models"] {
+        let Some(items) = metadata.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for rule in super::file::decode_model_aliases(items) {
+            let name = rule.name.trim();
+            let alias = rule.alias.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if !alias.is_empty() && !equal_fold(name, alias) {
+                if !seen_alias.insert(to_lower(alias)) {
+                    continue;
+                }
+            } else if rule.openapi.is_none() || !seen_name.insert(to_lower(name)) {
+                continue;
+            }
+            if let Some(enabled) = rule.openapi {
+                rules.push(json!({"name": name, "alias": alias, "openapi": enabled}));
+            }
+        }
+    }
+    if !rules.is_empty() {
+        auth.attributes.insert(
+            "vertex_model_openapi".into(),
+            Value::Array(rules).to_string(),
+        );
+    }
 }
 
 // Ported from internal/watcher/synthesizer/config_test.go: the Vertex,
@@ -176,6 +257,90 @@ mod tests {
 
     fn ctx() -> SynthesisContext {
         SynthesisContext::new("", chrono::Utc.timestamp_opt(100, 0).unwrap())
+    }
+
+    #[test]
+    fn credential_settings_project_to_attributes() {
+        use serde_json::json;
+        for value in [
+            json!(true),
+            json!(false),
+            json!("true"),
+            json!("false"),
+            json!("1"),
+            json!("0"),
+            json!("T"),
+            json!("f"),
+        ] {
+            for key in ["openapi_location", "openapi-location"] {
+                let enabled = matches!(value, Value::Bool(true))
+                    || ["true", "1", "T"].contains(&value.as_str().unwrap_or_default());
+                let raw = json!({"type":"vertex", "openapi":value, key:" global "});
+                let auth = super::super::file::synthesize_auth_file(
+                    &ctx(),
+                    std::path::Path::new("vertex.json"),
+                    &serde_json::to_vec(&raw).unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    auth.attribute("openapi"),
+                    Some(enabled.to_string().as_str())
+                );
+                assert_eq!(auth.attribute("openapi_location"), Some("global"));
+            }
+        }
+        for enabled in [None, Some(false), Some(true)] {
+            let auths = synth(&vertex(vec![VertexCompatKey {
+                openapi: enabled,
+                openapi_location: " global ".into(),
+                ..key("dummy", "")
+            }]))
+            .unwrap();
+            assert_eq!(
+                auths[0].attribute("openapi"),
+                enabled.map(|v| v.to_string()).as_deref()
+            );
+            assert_eq!(auths[0].attribute("openapi_location"), Some("global"));
+        }
+    }
+
+    #[test]
+    fn mixed_model_lists_project_alias_and_name_only_rules() {
+        use serde_json::json;
+        for source in ["model_aliases", "model-aliases", "models"] {
+            for enabled in [false, true] {
+                let raw = json!({"type":"vertex", source:["native-model", 3, {"name":"bad", "openapi":"false"}, {"name":" partner/model ", "alias":" public ", "openapi":enabled}, {"name":"custom", "openapi":!enabled}]});
+                let auth = super::super::file::synthesize_auth_file(
+                    &ctx(),
+                    std::path::Path::new("vertex.json"),
+                    &serde_json::to_vec(&raw).unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+                let rules: Value =
+                    serde_json::from_str(auth.attribute("vertex_model_openapi").unwrap()).unwrap();
+                assert_eq!(rules.as_array().unwrap().len(), 2);
+                assert_eq!(rules[0]["name"], "partner/model");
+                assert_eq!(rules[0]["alias"], "public");
+                assert_eq!(rules[0]["openapi"], enabled);
+                assert_eq!(rules[1]["openapi"], !enabled);
+                let aliases: Value =
+                    serde_json::from_str(auth.attribute("model_aliases").unwrap()).unwrap();
+                assert_eq!(aliases[0]["openapi"], enabled);
+                assert_eq!(aliases[0]["alias"], "public");
+            }
+        }
+        // An unset per-account alias reserves its name ahead of later sources.
+        let raw = json!({"type":"vertex", "model_aliases":[{"name":"model", "alias":"shared"}], "models":[{"name":"other", "alias":"shared", "openapi":false}]});
+        let auth = super::super::file::synthesize_auth_file(
+            &ctx(),
+            std::path::Path::new("vertex.json"),
+            &serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(auth.attribute("vertex_model_openapi").is_none());
     }
 
     fn synth(config: &Config) -> Result<Vec<Auth>, SynthesisError> {
@@ -313,6 +478,7 @@ mod tests {
                 alias: "Pro".to_owned(),
                 display_name: " Pro ".to_owned(),
                 force_mapping: true,
+                openapi: None,
                 thinking: Some(ThinkingSupport {
                     levels: vec!["low".to_owned()],
                     ..ThinkingSupport::default()

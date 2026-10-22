@@ -109,6 +109,8 @@ mod sync_contract_tests;
 #[cfg(test)]
 mod testing;
 mod types;
+#[cfg(test)]
+mod vertex_openapi_tests;
 mod web_search_result_cache;
 pub use web_search_result_cache::CodexWebSearchResultCacheConfig;
 mod v8;

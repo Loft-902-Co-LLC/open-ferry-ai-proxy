@@ -80,7 +80,7 @@ fn urls_and_official_hosts() {
             "https://example.test/v1/endpoints/openapi",
         ),
     ] {
-        assert_eq!(base_url(base, project, DEFAULT_LOCATION), expected);
+        assert_eq!(base_url(base, project, ""), expected);
     }
     assert_eq!(
         base_url("", "p", "global"),
@@ -102,8 +102,9 @@ fn urls_and_official_hosts() {
     }
 }
 
-const CHAT: &str = r#"{"id":"test","object":"chat.completion","model":"meta/llama","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#;
-const PAYLOAD: &str = r#"{"model":"meta/llama","messages":[{"role":"user","content":"hello"}]}"#;
+pub(super) const CHAT: &str = r#"{"id":"test","object":"chat.completion","model":"meta/llama","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#;
+pub(super) const PAYLOAD: &str =
+    r#"{"model":"meta/llama","messages":[{"role":"user","content":"hello"}]}"#;
 
 #[tokio::test]
 async fn third_party_key_and_stream_use_openapi() {

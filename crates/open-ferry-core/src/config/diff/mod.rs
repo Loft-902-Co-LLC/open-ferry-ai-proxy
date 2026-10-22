@@ -4,7 +4,7 @@
 // appendOptionalIntChange, appendOptionalBoolChange, formatOptionalBool,
 // formatOptionalInt, equalStringMap, formatProxyURL, formatURL) and the
 // change logging of internal/watcher/config_reload.go (reloadConfig)
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a reload changed, as the lines upstream logs after
@@ -694,6 +694,12 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
                 &field("disable-cooling"),
                 o.disable_cooling,
                 n.disable_cooling,
+            );
+            changes.optional_bool(&field("openapi"), o.openapi, n.openapi);
+            changes.trimmed(
+                &field("openapi-location"),
+                &o.openapi_location,
+                &n.openapi_location,
             );
             changes.secret(&field("api-key"), &o.api_key, &n.api_key);
             changes.summary(

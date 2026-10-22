@@ -2,7 +2,7 @@
 // config_types.go and vertex_compat.go: the JSON layouts of `Config` and the
 // types it holds), internal/registry/catalog_config.go (CatalogSources) and
 // internal/api/handlers/management/config_auth_index.go
-// (the `*WithAuthIndex` types) (v8.0.36, MIT).
+// (the `*WithAuthIndex` types) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config as Go's JSON encoder writes upstream's `Config`: struct
@@ -642,6 +642,8 @@ pub(super) fn vertex_key(key: &VertexCompatKey, auth_index: &str) -> Json {
         .omit_nil("disable-cooling", key.disable_cooling.map(Json::Bool))
         .omit_nil("request-retry", key.request_retry.map(Json::Int))
         .omit_nil("interactions", key.interactions.map(Json::Bool))
+        .omit_nil("openapi", key.openapi.map(Json::Bool))
+        .omit_empty("openapi-location", string(&key.openapi_location))
         .omit_empty("auth-index", string(auth_index))
         .done()
 }
@@ -817,6 +819,7 @@ fn vertex_model(model: &VertexCompatModel) -> Json {
         .with("alias", string(&model.alias))
         .omit_empty("display-name", string(&model.display_name))
         .omit_empty("force-mapping", Json::Bool(model.force_mapping))
+        .omit_nil("openapi", model.openapi.map(Json::Bool))
         .omit_nil("thinking", model.thinking.as_ref().map(thinking))
         .done()
 }
@@ -882,6 +885,7 @@ fn scoped_error(rule: &RequestScopedErrorRule) -> Json {
 
 fn model_alias(alias: &OAuthModelAlias) -> Json {
     Fields::new()
+        .omit_nil("openapi", alias.openapi.map(Json::Bool))
         .with("name", string(&alias.name))
         .with("alias", string(&alias.alias))
         .omit_empty("fork", Json::Bool(alias.fork))
@@ -892,6 +896,7 @@ fn model_alias(alias: &OAuthModelAlias) -> Json {
 
 fn model_setting(setting: &OAuthModelSetting) -> Json {
     Fields::new()
+        .omit_nil("openapi", setting.openapi.map(Json::Bool))
         .with("name", string(&setting.name))
         .omit_empty("alias", string(&setting.alias))
         .omit_empty("max-context-length", Json::Int(setting.max_context_length))
@@ -902,6 +907,17 @@ fn model_setting(setting: &OAuthModelSetting) -> Json {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn vertex_openapi_settings_keep_explicit_false_in_management_json() {
+        let cfg = Config::parse(b"vertex-api-key: [{api-key: dummy, openapi: false, openapi-location: global, models: [{name: partner/model, openapi: false}]}]\noauth-model-alias: {vertex: [{name: model, alias: public, openapi: false}]}\noauth-settings: {vertex: [{name: model, openapi: false}]}\n").unwrap();
+        let value: Value = serde_json::from_str(&config(&cfg).encode()).unwrap();
+        assert_eq!(value["vertex-api-key"][0]["openapi"], false);
+        assert_eq!(value["vertex-api-key"][0]["openapi-location"], "global");
+        assert_eq!(value["vertex-api-key"][0]["models"][0]["openapi"], false);
+        assert_eq!(value["oauth-model-alias"]["vertex"][0]["openapi"], false);
+        assert_eq!(value["oauth-settings"]["vertex"][0]["openapi"], false);
+    }
 
     #[test]
     fn signin_with_chatgpt_identifier_uses_legacy_json_and_omits_empty() {
