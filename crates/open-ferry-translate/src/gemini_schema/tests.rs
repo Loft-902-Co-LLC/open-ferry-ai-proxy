@@ -2640,7 +2640,7 @@ fn removes_access_annotations_but_keeps_names_and_literal_values_issue6778() {
 }
 
 #[test]
-fn every_path_writer_preflights_depth_before_recursing() {
+fn set_preflights_depth_before_recursing() {
     std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(|| {
