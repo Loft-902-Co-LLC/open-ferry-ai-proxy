@@ -482,6 +482,14 @@ tree until the edit is applied, so the emitter sees the actual final recipient
 instead of relocating comments before layout conversion. Canonicalizing
 config-version keeps its comments; upstream replaces the value and drops them.
 
+The offline parity feature has call-scoped diagnostic switches for the empty
+mapping flush, canonical-version comment copying, dropped single-key comment
+transfer and older inline empty-null flush. Disabling these switches alone
+does not certify a deviation. In the saved compound `random-31-2887`, every
+subset still protects the first block scalar while Go writes unloadable YAML;
+raw step-by-step equality therefore fails and the case remains Different.
+Product builds contain none of these switches and keep every protection.
+
 
 - Archived config strings containing U+2028, U+2029 or U+0085 are quoted
   before their YAML is commented out. Upstream prefixes only LF lines and

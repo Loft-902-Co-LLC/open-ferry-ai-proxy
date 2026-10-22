@@ -6,6 +6,9 @@ pub mod counterfactual;
 pub mod folded;
 pub mod version;
 
+#[cfg(test)]
+mod ablation_tests;
+
 use std::env;
 use std::fs;
 use std::iter;

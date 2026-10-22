@@ -177,6 +177,11 @@ pub(crate) fn protect_conflicting_key_comments(
     output_complete: bool,
 ) -> Result<(), YamlError> {
     fn candidate(key: &Node, value: &Node, output_complete: bool) -> bool {
+        #[cfg(feature = "parity")]
+        let output_complete = output_complete
+            && crate::config::save::parity::ablation::enabled(
+                crate::config::save::parity::ablation::Protection::DroppedSingleKeyComment,
+            );
         (key.line_comment.contains('\n')
             && value.kind == Kind::Scalar
             && !value.line_comment.is_empty())
