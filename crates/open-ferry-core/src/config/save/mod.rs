@@ -45,6 +45,9 @@
 //! it was and returns a [`SaveError`] that says why.
 //!
 //! Deviations from upstream:
+//! - Comment normalization leaves block scalar bodies alone in every section.
+//!   Multiline line comments on block scalars are quoted safely, so emitting
+//!   them cannot turn the comment into scalar data. Other block styles stay.
 //! - The check, the backup, the record, the lock, the atomic replacement
 //!   and the symbolic link refusal are this port's; upstream writes the
 //!   file in place.
@@ -546,9 +549,7 @@ pub(crate) fn render_preserving_comments(
         }
     }
     merge::normalize_collection_node_styles(root);
-    if let Some(configs) = yaml_path_mut(root, "plugins.configs") {
-        protect_plugin_block_scalars(configs);
-    }
+    protect_block_scalar_comments(root);
 
     let mut out = normalize_comment_indentation(&marshal_config(&original)?);
     if migrating {
@@ -557,20 +558,13 @@ pub(crate) fn render_preserving_comments(
     Ok(out)
 }
 
-/// Keep retained plugin data out of NormalizeCommentIndentation's way.
+/// Keep block scalar data separate from multiline line comments.
 /// yaml.v3 emits continuation lines of a block scalar's line comment into
 /// its body. Re-reading that changes the value; left-aligning the comment
 /// can also strand the body's remaining lines. Quoting that scalar keeps
 /// its value and every comment, without rebuilding the plugin subtree.
-fn protect_plugin_block_scalars(node: &mut Node) {
-    if node.kind == Kind::Scalar
-        && node.style.has(Style::LITERAL | Style::FOLDED)
-        && (node.line_comment.contains('\n')
-            || node
-                .value
-                .lines()
-                .any(|line| line.trim_start().starts_with('#')))
-    {
+fn protect_block_scalar_comments(node: &mut Node) {
+    if needs_block_scalar_comment_protection(node) {
         node.style = if node.style.has(Style::TAGGED) {
             Style::TAGGED | Style::DOUBLE_QUOTED
         } else {
@@ -578,8 +572,16 @@ fn protect_plugin_block_scalars(node: &mut Node) {
         };
     }
     for child in &mut node.content {
-        protect_plugin_block_scalars(child);
+        protect_block_scalar_comments(child);
     }
+}
+
+fn needs_block_scalar_comment_protection(node: &Node) -> bool {
+    node.kind == Kind::Scalar
+        && (node.style.has(Style::LITERAL | Style::FOLDED)
+            || (!node.style.has(Style::DOUBLE_QUOTED | Style::SINGLE_QUOTED)
+                && node.value.contains('\n')))
+        && node.line_comment.contains('\n')
 }
 
 /// The bytes [`update_nested_scalar`] writes for the file `data`.
@@ -626,17 +628,64 @@ pub(crate) fn render_nested_scalar(
         }
         node = next;
     }
-    if let Some(root) = doc.content.first_mut()
-        && let Some(configs) = yaml_path_mut(root, "plugins.configs")
-    {
-        protect_plugin_block_scalars(configs);
-    }
+    protect_block_scalar_comments(&mut doc);
     Ok(normalize_comment_indentation(&marshal_config(&doc)?))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    #[test]
+    fn multiline_values_in_every_section_keep_block_style_and_reload() {
+        fn find<'a>(node: &'a Node, key: &str) -> Option<&'a Node> {
+            if node.kind == Kind::Mapping
+                && let Some(i) = find_map_key_index(node, key)
+            {
+                return node.content.get(i + 1);
+            }
+            node.content.iter().find_map(|child| find(child, key))
+        }
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/block-scalar-every-section.json"))
+                .unwrap();
+        for case in fixtures.as_array().unwrap() {
+            let source = case["Source"].as_str().unwrap();
+            let op = case["Op"].as_str().unwrap();
+            let actual = if op == "nested" {
+                render_nested_scalar(source.as_bytes(), &["auth-dir"], "/x").unwrap()
+            } else {
+                render_preserving_comments(
+                    source.as_bytes(),
+                    &Config::parse(source).unwrap(),
+                    op == "migrate",
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                std::str::from_utf8(&actual).unwrap(),
+                case["File"].as_str().unwrap(),
+                "{} {op}",
+                case["Name"]
+            );
+            Config::load_bytes(&actual).unwrap();
+            let saved = root(&actual);
+            let key = match case["Name"].as_str().unwrap() {
+                "typed-payload" => "prompt",
+                "retained-pprof" => "note",
+                _ => "x-note",
+            };
+            if matches!(key, "x-note" | "note") && op == "migrate" {
+                // Go archives unknown keys, including pprof's unknown note.
+                assert!(find(&saved, key).is_none());
+                assert!(String::from_utf8_lossy(&actual).lines().any(|line| line.starts_with("# ") && line[2..].trim_start() == "# Heading"));
+            } else {
+                let value = find(&saved, key).unwrap();
+                assert_eq!(value.value, "before\n# Heading\nafter");
+                assert!(value.style.has(Style::LITERAL));
+            }
+        }
+    }
 
     use super::tree::set_yaml_path;
     use super::*;
@@ -771,20 +820,20 @@ mod tests {
             let source = format!("tags: &s # moved\n  - {style} # own\n    a\n  - b\n");
             let mut doc = unmarshal(source.as_bytes()).unwrap();
             doc.content[0] = expand_config_aliases(&doc.content[0]).unwrap();
-            protect_plugin_block_scalars(&mut doc);
+            protect_block_scalar_comments(&mut doc);
             assert_eq!(
                 normalize_comment_indentation(&marshal_config(&doc).unwrap()),
                 b"tags:\n  - \"a\" # moved\n# own\n  - b\n"
             );
         }
         let mut doc = unmarshal(b"tags:\n  - |- # own\n    # data\n    a\n").unwrap();
-        protect_plugin_block_scalars(&mut doc);
+        protect_block_scalar_comments(&mut doc);
         assert_eq!(
             normalize_comment_indentation(&marshal_config(&doc).unwrap()),
-            b"tags:\n  - \"# data\\na\" # own\n"
+            b"tags:\n  - |- # own\n    # data\n    a\n"
         );
         let mut doc = unmarshal(b"tags:\n  - >- # own\n    a\n").unwrap();
-        protect_plugin_block_scalars(&mut doc);
+        protect_block_scalar_comments(&mut doc);
         assert_eq!(
             normalize_comment_indentation(&marshal_config(&doc).unwrap()),
             b"tags:\n  - >- # own\n    a\n"

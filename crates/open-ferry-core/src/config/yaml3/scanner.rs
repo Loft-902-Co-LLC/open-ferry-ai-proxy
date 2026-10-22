@@ -58,7 +58,6 @@ use super::chars::{
     is_digit, is_hex, is_space, is_tab, is_z, width,
 };
 use super::parser::Parser;
-#[cfg(test)]
 use super::types::ParserError;
 use super::types::{ErrorType, Mark, ScalarStyle, Token, TokenType};
 
@@ -205,7 +204,6 @@ impl Parser<'_> {
     /// error again. A token fetched while an error is set (see the module
     /// docs) is reported as that error, as yaml.v3's callers check the
     /// error field too.
-    #[cfg(test)]
     pub(crate) fn scan(&mut self) -> Result<Token, ParserError> {
         // No tokens after STREAM-END or error.
         if self.error != ErrorType::No {
@@ -237,7 +235,6 @@ impl Parser<'_> {
 
     /// The head token for yaml_parser_scan: its type and marks are copied
     /// and its values moved out.
-    #[cfg(test)]
     fn take_head_token(&mut self) -> Token {
         let Some(head) = self.tokens.get_mut(self.tokens_head) else {
             return Token::default();
