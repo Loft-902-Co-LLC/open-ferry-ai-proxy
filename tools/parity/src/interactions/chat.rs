@@ -82,6 +82,8 @@ pub fn suites(seed: u64, random: usize) -> Vec<Suite> {
 /// result that isn't text. Joined text and data URLs retain their surrounding
 /// bytes; only the embedded objects/arrays can be written compactly.
 const TO_CHAT_REQUEST_JSON: &[JsonAt] = &[
+    ("$.previous_response_id", JsonForm::Whole),
+    ("$.environment_id", JsonForm::Whole),
     (
         "$.messages[*].tool_calls[*].function.arguments",
         JsonForm::Whole,

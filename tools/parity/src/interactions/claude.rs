@@ -83,6 +83,8 @@ pub fn suites(seed: u64, random: usize) -> Vec<Suite> {
 
 /// Client JSON read as text; names and IDs sanitized for Claude are excluded.
 const CLAUDE_REQUEST_JSON: &[JsonAt] = &[
+    ("$.system", JsonForm::InText),
+    ("$.output_config.effort", JsonForm::Whole),
     ("$.messages[*].content[*].content", JsonForm::Whole),
     ("$.messages[*].content[*].text", JsonForm::InText),
     ("$.messages[*].content[*].thinking", JsonForm::InText),

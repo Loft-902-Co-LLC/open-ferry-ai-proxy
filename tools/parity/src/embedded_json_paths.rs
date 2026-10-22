@@ -57,6 +57,21 @@ macro_rules! path_test {
     };
 }
 
+path_test!(
+    chat_previous_response,
+    "openai",
+    "$.previous_response_id",
+    false
+);
+path_test!(chat_environment, "openai", "$.environment_id", false);
+path_test!(claude_system, "claude", "$.system", true);
+path_test!(
+    claude_adaptive_effort,
+    "claude",
+    "$.output_config.effort",
+    false
+);
+
 #[test]
 fn saved_seed11_request_is_equivalent_without_a_marker() {
     let fixture: Value = serde_json::from_str(include_str!(
