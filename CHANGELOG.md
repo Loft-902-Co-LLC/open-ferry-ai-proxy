@@ -107,9 +107,9 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
-- **Gemini and Vertex AI stream accounting:** Preserve observed counts on generateContent stream cancellation or read failure; cancellation succeeds after a successful terminal is returned by the call's stream to the manager and records a 499 before it.
-- **Vertex AI Interactions bridge:** Deliver streamed text, thoughts, function calls and arguments, and completion usage to Interactions clients.
-- **Native Vertex AI Interactions usage:** Record token counts for streamed and non-stream calls, retaining observed counts on cancellation and the `vertex` provider name.
+- **Keep observed counts when Gemini and Vertex AI streams are cancelled or fail to read.** A `generateContent` stream cancelled after its final chunk reaches the manager counts as a success; cancellation before that is recorded as a 499 with the counts observed so far. A read failure is recorded as a failure with the observed counts.
+- **Deliver Vertex AI streamed text, thoughts, function calls and arguments, and completion usage** to Interactions clients.
+- **Record token counts for native Vertex AI Interactions calls**, streamed or not, retaining observed counts on cancellation and the `vertex` provider name.
 - **Guardian reviews can inherit their parent's credential across model scopes**, including mixed-provider routes, when the parent's newest live selection among real providers available to the review is eligible; child bindings and session-affinity settings retain precedence.
 - **Preserve parent selection order** across result refreshes and transient failover without extending parent TTL during guardian lookups.
 - **Drop blank text sent to Claude** and keep dropped-part cache markers on the preceding surviving block without changing TTL order; Responses item markers are dropped when the final block cannot host them.
