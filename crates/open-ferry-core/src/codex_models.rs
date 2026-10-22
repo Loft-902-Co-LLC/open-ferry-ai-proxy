@@ -587,6 +587,7 @@ fn intersect_thinking_support(a: &ThinkingSupport, b: &ThinkingSupport) -> Think
         max,
         zero_allowed: a.zero_allowed && b.zero_allowed,
         dynamic_allowed: a.dynamic_allowed && b.dynamic_allowed,
+        disable_type: String::new(),
         levels: intersect_string_slices(&a.levels, &b.levels),
     }
 }

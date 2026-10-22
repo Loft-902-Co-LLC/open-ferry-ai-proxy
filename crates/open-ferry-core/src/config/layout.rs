@@ -136,7 +136,15 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ("client", &["codex"]),
     (
         "client.codex",
-        &["enable-apply-patch", "optimize-multi-agent-v2"],
+        &[
+            "enable-apply-patch",
+            "optimize-multi-agent-v2",
+            "web-search-result-cache",
+        ],
+    ),
+    (
+        "client.codex.web-search-result-cache",
+        &["enabled", "ttl", "limit"],
     ),
     ("credentials", &["concurrency", "in-flight"]),
     (

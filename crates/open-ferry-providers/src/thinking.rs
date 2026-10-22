@@ -214,6 +214,36 @@ pub(crate) fn apply_request_to<T: Target>(
     original_request: &Body,
     lookup: impl FnOnce(&str) -> Option<Model>,
 ) -> Result<(), ExecError> {
+    apply_request_inner::<T>(body, route, payload, original_request, lookup, false)
+}
+
+/// Request thinking with an authoritative per-attempt capability snapshot,
+/// retaining the same translated summary/source precedence as an unbound call.
+pub(crate) fn apply_request_with_model<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    payload: &Body,
+    original_request: &Body,
+    model: Model,
+) -> Result<(), ExecError> {
+    apply_request_inner::<T>(
+        body,
+        route,
+        payload,
+        original_request,
+        |_| Some(model),
+        true,
+    )
+}
+
+fn apply_request_inner<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    payload: &Body,
+    original_request: &Body,
+    lookup: impl FnOnce(&str) -> Option<Model>,
+    resolved: bool,
+) -> Result<(), ExecError> {
     let original_source = if original_request.is_empty() {
         payload
     } else {
@@ -225,7 +255,7 @@ pub(crate) fn apply_request_to<T: Target>(
         payload
     };
     let summary = translated_summary(body, payload.json(), original_source.json(), &route);
-    apply::<T>(body, source, route, summary, lookup, false)
+    apply::<T>(body, source, route, summary, lookup, resolved)
 }
 
 /// `ApplyThinkingWithModelInfo`: applies the thinking setting to a `T`
@@ -432,6 +462,8 @@ fn apply<T: Target>(
     if resolved && config.mode == Mode::Level && maps_high_intent(&plan.from, T::NAME, &info) {
         config.level = map_high_intent(&config.level, support);
     }
+    let requested_off =
+        config.mode == Mode::None || (config.mode == Mode::Budget && config.budget == 0);
     let config = validate(config, &info, support, &plan.from, T::NAME, suffix.is_some())
         .inspect_err(|error| {
             warn!(model = %info.id, provider = T::NAME, error = %error.message, "thinking: validation failed");
@@ -447,6 +479,12 @@ fn apply<T: Target>(
     T::apply_known(body, config.clone(), &info, support);
     // A setting that turns thinking off wins over showing summaries.
     if !config.fully_disabled() && !native_responses {
+        let summary = if T::NAME == "claude" && requested_off {
+            json::delete(body, "thinking.block_binding");
+            Summary::Hidden
+        } else {
+            summary
+        };
         T::apply_summary(body, base, &plan.provider, summary);
     }
     Ok(())
@@ -956,9 +994,14 @@ fn validate(
     }
 
     if config.mode == Mode::None && to == "claude" {
-        // Claude turns thinking off outright, without a budget.
         config.budget = 0;
         config.level.clear();
+        if !support.zero_allowed
+            && let Some(lowest) = lowest_supported_level(&support.levels)
+        {
+            config.mode = Mode::Level;
+            config.level = lowest;
+        }
     } else {
         if matches!(config.mode, Mode::Budget | Mode::Auto | Mode::None) {
             config.budget = clamp_budget(config.budget, support);
@@ -969,9 +1012,9 @@ fn validate(
         if config.mode == Mode::None
             && !support.levels.is_empty()
             && (config.budget > 0 || cannot_disable)
-            && let Some(lowest) = support.levels.first()
+            && let Some(lowest) = lowest_supported_level(&support.levels)
         {
-            lowest.clone_into(&mut config.level);
+            config.level = lowest;
         }
     }
     Ok(config)
@@ -996,6 +1039,14 @@ fn auto_to_mid_range(config: Config, support: &ThinkingSupport) -> Config {
         budget,
         ..config
     }
+}
+
+fn lowest_supported_level(levels: &[String]) -> Option<String> {
+    levels
+        .iter()
+        .filter_map(|level| level_index(level.trim()))
+        .min()
+        .map(|index| LEVEL_ORDER[index].to_owned())
 }
 
 /// `clampLevel`: the supported level nearest to `level`, the lower one on a
@@ -1450,5 +1501,28 @@ mod tests {
             ..support
         };
         assert_eq!(clamp_budget(0, &zero), 0);
+    }
+}
+
+#[cfg(test)]
+mod adaptive_fallback_tests {
+    use super::*;
+    #[test]
+    fn off_uses_the_lowest_canonical_effort_in_unordered_levels() {
+        for levels in [["high", "medium", "low"], ["auto", "high", "low"]] {
+            let support = ThinkingSupport {
+                levels: levels.into_iter().map(str::to_owned).collect(),
+                dynamic_allowed: true,
+                ..ThinkingSupport::default()
+            };
+            let model = Model {
+                id: "claude-opus-5-5".into(),
+                model_type: "claude".into(),
+                ..Model::default()
+            };
+            let validated =
+                validate(Config::none(), &model, &support, "claude", "claude", false).unwrap();
+            assert_eq!(validated, Config::level("low"));
+        }
     }
 }

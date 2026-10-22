@@ -57,6 +57,11 @@ pub fn model_info(value: &Value) -> Option<ModelInfo> {
             max: thinking["max"].as_i64().unwrap_or(0),
             zero_allowed: thinking["zero_allowed"].as_bool().unwrap_or(false),
             dynamic_allowed: thinking["dynamic_allowed"].as_bool().unwrap_or(false),
+            disable_type: thinking
+                .get("disable_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             levels: thinking["levels"]
                 .as_array()
                 .into_iter()

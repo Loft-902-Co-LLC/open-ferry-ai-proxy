@@ -450,6 +450,7 @@ impl Attempt<'_> {
 
 /// A picked credential with the upstream models to try.
 struct Prepared {
+    model_config: Option<Arc<crate::manager::ClaudeModelConfig>>,
     auth: Arc<Auth>,
     executor: Arc<dyn ProviderExecutor>,
     provider: String,
@@ -682,6 +683,7 @@ impl Manager {
             quota_check::claim(state, &self.shared, &picked.auth.id, keys, now)
         };
         Ok(Prepared {
+            model_config: settings.model_config.clone(),
             auth: picked.auth,
             executor: picked.executor,
             provider: picked.provider,
@@ -944,6 +946,7 @@ impl Manager {
             }
             attempted.insert(prepared.auth.id.clone());
             let Prepared {
+                model_config,
                 mut auth,
                 executor,
                 provider,
@@ -973,7 +976,9 @@ impl Manager {
                 } else {
                     upstream_model.clone()
                 };
-                let exec_opts = opts.clone();
+                let mut exec_opts = opts.clone();
+                exec_opts.metadata.route_model = route_model.clone();
+                exec_opts.metadata.model_config = model_config.clone();
                 attempt.execution_seq = self.next_execution_seq();
                 let mut outcome = Self::call_unary(
                     kind,
@@ -1248,7 +1253,9 @@ impl Manager {
             } else {
                 execution_model.to_owned()
             };
-            let exec_opts = opts.clone();
+            let mut exec_opts = opts.clone();
+            exec_opts.metadata.route_model = route_model.to_owned();
+            exec_opts.metadata.model_config = prepared.model_config.clone();
             attempt.execution_seq = self.next_execution_seq();
             let mut outcome = Self::call_stream(
                 &**executor,

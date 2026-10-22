@@ -6,17 +6,16 @@
 //! adaptive effort. [`crate::thinking`] reads and checks the setting.
 //!
 //! Deviations from upstream:
-//! - Models are looked up in the static catalog only. Models registered at
-//!   run time, and models configured for an API key (upstream's
-//!   `ResolvedModelInfo`), aren't seen; such a model is treated as unknown,
-//!   so its setting goes to Claude unchecked, as upstream does for unknown
-//!   models.
-//! - A model found in the catalog is taken to be a Claude model. Upstream
-//!   compares the model's provider type with the request's formats, which
-//!   gives the same answer for Claude models.
+//! - The manager carries the pre-rewrite route and its immutable Claude config
+//!   snapshot; the executor resolves the selected definition from it instead
+//!   of receiving a precompiled ModelInfo. Direct calls use executor config.
+//!   Unbound attempts retain registry lookup, including UserDefined handling
+//!   and upstream's last-registration behavior.
 
 use open_ferry_core::exec::ExecError;
-use open_ferry_translate::models::{ModelCatalog, ThinkingSupport};
+#[cfg(test)]
+use open_ferry_translate::models::ModelCatalog;
+use open_ferry_translate::models::ThinkingSupport;
 use open_ferry_translate::thinking::level_to_budget;
 use serde_json::Value;
 
@@ -52,6 +51,7 @@ impl Target for Claude {
 /// request as the executor got it and as the client first sent it.
 ///
 /// A setting the model can't take is a 400 error.
+#[cfg(test)]
 pub(crate) fn apply_request(
     body: &mut Value,
     model: &str,
@@ -62,7 +62,37 @@ pub(crate) fn apply_request(
     shared::apply_request::<Claude>(body, model, from, payload, original_request, lookup)
 }
 
+/// Selected-credential capabilities take precedence over registry lookup.
+pub(crate) fn apply_request_with_models(
+    body: &mut Value,
+    model: &str,
+    from: &str,
+    payload: &Body,
+    original_request: &Body,
+    models: Option<&dyn open_ferry_core::models::ModelCatalog>,
+    resolved: Option<open_ferry_core::models::ModelInfo>,
+) -> Result<(), ExecError> {
+    if let Some(resolved) = resolved {
+        return shared::apply_request_with_model::<Claude>(
+            body,
+            shared::Route {
+                model,
+                from,
+                to: "claude",
+                provider: "claude",
+            },
+            payload,
+            original_request,
+            crate::codex::thinking::thinking_model(resolved),
+        );
+    }
+    shared::apply_request::<Claude>(body, model, from, payload, original_request, |id| {
+        crate::codex::thinking::lookup(models, id, "claude")
+    })
+}
+
 /// The static catalog's model `id`, taken to be a Claude model.
+#[cfg(test)]
 fn lookup(id: &str) -> Option<Model> {
     ModelCatalog::current().lookup(id).map(|info| Model {
         id: info.id.clone(),
@@ -89,11 +119,12 @@ fn set_kind(body: &mut Value, kind: &str) {
 }
 
 /// Turns thinking off. `display` is only valid with thinking on.
-fn disable(body: &mut Value, drop_display: bool) {
-    set_kind(body, "disabled");
-    if drop_display {
-        json::delete(body, "thinking.display");
-    }
+fn disable(body: &mut Value, support: Option<&ThinkingSupport>) {
+    let kind = support
+        .map(|support| support.disable_type.as_str())
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("disabled");
+    json::set(body, "thinking", serde_json::json!({"type": kind}));
     json::delete(body, "output_config.effort");
     drop_empty_output_config(body);
 }
@@ -131,7 +162,7 @@ fn adaptive(body: &mut Value, effort: Option<&str>) {
 fn apply_known(body: &mut Value, mut config: Config, info: &Model, support: &ThinkingSupport) {
     let supports_adaptive = !support.levels.is_empty();
     match config.mode {
-        Mode::None => return disable(body, true),
+        Mode::None => return disable(body, Some(support)),
         Mode::Level => {
             if supports_adaptive && !config.level.is_empty() {
                 return adaptive(body, Some(&config.level));
@@ -146,7 +177,7 @@ fn apply_known(body: &mut Value, mut config: Config, info: &Model, support: &Thi
         Mode::Budget => {}
     }
     if config.budget == 0 {
-        return disable(body, false);
+        return disable(body, Some(support));
     }
     enable(body, Some(config.budget));
     normalize_budget(body, config.budget, info, support);
@@ -185,10 +216,11 @@ fn normalize_budget(body: &mut Value, budget: i64, info: &Model, support: &Think
 /// doesn't know.
 fn apply_compatible(body: &mut Value, config: &Config) {
     match config.mode {
-        Mode::None => disable(body, true),
+        Mode::None => disable(body, None),
         Mode::Auto => enable(body, None),
         Mode::Level if config.level.is_empty() => {}
         Mode::Level => adaptive(body, Some(&config.level)),
+        Mode::Budget if config.budget == 0 => disable(body, None),
         Mode::Budget => enable(body, Some(config.budget)),
     }
 }
@@ -206,7 +238,7 @@ mod tests {
         Ok(body)
     }
 
-    fn ok(body: Value, model: &str, from: &str) -> Value {
+    pub(super) fn ok(body: Value, model: &str, from: &str) -> Value {
         match run(body, model, from) {
             Ok(body) => body,
             Err(error) => panic!("apply failed: {}", error.message),
@@ -498,5 +530,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+}
+
+#[cfg(test)]
+mod adaptive_tests {
+    use super::tests::ok;
+    use serde_json::json;
+
+    #[test]
+    fn off_uses_the_models_disable_type_and_drops_stale_fields() {
+        for model in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5-5[1m]",
+            "claude-sonnet-5-5-20261001",
+        ] {
+            for suffix in ["", "(none)", "(0)"] {
+                let body = ok(
+                    json!({"thinking": {"type": "disabled", "budget_tokens": 8000,
+                    "display": "summarized", "block_binding": {"prefix_mismatch_behavior": "drop_block"}},
+                    "output_config": {"effort": "xhigh", "format": {}}}),
+                    &format!("{model}{suffix}"),
+                    "claude",
+                );
+                assert_eq!(body["thinking"], json!({"type": "between_tools"}));
+                assert_eq!(body["output_config"], json!({"format": {}}));
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_only_off_falls_back_to_low_and_hides_thinking() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5-5[1m]",
+            "claude-opus-5-5-20261001",
+            "claude-fable-5",
+            "claude-fable-5-1",
+        ] {
+            for suffix in ["", "(none)", "(0)"] {
+                let body = ok(
+                    json!({"thinking": {"type": "disabled", "budget_tokens": 8000,
+                    "display": "summarized", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}}),
+                    &format!("{model}{suffix}"),
+                    "claude",
+                );
+                assert_eq!(
+                    body["thinking"],
+                    json!({"type": "adaptive", "display": "omitted"}),
+                    "{model}"
+                );
+                assert_eq!(body["output_config"]["effort"], "low");
+            }
+        }
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+        ] {
+            let body = ok(
+                json!({"thinking": {"type": "disabled", "display": "summarized", "block_binding": {}}}),
+                model,
+                "claude",
+            );
+            assert_eq!(body["thinking"], json!({"type": "disabled"}), "{model}");
+        }
+    }
+
+    #[test]
+    fn adaptive_only_models_convert_budgets_and_keep_auto_dynamic() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-fable-5-1",
+        ] {
+            for (budget, effort) in [(4096, "medium"), (16384, "high"), (64000, "xhigh")] {
+                let body = ok(
+                    json!({"max_tokens": 32000, "thinking": {"type": "enabled", "budget_tokens": budget}}),
+                    model,
+                    "claude",
+                );
+                assert_eq!(body["thinking"]["type"], "adaptive");
+                assert!(body["thinking"].get("budget_tokens").is_none());
+                assert_eq!(body["output_config"]["effort"], effort);
+            }
+            let body = ok(json!({}), &format!("{model}(auto)"), "claude");
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+            assert!(body.get("output_config").is_none());
+        }
     }
 }

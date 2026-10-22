@@ -407,6 +407,7 @@ fn does_not_inherit_unsupported_reasoning_levels() {
                 max: 64000,
                 zero_allowed: true,
                 dynamic_allowed: true,
+                disable_type: String::new(),
                 levels: Vec::new(),
             },
             &[],

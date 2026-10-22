@@ -323,6 +323,11 @@ impl StaticCatalog {
             .flatten()
             .find(|model| model.id == id)
             .cloned()
+            .or_else(|| {
+                open_ferry_translate::models::claude_family_model_ids(id)
+                    .into_iter()
+                    .find_map(|family| self.claude.iter().find(|model| model.id == family).cloned())
+            })
     }
 
     /// What the translators need of this catalog: each model's thinking
@@ -332,6 +337,7 @@ impl StaticCatalog {
         TranslatorCatalog::from_models(
             self.searched().into_iter().flatten().map(translator_model),
             self.meta.iter().map(translator_model),
+            self.claude.iter().map(translator_model),
         )
     }
 
@@ -629,7 +635,14 @@ fn decode_thinking(path: &str, value: &Value) -> Result<Option<ThinkingSupport>,
     for (key, value) in object {
         let Some(field) = json::field(
             key,
-            &["min", "max", "zero_allowed", "dynamic_allowed", "levels"],
+            &[
+                "min",
+                "max",
+                "zero_allowed",
+                "dynamic_allowed",
+                "disable_type",
+                "levels",
+            ],
         ) else {
             continue;
         };
@@ -639,6 +652,7 @@ fn decode_thinking(path: &str, value: &Value) -> Result<Option<ThinkingSupport>,
             "max" => json::int(&path, value, &mut thinking.max)?,
             "zero_allowed" => json::boolean(&path, value, &mut thinking.zero_allowed)?,
             "dynamic_allowed" => json::boolean(&path, value, &mut thinking.dynamic_allowed)?,
+            "disable_type" => json::string(&path, value, &mut thinking.disable_type)?,
             "levels" => json::strings(&path, value, &mut thinking.levels)?,
             _ => {}
         }

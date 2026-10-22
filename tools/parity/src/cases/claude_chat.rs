@@ -382,6 +382,22 @@ pub fn requests() -> Vec<Case> {
             ));
         }
     }
+    for model in [
+        "claude-opus-4-7",
+        "claude-fable-5-1",
+        "claude-opus-4-8-20261001[1m]",
+        "claude-sonnet-5-5[1m]",
+    ] {
+        for effort in ["xhigh", "auto", "none"] {
+            let mut body = json!({"messages": [{"role": "user", "content": "hi"}]});
+            body["reasoning_effort"] = json!(effort);
+            cases.push(Case::new(
+                format!("adaptive-{model}-{effort}"),
+                model,
+                body.to_string(),
+            ));
+        }
+    }
     cases
 }
 

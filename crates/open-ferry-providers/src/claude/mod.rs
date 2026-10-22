@@ -33,6 +33,7 @@
 //! - Deferred: local token counting for credentials that don't go to
 //!   Anthropic's API (a 501 for now).
 
+mod capabilities;
 mod client;
 pub(crate) mod compaction;
 pub(crate) mod executor;
@@ -45,5 +46,7 @@ mod thinking;
 pub mod token;
 mod tool_call_ids;
 pub(crate) mod usage;
+mod web_search;
 
 pub use executor::ClaudeExecutor;
+pub use web_search::apply_config as apply_web_search_cache_config;
