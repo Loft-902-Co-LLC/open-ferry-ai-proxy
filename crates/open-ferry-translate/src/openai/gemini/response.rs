@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_response.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_response.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → Gemini `generateContent` responses.
@@ -8,9 +8,8 @@
 //! each `"key": value` pair found between the first `{` and the last `}`.
 //!
 //! Deviations from upstream:
-//! - A stream's function calls come out in the order of their tool call
-//!   index. Upstream keeps them in a Go map, so their order changes from run
-//!   to run.
+//! A stream's function calls come out in tool-call index order, as upstream
+//! now sorts them too.
 //! - Where upstream copies JSON text it read into a string, we write the
 //!   same JSON compactly: content that isn't a string, and reasoning given
 //!   as an object whose `text` isn't a string.
@@ -47,6 +46,7 @@ struct ToolCall {
     id: String,
     name: String,
     arguments: String,
+    thought_signature: String,
 }
 
 impl OpenAIToGeminiStream {
@@ -116,14 +116,22 @@ impl OpenAIToGeminiStream {
             }
             if !outputs.is_empty() {
                 results.extend(outputs);
-                continue;
+                if delta.and_then(|delta| delta.get("tool_calls")).is_none() {
+                    continue;
+                }
             }
 
             if let Some(Value::Array(calls)) = delta.and_then(|delta| delta.get("tool_calls")) {
                 for call in calls {
                     self.add_tool_call(call);
                 }
-                continue;
+                if choice
+                    .get("finish_reason")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                {
+                    continue;
+                }
             }
 
             if let Some(Value::String(reason)) = choice.get("finish_reason")
@@ -139,7 +147,11 @@ impl OpenAIToGeminiStream {
                     }
                     function_call.insert("name".into(), call.name.into());
                     function_call.insert("args".into(), args_object(&call.arguments));
-                    object([("functionCall", function_call.into())])
+                    let mut part = object([("functionCall", function_call.into())]);
+                    if !call.thought_signature.is_empty() {
+                        part["thoughtSignature"] = call.thought_signature.into();
+                    }
+                    part
                 }));
                 results.push(template);
                 continue;
@@ -160,9 +172,11 @@ impl OpenAIToGeminiStream {
         if !kind.is_empty() && kind != "function" {
             return;
         }
-        let Some(function) = call.get("function") else {
+        let sig = tool_call_thought_signature(call).unwrap_or_default();
+        let function = call.get("function").unwrap_or(&Value::Null);
+        if function.is_null() && sig.is_empty() {
             return;
-        };
+        }
         let id = str_of(call.get("id")).into_owned();
         let name = str_of(function.get("name")).into_owned();
         let arguments = str_of(function.get("arguments"));
@@ -171,6 +185,7 @@ impl OpenAIToGeminiStream {
             id: id.clone(),
             name: name.clone(),
             arguments: String::new(),
+            thought_signature: String::new(),
         });
         if !id.is_empty() {
             entry.id = id;
@@ -179,6 +194,9 @@ impl OpenAIToGeminiStream {
             entry.name = name;
         }
         entry.arguments.push_str(&arguments);
+        if !sig.is_empty() {
+            entry.thought_signature = sig;
+        }
     }
 }
 
@@ -239,6 +257,9 @@ pub fn convert_openai_response_to_gemini_non_stream(body: &[u8]) -> Value {
                     }
                     function_call["name"] = name.into_owned().into();
                     function_call["args"] = args_object(&arguments);
+                    if let Some(sig) = tool_call_thought_signature(call) {
+                        part.insert("thoughtSignature".into(), sig.into());
+                    }
                 }
             }
 
@@ -606,3 +627,16 @@ fn set_key(result: &mut Map<String, Value>, key: &str, value: Value) {
 
 #[cfg(test)]
 mod tests;
+
+fn tool_call_thought_signature(call: &Value) -> Option<String> {
+    [
+        "extra_content.google.thought_signature",
+        "function.extra_content.google.thought_signature",
+        "thoughtSignature",
+        "thought_signature",
+    ]
+    .iter()
+    .filter_map(|key| path(call, key))
+    .map(|v| str_of(Some(v)).into_owned())
+    .find(|s| !s.is_empty())
+}

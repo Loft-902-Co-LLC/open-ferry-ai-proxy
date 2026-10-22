@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/interactions/init.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/interactions/init.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Interactions → Codex translators' registration: Interactions clients
@@ -89,9 +89,11 @@ mod tests {
             json!({
                 "model": "gpt-5-codex",
                 "instructions": "",
+                "store": false,
                 "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
                 "stream": true,
-                "reasoning": {"effort": "high"}
+                "reasoning": {"effort": "high"},
+                "include": ["reasoning.encrypted_content"]
             })
         );
     }

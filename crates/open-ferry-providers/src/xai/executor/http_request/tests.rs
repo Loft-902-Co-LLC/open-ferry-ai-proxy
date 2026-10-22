@@ -8,6 +8,7 @@ use axum::http::Uri;
 use http::{HeaderMap, Method};
 
 use super::*;
+use crate::codex::USER_AGENT;
 use crate::codex::request::CONTROL_CHARACTER;
 
 const KEY: &str = "xai-http-key";
@@ -139,8 +140,8 @@ async fn sends_no_grok_cli_identity_and_keeps_the_calls_own_conversation() {
         .unwrap();
     let second = last(&seen);
     assert!(second.header(CONV_ID_HEADER).is_none(), "{second:?}");
-    for seen in [first, second] {
-        assert_eq!(seen.header("user-agent"), Some(USER_AGENT));
+    for (seen, agent) in [(first, "grok-cli/1.0"), (second, USER_AGENT)] {
+        assert_eq!(seen.header("user-agent"), Some(agent));
         for name in [
             "x-xai-token-auth",
             "x-grok-client-version",

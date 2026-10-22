@@ -96,6 +96,7 @@ pub fn inspect(model: &str, raw: &str, options: &Value) -> Value {
                 .collect::<Value>(),
             "replay": per_kind(&|kind| signature::gemini_replay_signature_or_bypass(raw, kind).into()),
         },
+        "meta": fallible(signature::inspect_meta_reasoning_signature(raw), |info| json!({"DecodedLen":info.decoded_len,"PayloadLen":info.payload_len,"BucketExponent":info.bucket_exponent,"RouterSuffix":info.router_suffix})),
         "gpt": fallible(signature::inspect_gpt_reasoning_signature(raw), gpt_info),
         "grok": fallible(signature::inspect_grok_encrypted_content(raw), grok_info),
         "kimi": fallible(signature::inspect_kimi_thinking_signature(raw), kimi_info),
@@ -221,6 +222,7 @@ fn provider(name: Option<&Value>) -> Provider {
         "kimi" => Provider::Kimi,
         "grok" => Provider::Grok,
         "swe" => Provider::Swe,
+        "meta" => Provider::Meta,
         _ => Provider::Unknown,
     }
 }
@@ -326,11 +328,11 @@ fn gemini_info(info: GeminiThoughtSignatureInfo) -> Value {
 }
 
 fn gpt_info(info: GptReasoningSignatureInfo) -> Value {
-    json!({ "DecodedLen": info.decoded_len, "CiphertextLen": info.ciphertext_len })
+    json!({ "DecodedLen": info.decoded_len, "CiphertextLen": info.ciphertext_len, "RouterSuffix": info.router_suffix })
 }
 
 fn grok_info(info: GrokEncryptedContentInfo) -> Value {
-    json!({ "RawLen": info.raw_len, "DecodedLen": info.decoded_len })
+    json!({ "RawLen": info.raw_len, "DecodedLen": info.decoded_len, "RouterSuffix": info.router_suffix })
 }
 
 fn kimi_info(info: KimiThinkingSignatureInfo) -> Value {

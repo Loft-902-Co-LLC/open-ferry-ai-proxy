@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature (v8.0.32, MIT); this file from
+// Ported from CLIProxyAPI internal/signature (v8.0.36, MIT); this file from
 // provider_compatibility.go. https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning-signature validation and replay decisions.
@@ -34,6 +34,11 @@ mod gemini_validation;
 mod gpt_validation;
 mod grok_validation;
 mod kimi_validation;
+mod meta_validation;
+pub use meta_validation::{
+    MAX_META_REASONING_SIGNATURE_LEN, MetaReasoningSignatureInfo, inspect_meta_reasoning_signature,
+    is_valid_meta_reasoning_signature,
+};
 
 pub use claude::{
     strip_invalid_claude_thinking_blocks, strip_invalid_claude_thinking_blocks_and_empty_messages,
@@ -109,6 +114,7 @@ pub enum Provider {
     Grok,
     /// Cognition's SWE models, which emit `sealed.v1.` envelopes.
     Swe,
+    Meta,
 }
 
 impl Provider {
@@ -123,6 +129,7 @@ impl Provider {
             Provider::Kimi => "kimi",
             Provider::Grok => "grok",
             Provider::Swe => "swe",
+            Provider::Meta => "meta",
         }
     }
 
@@ -130,6 +137,19 @@ impl Provider {
     /// be replayed to `model`.
     pub fn from_model_name(model: &str) -> Self {
         let lower = crate::go::to_lower(model.trim());
+        let candidate = lower
+            .rsplit(['/', ':'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&lower);
+        let family = Self::from_model_value(candidate);
+        if family != Self::Unknown {
+            return family;
+        }
+        Self::from_model_value(&lower)
+    }
+
+    fn from_model_value(lower: &str) -> Self {
         let has = |needle| lower.contains(needle);
         let starts = |prefix| lower.starts_with(prefix);
         if has("claude") {
@@ -148,6 +168,8 @@ impl Provider {
             Provider::Kimi
         } else if has("grok") {
             Provider::Grok
+        } else if is_meta_muse_model_name(lower) {
+            Provider::Meta
         } else if has("swe-") {
             Provider::Swe
         } else {
@@ -317,6 +339,9 @@ pub fn detect_signature_provider_for_block(raw: &str, block_kind: BlockKind) -> 
         if is_valid_gpt_reasoning_signature(sig) {
             return Provider::Gpt;
         }
+        if is_valid_meta_reasoning_signature(sig) {
+            return Provider::Meta;
+        }
         if is_valid_claude_cais_signature(sig)
             || is_valid_claude_thinking_signature(sig, ClaudeValidationOptions::STRICT)
         {
@@ -422,6 +447,10 @@ pub fn decide_signature_compatibility_for_model(
         Provider::Swe => (
             Action::DropBlock,
             "SWE requires sealed.v1 signature from its own backend",
+        ),
+        Provider::Meta => (
+            Action::DropBlock,
+            "Meta Muse requires its native encrypted_content envelope and has no cross-provider bypass sentinel",
         ),
         // Kimi never reads the signature back, so the thinking text can stay.
         Provider::Kimi => (
@@ -539,7 +568,9 @@ fn normalize_target_provider(provider: Provider) -> Provider {
 fn provider_matches_target(target: Provider, detected: Provider) -> bool {
     match target {
         Provider::Gemini => matches!(detected, Provider::Gemini | Provider::GeminiBypass),
-        Provider::Claude | Provider::Gpt | Provider::Swe | Provider::Kimi => detected == target,
+        Provider::Claude | Provider::Gpt | Provider::Swe | Provider::Kimi | Provider::Meta => {
+            detected == target
+        }
         // Detection never yields Grok, so a Grok target never matches.
         _ => false,
     }
@@ -565,6 +596,7 @@ fn normalize_compatible_signature(target: Provider, raw: &str) -> String {
                 || is_recognized_gemini_provider_signature(payload)
         }
         Provider::Gpt => is_valid_gpt_reasoning_signature(payload),
+        Provider::Meta => is_valid_meta_reasoning_signature(payload),
         Provider::Swe => payload.starts_with("sealed.v1."),
         Provider::Kimi => is_valid_kimi_thinking_signature(payload),
         _ => false,
@@ -589,3 +621,42 @@ fn is_recognized_gemini_provider_signature(raw: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+fn is_meta_muse_model_name(lower: &str) -> bool {
+    if lower == "muse"
+        || lower.starts_with("muse-")
+        || lower.starts_with("muse_")
+        || lower.ends_with("/muse")
+        || lower.contains("/muse-")
+        || lower.contains("/muse_")
+    {
+        return true;
+    }
+    ["meta-muse", "meta_muse"].iter().any(|prefix| {
+        lower.find(prefix).is_some_and(|i| {
+            let rest = &lower[i + prefix.len()..];
+            rest.is_empty() || rest.starts_with(['-', '_', '.', ':'])
+        })
+    })
+}
+
+#[cfg(test)]
+mod muse_model_tests {
+    use super::*;
+    #[test]
+    fn namespaced_and_bounded_muse_names() {
+        for model in [
+            "muse",
+            "muse_spark",
+            "meta-muse-1",
+            "meta_muse.1",
+            "openai-compatible/muse-spark",
+            "openai:muse_spark",
+        ] {
+            assert_eq!(Provider::from_model_name(model), Provider::Meta, "{model}");
+        }
+        for model in ["museum", "amuse", "meta-museum"] {
+            assert_eq!(Provider::from_model_name(model), Provider::Unknown);
+        }
+    }
+}

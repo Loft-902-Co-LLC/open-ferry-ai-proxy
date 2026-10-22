@@ -451,6 +451,23 @@ async fn sends_response_create_with_previous_response_id() {
     }
 }
 
+#[tokio::test]
+async fn handshake_forwards_client_user_agent() {
+    let server = Server::once(&[COMPLETED]).await;
+    let executor = executor();
+    let mut options = ws_options("client-agent");
+    options.headers.insert(
+        "user-agent",
+        http::HeaderValue::from_static("ExampleClient/1.2"),
+    );
+    streamed(&executor, &auth(&server.url), HELLO, options).await;
+    assert_eq!(
+        server.record().handshakes[0].header("user-agent"),
+        Some("ExampleClient/1.2")
+    );
+    executor.close_execution_session("client-agent");
+}
+
 // TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey
 #[test]
 fn request_message_sets_store_and_keeps_prompt_cache_key() {

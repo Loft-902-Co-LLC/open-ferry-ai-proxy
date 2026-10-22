@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor.go
-// (PrepareRequest, HttpRequest) (v8.0.32, MIT).
+// (PrepareRequest, HttpRequest) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`]'s plain HTTP requests (upstream's `HttpRequest`).
@@ -38,7 +38,7 @@ use open_ferry_core::exec::{ErrorKind, ExecError, Format, HttpCall, HttpReply, H
 use open_ferry_core::observe::AttemptKind;
 
 use super::XaiExecutor;
-use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
+use crate::codex::client::{error_chain, read_body_prefix};
 use crate::codex::request::refuse_control_characters;
 use crate::custom_headers;
 use crate::observe_send::{self, Attempt, BodyTap};
@@ -88,7 +88,7 @@ impl XaiExecutor {
         if let Some(conversation) = conversation {
             headers.insert(HeaderName::from_static(CONV_ID_HEADER), conversation);
         }
-        headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
+        crate::xai::request::ensure_user_agent(&mut headers, &client_headers);
         let attempt = Attempt {
             observation: observation
                 .as_ref()

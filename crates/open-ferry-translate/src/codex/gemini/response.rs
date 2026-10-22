@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/gemini/codex_gemini_response.go (v8.0.32, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/gemini/codex_gemini_response.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) events → Gemini `generateContent` responses.
@@ -12,7 +12,7 @@
 //! - A non-string value read as text, such as a reasoning item's `content`
 //!   array, is written as compact JSON, where upstream uses its JSON text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -37,7 +37,11 @@ pub struct CodexToGeminiStream {
     model: String,
     response_id: String,
     /// A function call, held back until the next chunk goes out.
-    pending_function_call: Option<Value>,
+    pending_function_calls: Vec<Value>,
+    pending_signature: String,
+    seen_reasoning: HashSet<[u8; 32]>,
+    has_reasoning_delta: bool,
+    streamed_reasoning: HashSet<String>,
     has_output_text_delta: bool,
     /// The SHA-256 of the last image sent for each image item, so the same
     /// image isn't sent twice.
@@ -53,7 +57,11 @@ impl CodexToGeminiStream {
         Self {
             model: model.to_owned(),
             response_id: String::new(),
-            pending_function_call: None,
+            pending_function_calls: Vec::new(),
+            pending_signature: String::new(),
+            seen_reasoning: HashSet::new(),
+            has_reasoning_delta: false,
+            streamed_reasoning: HashSet::new(),
             has_output_text_delta: false,
             last_image_hash_by_id: HashMap::new(),
             tool_names: reverse_tool_names(original_request),
@@ -101,8 +109,10 @@ impl CodexToGeminiStream {
                     return Vec::new();
                 }
                 let mime_type = image_mime_type(&str_of(event.get("output_format")));
-                *parts_mut(&mut template) = vec![inline_data(&data, &mime_type)];
-                return vec![template];
+                let mut part = inline_data(&data, &mime_type);
+                self.attach_signature(&mut part);
+                *parts_mut(&mut template) = vec![part];
+                return self.flush(template);
             }
             "response.output_item.done" => {
                 let item = event.get("item").unwrap_or(&Value::Null);
@@ -114,14 +124,62 @@ impl CodexToGeminiStream {
                             return Vec::new();
                         }
                         let mime_type = image_mime_type(&str_of(item.get("output_format")));
-                        *parts_mut(&mut template) = vec![inline_data(&data, &mime_type)];
-                        return vec![template];
+                        let mut part = inline_data(&data, &mime_type);
+                        self.attach_signature(&mut part);
+                        *parts_mut(&mut template) = vec![part];
+                        return self.flush(template);
+                    }
+                    "reasoning" => {
+                        let sig = str_of(item.get("encrypted_content")).trim().to_owned();
+                        let id = str_of(item.get("id")).trim().to_owned();
+                        let had_delta = if !id.is_empty() && !self.streamed_reasoning.is_empty() {
+                            self.streamed_reasoning.contains(&id)
+                        } else {
+                            self.has_reasoning_delta
+                        };
+                        self.has_reasoning_delta = false;
+                        let texts = if had_delta {
+                            Vec::new()
+                        } else {
+                            reasoning_texts(item)
+                        };
+                        if sig.is_empty() && texts.is_empty() {
+                            return Vec::new();
+                        }
+                        if !sig.is_empty() {
+                            let key: [u8; 32] =
+                                Sha256::digest(format!("{id}\0{sig}").as_bytes()).into();
+                            if !self.seen_reasoning.insert(key) {
+                                return Vec::new();
+                            }
+                        }
+                        let mut parts = Vec::new();
+                        if !self.pending_signature.is_empty() && !sig.is_empty() {
+                            let mut part = serde_json::json!({"thought":true,"text":""});
+                            self.attach_signature(&mut part);
+                            parts.push(part);
+                        }
+                        parts.extend(
+                            texts
+                                .into_iter()
+                                .map(|text| serde_json::json!({"thought":true,"text":text})),
+                        );
+                        if !sig.is_empty() {
+                            self.pending_signature = sig;
+                        }
+                        if parts.is_empty() {
+                            return Vec::new();
+                        }
+                        *parts_mut(&mut template) = parts;
+                        return self.flush(template);
                     }
                     "function_call" => {
-                        let call = function_call(item, &self.tool_names, CallKeyOrder::NameFirst);
+                        let mut call =
+                            function_call(item, &self.tool_names, CallKeyOrder::NameFirst);
+                        self.attach_signature(&mut call);
                         *parts_mut(&mut template) = vec![call];
                         set_finish_reason(&mut template, "STOP");
-                        self.pending_function_call = Some(template);
+                        self.pending_function_calls.push(template);
                         return Vec::new();
                     }
                     "message" if !self.has_output_text_delta => {}
@@ -131,7 +189,7 @@ impl CodexToGeminiStream {
                 let Some(Value::Array(content)) = item.get("content") else {
                     return Vec::new();
                 };
-                let texts: Vec<Value> = content
+                let mut texts: Vec<Value> = content
                     .iter()
                     .filter(|part| str_of(part.get("type")) == "output_text")
                     .map(|part| str_of(part.get("text")))
@@ -142,27 +200,62 @@ impl CodexToGeminiStream {
                     return Vec::new();
                 }
                 self.has_output_text_delta = true;
+                self.attach_signature(&mut texts[0]);
                 *parts_mut(&mut template) = texts;
-                return vec![template];
+                return self.flush(template);
             }
             "response.created" => {
+                self.pending_function_calls.clear();
+                self.pending_signature.clear();
+                self.seen_reasoning.clear();
+                self.has_reasoning_delta = false;
+                self.streamed_reasoning.clear();
+                self.has_output_text_delta = false;
                 let model = str_of(path(&event, "response.model")).into_owned();
                 let id = str_of(path(&event, "response.id")).into_owned();
                 template["modelVersion"] = model.into();
                 template["responseId"] = id.clone().into();
                 self.response_id = id;
             }
-            "response.reasoning_summary_text.delta" => {
-                let text = str_of(event.get("delta")).into_owned();
-                *parts_mut(&mut template) =
-                    vec![object([("thought", true.into()), ("text", text.into())])];
+            "response.output_item.added" if str_of(path(&event, "item.type")) == "reasoning" => {
+                self.has_reasoning_delta = false;
+                if self.pending_signature.is_empty() {
+                    return Vec::new();
+                }
+                let mut part = serde_json::json!({"thought":true,"text":""});
+                self.attach_signature(&mut part);
+                *parts_mut(&mut template) = vec![part];
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                self.has_reasoning_delta = true;
+                let id = str_of(event.get("item_id")).trim().to_owned();
+                if !id.is_empty() {
+                    self.streamed_reasoning.insert(id);
+                }
+                let mut parts = Vec::new();
+                if !self.pending_signature.is_empty() {
+                    let mut part = serde_json::json!({"thought":true,"text":""});
+                    self.attach_signature(&mut part);
+                    parts.push(part);
+                }
+                parts.push(serde_json::json!({"thought":true,"text":str_of(event.get("delta"))}));
+                *parts_mut(&mut template) = parts;
             }
             "response.output_text.delta" => {
                 self.has_output_text_delta = true;
                 let text = str_of(event.get("delta")).into_owned();
-                *parts_mut(&mut template) = vec![object([("text", text.into())])];
+                let mut part = object([("text", text.clone().into())]);
+                if !text.is_empty() {
+                    self.attach_signature(&mut part);
+                }
+                *parts_mut(&mut template) = vec![part];
             }
             "response.completed" | "response.incomplete" => {
+                if !self.pending_signature.is_empty() {
+                    let mut part = serde_json::json!({"thought":true,"text":""});
+                    self.attach_signature(&mut part);
+                    *parts_mut(&mut template) = vec![part];
+                }
                 let response = event.get("response").unwrap_or(&Value::Null);
                 set_usage(&mut template, response);
                 if kind == "response.incomplete" {
@@ -173,10 +266,18 @@ impl CodexToGeminiStream {
             _ => return Vec::new(),
         }
 
-        match self.pending_function_call.take() {
-            Some(call) => vec![call, template],
-            None => vec![template],
-        }
+        self.flush(template)
+    }
+
+    fn attach_signature(&mut self, part: &mut Value) {
+        super::signature::set(part, &self.pending_signature);
+        self.pending_signature.clear();
+    }
+
+    fn flush(&mut self, template: Value) -> Vec<Value> {
+        let mut out = std::mem::take(&mut self.pending_function_calls);
+        out.push(template);
+        out
     }
 
     /// Whether `data` is the image last sent for `item_id`, recording it if
@@ -255,9 +356,18 @@ pub fn convert_codex_response_to_gemini_non_stream(
     for item in output {
         match str_of(item.get("type")).as_ref() {
             "reasoning" => {
-                if let Some(content) = item.get("content") {
-                    let text = str_of(Some(content)).into_owned();
-                    parts.push(object([("text", text.into()), ("thought", true.into())]));
+                let sig = str_of(item.get("encrypted_content")).trim().to_owned();
+                let mut texts = reasoning_texts(item);
+                if texts.is_empty() && !sig.is_empty() {
+                    texts.push(String::new());
+                }
+                let last = texts.len().saturating_sub(1);
+                for (i, text) in texts.into_iter().enumerate() {
+                    let mut part = object([("text", text.into()), ("thought", true.into())]);
+                    if i == last {
+                        super::signature::set(&mut part, &sig);
+                    }
+                    parts.push(part);
                 }
             }
             "message" => {
@@ -405,3 +515,27 @@ fn set_usage(template: &mut Value, response: &Value) {
 
 #[cfg(test)]
 mod tests;
+
+fn reasoning_texts(item: &Value) -> Vec<String> {
+    let mut texts = Vec::new();
+    if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+        texts.extend(
+            summary
+                .iter()
+                .map(|p| str_of(p.get("text")).into_owned())
+                .filter(|t| !t.is_empty()),
+        );
+    }
+    match item.get("content") {
+        Some(Value::Array(content)) => texts.extend(
+            content
+                .iter()
+                .filter(|p| str_of(p.get("type")) == "reasoning_text")
+                .map(|p| str_of(p.get("text")).into_owned())
+                .filter(|t| !t.is_empty()),
+        ),
+        Some(Value::String(text)) if !text.is_empty() => texts.push(text.clone()),
+        _ => {}
+    }
+    texts
+}
