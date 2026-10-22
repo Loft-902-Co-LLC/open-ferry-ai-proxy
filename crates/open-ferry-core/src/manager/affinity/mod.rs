@@ -22,8 +22,11 @@
 //! credential its fallback is bound to, and the two are bound together. A
 //! subagent's session takes its parent's credential only with
 //! `routing.session-affinity-subagents` (the default), and is bound alone;
-//! so is a fork. Guardian reviews may inherit the parent's latest selection
-//! across models on an eligible real provider, without refreshing the parent.
+//! so is a fork. Ordinary subagents inherit within their own provider/model
+//! scope. Guardian reviews look up the parent's newest live selection among
+//! real providers available to the review, across model scopes, then inherit
+//! only if that selected credential is eligible; they do not search older
+//! selections after an ineligible result, or refresh the parent.
 //!
 //! Deviations from upstream:
 //! - The bindings are the cache's (see `cache`): hashed keys, a sweep on use
