@@ -494,3 +494,96 @@ async fn v8_oauth_access_logs_suppress_the_whole_query() {
         }
     }
 }
+
+// Exercise both production listener stacks: OAuth queries must stay out of
+// access logs even when ingress rejects a body, and out of request/error logs.
+#[tokio::test]
+async fn v8_oauth_queries_stay_private_through_ingress_and_both_loggers() {
+    use crate::testing::TempDir;
+    use open_ferry_core::config::Config;
+    use open_ferry_core::observe::{Observability, request_log::RequestLogger};
+
+    for separate in [false, true] {
+        for full_logging in [false, true] {
+            let dir = TempDir::new();
+            let mut config = Config::default();
+            config.request_log = full_logging;
+            config.error_logs_max_files = 10;
+            let logger = RequestLogger::new(&config, dir.path(), std::path::Path::new(""));
+            let state = state(
+                ServerConfig::default(),
+                FakeCatalog::new(),
+                &FakeDispatcher::new([]),
+            )
+            .with_observability(Observability {
+                request_log: logger.clone(),
+                ..Observability::default()
+            });
+            // Stand-ins for OAuth handlers after their availability/key checks;
+            // use the production public/authenticated ingress admission paths.
+            let extra = Router::new()
+                .route(
+                    "/v8/management/oauth/callback",
+                    any(|| async { StatusCode::BAD_REQUEST })
+                        .layer(middleware::from_fn(crate::ingress::public_request)),
+                )
+                .route(
+                    "/v8/management/oauth/status",
+                    any(|| async { StatusCode::BAD_REQUEST })
+                        .layer(middleware::from_fn(crate::ingress::after_management_auth)),
+                )
+                .route(
+                    "/v8/management/oauth/siwc/bind",
+                    any(|| async { StatusCode::BAD_REQUEST })
+                        .layer(middleware::from_fn(crate::ingress::after_management_auth)),
+                );
+            let app = if separate {
+                crate::app::router_without_proxy(state, extra)
+            } else {
+                crate::app::router_with(state, extra)
+            };
+            for (method, path) in [
+                (Method::GET, "/v8/management/oauth/callback"),
+                (Method::POST, "/v8/management/oauth/callback"),
+                (Method::GET, "/v8/management/oauth/status"),
+                (Method::POST, "/v8/management/oauth/siwc/bind"),
+            ] {
+                for oversized in [false, true] {
+                    if oversized && method == Method::GET {
+                        continue;
+                    }
+                    let uri = format!(
+                        "{path}?code=private-code&state=private-state&client_id=private-client&token=private-token&arbitrary=private-value"
+                    );
+                    let request = Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("content-length", if oversized { "33554433" } else { "2" })
+                        .body(Body::from("{}"))
+                        .unwrap();
+                    let (status, events) = send(&app, request).await;
+                    assert_eq!(
+                        status,
+                        if oversized {
+                            StatusCode::PAYLOAD_TOO_LARGE
+                        } else {
+                            StatusCode::BAD_REQUEST
+                        }
+                    );
+                    let access = events
+                        .iter()
+                        .filter(|event| event.message.contains(path))
+                        .count();
+                    assert_eq!(access, 1, "{events:?}");
+                    for event in events {
+                        assert!(!event.message.contains("private-"), "{event:?}");
+                        assert!(!event.message.contains('?'), "{event:?}");
+                    }
+                    logger.flush();
+                    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+                }
+            }
+        }
+    }
+}

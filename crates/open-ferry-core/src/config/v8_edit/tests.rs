@@ -727,3 +727,74 @@ fn edit_v8_if_checks_the_file_it_reads() {
     );
     assert_ne!(wrote, hash);
 }
+
+// Main's ingress settings and the v8.0.36 client/model settings must coexist
+// through a management edit, the save generator, reload and change reporting.
+#[test]
+fn ingress_and_v36_settings_survive_one_v8_edit_and_save() {
+    let source = b"config-version: 8\n";
+    let update = edit(
+        V8Method::Patch,
+        "",
+        r#"{
+        "server":{"ingress-limits":{
+            "max-connections":7,"header-timeout-seconds":8,
+            "tls-handshake-timeout-seconds":9,"idle-timeout-seconds":10,
+            "body-idle-timeout-seconds":11,"body-total-timeout-seconds":12,
+            "buffered-body-bytes":13,"write-stall-timeout-seconds":14}},
+        "client":{"codex":{"web-search-result-cache":{"enabled":true,"ttl":"30m","limit":128}}},
+        "api-keys":{"claude":[{"models":[{"name":"claude-sonnet-5-5","alias":"sonnet",
+            "thinking":{"levels":["low","none"],"disable-type":"between_tools"}}],
+            "keys":[{"api-key":"dummy"}]}]}
+    }"#,
+    );
+    let (out, config) = render(source, &update).expect("edit all settings together");
+    let saved = save::render_preserving_comments(&out, &config, false).expect("save");
+    validate_v8_config(&saved).expect("all settings remain in the v8 schema");
+    let loaded = Config::parse(std::str::from_utf8(&saved).unwrap()).expect("reload");
+    assert_eq!(loaded.ingress_limits, config.ingress_limits);
+    assert_eq!(
+        loaded.client.codex.web_search_result_cache,
+        config.client.codex.web_search_result_cache
+    );
+    assert_eq!(
+        loaded.claude_api_key[0].models[0]
+            .thinking
+            .as_ref()
+            .unwrap()
+            .disable_type,
+        "between_tools"
+    );
+    let changes = crate::config::diff::build_change_details(&Config::default(), &loaded);
+    for key in [
+        "ingress-limits.max-connections",
+        "ingress-limits.header-timeout-seconds",
+        "ingress-limits.tls-handshake-timeout-seconds",
+        "ingress-limits.idle-timeout-seconds",
+        "ingress-limits.body-idle-timeout-seconds",
+        "ingress-limits.body-total-timeout-seconds",
+        "ingress-limits.buffered-body-bytes",
+        "ingress-limits.write-stall-timeout-seconds",
+        "client.codex.web-search-result-cache.enabled",
+        "client.codex.web-search-result-cache.ttl",
+        "client.codex.web-search-result-cache.limit",
+        "claude-api-key",
+    ] {
+        assert!(
+            changes.iter().any(|change| change.starts_with(key)),
+            "{key}: {changes:?}"
+        );
+    }
+    let mut changed_type = loaded.clone();
+    changed_type.claude_api_key[0].models[0]
+        .thinking
+        .as_mut()
+        .unwrap()
+        .disable_type = "disabled".into();
+    assert!(
+        crate::config::diff::build_change_details(&loaded, &changed_type)
+            .iter()
+            .any(|change| change.starts_with("claude[0].models")),
+        "thinking-only changes must reload"
+    );
+}

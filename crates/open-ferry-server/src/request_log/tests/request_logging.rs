@@ -561,3 +561,72 @@ async fn logs_websocket_upgrades() {
     );
     assert!(log.contains("=== RESPONSE ===\nStatus: 101\n"), "{log}");
 }
+
+// The v8.0.36 Claude terminal check consumes the complete admitted request,
+// while main's logger keeps only its prefix and scrubs the streamed answer.
+#[tokio::test]
+async fn claude_truncation_keeps_bounded_request_capture_and_secret_scrubbing() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
+
+    const KEY: &str = "client-review-key-0123456789";
+    let chunk = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{KEY}\"}}}}\n\n"
+    );
+    let dispatcher = FakeDispatcher::new([Outcome::chunks(&[&chunk])]);
+    let harness = Harness::over(
+        true,
+        state(
+            ServerConfig {
+                api_keys: vec![KEY.into()],
+                ..ServerConfig::default()
+            },
+            FakeCatalog::new().serve("claude-review", &["claude"]),
+            &dispatcher,
+        ),
+    );
+    let app = crate::router(harness.state.clone());
+    let payload = Bytes::from(format!(
+        "{{\"model\":\"claude-review\",\"stream\":true,\"messages\":[{{\"role\":\"user\",\"content\":\"{KEY}{}tail-after-capture\"}}]}}",
+        "x".repeat(REQUEST_CAPTURE_LIMIT)
+    ));
+    let chunks = stream::iter([
+        Ok::<_, std::io::Error>(payload.slice(..REQUEST_CAPTURE_LIMIT - 1)),
+        Ok(payload.slice(REQUEST_CAPTURE_LIMIT - 1..)),
+    ]);
+    let request = Request::post("/v1/messages")
+        .header("authorization", format!("Bearer {KEY}"))
+        .header("content-type", "application/json")
+        .body(Body::from_stream(chunks))
+        .unwrap();
+    let (status, _, answer) = send(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer = std::str::from_utf8(&answer).unwrap();
+    assert!(answer.contains(KEY));
+    assert_eq!(answer.matches("event: error").count(), 1, "{answer}");
+    assert!(
+        answer.contains("upstream stream closed before message_stop"),
+        "{answer}"
+    );
+    let calls = dispatcher.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.payload, payload);
+    let (_, log) = harness.only_log();
+    assert!(!log.contains(KEY), "{log}");
+    assert!(
+        log.contains("upstream stream closed before message_stop"),
+        "{log}"
+    );
+    let request_body = log
+        .split("=== REQUEST BODY ===\n")
+        .nth(1)
+        .unwrap()
+        .split("=== RESPONSE ===")
+        .next()
+        .unwrap();
+    assert!(request_body.contains(&format!(
+        "[REQUEST BODY TRUNCATED: captured first {REQUEST_CAPTURE_LIMIT} bytes]"
+    )));
+    assert!(request_body.len() < REQUEST_CAPTURE_LIMIT + 128);
+    assert!(!request_body.contains("tail-after-capture"));
+}
