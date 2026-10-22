@@ -16,6 +16,7 @@ mod multi_agent;
 mod payload;
 mod quota_signals;
 mod raw_json;
+mod request_witness;
 mod session;
 mod signature;
 mod stream_framing;
@@ -1191,12 +1192,18 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
 
     let outcome = match (&go_value, compared) {
         (Some(go), Ok(rust)) => {
-            let mut comparison = compare::compare_numbers_from_request(
+            let witness = |path: &str, span: &str, text: &str| {
+                request_witness::bound_span(translator, case, rust, path, span, text)
+            };
+            let mut comparison = compare::compare_numbers_with_witness(
                 go,
                 rust,
                 translator.embedded_json(case),
                 translator.numbers(),
                 translator.embedded_json_request_source(case),
+                translator
+                    .embedded_json_request_source(case)
+                    .map(|_| &witness as &dyn Fn(&str, &str, &str) -> bool),
             );
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {

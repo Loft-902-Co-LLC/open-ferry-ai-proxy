@@ -106,10 +106,11 @@ impl JsonForm {
         rust: &str,
         numbers: Numbers,
         source: Option<&crate::raw_json::Raw<'_>>,
+        bound: Option<&dyn Fn(&str) -> bool>,
     ) -> bool {
         match self {
             Self::Whole => {
-                witnessed(source, go)
+                bound.map_or_else(|| witnessed(source, go), |f| f(go))
                     && numbers
                         .read(go)
                         .is_some_and(|value| compact(&value) == rust)
@@ -119,7 +120,7 @@ impl JsonForm {
                 go.len() == rust.len()
                     && go.iter().zip(&rust).all(|((go, value), (rust, _))| {
                         go == rust
-                            || (witnessed(source, go)
+                            || (bound.map_or_else(|| witnessed(source, go), |f| f(go))
                                 && value.as_ref().is_some_and(|value| compact(value) == *rust))
                     })
             }
@@ -129,23 +130,18 @@ impl JsonForm {
 }
 
 /// A changed JSON span must occur as a complete lexical request value.
-/// Parsing the lexical tree excludes interiors of strings, including escaped
-/// quotes and nested JSON-looking text. A complete quoted JSON string token
-/// is allowed (for raw tool-result fallbacks), never its interior text. None
-/// is for older response-only paths.
+/// This fallback compares the corresponding path only, never another field.
+/// Translator routes that rearrange paths supply a marker replay bound to the
+/// precise output path. Complete quoted tokens are allowed for raw fallbacks,
+/// never their interior text. None is for older response-only paths.
 fn witnessed(source: Option<&crate::raw_json::Raw<'_>>, span: &str) -> bool {
-    use crate::raw_json::Raw;
     let Some(source) = source else {
         return true;
     };
     if source.text() == span {
         return true;
     }
-    match source {
-        Raw::Object(fields, _) => fields.iter().any(|(_, v)| witnessed(Some(v), span)),
-        Raw::Array(items, _) => items.iter().any(|v| witnessed(Some(v), span)),
-        Raw::Scalar(_) => false,
-    }
+    false
 }
 
 /// `value` as we write it: compact, with key order and number text kept.
@@ -307,6 +303,19 @@ pub fn compare_numbers_from_request(
     numbers: Numbers,
     request_text: Option<&str>,
 ) -> Comparison {
+    compare_numbers_with_witness(go, rust, embedded_json, numbers, request_text, None)
+}
+
+type Witness<'a> = dyn Fn(&str, &str, &str) -> bool + 'a;
+
+pub fn compare_numbers_with_witness(
+    go: &Value,
+    rust: &Value,
+    embedded_json: &[JsonAt],
+    numbers: Numbers,
+    request_text: Option<&str>,
+    witness: Option<&Witness<'_>>,
+) -> Comparison {
     let source = request_text
         .map(|text| crate::raw_json::parse(text).unwrap_or(crate::raw_json::Raw::Scalar("\"\"")));
     let mut walker = Walker {
@@ -314,6 +323,7 @@ pub fn compare_numbers_from_request(
         embedded_json,
         numbers,
         source: source.as_ref(),
+        witness,
         out: Comparison::default(),
     };
     walker.walk(go, rust);
@@ -355,6 +365,7 @@ struct Walker<'a> {
     embedded_json: &'a [JsonAt],
     numbers: Numbers,
     source: Option<&'a crate::raw_json::Raw<'a>>,
+    witness: Option<&'a Witness<'a>>,
     out: Comparison,
 }
 
@@ -444,14 +455,45 @@ impl<'a> Walker<'a> {
             self.out.deviations.insert(Deviation::UtcCreateTime);
             return;
         }
-        if self
-            .json_form()
-            .is_some_and(|form| form.matches(go, rust, self.numbers, self.source))
-        {
+        let pointer = self.pointer();
+        let bound = |span: &str| self.witness.is_some_and(|f| f(&pointer, span, rust));
+        let mut source = self.source;
+        for part in &self.path {
+            source = match (source, part) {
+                (Some(n), Segment::Key(k)) => n.get(k),
+                (Some(crate::raw_json::Raw::Array(items, _)), Segment::Index(i)) => items.get(*i),
+                _ => None,
+            };
+        }
+        // An unavailable path fails closed; None means a legacy ungated route.
+        let missing = crate::raw_json::Raw::Scalar("\"\"");
+        if self.source.is_some() && source.is_none() {
+            source = Some(&missing);
+        }
+        if self.json_form().is_some_and(|form| {
+            form.matches(
+                go,
+                rust,
+                self.numbers,
+                source,
+                self.witness.map(|_| &bound as &dyn Fn(&str) -> bool),
+            )
+        }) {
             self.out.deviations.insert(Deviation::EmbeddedJson);
             return;
         }
         self.differ(Value::from(go).to_string(), Value::from(rust).to_string());
+    }
+
+    fn pointer(&self) -> String {
+        self.path.iter().fold(String::new(), |mut out, p| {
+            out.push('/');
+            match p {
+                Segment::Key(k) => out.push_str(&k.replace('~', "~0").replace('/', "~1")),
+                Segment::Index(i) => out.push_str(&i.to_string()),
+            }
+            out
+        })
     }
 
     /// How the translator writes JSON in the string at the walk's path, if it

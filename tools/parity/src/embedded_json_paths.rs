@@ -28,7 +28,7 @@ fn check(from: &str, to: &str, path: &str, in_text: bool) {
     let go = format!("{prefix}{{ \"a\": [1, 2], \"s\": \"two  spaces\" }}{suffix}");
     let rust = format!("{prefix}{{\"a\":[1,2],\"s\":\"two  spaces\"}}{suffix}");
     let raw = r#"{ "a": [1, 2], "s": "two  spaces" }"#;
-    let source = format!("{{\"input\":{raw}}}");
+    let source = at(path, "").to_string().replacen("\"\"", raw, 1);
     let cmp = compare_numbers_from_request(
         &at(path, &go),
         &at(path, &rust),
