@@ -140,7 +140,7 @@ When we move the pin, we update this table, bring every ported file's header to 
 - **Every ported file gets a header** naming its source, for example:
 
   ```rust
-  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.36, MIT).
+  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.38, MIT).
   // https://github.com/router-for-me/CLIProxyAPI
   ```
 
@@ -1056,7 +1056,7 @@ floor max(configured, 3 * proxy body limit + 96 MiB). The configured default is
 management headroom. A lowering reload retains old charges, which can temporarily
 occupy the newly defined headroom until their owners release storage. Management
 keeps its own handler bounds on both listeners. GET OAuth callbacks use queries
-and do not poll bodies, matching v8.0.36 server_routes.go:153-184. POST callback
+and do not poll bodies, matching v8.0.38 server_routes.go:153-184. POST callback
 bodies are limited to 64 KiB and share a separate process-wide 2 MiB pool. When
 full they get 503 with Retry-After: 1. A declared Content-Length is refused before
 polling; a chunked body first yields a frame, which is dropped if its capacity
@@ -1196,7 +1196,7 @@ The OpenAI translators share helpers with upstream's other translators, ported a
 
 The Claude translators use more of upstream's shared code:
 
-- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json` as of v8.0.36, copied unchanged.
+- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json` as of v8.0.38, copied unchanged.
 - `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing. Lining up a user message's tool results with the preceding `tool_use` IDs queues the results by ID instead of scanning them again for each ID as upstream does, so it takes linear time rather than quadratic; the output is the same.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.

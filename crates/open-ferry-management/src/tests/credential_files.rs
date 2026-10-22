@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_upload_test.go, auth_files_batch_test.go,
 // auth_files_delete_test.go, auth_files_download_test.go and
-// auth_files_download_windows_test.go (v8.0.36, MIT).
+// auth_files_download_windows_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::credential_files`: downloading,
@@ -1276,7 +1276,7 @@ async fn form_debug_leaves_out_contents() {
     );
 }
 
-// Ported from auth_files_excluded_models_test.go (v8.0.36).
+// Ported from auth_files_excluded_models_test.go (v8.0.38).
 #[tokio::test]
 async fn uploads_validate_exclusions_before_writing() {
     for (content, reason) in [

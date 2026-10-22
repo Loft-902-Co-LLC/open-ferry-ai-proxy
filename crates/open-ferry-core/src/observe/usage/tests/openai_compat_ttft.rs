@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor_ttft_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor_ttft_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage tap observes upstream bytes before translation or downstream

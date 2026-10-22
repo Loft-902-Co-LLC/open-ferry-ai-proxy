@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cooldown.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cooldown.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A model's own cooldown is kept beneath a credential-wide quota cooldown,

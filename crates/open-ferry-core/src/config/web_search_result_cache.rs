@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/config/sdk_config.go (9d453bc0, v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/config/sdk_config.go (9d453bc0, v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Opt-in session web search caching. Both config layouts use the same client path.

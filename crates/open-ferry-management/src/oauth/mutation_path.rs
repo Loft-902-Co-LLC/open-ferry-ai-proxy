@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/oauth_siwc_mutations.go
-// (sameSIWCMutationPath) (v8.0.36, MIT).
+// (sameSIWCMutationPath) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Snapshot a mutation destination before replacement. Compare it with the

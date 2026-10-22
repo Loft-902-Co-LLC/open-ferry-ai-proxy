@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
-// config_v8_etag_test.go (TestConfigV8ETagIfMatch) (v8.0.36, MIT).
+// config_v8_etag_test.go (TestConfigV8ETagIfMatch) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The version token of the v8 config routes (see

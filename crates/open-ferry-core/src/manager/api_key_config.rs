@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_models.go
-// (v8.0.36, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.38, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::credential::{SOURCE_CONFIG, attribute, auth_source_kind};
 use super::settings::ApiKeyEntry;

@@ -20,7 +20,7 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 | `api-keys.claude[].models[].thinking.disable-type` | `claude-api-key[].models[].thinking.disable-type` | String, empty uses `disabled`. Overrides the API thinking type used when thinking is off; Sonnet 5.5 uses `between_tools`. Omitted model capabilities inherit catalog settings. The field is also accepted wherever a configured model has a `thinking` mapping. |
 | `oauth.providers.codex.signin-with-chatgpt-identifier` | `codex.signin-with-chatgpt-identifier` | String, empty. Accepted for configuration compatibility only: trimmed and saved; changes are reported without the value. It has no runtime effect. open-ferry always identifies itself as `open-ferry`. |
 
-These other switches' configuration contract is available for the v8.0.36 sync. Runtime behavior is wired by the corresponding provider and server changes.
+These other switches' configuration contract is available for the v8.0.38 sync. Runtime behavior is wired by the corresponding provider and server changes.
 
 The compatibility-only `signin-with-chatgpt-identifier` has no runtime effect and warns once per load when set, without logging its value.
 
@@ -138,7 +138,7 @@ the TCP write guard, existing frame/message bounds (64 MiB default), a bounded
 upgrade or an H2 WebSocket blocked by its stream window can retain a slot; the
 HTTP response-stream watchdog does not impose a new WebSocket ping or lifetime.
 
-The v8.0.36 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
+The v8.0.38 contract also carries these settings for compatibility. open-ferry ignores them because it does not impersonate clients or cloak Claude requests.
 
 | v8 path | Legacy path | Default and meaning |
 |---|---|---|

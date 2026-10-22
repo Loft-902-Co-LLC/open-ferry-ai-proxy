@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/common/codex_replay_signature.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/translator/common/codex_replay_signature.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 use crate::signature::{
     Provider, compatible_signature_for_provider, detect_signature_provider,

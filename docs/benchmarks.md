@@ -75,7 +75,7 @@ It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
 1. installs `build-essential`, `pkg-config`, `cmake`, `git`, `curl` and `ca-certificates` with apt, if they're missing;
 2. installs rustup, if it's missing, and the toolchain `rust-toolchain.toml` names;
 3. downloads Go 1.26.4 for Linux from go.dev, checks its SHA-256, and unpacks it into `<dir>/sdk`;
-4. fetches open-ferry at `--ref` (default `main`) into `<dir>/open-ferry` and CLIProxyAPI at `--tag` (default `v8.0.36`) into `<dir>/CLIProxyAPI`;
+4. fetches open-ferry at `--ref` (default `main`) into `<dir>/open-ferry` and CLIProxyAPI at `--tag` (default `v8.0.38`) into `<dir>/CLIProxyAPI`;
 5. builds open-ferry and the benchmark in release mode, and CLIProxyAPI with the benchmark's `--prepare`;
 6. waits until the 1-minute load average is at most `--max-load` (default 0.5), for up to `--wait` minutes (default 30);
 7. runs the benchmark with `--out docs/benchmarks.md` and `--machine-note`, and copies the updated `docs/benchmarks.md`, the results and a log of everything into `<dir>/results/<time>/`.
@@ -84,7 +84,7 @@ It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/tools/bench/cloud/run-ubuntu.sh
-bash run-ubuntu.sh --note "Azure Standard_D8s_v6, East US" --ref main --tag v8.0.36
+bash run-ubuntu.sh --note "Azure Standard_D8s_v6, East US" --ref main --tag v8.0.38
 ```
 
 Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. Options after `--` go to the benchmark, such as `-- --duration 2 --starts 1 --long-requests 2` for a quick check that everything works. `bash run-ubuntu.sh --help` lists the script's options.
@@ -94,7 +94,7 @@ Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. 
 You need Git, Go 1.26 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) says how to get Go 1.26.4) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
 
 ```sh
-git clone --branch v8.0.36 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+git clone --branch v8.0.38 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo build --release --locked -p open-ferry
 cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.4 --machine-note "<what the machine is>" --out docs/benchmarks.md
 ```

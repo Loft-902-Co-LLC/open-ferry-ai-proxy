@@ -3,7 +3,7 @@
 // executeStreamWithServiceAccount and executeStreamWithAPIKey),
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // Buffered usage on read failure follows b12db8c3 (v8.0.38).
 // https://github.com/router-for-me/CLIProxyAPI
 

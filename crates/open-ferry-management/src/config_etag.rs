@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/config_v8.go
-// (configV8ETag, ifMatchSatisfied, splitEntityTagList) (v8.0.36, MIT).
+// (configV8ETag, ifMatchSatisfied, splitEntityTagList) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The version token of the config file the v8 config routes give and take.

@@ -3,7 +3,7 @@
 // ConvertGeminiResponseToInteractions, ConvertGeminiResponseToInteractionsNonStream,
 // ConvertInteractionsResponseToGemini, ConvertInteractionsResponseToGeminiNonStream,
 // ConvertInteractionsRequestToInteractions, ConvertInteractionsResponsePassthrough,
-// ConvertInteractionsResponsePassthroughNonStream) (v8.0.36, MIT).
+// ConvertInteractionsResponsePassthroughNonStream) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions clients talking to a Gemini upstream, Gemini clients

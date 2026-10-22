@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/interactions_usage.go
-// (InteractionsUsage) (v8.0.36, MIT).
+// (InteractionsUsage) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Finding the usage in a Gemini Interactions response or stream event, for

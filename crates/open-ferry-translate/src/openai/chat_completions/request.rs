@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/chat-completions/openai_openai_request.go
-// (ConvertOpenAIRequestToOpenAI) (v8.0.36, MIT).
+// (ConvertOpenAIRequestToOpenAI) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Chat Completions request → Chat Completions request.

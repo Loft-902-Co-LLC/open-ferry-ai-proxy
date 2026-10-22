@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stop_reasons_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stop_reasons_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The executor against a mock Anthropic server on 127.0.0.1, covering what

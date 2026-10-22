@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor_test.go
-// and gemini_vertex_executor_test.go (v8.0.36, MIT).
+// and gemini_vertex_executor_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Malformed calls fail all Gemini/Vertex Claude paths. The call's taps record

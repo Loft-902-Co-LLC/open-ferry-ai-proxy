@@ -2,7 +2,7 @@
 // (ConvertClaudeRequestToGemini, ConvertClaudeRequestToGeminiWithCompat,
 // geminiContentWithParts and toolNameFromClaudeToolUseID) and
 // internal/util/claude_tool_result.go (ConvertClaudeToolResultContent), with the
-// document blocks and user turn checks (claudeBase64InlineData) (v8.0.36, MIT).
+// document blocks and user turn checks (claudeBase64InlineData) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Gemini request.

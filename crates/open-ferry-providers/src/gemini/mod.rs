@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go and
 // gemini_vertex_executor.go (the parts the two executors share)
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // Also ported from internal/runtime/executor/helps/apply_patch.go.
 // https://github.com/router-for-me/CLIProxyAPI
 

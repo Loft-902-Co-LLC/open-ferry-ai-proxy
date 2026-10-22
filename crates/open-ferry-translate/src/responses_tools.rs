@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/util/responses_tools.go and
-// internal/util/responses_tools_test.go (v8.0.36, MIT).
+// internal/util/responses_tools_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which declaration a tool name refers to in a Responses-style request, and

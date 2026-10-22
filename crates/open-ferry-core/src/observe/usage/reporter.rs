@@ -21,7 +21,7 @@
 // accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
 // (requestedModelAliasFromOptions, generateFromOptions),
 // and sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
-// GenerateFromContext, GenerateEnabled) (v8.0.36, MIT).
+// GenerateFromContext, GenerateEnabled) (v8.0.38, MIT).
 // Gemini/Vertex terminal cancellation follows b12db8c3 (v8.0.38).
 // https://github.com/router-for-me/CLIProxyAPI
 
