@@ -17,6 +17,7 @@ mod quota_signals;
 mod raw_json;
 mod session;
 mod signature;
+mod stream_framing;
 mod summary;
 mod translator;
 mod ttft;
@@ -625,13 +626,43 @@ fn check(
     dir: &Path,
 ) -> Result<Tally, Box<dyn Error>> {
     let go_results = upstream.run(translator.key(), cases, work_dir)?;
+    // The documented SSE exception needs an independent upstream execution
+    // on unframed input. A fixture name or a structural mismatch is no proof.
+    let probes: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .filter_map(|(index, case)| {
+            stream_framing::unframe(translator, case).map(|bare| (index, bare))
+        })
+        .collect();
+    let bare_cases: Vec<_> = probes.iter().map(|(_, bare)| bare.case.clone()).collect();
+    let bare_go = if bare_cases.is_empty() {
+        Vec::new()
+    } else {
+        upstream.run(translator.key(), &bare_cases, work_dir)?
+    };
+    let mut proofs = probes.into_iter().zip(bare_go).peekable();
     // Rust panics are caught and reported per case, so keep them off stderr.
     panic::set_hook(Box::new(|_| {}));
     let mut tally = Tally::default();
     let recorded = cases
         .iter()
         .zip(&go_results)
-        .try_for_each(|(case, go)| tally.record(case, evaluate(translator, case, go), dir));
+        .enumerate()
+        .try_for_each(|(index, (case, go))| {
+            let evaluated = evaluate(translator, case, go);
+            let proof = proofs.next_if(|((candidate, _), _)| *candidate == index);
+            let mut checked = case.clone();
+            if checked.known_difference.is_none()
+                && matches!(evaluated.outcome, Outcome::Different(_))
+                && let Ok(rust) = &evaluated.rust_output
+                && let Some(((_, bare), go)) = proof
+                && bare.matches(translator, rust, &go)
+            {
+                checked.known_difference = Some(stream_framing::REASON);
+            }
+            tally.record(&checked, evaluated, dir)
+        });
     let _ = panic::take_hook();
     recorded.map(|()| tally)
 }
