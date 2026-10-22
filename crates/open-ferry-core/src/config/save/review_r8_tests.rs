@@ -111,3 +111,84 @@ fn review_r8_version_foot_paragraphs_keep_their_parsed_owners() {
         }
     }
 }
+
+#[test]
+fn review_r8_generated_node_rebind_uses_the_emitted_comment_position() {
+    use crate::config::yaml3::{CommentId, Style};
+    let id = CommentId::fresh();
+    let mut value = Node::scalar(STR_TAG, "/a\u{2028}b");
+    value.style = Style::SINGLE_QUOTED;
+    value.line_comment = "# pending".into();
+    value.line_comment_id = Some(id.clone());
+    let (bytes, emitted) = encode::marshal_with_comment_ids(&encode::Value::Node(value)).unwrap();
+    let mut parsed = unmarshal(&bytes).unwrap();
+    assert_ne!(parsed.content[0].line, parsed.content[0].line_comment_line);
+    assert_ne!(parsed.content[0].line_comment_id, Some(id.clone()));
+    rebind_generated_comments(&mut parsed, &emitted);
+    assert_eq!(parsed.content[0].line_comment_id, Some(id));
+}
+
+#[test]
+fn review_r8_archive_tag_table_survives_two_writes() {
+    fn scalar_values(n: &Node) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        if n.kind == Kind::Scalar {
+            result.push((n.tag.clone(), n.value.clone()));
+        }
+        for child in &n.content {
+            result.extend(scalar_values(child));
+        }
+        result
+    }
+    let cases = [
+        ("explicit-str", "x: !!str |-\n  a\u{2029}  b\n"),
+        ("non-specific", "x: ! 'a\u{2028}b'\n"),
+        (
+            "verbatim",
+            "x: !<tag:example.com,2000:x> |-\n  a\u{2029}  b\n",
+        ),
+        ("binary", "x: !!binary YWJj\n"),
+        ("null", "x: !!null \"\"\n"),
+        ("flow", "x: {a: 'b\u{2028}c'}\n"),
+        ("sequence", "x:\n- !t 'a\u{2028}b'\n"),
+        ("anchor", "x: &a !t 'a\u{2028}b'\ny: *a\n"),
+        ("only-escapes", "x: \"a\\u2028b\\u2029c\\u0085d\"\n"),
+    ];
+    for (name, shape) in cases {
+        let source = format!("config-version: 8\n{shape}auth-dir: /old\n");
+        let original = unmarshal(source.as_bytes()).unwrap();
+        let original = expand_config_aliases(&original.content[0]).unwrap();
+        let expected = scalar_values(yaml_path(&original, "x").unwrap());
+        for op in ["raw", "normalize", "put"] {
+            let fixture = serde_json::json!({"source":source,"op":op});
+            let mut out = super::review_r7_tests::exact_review_output(&fixture).unwrap();
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            for pass in 0..2 {
+                if pass > 0 {
+                    write_file(&path, out.as_bytes()).unwrap();
+                    out = std::fs::read_to_string(&path).unwrap();
+                }
+                Config::parse(&out).unwrap();
+                let archive = out
+                    .split('\n')
+                    .filter_map(|l| {
+                        if l == "#" {
+                            Some("")
+                        } else {
+                            l.strip_prefix("# ")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let archived = unmarshal(archive.as_bytes()).unwrap();
+                let archived = expand_config_aliases(&archived.content[0]).unwrap();
+                assert_eq!(
+                    scalar_values(yaml_path(&archived, "x").unwrap()),
+                    expected,
+                    "{name} {op} pass {pass}: {archive}"
+                );
+            }
+        }
+    }
+}

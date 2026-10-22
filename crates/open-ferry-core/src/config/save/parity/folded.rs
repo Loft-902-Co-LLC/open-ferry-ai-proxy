@@ -182,6 +182,9 @@ pub fn folded_scalar_reencode(
             let (path, value) = rust_values
                 .iter()
                 .find(|(_, n)| n.line == r.line && n.column == r.column)?;
+            // Defense in depth: for this comment-free bare-node replay, the
+            // repaired clip emitter already makes every lossless pair byte
+            // identical. The only remaining folded differences change values.
             if g.value == r.value
                 || g.style != ScalarStyle::Folded
                 || r.style != ScalarStyle::Folded
@@ -244,6 +247,53 @@ pub fn folded_scalar_reencode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lossless_bare_folded_replays_are_already_byte_identical() {
+        let lines = ["ordinary", " indented", "\tindented", "", "long words "];
+        let mut checked = 0;
+        for a in lines {
+            for b in lines {
+                for c in lines {
+                    for trailing in 0..4 {
+                        for width in [2, 4] {
+                            let value = format!("{a}\n{b}\n{c}{}", "\n".repeat(trailing));
+                            let mut node = Node::scalar(STR_TAG, &value);
+                            node.style = Style::FOLDED;
+                            let Ok((protected, _)) = encode::protected_node(&node, width) else {
+                                continue;
+                            };
+                            let Ok(parsed) = unmarshal(&protected) else {
+                                continue;
+                            };
+                            if parsed.content[0].value != value {
+                                continue;
+                            }
+                            let mut faithful_node = node.clone();
+                            for _pass in 1..=2 {
+                                let Ok(faithful) = encode::faithful_node(&faithful_node, width)
+                                else {
+                                    break;
+                                };
+                                let Ok(parsed) = unmarshal(&faithful) else {
+                                    break;
+                                };
+                                let Some(parsed) = parsed.content.first() else {
+                                    break;
+                                };
+                                if parsed.value == value {
+                                    assert_eq!(faithful, protected, "{value:?}");
+                                    checked += 1;
+                                }
+                                faithful_node.value.clone_from(&parsed.value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100);
+    }
+
     #[test]
     fn clip_trailing_break_difference_is_not_a_value_preservation_proof() {
         let rust = "v: >\n  text\nnext: ok\n";

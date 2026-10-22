@@ -443,6 +443,17 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     Ok(normalize_comment_indentation(&out))
 }
 
+fn rebind_generated_comments(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
+    if let Some(origin) = emitted.iter().find(|origin| {
+        origin.line == node.line_comment_line && origin.text == node.line_comment.as_bytes()
+    }) {
+        node.line_comment_id = Some(origin.id.clone());
+    }
+    for child in &mut node.content {
+        rebind_generated_comments(child, emitted);
+    }
+}
+
 /// The generated tree: `cfg` as upstream marshals it, read back.
 fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, SaveError> {
     let mut value = generate::legacy_config(cfg)
@@ -481,17 +492,7 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
     };
     // Re-parsing generated YAML changes ownership/positions. Rebind only an
     // actual emitted occurrence with the exact output line and full comment.
-    fn rebind(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
-        if let Some(origin) = emitted.iter().find(|origin| {
-            origin.line == node.line_comment_line && origin.text == node.line_comment.as_bytes()
-        }) {
-            node.line_comment_id = Some(origin.id.clone());
-        }
-        for child in &mut node.content {
-            rebind(child, emitted);
-        }
-    }
-    rebind(&mut generated, &identities);
+    rebind_generated_comments(&mut generated, &identities);
     if generated.kind != Kind::Document {
         return Err(invalid("invalid generated yaml structure"));
     }

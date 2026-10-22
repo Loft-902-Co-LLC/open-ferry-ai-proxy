@@ -376,6 +376,7 @@ pub(crate) fn normalize_config_layout_doc(
     if let Some(first) = doc.content.first_mut() {
         *first = root;
     }
+    super::encode::quote_config_unicode(&mut doc);
     Ok((doc, true))
 }
 
