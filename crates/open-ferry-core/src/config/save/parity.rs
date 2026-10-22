@@ -150,6 +150,111 @@ pub fn quoted_source(source: &str) -> Result<Option<String>, SaveError> {
     Ok(Some(rewritten))
 }
 
+/// Prove the exact archived-comment loss: a source block scalar's second
+/// header comment became its first data line in upstream's archive. Only
+/// those scalar spans and the restored comment line may differ.
+pub fn archived_scalar_comment_loss(sources: &[&str], go: &str, rust: &str) -> bool {
+    fn attempt(sources: &[&str], go: &str, rust: &str) -> Option<bool> {
+        fn scalars(source: &str) -> Option<Vec<(usize, usize, ScalarStyle, String)>> {
+            fn offset(source: &str, line: usize, column: usize) -> Option<usize> {
+                let start = source.split_inclusive('\n').take(line).map(str::len).sum();
+                let text = source.get(start..)?;
+                Some(start + text.char_indices().nth(column).map_or(text.len(), |p| p.0))
+            }
+            let mut parser = Parser::new(source.as_bytes());
+            let mut result = Vec::new();
+            loop {
+                let token = parser.scan().ok()?;
+                if matches!(token.typ, TokenType::No | TokenType::StreamEnd) {
+                    break;
+                }
+                if token.typ == TokenType::Scalar {
+                    result.push((
+                        offset(source, token.start_mark.line, token.start_mark.column)?,
+                        offset(source, token.end_mark.line, token.end_mark.column)?,
+                        token.style,
+                        String::from_utf8(token.value).ok()?,
+                    ));
+                }
+            }
+            Some(result)
+        }
+        fn witness(node: &Node, value: &str, comment: &str) -> bool {
+            (node.kind == super::Kind::Scalar
+                && node.tag == STR_TAG
+                && node.style.has(Style::LITERAL | Style::FOLDED)
+                && node.value == value
+                && node.line_comment == comment)
+                || node.content.iter().any(|n| witness(n, value, comment))
+        }
+        let source_nodes = sources
+            .iter()
+            .map(|s| unmarshal(s.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let gs = scalars(go)?;
+        let rs = scalars(rust)?;
+        if gs.len() != rs.len() {
+            return None;
+        }
+        let mut rewritten = String::new();
+        let mut last = 0;
+        let mut changed = false;
+        for ((start, end, style, value), (rstart, rend, rstyle, rvalue)) in gs.iter().zip(&rs) {
+            if value == rvalue {
+                continue;
+            }
+            if !matches!(style, ScalarStyle::Literal | ScalarStyle::Folded)
+                || *rstyle != ScalarStyle::DoubleQuoted
+                || rvalue.is_empty()
+                || rvalue.contains(['\n', '\r'])
+            {
+                return None;
+            }
+            let suffix = rust.get(*rend..)?;
+            let header_end = suffix.find('\n')?;
+            let head = suffix[..header_end].trim_matches([' ', '\t']);
+            let remaining = &suffix[header_end + 1..];
+            let tail_end = remaining.find('\n')?;
+            let tail = remaining[..tail_end].trim_matches([' ', '\t']);
+            if !head.starts_with('#')
+                || !tail.starts_with('#')
+                || head == tail
+                || !source_nodes
+                    .iter()
+                    .any(|n| witness(n, rvalue, &format!("{head}\n{tail}")))
+                || value
+                    != &format!(
+                        "{tail}{}{rvalue}",
+                        if *style == ScalarStyle::Folded {
+                            " "
+                        } else {
+                            "\n"
+                        }
+                    )
+            {
+                return None;
+            }
+            let raw = go.get(*start..*end)?;
+            let gheader = raw.split('\n').next()?;
+            let indicator = gheader
+                .bytes()
+                .take_while(|b| matches!(b, b'|' | b'>' | b'+' | b'-' | b'1'..=b'9'))
+                .count();
+            if gheader.get(indicator..)?.trim_matches([' ', '\t']) != head || *start < last {
+                return None;
+            }
+            rewritten.push_str(go.get(last..*start)?);
+            rewritten.push_str(rust.get(*rstart..*rend + header_end + 1 + tail_end + 1)?);
+            last = *end;
+            changed = true;
+        }
+        rewritten.push_str(go.get(last..)?);
+        Some(changed && rewritten == rust)
+    }
+    attempt(sources, go, rust) == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
