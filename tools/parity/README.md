@@ -162,7 +162,8 @@ count, each suite's case count, and identical, equivalent, known and different
 totals.
 
 On failure, `parity-failures-<run-id>-<attempt>` keeps the first 200 unexpected
-cases per suite, both outputs, metadata and the log for 14 days. Download it from
+cases per suite, or 1,000 for config-save frequency sweeps, with both outputs,
+metadata and the log for 14 days. Download it from
 the failed run's Actions page, or with `gh run download <run-id> -n <artifact>`.
 To keep a failing case as a regression fixture:
 
