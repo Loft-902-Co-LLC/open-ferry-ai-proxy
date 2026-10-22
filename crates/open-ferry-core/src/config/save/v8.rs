@@ -361,6 +361,9 @@ pub(crate) fn normalize_config_layout_doc(
         if let Some(previous) = previous {
             version.head_comment.clone_from(&previous.head_comment);
             version.line_comment.clone_from(&previous.line_comment);
+            version
+                .line_comment_id
+                .clone_from(&previous.line_comment_id);
             version.foot_comment.clone_from(&previous.foot_comment);
         }
         set_yaml_path(&mut root, "config-version", &version);
@@ -480,14 +483,15 @@ fn comment_unknown_v8_fields(
             key.value = section;
         }
         // Archive prefixes are LF-based, but YAML comments also end at LS,
-        // PS and NEL. Escape these in archived strings so a later parse cannot
+        // PS and NEL. Escape these in every archived scalar so a later parse cannot
         // discard the prefix or treat the remainder as a live scalar body.
         fn quote_archive_breaks(node: &mut Node) {
             if node.kind == Kind::Scalar
-                && node.tag == STR_TAG
                 && node.value.contains(['\u{2028}', '\u{2029}', '\u{0085}'])
             {
-                node.style = if node.style.has(super::super::yaml3::Style::TAGGED) {
+                node.style = if node.tag != STR_TAG
+                    || node.style.has(super::super::yaml3::Style::TAGGED)
+                {
                     super::super::yaml3::Style::DOUBLE_QUOTED | super::super::yaml3::Style::TAGGED
                 } else {
                     super::super::yaml3::Style::DOUBLE_QUOTED

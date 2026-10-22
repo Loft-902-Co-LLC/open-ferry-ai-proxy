@@ -287,6 +287,7 @@ impl fmt::Display for EventType {
 pub(crate) struct Event {
     /// Stable preorder identity for tracing deferred config key comments.
     pub(crate) source_node_id: usize,
+    pub(crate) line_comment_id: Option<super::CommentId>,
     /// Config-writer hint: this key precedes an empty null or empty mapping.
     pub(crate) empty_inline_value: bool,
     /// An empty block-style mapping will actually be emitted in flow style.

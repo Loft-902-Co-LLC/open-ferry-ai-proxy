@@ -177,7 +177,7 @@ pub(crate) enum AliasTarget {
 }
 
 /// A YAML node with its comments and position (`yaml.Node`).
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub(crate) struct Node {
     /// The kind of node.
     pub(crate) kind: Kind,
@@ -198,12 +198,91 @@ pub(crate) struct Node {
     pub(crate) head_comment: String,
     /// The comment after the node on its line.
     pub(crate) line_comment: String,
+    /// Source occurrence, retained by intentional copies, never matched by text.
+    pub(crate) line_comment_id: Option<CommentId>,
+    /// Stable identity for this alias occurrence across repeated expansions.
+    pub(crate) alias_comment_scope: Option<Arc<()>>,
     /// The comments after the node.
     pub(crate) foot_comment: String,
     /// The line the node starts on, from 1, or 0 if unknown.
     pub(crate) line: usize,
     /// The column the node starts at, from 1, or 0 if unknown.
     pub(crate) column: usize,
+}
+
+/// Identity of one source comment, including its alias-expansion occurrence.
+#[derive(Clone, Debug)]
+pub(crate) struct CommentId {
+    source: Arc<()>,
+    aliases: Vec<Arc<()>>,
+}
+
+impl CommentId {
+    pub(crate) fn fresh() -> Self {
+        Self {
+            source: Arc::new(()),
+            aliases: Vec::new(),
+        }
+    }
+
+    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+        let mut copy = self.clone();
+        copy.aliases.extend_from_slice(scopes);
+        copy
+    }
+}
+
+impl PartialEq for CommentId {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source)
+            && self.aliases.len() == other.aliases.len()
+            && self
+                .aliases
+                .iter()
+                .zip(&other.aliases)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+}
+impl Eq for CommentId {}
+
+/// Actual emitted occurrence, allowing a generated YAML parse to retain lineage.
+pub(crate) struct CommentEmission {
+    pub(crate) line: usize,
+    pub(crate) id: CommentId,
+    pub(crate) text: Vec<u8>,
+}
+
+// Provenance is writer bookkeeping, not part of YAML tree equality.
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            self.kind,
+            self.style,
+            &self.tag,
+            &self.value,
+            &self.anchor,
+            &self.alias,
+            &self.content,
+            &self.head_comment,
+            &self.line_comment,
+            &self.foot_comment,
+            self.line,
+            self.column,
+        ) == (
+            other.kind,
+            other.style,
+            &other.tag,
+            &other.value,
+            &other.anchor,
+            &other.alias,
+            &other.content,
+            &other.head_comment,
+            &other.line_comment,
+            &other.foot_comment,
+            other.line,
+            other.column,
+        )
+    }
 }
 
 impl fmt::Debug for Node {

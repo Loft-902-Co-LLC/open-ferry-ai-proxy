@@ -473,9 +473,12 @@ Deferred key comments are traced through protected config emission before a
 conflicting multiline key comment with a value's own line comment, or a
 single-line key comment that would be dropped, is moved to its head. Both
 comments are kept once. Single-line transfer is limited to complete output and
-comments absent from the emitter's actual comment output; a generated auth-dir
-may already preserve a plugin comment. Text inside scalar values does not count
-as an emitted comment. A later harmless plain recipient
+comments whose source occurrence is absent from the emitter's actual comment
+output; a generated auth-dir may already preserve that same plugin occurrence.
+Comment identities survive intentional copies and the generated YAML roundtrip;
+alias expansions distinguish occurrences while remaining stable across repeated
+expansions. Equal text on another source occurrence, including scalar data,
+does not discharge the preservation obligation. A later harmless plain recipient
 keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
 runs on isolated generated plugin intermediates. V8 edits keep the normalized
 tree until the edit is applied, so the emitter sees the actual final recipient
@@ -491,12 +494,13 @@ raw step-by-step equality therefore fails and the case remains Different.
 Product builds contain none of these switches and keep every protection.
 
 
-- Archived config strings containing U+2028, U+2029 or U+0085 are quoted
-  before their YAML is commented out. Upstream prefixes only LF lines and
+- Archived config scalars containing U+2028, U+2029 or U+0085 are quoted
+  before their YAML is commented out, including custom-tagged scalars. Their
+  tags are retained and emitted explicitly when quoting needs them. Upstream prefixes only LF lines and
   loses archived text across a Unicode YAML line break; escaping those breaks
   keeps the archived value and comments recoverable.
 
-- **Folded config scalars keep their line breaks and trailing blank lines.** Protected config emission looks ahead from the current break, as libyaml does, rather than from the value's start as yaml.v3 does. Otherwise `" indented\nordinary\nnext"` reloads as `" indented\nordinary next"`, and `>+` values with an ordinary first line gain a trailing LF. Folded style is retained, including in archived unknown fields. Literal emission already preserves these breaks. A tab-leading literal or folded value gets an explicit indentation hint so it remains readable; if yaml.v3's missing hint makes the generated plugin intermediate invalid, only that intermediate is quoted, while the file's subtree keeps its value, comments and block style. Ordinary yaml.v3 encoding remains unchanged. The parity generator's block bodies are single-line strings without leading whitespace, so they cannot currently produce this shape; no equivalence is widened.
+- **Folded config scalars keep their line breaks and trailing blank lines.** Protected config emission looks ahead from the current break, as libyaml does, for value-changing breaks. At the sole trailing break of a clip-chomped value, it keeps yaml.v3's harmless extra physical newline and matches Go's bytes. Otherwise `" indented\nordinary\nnext"` reloads as `" indented\nordinary next"`, and `>+` values with an ordinary first line gain a trailing LF. Folded style is retained, including in archived unknown fields. Literal emission already preserves these breaks. A tab-leading literal or folded value gets an explicit indentation hint so it remains readable; if yaml.v3's missing hint makes the generated plugin intermediate invalid, only that intermediate is quoted, while the file's subtree keeps its value, comments and block style. Ordinary yaml.v3 encoding remains unchanged. The parity generator's block bodies are single-line strings without leading whitespace, so they cannot currently produce this shape; no equivalence is widened.
 
 The source-proved **upstream config version comment loss** class covers only a
 single-line comment on the source's root integer config-version: 8. The Go

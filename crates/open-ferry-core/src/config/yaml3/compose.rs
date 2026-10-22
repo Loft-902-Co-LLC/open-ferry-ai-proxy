@@ -93,6 +93,18 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, YamlError> {
     let Some(mut root) = composer.parse()? else {
         return Ok(Node::default());
     };
+    fn identify(node: &mut Node) {
+        if !node.line_comment.is_empty() {
+            node.line_comment_id = Some(super::CommentId::fresh());
+        }
+        if node.kind == Kind::Alias {
+            node.alias_comment_scope = Some(Arc::new(()));
+        }
+        for child in &mut node.content {
+            identify(child);
+        }
+    }
+    identify(&mut root);
     resolve_aliases(&mut root, &composer.aliases)?;
     Ok(root)
 }

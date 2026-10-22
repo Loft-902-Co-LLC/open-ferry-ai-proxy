@@ -182,7 +182,8 @@ pub fn folded_scalar_reencode(
             let (path, value) = rust_values
                 .iter()
                 .find(|(_, n)| n.line == r.line && n.column == r.column)?;
-            if g.style != ScalarStyle::Folded
+            if g.value == r.value
+                || g.style != ScalarStyle::Folded
                 || r.style != ScalarStyle::Folded
                 || value.tag != STR_TAG
                 || forbidden.iter().any(|p| path.starts_with(p))
@@ -244,9 +245,15 @@ pub fn folded_scalar_reencode(
 mod tests {
     use super::*;
     #[test]
+    fn clip_trailing_break_difference_is_not_a_value_preservation_proof() {
+        let rust = "v: >\n  text\nnext: ok\n";
+        let go = "v: >\n  text\n\nnext: ok\n";
+        assert!(!folded_scalar_reencode(&[rust], go, rust, &[], &[], 1));
+    }
+
+    #[test]
     fn exact_folded_emitter_replay_requires_source_value_and_every_other_byte() {
         for (rust, go) in [
-            ("v: >\n  text\nnext: ok\n", "v: >\n  text\n\nnext: ok\n"),
             (
                 "v: >+\n  text\n\nnext: ok\n",
                 "v: >+\n  text\n\n\nnext: ok\n",
