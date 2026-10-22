@@ -212,8 +212,16 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             .iter()
             .find(|p| p["kind"] == "options")
             .unwrap()["go"];
-        let traced=&row["probes"].as_array().unwrap().iter().find(|p|p["kind"]=="traced").unwrap()["go"];
-        assert!(trace_output(go,traced).is_some(),"instrumentation must preserve the complete uninstrumented result");
+        let traced = &row["probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["kind"] == "traced")
+            .unwrap()["go"];
+        assert!(
+            trace_output(go, traced).is_some(),
+            "instrumentation must preserve the complete uninstrumented result"
+        );
         let protected = Translator::ConfigSave.run_rust(&case).unwrap();
         if let Some(expected) = row.get("protected") {
             assert_eq!(&protected, expected);
@@ -261,4 +269,64 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             "{results:?}"
         );
     }
+}
+
+#[test]
+fn unloadable_empty_mapping_bytes_require_bound_counts_and_source_owners() {
+    let case = single("auth-dir: /old # c\ndebug: false\n");
+    let bad = "auth-dir: # c\n{}\n";
+    assert!(Config::load_bytes(bad.as_bytes()).is_err());
+    let replay = Replay {
+        output: json!({"files":[bad],"unloadable":"invalid"}),
+        traces: vec![Trace {
+            rejected: vec![core::ablation::Rejected {
+                stage: "write",
+                bytes: bad.as_bytes().to_vec(),
+            }],
+            emissions: vec![core::ablation::Emission {
+                bytes: bad.as_bytes().to_vec(),
+                comments: vec![core::ablation::WrittenComment {
+                    offset: bad.find("# c").unwrap(),
+                    bytes: b"# c".to_vec(),
+                }],
+            }],
+        }],
+    };
+    let protected = json!({"files":["auth-dir: /x # c\ndebug: false\n"]});
+    let c = evaluate_boundary(
+        &case,
+        &replay.output,
+        &protected,
+        &protected,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    assert_eq!(c, [true; 5]);
+    assert!(accepted(c));
+    let mut offset = replay.clone();
+    offset.traces[0].emissions[0].comments[0].offset += 1;
+    let c = evaluate_boundary(
+        &case,
+        &replay.output,
+        &protected,
+        &protected,
+        &offset,
+        1,
+        &[(1, true)],
+    );
+    assert_eq!(c, [true, true, false, true, true]);
+    assert!(!accepted(c));
+    let misplaced = json!({"files":["auth-dir: /x\ndebug: false # c\n"]});
+    let c = evaluate_boundary(
+        &case,
+        &replay.output,
+        &misplaced,
+        &protected,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    assert_eq!(c, [true, true, false, true, true]);
+    assert!(!accepted(c));
 }
