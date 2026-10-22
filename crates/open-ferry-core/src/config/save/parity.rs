@@ -1,13 +1,11 @@
 //! Source-only counterfactuals for the offline parity harness. This uses the
-//! writer's own parser, protection predicate and double-quoted encoder. It
+//! writer's own parser, effective-comment protection and double-quoted encoder. It
 //! never saves a config or rewrites any byte outside the selected scalars.
 
+use super::super::yaml3::Style;
 use super::super::yaml3::parser::Parser;
 use super::super::yaml3::types::{ScalarStyle, TokenType};
-use super::{
-    Node, STR_TAG, SaveError, Style, marshal_config, needs_block_scalar_comment_protection,
-    unmarshal,
-};
+use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 
 /// Quote only source block scalars the writer protects from multiline line
 /// comments. Anchors, explicit tags, header comments and all other bytes are
@@ -16,19 +14,20 @@ use super::{
 /// # Errors
 /// Returns a parse/encode error for invalid YAML.
 pub fn quoted_source(source: &str) -> Result<Option<String>, SaveError> {
-    fn collect<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
-        if needs_block_scalar_comment_protection(node) {
-            out.push(node)
-        }
-        for child in &node.content {
-            collect(child, out)
-        }
-    }
     let original = unmarshal(source.as_bytes())?;
-    let mut protected = Vec::new();
-    collect(&original, &mut protected);
+    let mut normalized = original.clone();
+    super::normalize_collection_node_styles(&mut normalized);
+    let (_, protected) = super::super::yaml3::encode::protected_node(&normalized, 2)?;
     if protected.is_empty() {
         return Ok(None);
+    }
+    fn find(node: &Node, line: usize, column: usize) -> Option<&Node> {
+        if node.kind == super::Kind::Scalar && node.line == line + 1 && node.column == column + 1 {
+            return Some(node);
+        }
+        node.content
+            .iter()
+            .find_map(|child| find(child, line, column))
     }
     let lines: Vec<&str> = source.split_inclusive('\n').collect();
     let mut starts = Vec::new();
@@ -66,11 +65,18 @@ pub fn quoted_source(source: &str) -> Result<Option<String>, SaveError> {
         {
             continue;
         }
-        let Some(node) = protected.iter().find(|node| {
-            node.line == token.start_mark.line + 1 && node.value.as_bytes() == token.value
-        }) else {
+        let Some(mark) = protected
+            .iter()
+            .find(|mark| mark.line == token.start_mark.line)
+        else {
             continue;
         };
+        let Some(node) = find(&original, mark.line, mark.column) else {
+            return Ok(None);
+        };
+        if node.value.as_bytes() != token.value {
+            return Ok(None);
+        }
         let (Some(start), Some(end)) = (
             position(
                 &lines,
