@@ -8,6 +8,7 @@ mod codex_models;
 mod compare;
 mod config_diff;
 mod config_save;
+mod embedded_names;
 mod generate;
 mod interactions;
 mod live;
@@ -668,6 +669,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
 
     let suites = selected_suites(args)?;
     let failures_dir = fresh_dir(&work_dir.join("failures"))?;
+    fresh_dir(&work_dir.join("counterfactual"))?;
 
     println!("open-ferry parity");
     println!(
@@ -978,6 +980,14 @@ fn evaluate_with_counterfactual(
     upstream: &Upstream,
     work_dir: &Path,
 ) -> Result<Evaluated, Box<dyn Error>> {
+    if !safe_case_name(&case.name) {
+        let mut e = evaluate(translator, case, go);
+        e.outcome = Outcome::Different(vec![Difference::whole(
+            "safe counterfactual evidence filename".into(),
+            case.name.clone(),
+        )]);
+        return Ok(e);
+    }
     let mut evaluated =
         evaluate_with_whole_counterfactual(translator, case, go, upstream, work_dir)?;
     if translator == Translator::ConfigSave
@@ -997,12 +1007,21 @@ fn evaluate_with_counterfactual(
     Ok(evaluated)
 }
 
-fn save_counterfactual(work_dir: &Path, case: &Case, proof: &Value) -> Result<(), Box<dyn Error>> {
-    if !case
-        .name
-        .chars()
+fn safe_case_name(name: &str) -> bool {
+    name.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
+}
+
+fn proof_deviations(reason: Deviation, outcome: &Outcome) -> BTreeSet<Deviation> {
+    let mut deviations = BTreeSet::from([reason]);
+    if let Outcome::Equivalent(found) = outcome {
+        deviations.extend(found);
+    }
+    deviations
+}
+
+fn save_counterfactual(work_dir: &Path, case: &Case, proof: &Value) -> Result<(), Box<dyn Error>> {
+    if !safe_case_name(&case.name) {
         return Err("unsafe counterfactual evidence filename".into());
     }
     let dir = work_dir.join("counterfactual");
@@ -1073,7 +1092,7 @@ fn evaluate_with_whole_counterfactual(
             rust_rewritten,
         );
         save_counterfactual(work_dir, case, &proof)?;
-        evaluated.outcome = Outcome::Equivalent(BTreeSet::from([reason]));
+        evaluated.outcome = Outcome::Equivalent(proof_deviations(reason, &counterfactual.outcome));
     }
     Ok(evaluated)
 }
@@ -1118,13 +1137,21 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
         omitted.push(loss);
     }
 
+    if translator.collection_tool_name_source(case)
+        && let (Some(go), Ok(rust)) = (&mut go_value, compared)
+        && embedded_names::repair(case, go, rust)
+    {
+        omitted.push(Deviation::EmbeddedJson);
+    }
+
     let outcome = match (&go_value, compared) {
         (Some(go), Ok(rust)) => {
-            let mut comparison = compare::compare_numbers(
+            let mut comparison = compare::compare_numbers_from_request(
                 go,
                 rust,
                 translator.embedded_json(case),
                 translator.numbers(),
+                translator.embedded_json_request_source(case),
             );
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
@@ -1301,10 +1328,24 @@ fn write_failure(
     report["open_ferry_output"] = rust_output;
     fs::create_dir_all(dir)?;
     fs::write(
-        dir.join(format!("{}.json", case.name)),
+        dir.join(format!("{}.json", safe_failure_name(&case.name))),
         serde_json::to_string_pretty(&report)?,
     )?;
     Ok(())
+}
+
+fn safe_failure_name(name: &str) -> String {
+    if safe_case_name(name) {
+        return name.to_owned();
+    }
+    use sha2::{Digest, Sha256};
+    format!(
+        "unsafe-{}",
+        Sha256::digest(name.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 /// Shortens long values for the terminal, on a character boundary.
@@ -1319,6 +1360,49 @@ fn clip(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counterfactual_deviations_include_comparison_classes() {
+        let found = Outcome::Equivalent(BTreeSet::from([Deviation::EmbeddedJson]));
+        assert_eq!(
+            proof_deviations(Deviation::UpstreamBlockScalarCounterfactual, &found),
+            BTreeSet::from([
+                Deviation::EmbeddedJson,
+                Deviation::UpstreamBlockScalarCounterfactual
+            ])
+        );
+    }
+    #[test]
+    fn evidence_is_fresh_and_unsafe_names_stay_in_the_run() {
+        let dir = std::env::temp_dir().join(format!("parity-proof-hygiene-{}", std::process::id()));
+        fresh_dir(&dir).unwrap();
+        fs::write(dir.join("stale.json"), b"old").unwrap();
+        fresh_dir(&dir).unwrap();
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(!safe_case_name("../escape"));
+        assert!(!safe_failure_name("../escape").contains(['/', '\\']));
+        let case = Case::new("../escape", "", "")
+            .with_options(json!({"file":"debug: false\n","steps":[]}));
+        // The guard precedes all upstream access, so no process is started.
+        assert!(save_counterfactual(&dir, &case, &json!({})).is_err());
+        let e = evaluate(
+            Translator::ConfigSave,
+            &case,
+            &GoResult::Output(br#"{"files":[]}"#.to_vec()),
+        );
+        let e = Evaluated {
+            outcome: Outcome::Different(vec![Difference::whole(
+                "safe name".into(),
+                case.name.clone(),
+            )]),
+            ..e
+        };
+        let mut tally = Tally::default();
+        tally.record(&case, e, &dir).unwrap();
+        assert_eq!(tally.different, 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn suite_filter_is_repeatable_defaults_to_all_and_rejects_unknown_names() {

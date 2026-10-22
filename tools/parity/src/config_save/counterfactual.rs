@@ -229,7 +229,7 @@ pub fn stepwise(
                     return Ok(None);
                 }
                 protected = true;
-                deviations.insert(reason);
+                deviations.extend(crate::proof_deviations(reason, &cf.outcome));
                 let proof = evidence(&single, &candidate, &go, &cf_go, rust, cf_rust);
                 (cf_go, proof)
             }

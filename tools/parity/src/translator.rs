@@ -1244,6 +1244,32 @@ impl Translator {
     /// copies the JSON's text, and the form it takes there. Each place is a
     /// documented deviation (see UPSTREAM.md and the ported module's docs).
     /// JSON in any other string must match upstream's exactly.
+    pub fn collection_tool_name_source(self, case: &Case) -> bool {
+        match self {
+            Self::RegistryRequest => self
+                .native(case)
+                .is_some_and(|n| n.collection_tool_name_source(case)),
+            Self::Interactions(kind) => kind.slug() == "interactions-to-claude-request",
+            _ => false,
+        }
+    }
+
+    pub fn embedded_json_request_source(self, case: &Case) -> Option<&str> {
+        match self {
+            Self::RegistryRequest => self.native(case)?.embedded_json_request_source(case),
+            Self::GeminiResponsesRequest => Some(&case.request),
+            Self::Interactions(kind)
+                if matches!(
+                    kind.slug(),
+                    "interactions-to-chat-request" | "interactions-to-claude-request"
+                ) =>
+            {
+                Some(&case.request)
+            }
+            _ => None,
+        }
+    }
+
     pub fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         use JsonForm::{GoEscaped, InText, Whole};
         match self {
@@ -2566,7 +2592,7 @@ fn is_generated_tool_id(text: &str) -> bool {
 /// instruction's text is read the same way (`str_of` on the `instructions`
 /// and on a system or developer message's text parts), so it is in the list.
 const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] = &[
-    ("$.contents[*].parts[*].text", JsonForm::Whole),
+    ("$.contents[*].parts[*].text", JsonForm::InText),
     ("$.systemInstruction.parts[*].text", JsonForm::Whole),
 ];
 

@@ -97,20 +97,49 @@ pub enum JsonForm {
 impl JsonForm {
     /// Whether `rust` is `go` with its JSON, read with `numbers`, written in
     /// this form.
-    fn matches(self, go: &str, rust: &str, numbers: Numbers) -> bool {
+    fn matches(
+        self,
+        go: &str,
+        rust: &str,
+        numbers: Numbers,
+        source: Option<&crate::raw_json::Raw<'_>>,
+    ) -> bool {
         match self {
-            Self::Whole => numbers
-                .read(go)
-                .is_some_and(|value| compact(&value) == rust),
+            Self::Whole => {
+                witnessed(source, go)
+                    && numbers
+                        .read(go)
+                        .is_some_and(|value| compact(&value) == rust)
+            }
             Self::InText => {
                 let (go, rust) = (parts(go, numbers), parts(rust, numbers));
                 go.len() == rust.len()
                     && go.iter().zip(&rust).all(|((go, value), (rust, _))| {
-                        go == rust || value.as_ref().is_some_and(|value| compact(value) == *rust)
+                        go == rust
+                            || (witnessed(source, go)
+                                && value.as_ref().is_some_and(|value| compact(value) == *rust))
                     })
             }
             Self::GoEscaped => go_escaped(rust) == go,
         }
+    }
+}
+
+/// A changed JSON span must occur as a complete non-string request value.
+/// Parsing the lexical tree excludes text inside strings, including escaped
+/// quotes and nested JSON-looking text. None is for older response-only paths.
+fn witnessed(source: Option<&crate::raw_json::Raw<'_>>, span: &str) -> bool {
+    use crate::raw_json::Raw;
+    let Some(source) = source else {
+        return true;
+    };
+    if !source.text().starts_with('"') && source.text() == span {
+        return true;
+    }
+    match source {
+        Raw::Object(fields, _) => fields.iter().any(|(_, v)| witnessed(Some(v), span)),
+        Raw::Array(items, _) => items.iter().any(|v| witnessed(Some(v), span)),
+        Raw::Scalar(_) => false,
     }
 }
 
@@ -262,10 +291,24 @@ pub fn compare_numbers(
     embedded_json: &[JsonAt],
     numbers: Numbers,
 ) -> Comparison {
+    compare_numbers_from_request(go, rust, embedded_json, numbers, None)
+}
+
+/// The reviewed request text paths require a raw, non-string source witness.
+pub fn compare_numbers_from_request(
+    go: &Value,
+    rust: &Value,
+    embedded_json: &[JsonAt],
+    numbers: Numbers,
+    request_text: Option<&str>,
+) -> Comparison {
+    let source = request_text
+        .map(|text| crate::raw_json::parse(text).unwrap_or(crate::raw_json::Raw::Scalar("\"\"")));
     let mut walker = Walker {
         path: Vec::new(),
         embedded_json,
         numbers,
+        source: source.as_ref(),
         out: Comparison::default(),
     };
     walker.walk(go, rust);
@@ -306,6 +349,7 @@ struct Walker<'a> {
     path: Vec<Segment<'a>>,
     embedded_json: &'a [JsonAt],
     numbers: Numbers,
+    source: Option<&'a crate::raw_json::Raw<'a>>,
     out: Comparison,
 }
 
@@ -397,7 +441,7 @@ impl<'a> Walker<'a> {
         }
         if self
             .json_form()
-            .is_some_and(|form| form.matches(go, rust, self.numbers))
+            .is_some_and(|form| form.matches(go, rust, self.numbers, self.source))
         {
             self.out.deviations.insert(Deviation::EmbeddedJson);
             return;

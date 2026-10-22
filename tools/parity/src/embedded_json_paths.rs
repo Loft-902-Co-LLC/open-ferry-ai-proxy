@@ -1,6 +1,6 @@
 //! Each listed path accepts only the client's JSON written compactly.
 use crate::cases::Case;
-use crate::compare::{Deviation, compare};
+use crate::compare::{Deviation, Numbers, compare, compare_numbers_from_request};
 use crate::translator::Translator;
 use serde_json::{Value, json};
 
@@ -27,7 +27,29 @@ fn check(from: &str, to: &str, path: &str, in_text: bool) {
     };
     let go = format!("{prefix}{{ \"a\": [1, 2], \"s\": \"two  spaces\" }}{suffix}");
     let rust = format!("{prefix}{{\"a\":[1,2],\"s\":\"two  spaces\"}}{suffix}");
-    let cmp = compare(&at(path, &go), &at(path, &rust), paths);
+    let raw = r#"{ "a": [1, 2], "s": "two  spaces" }"#;
+    let source = format!("{{\"input\":{raw}}}");
+    let cmp = compare_numbers_from_request(
+        &at(path, &go),
+        &at(path, &rust),
+        paths,
+        Numbers::AsWritten,
+        Some(&source),
+    );
+    // The same output spellings originating inside a client string are data.
+    let client = serde_json::to_string(&json!({"input":go})).unwrap();
+    assert!(
+        !compare_numbers_from_request(
+            &at(path, &go),
+            &at(path, &rust),
+            paths,
+            Numbers::AsWritten,
+            Some(&client)
+        )
+        .differences
+        .is_empty(),
+        "client string: {path}"
+    );
     assert!(cmp.differences.is_empty(), "{path}");
     assert!(cmp.deviations.contains(&Deviation::EmbeddedJson), "{path}");
     for different in [
@@ -249,3 +271,77 @@ path_test!(
     "$.tools[*].description",
     false
 );
+
+#[test]
+fn saved_wrapped_json_and_collection_tool_names_require_request_witnesses() {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("cases/testdata/retained-request-json.json")).unwrap();
+    for f in fixtures.as_array().unwrap() {
+        let case = Case::new(
+            f["case"].as_str().unwrap(),
+            f["model"].as_str().unwrap(),
+            f["request_text"].as_str().unwrap(),
+        )
+        .with_options(f["options"].clone());
+        let go = crate::upstream::GoResult::Output(f["upstream_output"].to_string().into_bytes());
+        let e = crate::evaluate(Translator::RegistryRequest, &case, &go);
+        assert!(
+            matches!(e.outcome, crate::Outcome::Equivalent(_)),
+            "{}",
+            case.name
+        );
+        if case.name.ends_with("3825") {
+            let mut changed = f["upstream_output"].clone();
+            changed["tools"][3]["name"] = "wrong".into();
+            let e = crate::evaluate(
+                Translator::RegistryRequest,
+                &case,
+                &crate::upstream::GoResult::Output(changed.to_string().into_bytes()),
+            );
+            assert!(matches!(e.outcome, crate::Outcome::Different(_)));
+            let mut request: Value = serde_json::from_str(&case.request).unwrap();
+            request["tools"][2]["name"] = "{ \"a\": 1 }".into();
+            let mut string_case = case.clone();
+            string_case.request = request.to_string();
+            let mut output = f["upstream_output"].clone();
+            let rust = Translator::RegistryRequest.run_rust(&string_case).unwrap();
+            assert!(!crate::embedded_names::repair(
+                &string_case,
+                &mut output,
+                &rust
+            ));
+        }
+    }
+}
+
+#[test]
+fn responses_gemini_text_paths_reject_json_looking_client_strings() {
+    let case =
+        Case::new("text", "m", "{}").with_options(json!({"from":"openai-response","to":"gemini"}));
+    for path in [
+        "$.contents[*].parts[*].text",
+        "$.systemInstruction.parts[*].text",
+    ] {
+        let go = if path.starts_with("$.contents") {
+            "Please keep [1, 2] and {\"a\": 1} exactly as typed"
+        } else {
+            "{\"a\": 1}"
+        };
+        let rust = go
+            .replace("[1, 2]", "[1,2]")
+            .replace("{\"a\": 1}", "{\"a\":1}");
+        let request = json!({"input":go}).to_string();
+        assert!(
+            !compare_numbers_from_request(
+                &at(path, go),
+                &at(path, &rust),
+                Translator::RegistryRequest.embedded_json(&case),
+                Numbers::AsWritten,
+                Some(&request)
+            )
+            .differences
+            .is_empty(),
+            "{path}"
+        );
+    }
+}
