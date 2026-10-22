@@ -194,4 +194,19 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn duplicated_retained_version_comment_stays_different() {
+        let source = "config-version: 8 # owned\nx: same\n";
+        let case = Case::new("duplicate-version", "", "")
+            .with_options(json!({"file":source,"steps":[{"op":"save"}]}));
+        let mut go = json!({"files":["config-version: 8\nx: same # owned\n"]});
+        let rust = json!({"files":["config-version: 8 # owned\nx: same # owned\n"]});
+        assert!(repair(&case, &mut go, &rust).is_none());
+        assert!(
+            !crate::compare::compare(&go, &rust, &[])
+                .differences
+                .is_empty()
+        );
+    }
 }
