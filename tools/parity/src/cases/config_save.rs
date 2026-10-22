@@ -918,6 +918,7 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
     for fixtures in [
         include_str!("testdata/config-save-counterfactual.json"),
         include_str!("testdata/config-save-pending-key-counterfactual.json"),
+        include_str!("testdata/config-save-write-body-counterfactual.json"),
     ] {
         cases.extend(
             serde_json::from_str::<Vec<Value>>(fixtures)
