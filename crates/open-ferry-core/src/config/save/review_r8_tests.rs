@@ -7,6 +7,8 @@ const PENDING: &str = "plugins:\n  configs:\n    demo:\n      ? note # pending\n
 fn review_r8_generated_multiline_comment_keeps_occurrence_identity() {
     for value in [
         "/a\u{2028}b".to_owned(),
+        "/a\u{2029}b".to_owned(),
+        "/a\u{0085}b".to_owned(),
         format!("/{}", "long path ".repeat(40)),
     ] {
         for migrate in [false, true] {
