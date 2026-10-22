@@ -2189,4 +2189,6 @@ mod review_r7_tests;
 #[cfg(test)]
 mod review_r8_tests;
 #[cfg(test)]
+mod review_r9_foot_tests;
+#[cfg(test)]
 mod review_r9_unicode_tests;
