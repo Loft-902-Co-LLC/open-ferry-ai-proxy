@@ -280,6 +280,8 @@ pub(crate) fn normalize_config_layout(
     };
     check_layout(data)?;
     let mut root = expand_config_aliases(first)?;
+    // Decide before regrouping or archiving can remove a hazardous recipient.
+    super::encode::protect_conflicting_key_comments(&mut root, 4)?;
     let mut changed = normalize_private_ip_alias(&mut root, migrate)?;
     // Empty legacy structs have no leaf fields to move. Preserve them as
     // empty v8 mappings; null structs also mean defaults.

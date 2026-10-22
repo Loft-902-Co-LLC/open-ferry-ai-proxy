@@ -1,0 +1,56 @@
+[
+  {
+    "name": "L1",
+    "op": "nested",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\ndebug: false # c1\n\n# c2\nauth-dir: /x\n"
+  },
+  {
+    "name": "L1",
+    "op": "save",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\ndebug: false # c1\n\n# c2\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "L1",
+    "op": "put",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\ndebug: false\n",
+    "file": "observability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note:\n#     list:\n#         - k: first # own\n"
+  },
+  {
+    "name": "L2",
+    "op": "nested",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\n      k3: plain\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\n      k3: plain # c1\n# c2\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "L2",
+    "op": "save",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\n      k3: plain\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\n      k3: plain # c1\n# c2\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+  },
+  {
+    "name": "L2",
+    "op": "put",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\n      k3: plain\ndebug: false\n",
+    "file": "observability:\n    logs:\n        debug: false\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note:\n#     list:\n#         - k: first # own\n#           k3: plain # c1\n#           # c2\n"
+  },
+  {
+    "name": "L3",
+    "op": "nested",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\nrequest-retry: 1 # c1\n\n# c2\ndebug: false\nauth-dir: /x\n"
+  },
+  {
+    "name": "L3",
+    "op": "save",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "file": "x-note:\n  list:\n    - k: first # own\nrequest-retry: 1 # c1\n\n# c2\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nws-auth: true\n"
+  },
+  {
+    "name": "L3",
+    "op": "put",
+    "source": "x-note:\n  list: &a # c1\n    - &b # c2\n      k: first # own\nrequest-retry: 1\ndebug: false\n",
+    "file": "observability:\n    logs:\n        debug: false\nrouting:\n    retry:\n        request-retry: 1\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n\n# x-note:\n#     list:\n#         - k: first # own\n"
+  }
+]

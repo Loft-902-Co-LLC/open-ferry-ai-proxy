@@ -267,6 +267,9 @@ pub(crate) struct Emitter {
 
     /// A line comment given for a mapping key, kept for its value.
     key_line_comment: Vec<u8>,
+    key_comment_origin: Option<usize>,
+    line_comment_origin: Option<usize>,
+    pub(crate) hazardous_key_comments: Vec<usize>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
@@ -343,6 +346,9 @@ impl Emitter {
             foot_comment: Vec::new(),
             tail_comment: Vec::new(),
             key_line_comment: Vec::new(),
+            key_comment_origin: None,
+            line_comment_origin: None,
+            hazardous_key_comments: Vec::new(),
             protect_config_comments: false,
             protected_scalars: Vec::new(),
         }
@@ -800,6 +806,9 @@ impl Emitter {
         }
 
         if event.typ == EventType::StreamEnd {
+            if let Some(origin) = self.key_comment_origin.take() {
+                self.hazardous_key_comments.push(origin);
+            }
             if self.open_ended {
                 self.write_indicator(b"...", true, false, false)?;
                 self.write_indent()?;
@@ -1014,6 +1023,7 @@ impl Emitter {
             // Keep pending and current key comments before this key instead.
             let current = mem::take(&mut self.line_comment);
             self.line_comment = mem::take(&mut self.key_line_comment);
+            self.line_comment_origin = self.key_comment_origin.take();
             self.process_line_comment()?;
             self.line_comment = current;
             self.process_line_comment()?;
@@ -1032,10 +1042,18 @@ impl Emitter {
                 // it as a standalone comment before writing the new key.
                 let current = mem::take(&mut self.line_comment);
                 self.line_comment = mem::take(&mut self.key_line_comment);
+                self.line_comment_origin = self.key_comment_origin.take();
                 self.process_line_comment()?;
                 self.write_indent()?;
                 self.line_comment = current;
             }
+            if let Some(origin) = self.key_comment_origin.take() {
+                self.hazardous_key_comments.push(origin);
+            }
+            self.key_comment_origin = self
+                .line_comment_origin
+                .take()
+                .or(Some(event.source_node_id));
             self.key_line_comment = mem::take(&mut self.line_comment);
         }
         if self.check_simple_key(event) {
@@ -1070,14 +1088,17 @@ impl Emitter {
                     // usual. If it has a line comment, we can't have both so
                     // the one from the key is lost.
                     self.line_comment = mem::take(&mut self.key_line_comment);
+                    self.line_comment_origin = self.key_comment_origin.take();
                 }
             } else if event.collection_style != CollectionStyle::Flow
                 && (event.typ == EventType::MappingStart || event.typ == EventType::SequenceStart)
             {
                 // An indented block follows, so write the comment right now.
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
+                mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
                 self.process_line_comment()?;
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
+                mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
             }
         }
         self.states.push(EmitterState::BlockMappingKey);
@@ -1267,6 +1288,9 @@ impl Emitter {
         {
             style = ScalarStyle::DoubleQuoted;
             self.protected_scalars.push(event.start_mark);
+            if let Some(origin) = self.line_comment_origin {
+                self.hazardous_key_comments.push(origin);
+            }
         }
         if no_tag && !event.quoted_implicit && style != ScalarStyle::Plain {
             self.tag_data.handle = b"!".to_vec();
@@ -1362,6 +1386,7 @@ impl Emitter {
         if !self.whitespace {
             self.put(b' ')?;
         }
+        self.line_comment_origin = None;
         let line_comment = mem::take(&mut self.line_comment);
         self.write_comment(&line_comment)
     }
@@ -1606,6 +1631,9 @@ impl Emitter {
             self.head_comment = mem::take(&mut event.head_comment);
         }
         if !event.line_comment.is_empty() {
+            if let Some(origin) = self.line_comment_origin.take() {
+                self.hazardous_key_comments.push(origin);
+            }
             self.line_comment = mem::take(&mut event.line_comment);
         }
         if !event.foot_comment.is_empty() {
