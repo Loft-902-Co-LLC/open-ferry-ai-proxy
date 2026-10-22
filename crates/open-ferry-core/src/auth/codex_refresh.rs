@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/refresh_patch.go and
-// sdk/cliproxy/auth/codex_persist.go (v8.0.36, MIT).
+// sdk/cliproxy/auth/codex_persist.go (v8.0.38, MIT).
 //! Independent, version-checked Codex token partitions and save intents.
 
 use std::fmt;
@@ -30,6 +30,7 @@ pub(crate) const SIWC_KEYS: &[&str] = &[
     "client_id",
     "device_id",
     "expired",
+    "expires_at",
     "last_refresh",
     "scope",
     "scopes",
@@ -263,9 +264,20 @@ impl PartitionPatch {
         let Some((before, later, landed)) = self.baseline(target) else {
             return false;
         };
+        let remove_expiry = !self.after.contains_key("expires_at")
+            && std::iter::once(&self.before)
+                .chain(self.disk_before.iter())
+                .chain(self.intermediate.iter())
+                .any(|baseline| baseline.contains_key("expires_at"));
+        // Only captured producer versions define a removal. Accepted durable
+        // variants are folded to agreement; their presence/absence cannot
+        // change the patch's meaning as more variants are recorded.
         // Only the final after-only fallback proves this patch already landed.
         // Earlier baseline matches still apply F6, even for equal identities.
         if landed {
+            if remove_expiry {
+                target.remove("expires_at");
+            }
             return true;
         }
         // Absent fields are not resurrected. Leaving a field untouched requires
@@ -286,6 +298,11 @@ impl PartitionPatch {
             {
                 target.insert(key.clone(), value.clone());
             }
+        }
+        // Unlike other sparse fields, a real expiry belongs to this token
+        // response only. An omitted replacement must remove the old value.
+        if remove_expiry {
+            target.remove("expires_at");
         }
         true
     }
@@ -525,6 +542,9 @@ impl CredentialRefreshPatch {
                     }
                     let mut after = older.after.clone();
                     after.retain(|key, value| {
+                        if key == "expires_at" && !newer.after.contains_key(key) {
+                            return false;
+                        }
                         newer.after.contains_key(key)
                             || if IDENTITY_KEYS.contains(&key.as_str()) {
                                 newer.before.get(key).unwrap_or(&Value::Null) == value

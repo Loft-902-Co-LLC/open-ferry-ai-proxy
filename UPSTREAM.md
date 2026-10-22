@@ -562,10 +562,13 @@ Claude and Codex logins, with the providers' official OAuth flows only:
 |---|---|---|
 | `GET /v0/management/anthropic-auth-url` | `GET /v8/management/oauth/auth-url?provider=claude` | `Key` |
 | `GET /v0/management/codex-auth-url` | `GET /v8/management/oauth/auth-url?provider=codex` | `Key` |
+| | `GET /v8/management/oauth/siwc/status`, `GET /v8/management/credentials/siwc/status` | `Key` |
 | `GET /v0/management/get-auth-status` | `GET /v8/management/oauth/status` | `Key` |
 | `DELETE /v0/management/oauth-session` | `DELETE /v8/management/oauth/session` | `Key` |
 | `GET`, `POST /v0/management/oauth-callback` | `GET`, `POST /v8/management/oauth/callback` | `Availability` |
 | `GET /anthropic/callback`, `GET /codex/callback` (the main server) | | `Open` |
+
+The SIWC status routes accept `name` / `id` and `auth_index` / `authIndex` (both selectors must match when supplied). They read the manager only and return `{"status":"off"}`, `valid`, or `invalid`, without refreshing or making a network check. Valid requires an enabled SIWC bearer with a known future real expiry and no remembered 401 rejection. Real expiry comes from `siwc.expires_at`, relative lifetime plus issuance/refresh time, or JWT `exp`, never margin-adjusted `expired`. Codex credential summaries include `siwc_status`. The rejection is runtime-only and survives an outer refresh, login, toggle or same-token bind until the nested token changes.
 
 A login answers its authorization URL and `state` at once, then waits up to 5 minutes for its callback. It exchanges the code at the provider's token endpoint, through the config's `proxy-url` and with `User-Agent: open-ferry/<version>`, within 60 seconds, and saves the credential as other saved logins are saved (above). With `is_webui`, a callback forwarder on the redirect URI's port (54545 for Claude, 1455 for Codex) sends the browser on to the main server's callback page, over `https` when TLS is on; while that port is held elsewhere, the login answers 500 `{"error":"failed to start callback server"}`. The callback routes only look up a `state` of 1 to 128 letters, digits, `-`, `_` and `.`, without `..`.
 

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (ExpirationTime,
 // AccessTokenExpirationTime, HasValidAccessToken and their helpers) and
-// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.36, MIT).
+// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When a credential's tokens expire, read from its metadata.
@@ -47,7 +47,7 @@ impl Auth {
     /// else an expiry in the metadata.
     pub fn expiration_time(&self) -> Option<Timestamp> {
         if self.use_siwc() {
-            return if self.is_rejected_access_token(self.access_token()) {
+            return if self.is_siwc_access_token_rejected() {
                 Some(DateTime::<Utc>::UNIX_EPOCH)
             } else {
                 self.siwc_expiration_time()
@@ -78,10 +78,18 @@ impl Auth {
         if token.is_empty() {
             return None;
         }
-        if self.is_rejected_access_token(token) {
+        if self.is_rejected_access_token(token)
+            || (self.use_siwc() && self.is_siwc_access_token_rejected())
+        {
             return Some(DateTime::<Utc>::UNIX_EPOCH);
         }
-        parse_jwt_exp(token).or_else(|| self.expiration_time())
+        parse_jwt_exp(token)
+            .or_else(|| {
+                self.use_siwc()
+                    .then(|| self.siwc_real_expiration_time())
+                    .flatten()
+            })
+            .or_else(|| self.expiration_time())
     }
 
     /// Whether `token` is the access token a provider refused.
@@ -102,12 +110,7 @@ impl Auth {
     /// The access token in the metadata, trimmed, or empty.
     pub fn access_token(&self) -> &str {
         if self.use_siwc() {
-            let token = self.siwc_token_field("access_token");
-            return if token.is_empty() {
-                self.siwc_token_field("access")
-            } else {
-                token
-            };
+            return self.siwc_access_token();
         }
         self.outer_access_token()
     }
@@ -129,6 +132,116 @@ impl Auth {
             .and_then(|m| m.get(key))
             .and_then(Value::as_str)
             .map_or("", str::trim)
+    }
+
+    /// The nested bearer, including the supported legacy alias.
+    pub fn siwc_access_token(&self) -> &str {
+        let token = self.siwc_token_field("access_token");
+        if token.is_empty() {
+            self.siwc_token_field("access")
+        } else {
+            token
+        }
+    }
+
+    /// Real expiry, without the refresh margin or any network request.
+    pub fn siwc_real_expiration_time(&self) -> Option<Timestamp> {
+        let map = self.metadata.get("siwc")?.as_object()?;
+        let time = |keys: &[&str]| {
+            keys.iter().find_map(|key| {
+                map.get(*key)
+                    .and_then(parse_time_value)
+                    .filter(|ts| *ts != zero_time())
+            })
+        };
+        time(&["expires_at", "expiresAt"])
+            .or_else(|| {
+                let seconds = relative_expiry_seconds(map)?;
+                let issued = time(&[
+                    "last_refresh",
+                    "lastRefresh",
+                    "timestamp",
+                    "issued_at",
+                    "issuedAt",
+                ])?;
+                issued
+                    .checked_add_signed(TimeDelta::nanoseconds(seconds.wrapping_mul(1_000_000_000)))
+            })
+            .or_else(|| parse_jwt_exp(self.siwc_access_token()))
+    }
+
+    /// Local status only: unknown expiry is invalid; disabled SIWC is off.
+    pub fn siwc_status(&self, now: Timestamp) -> &'static str {
+        if !self.use_siwc() {
+            return "off";
+        }
+        if self.siwc_access_token().is_empty()
+            || self.is_siwc_access_token_rejected()
+            || self
+                .siwc_real_expiration_time()
+                .is_none_or(|expiry| expiry <= now)
+        {
+            "invalid"
+        } else {
+            "valid"
+        }
+    }
+
+    pub(crate) fn is_siwc_access_token_rejected(&self) -> bool {
+        let token = self.siwc_access_token();
+        !token.is_empty()
+            && (self.rejected_siwc_access_token == token || self.rejected_access_token == token)
+    }
+
+    /// Called under the manager state lock, using the bearer actually sent.
+    pub(crate) fn record_rejected_token(&mut self, token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return false;
+        }
+        let nested = token == self.siwc_access_token() && self.rejected_siwc_access_token != token;
+        let active = token == self.access_token() && self.rejected_access_token != token;
+        if nested {
+            self.rejected_siwc_access_token = token.to_owned();
+        }
+        if active {
+            self.rejected_access_token = token.to_owned();
+        }
+        nested || active
+    }
+
+    /// Preserve runtime rejection through publication/partition merges. A SIWC
+    /// refresh confirming the same bearer cannot make it valid again.
+    pub(crate) fn preserve_rejected_tokens_from(&mut self, previous: &Self, is_refresh: bool) {
+        self.rejected_siwc_access_token = if previous.is_siwc_access_token_rejected()
+            && self.siwc_access_token() == previous.siwc_access_token()
+        {
+            previous.siwc_access_token().to_owned()
+        } else {
+            String::new()
+        };
+        let rejected = previous.rejected_access_token.as_str();
+        let preserve = !rejected.is_empty()
+            && if rejected == previous.siwc_access_token() {
+                self.siwc_access_token() == rejected
+            } else {
+                self.outer_access_token() == rejected
+                    && previous.outer_access_token() == rejected
+                    && (!is_refresh
+                        || self
+                            .codex_persist_intent
+                            .refresh_patch()
+                            .is_some_and(|patch| {
+                                !patch.includes_partition(super::CodexCredentialPartition::Outer)
+                            }))
+            };
+        self.rejected_access_token = if preserve {
+            rejected.to_owned()
+        } else if self.use_siwc() {
+            self.rejected_siwc_access_token.clone()
+        } else {
+            String::new()
+        };
     }
 
     /// SIWC's stored expiry (already margin-adjusted) wins over JWT expiry.
@@ -156,7 +269,7 @@ impl Auth {
             return Some(now);
         }
         let access = self.siwc_token_field("access_token");
-        if access.is_empty() || self.is_rejected_access_token(access) {
+        if access.is_empty() || self.is_siwc_access_token_rejected() {
             return Some(now);
         }
         let lead = TimeDelta::minutes(5);

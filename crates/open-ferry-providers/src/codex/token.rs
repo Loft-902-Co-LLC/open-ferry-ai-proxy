@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/codex/token.go, filename.go and
 // openai.go, and CreateTokenStorage and UpdateTokenStorage in
-// openai_auth.go (v8.0.36, MIT).
+// openai_auth.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex tokens, and the credential file that keeps them.
@@ -49,6 +49,9 @@ pub struct SiwcTokenData {
     /// The margin-adjusted expiry, in RFC 3339.
     #[serde(rename = "expired")]
     pub expire: String,
+    /// The real expiry from expires_in, before the refresh margin.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub expires_at: String,
     /// When these tokens were fetched, in RFC 3339.
     pub last_refresh: String,
     /// The sign-in device UUID; sent only in the authorization URL.
@@ -89,6 +92,7 @@ impl SiwcTokenData {
             "client_id",
             "scope",
             "expired",
+            "expires_at",
             "last_refresh",
             "device_id",
         ] {

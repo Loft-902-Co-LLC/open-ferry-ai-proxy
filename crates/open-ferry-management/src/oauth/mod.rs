@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/server_management.go and
 // internal/api/server_management_v8.go (the OAuth login routes) and
 // internal/api/server_routes.go (the /anthropic/callback and
-// /codex/callback routes) (v8.0.36, MIT).
+// /codex/callback routes) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OAuth logins started from the management API, for Claude and Codex
@@ -36,6 +36,7 @@ mod forwarder;
 pub(crate) mod mutation_path;
 pub(crate) mod sessions;
 pub(crate) mod siwc_bind;
+mod siwc_status;
 
 use std::fmt;
 use std::future::Future;
@@ -480,6 +481,11 @@ pub(crate) fn routes() -> Vec<Route> {
         ),
         Route::key("/v0/management/get-auth-status", get(flows::status)),
         Route::key("/v8/management/oauth/status", get(flows::status)),
+        Route::key("/v8/management/oauth/siwc/status", get(siwc_status::status)),
+        Route::key(
+            "/v8/management/credentials/siwc/status",
+            get(siwc_status::status),
+        ),
         Route::key("/v0/management/oauth-session", delete(flows::cancel)),
         Route::key("/v8/management/oauth/session", delete(flows::cancel)),
         Route::availability("/v0/management/oauth-callback", callback()),

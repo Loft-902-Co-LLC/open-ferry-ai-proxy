@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/refresh_patch_test.go,
-// siwc_auth_test.go and sdk/auth/filestore_codex_refresh_test.go (v8.0.36, MIT).
+// siwc_auth_test.go and sdk/auth/filestore_codex_refresh_test.go (v8.0.38, MIT).
 use super::*;
 use crate::auth::{AuthStore, FileStore};
 use serde_json::json;
@@ -32,6 +32,67 @@ fn fixture() -> Auth {
         .unwrap()
         .clone(),
         ..Default::default()
+    }
+}
+
+#[test]
+fn real_siwc_expiry_is_partition_scoped_and_removed_when_omitted() {
+    let mut before = fixture();
+    before.metadata["siwc"]["expires_at"] = json!("2099-01-01T00:00:00Z");
+    for remove in [false, true] {
+        let mut after = before.clone();
+        rotate(&mut after, false, true);
+        if remove {
+            after.metadata["siwc"]
+                .as_object_mut()
+                .unwrap()
+                .remove("expires_at");
+        } else {
+            after.metadata["siwc"]["expires_at"] = json!("2099-02-01T00:00:00Z");
+        }
+        let patch = CredentialRefreshPatch::new(&before.metadata, &after.metadata, false, true);
+        let (merged, applied) = patch.apply(&before.metadata);
+        assert_eq!(applied.siwc, Some(true));
+        assert_eq!(
+            merged["siwc"].get("expires_at"),
+            after.metadata["siwc"].get("expires_at")
+        );
+        assert_eq!(merged["access_token"], before.metadata["access_token"]);
+        let mut outer = before.clone();
+        rotate(&mut outer, true, false);
+        let (merged, _) =
+            CredentialRefreshPatch::new(&before.metadata, &outer.metadata, true, false)
+                .apply(&merged);
+        assert_eq!(
+            merged["siwc"].get("expires_at"),
+            after.metadata["siwc"].get("expires_at")
+        );
+    }
+}
+
+#[test]
+fn real_siwc_expiry_removal_survives_composed_pending_rotations() {
+    let before = fixture();
+    let mut middle = before.clone();
+    rotate(&mut middle, false, true);
+    middle.metadata["siwc"]["expires_at"] = json!("2099-01-01T00:00:00Z");
+    let first = CredentialRefreshPatch::new(&before.metadata, &middle.metadata, false, true);
+    let mut after = middle.clone();
+    after.metadata["siwc"]["access_token"] = json!("siwc-final");
+    after.metadata["siwc"]["refresh_token"] = json!("siwc-refresh-final");
+    after.metadata["siwc"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expires_at");
+    let combined = CredentialRefreshPatch::new(&middle.metadata, &after.metadata, false, true)
+        .with_pending(Some(&first));
+    let mut stale_final = after.metadata.clone();
+    stale_final["siwc"]["expires_at"] = json!("2099-01-01T00:00:00Z");
+    for disk in [&before.metadata, &middle.metadata, &stale_final] {
+        let (saved, applied) = combined.apply(disk);
+        assert_eq!(applied.siwc, Some(true));
+        assert_eq!(saved["siwc"]["access_token"], "siwc-final");
+        assert!(saved["siwc"].get("expires_at").is_none());
     }
 }
 

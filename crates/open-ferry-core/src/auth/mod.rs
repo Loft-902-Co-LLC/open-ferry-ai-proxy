@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go, status.go and the Error
 // type in errors.go, and the Store interface in sdk/cliproxy/auth/store.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credentials: an [`Auth`] record for each account or API key, and the
@@ -265,10 +265,13 @@ pub struct Auth {
     /// Calls per 10-minute window, for the last twenty windows.
     pub recent_requests: RecentRequests,
     /// The access token a provider refused with a 401, until a refresh
-    /// works or the tokens change: while it is still the access token and
-    /// has no expiry of its own, it counts as expired (upstream's
+    /// works or the tokens change: while it is still the access token,
+    /// it counts as expired regardless of nominal expiry (upstream's
     /// `RejectedAccessToken`). Never saved.
     pub rejected_access_token: String,
+    /// Nested SIWC bearer refused with a 401, until that bearer changes.
+    /// Independent of outer refreshes and the active switch. Never saved or debugged.
+    pub rejected_siwc_access_token: String,
     /// Transient Codex save intent; never part of credential JSON or Debug.
     pub codex_persist_intent: codex_refresh::CodexPersistIntent,
     /// Unwritten rotations, oldest first; transient, never serialized or debugged.

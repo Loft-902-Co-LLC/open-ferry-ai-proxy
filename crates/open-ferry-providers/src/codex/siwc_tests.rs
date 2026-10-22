@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/auth/codex/siwc_auth_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/auth/codex/siwc_auth_test.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::VecDeque;
@@ -399,6 +399,9 @@ fn expiry_uses_three_minute_margin_and_short_ttl_fallback() {
         response["expires_in"] = json!(issued);
         let tokens = decode_token_response(response.to_string().as_bytes(), true, now()).unwrap();
         let expire = DateTime::parse_from_rfc3339(&tokens.expire).unwrap();
+        let real = DateTime::parse_from_rfc3339(&tokens.expires_at).unwrap();
+        assert_eq!(real.signed_duration_since(now()).num_seconds(), issued);
+        assert_eq!(tokens.to_json()["expires_at"], tokens.expires_at);
         assert_eq!(expire.signed_duration_since(now()).num_seconds(), expected);
         assert_eq!(
             DateTime::parse_from_rfc3339(&tokens.last_refresh).unwrap(),

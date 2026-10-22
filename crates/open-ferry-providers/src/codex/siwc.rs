@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Sign in with ChatGPT's dynamic-client OAuth transport.
@@ -833,6 +833,10 @@ fn decode_token_response(
         .and_then(|ttl| now.checked_add_signed(ttl))
         .ok_or_else(|| Error::new("OpenAI OAuth token response has invalid expires_in"))?;
     data.expire = expire.to_rfc3339_opts(SecondsFormat::Secs, true);
+    data.expires_at = TimeDelta::try_seconds(expires_in)
+        .and_then(|ttl| now.checked_add_signed(ttl))
+        .ok_or_else(|| Error::new("OpenAI OAuth token response has invalid expires_in"))?
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
     data.last_refresh = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     Ok(data)
 }

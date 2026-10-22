@@ -6,7 +6,7 @@
 // sdk/cliproxy/auth/conductor_cooldown.go,
 // ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go,
 // and lockAuthMutation in sdk/cliproxy/auth/conductor_persistence.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Adding, changing and removing credentials and executors, recording call
@@ -1525,18 +1525,15 @@ impl Manager {
         } else {
             existing_version
         };
+        auth.preserve_rejected_tokens_from(&existing_auth, is_refresh);
         if !is_disabled(&existing_auth) && !is_disabled(&auth) {
             if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
                 auth.model_states = existing_auth.model_states.clone();
             }
-            if changed || is_refresh {
-                if !auth
-                    .codex_refresh_failure
-                    .as_ref()
-                    .is_some_and(|failure| failure.partition.is_active(&auth))
-                {
-                    auth.rejected_access_token.clear();
-                }
+            if (changed || is_refresh)
+                && (auth.rejected_access_token.is_empty()
+                    || auth.access_token() != auth.rejected_access_token)
+            {
                 let new_unauthorized = auth
                     .last_error
                     .as_ref()
@@ -1548,9 +1545,6 @@ impl Manager {
                     auth.status = Status::Active;
                 }
                 clear_unauthorized_model_states(&mut auth, now);
-            } else {
-                auth.rejected_access_token
-                    .clone_from(&existing_auth.rejected_access_token);
             }
             if is_credential_quota_active(&existing_auth.quota, now) {
                 auth.unavailable = existing_auth.unavailable;
@@ -1832,6 +1826,7 @@ impl Manager {
                             };
                             if let Some(mut disk) = disk {
                                 overlay_undurable(&mut disk, live, undurable);
+                                let previous = live.clone();
                                 let changed = credentials_changed(live, &disk);
                                 if owed && is_refresh {
                                     // A refused save left settings owed to the
@@ -1867,6 +1862,7 @@ impl Manager {
                                     });
                                     live.attributes.extend(disk.attributes);
                                 }
+                                live.preserve_rejected_tokens_from(&previous, false);
                                 if changed {
                                     live.credential_version =
                                         live.credential_version.saturating_add(1);
@@ -2753,6 +2749,7 @@ impl Manager {
             let undurable = entry.protected();
             let live = Arc::make_mut(&mut entry.auth);
             if same_record && let Some(disk) = disk {
+                let previous = live.clone();
                 let mut persisted = super::merge::reconcile_persisted_codex(snapshot, live, &disk);
                 overlay_undurable(&mut persisted, live, undurable);
                 if credentials_changed(live, &persisted) {
@@ -2768,6 +2765,7 @@ impl Manager {
                 }
                 live.prefix = persisted.prefix;
                 live.proxy_url = persisted.proxy_url;
+                live.preserve_rejected_tokens_from(&previous, false);
                 live.generation = live.generation.saturating_add(1);
             }
             live.codex_pending_refresh
@@ -2842,8 +2840,9 @@ impl Manager {
     /// [`mark_result`](Self::mark_result) for a call of `session`, whose
     /// bindings the outcome then updates, whether or not the credential is
     /// still there (upstream's `MarkResult` and `updateSessionAffinity`).
-    /// An outcome from an earlier credential version or registration (see
-    /// [`CallResult::credential_version`]) changes neither.
+    /// An earlier registration is fenced. An older credential version still
+    /// applies when its captured active bearer is unchanged; otherwise a 401
+    /// can only remember a still-present nested bearer, without changing affinity.
     pub(crate) fn mark_call_result(&self, result: &CallResult, session: Option<&Session>) {
         if !self.record_result(result) {
             return;
@@ -2859,8 +2858,8 @@ impl Manager {
     }
 
     /// The credential side of [`mark_result`](Self::mark_result). False
-    /// when the outcome is from an earlier credential version or
-    /// registration, and was dropped.
+    /// when a stale outcome was excluded from counters and affinity. A
+    /// stale-version 401 can still mark a matching nested bearer as rejected.
     fn record_result(&self, result: &CallResult) -> bool {
         if result.auth_id.is_empty() {
             return true;
@@ -2878,6 +2877,22 @@ impl Manager {
                 return true;
             };
             if is_stale_result(result, &entry.auth) {
+                let stale_epoch = result.registration_epoch > 0
+                    && result.registration_epoch < entry.auth.registration_epoch;
+                if !stale_epoch
+                    && !result.success
+                    && !super::classify::should_skip_credential_cooldown(result.error.as_ref())
+                    && result.error.as_ref().is_some_and(|error| {
+                        error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
+                    })
+                {
+                    let auth = Arc::make_mut(&mut entry.auth);
+                    if auth.record_rejected_token(&result.access_token) {
+                        auth.generation = auth.generation.saturating_add(1);
+                        auth.updated_at = Some(now);
+                        state.sync_scheduler(self.models(), &result.auth_id, now);
+                    }
+                }
                 return false;
             }
             if model_key.is_empty() && !result.route_model.trim().is_empty() {
