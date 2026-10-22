@@ -1647,6 +1647,41 @@ fn blank_parts_drop_without_moving_cache_ttl_order() {
         assert_eq!(parts[0]["cache_control"]["ttl"], "1h");
         assert_eq!(parts[1]["cache_control"]["ttl"], "5m");
         assert!(parts[2].get("cache_control").is_none());
+
+        // A dropped marker yields to B's own marker; it must not walk back to A.
+        let request = json!({"messages":[
+            {"role":"developer","content":[
+                {"type":"text","text":"A"},
+                {"type":"text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"text","text":"A"},
+                {"type":"text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]}
+        ]});
+        let (out, error) = if compat {
+            convert_openai_chat_completions_request_to_claude_with_compat(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        } else {
+            convert_openai_chat_completions_request_to_claude(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        };
+        assert!(error.is_none(), "{error:?}");
+        for parts in [&out["system"], &out["messages"][0]["content"]] {
+            assert_eq!(parts.as_array().unwrap().len(), 2, "{out}");
+            assert!(parts[0].get("cache_control").is_none(), "{out}");
+            assert_eq!(parts[1]["cache_control"]["ttl"], "1h", "{out}");
+        }
     }
 }
 
@@ -1673,4 +1708,37 @@ fn tool_result_string_parts_drop_only_blanks() {
         tool_result_content(Some(&json!(["", " keep "]))),
         json!([{"type":"text","text":" keep "}])
     );
+}
+
+#[test]
+fn blank_string_messages_with_cache_markers_give_no_blocks() {
+    for compat in [false, true] {
+        for text in ["", "   "] {
+            let request = json!({"messages":[{
+                "role":"user", "content":text, "cache_control":{"type":"ephemeral"}
+            }]});
+            let (out, error) = if compat {
+                convert_openai_chat_completions_request_to_claude_with_compat(
+                    "claude-sonnet-4-6",
+                    &request,
+                    false,
+                    ModelCatalog::embedded(),
+                )
+            } else {
+                convert_openai_chat_completions_request_to_claude(
+                    "claude-sonnet-4-6",
+                    &request,
+                    false,
+                    ModelCatalog::embedded(),
+                )
+            };
+            assert!(error.is_none(), "{error:?}");
+            assert!(
+                out["messages"][0]["content"][0]
+                    .get("cache_control")
+                    .is_none()
+            );
+            assert!(out["messages"].as_array().unwrap().is_empty(), "{out}");
+        }
+    }
 }

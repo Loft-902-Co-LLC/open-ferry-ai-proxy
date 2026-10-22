@@ -147,6 +147,21 @@ mod tests {
     }
 
     #[test]
+    fn preceding_block_markers_never_walk_back_or_replace_a_marker() {
+        let source = json!({"cache_control":{"type":"ephemeral","ttl":"5m"}});
+        for tail in [
+            json!({"type":"thinking"}),
+            json!({"type":"redacted_thinking"}),
+            json!({"type":"text","text":" "}),
+            json!({"type":"text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}}),
+        ] {
+            let mut blocks = vec![json!({"type":"text","text":"A"}), tail.clone()];
+            attach_to_preceding_block(&mut blocks, &source);
+            assert_eq!(blocks, vec![json!({"type":"text","text":"A"}), tail]);
+        }
+    }
+
+    #[test]
     fn tool_messages_take_the_first_part_marker() {
         let message = json!({
             "cache_control": {"type": "ephemeral", "ttl": "5m"},

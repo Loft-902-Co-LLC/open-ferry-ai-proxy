@@ -1182,6 +1182,7 @@ fn cached_name_policy_matches_legacy_scanning() {
         json!({}),
         json!({"tools":null}),
         json!({"tools":{}}),
+        json!({"tools":["x", {"name":5}, {"name":null,"function":{"name":"Read"}}, {"name":"Read","function":{"name":"read"}}]}),
         json!({"tools":[{"name":"Read"},{"name":"read"},{"name":"_Read"}]}),
         json!({"tools":[{"name":"Read"},{"name":"Read"}]}),
         json!({"tools":[{"name":" ","function":{"name":"Read"}},{"function":{"name":"__Write"}},{"name":"___"}]}),

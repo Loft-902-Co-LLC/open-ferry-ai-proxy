@@ -2856,6 +2856,41 @@ fn blank_parts_drop_without_moving_cache_ttl_order() {
         assert_eq!(parts[0]["cache_control"]["ttl"], "1h");
         assert_eq!(parts[1]["cache_control"]["ttl"], "5m");
         assert!(parts[2].get("cache_control").is_none());
+
+        // A dropped marker yields to B's own marker; it must not walk back to A.
+        let request = json!({"input":[
+            {"role":"developer","content":[
+                {"type":"input_text","text":"A"},
+                {"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"input_text","text":"A"},
+                {"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}},
+                {"type":"input_text","text":" ","cache_control":{"type":"ephemeral","ttl":"5m"}}
+            ]}
+        ]});
+        let (out, error) = if compat {
+            convert_openai_responses_request_to_claude_with_compat(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        } else {
+            convert_openai_responses_request_to_claude(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        };
+        assert!(error.is_none(), "{error:?}");
+        for parts in [&out["system"], &out["messages"][0]["content"]] {
+            assert_eq!(parts.as_array().unwrap().len(), 2, "{out}");
+            assert!(parts[0].get("cache_control").is_none(), "{out}");
+            assert_eq!(parts[1]["cache_control"]["ttl"], "1h", "{out}");
+        }
     }
 }
 
@@ -2885,5 +2920,64 @@ fn blank_refusal_moves_its_marker_and_blank_input_gives_no_turn() {
     for text in ["", " \n\t"] {
         let out = convert("claude-sonnet-4-6", &json!({"input":text}));
         assert!(out["messages"].as_array().unwrap().is_empty(), "{out}");
+    }
+}
+
+#[test]
+fn item_cache_markers_use_only_final_block_and_yield_to_its_marker() {
+    for compat in [false, true] {
+        for kind in ["thinking", "redacted_thinking"] {
+            let request = json!({"input":[{
+                "role":"system", "cache_control":{"type":"ephemeral"},
+                "content":[{"type":"input_text","text":"A"},{"type":kind}]
+            }]});
+            let (out, error) = if compat {
+                convert_openai_responses_request_to_claude_with_compat(
+                    "claude-sonnet-4-6",
+                    &request,
+                    false,
+                    ModelCatalog::embedded(),
+                )
+            } else {
+                convert_openai_responses_request_to_claude(
+                    "claude-sonnet-4-6",
+                    &request,
+                    false,
+                    ModelCatalog::embedded(),
+                )
+            };
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(
+                out["system"],
+                json!([{"type":"text","text":"A"},{"type":kind}])
+            );
+        }
+        let request = json!({"input":[
+            {"role":"developer", "cache_control":{"type":"ephemeral","ttl":"5m"},
+             "content":[{"type":"input_text","text":"A","cache_control":{"type":"ephemeral","ttl":"1h"}}]},
+            {"role":"user", "cache_control":{"type":"ephemeral","ttl":"5m"},
+             "content":[{"type":"input_text","text":"B","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+        ]});
+        let (out, error) = if compat {
+            convert_openai_responses_request_to_claude_with_compat(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        } else {
+            convert_openai_responses_request_to_claude(
+                "claude-sonnet-4-6",
+                &request,
+                false,
+                ModelCatalog::embedded(),
+            )
+        };
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(out["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
+        );
     }
 }

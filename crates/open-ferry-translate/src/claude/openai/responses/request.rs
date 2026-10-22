@@ -377,8 +377,8 @@ fn push_system_item(system: &mut Vec<Value>, item: &Value) {
         }
         _ => {}
     }
-    // An item's marker goes on the last block it gave.
-    cache_control::attach_to_last_block(&mut system[start..], item);
+    // Only the final block this item produced can take its marker; its own wins.
+    cache_control::attach_to_preceding_block(&mut system[start..], item);
 }
 
 /// Builds Claude turns from input items, merging consecutive items of one
@@ -733,8 +733,8 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>, Option<&'static str
             _ => "user",
         };
     }
-    // An item's marker goes on its last block.
-    cache_control::attach_to_last_block(&mut parts, item);
+    // Only the final block this item produced can take its marker; its own wins.
+    cache_control::attach_to_preceding_block(&mut parts, item);
     (role, parts, dropped)
 }
 
