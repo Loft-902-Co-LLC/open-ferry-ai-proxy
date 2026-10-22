@@ -250,6 +250,8 @@ pub(crate) struct CommentEmission {
     pub(crate) line: usize,
     pub(crate) id: CommentId,
     pub(crate) text: Vec<u8>,
+    pub(crate) pending_key: Option<usize>,
+    pub(crate) recipient: usize,
 }
 
 // Provenance is writer bookkeeping, not part of YAML tree equality.
