@@ -10,13 +10,14 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Added
 
+- **Vertex AI partner and open models through `endpoints/openapi`**, with credential-declared model names and aliases; static keys require a configured endpoint attribute.
 - **Meta Responses remote compaction v2**, with sealed CPA summary capsules, replay and local token counting.
 - **Claude web search result caching for Responses sessions**, opt-in and isolated by session, caller and selected credential, with entry limits, sliding expiry and invalidation when its settings change.
 - **Meta Muse reasoning-envelope recognition and replay** through Gemini and Interactions clients.
 - **Management model definitions fall back to sorted available registry models**, including configured OpenAI-compatible provider channels.
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
-- **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
+- **Sign in with ChatGPT for Codex credentials.** `-siwc-bind FILE` adds a second login, with ChatGPT, to a Codex credential's file, and so does **Add OpenAI API access** on the dashboard's Credentials page. While the credential's `use_siwc` is on, its calls go to the OpenAI API (`https://api.openai.com/v1`, or its `base_url`) with that login's token, in place of ChatGPT's Codex backend with the usual one. A missing login is a 401; the usual token is never sent in its place. `POST /v8/management/oauth/siwc/bind` starts a bind, and credential listings expose `siwc_bind_supported`, `use_siwc`, `siwc_bound` and optional `siwc_expires_at`. Bindings and sign-ins saved during shutdown load on restart; the dashboard explains bindings stopped by shutdown or refused because the server is busy. The steps are in [docs/cli.md](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential).
 - **The client APIs**, over HTTP and WebSocket, sending each part of a streamed answer as soon as it's ready, as CLIProxyAPI does:
   - OpenAI Chat Completions, legacy Completions and Responses;
   - Claude Messages;
@@ -58,7 +59,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Changed
 
-- **Ported from CLIProxyAPI v8.0.36**, up from v8.0.32. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8032-to-v8036-left-out). The SIWC/routing group is still pending its final reviewed integration.
+- **Codex clients get direct tool mode on synthesized or non-Codex routes**, with Responses Lite and reasoning-effort updates disabled; pure-Codex template capabilities stay intact.
+- **Ported from CLIProxyAPI v8.0.36**, up from v8.0.32. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8032-to-v8036-left-out).
 - **Refresh outer Codex credentials 96 hours before nominal expiry.** Rejected unexpired JWTs and stream 401s recover in the background while sibling models remain blocked; SIWC keeps its independent five-minute lead.
 - **xAI forwards the real downstream User-Agent**, with open-ferry as its default.
 - **Ported from CLIProxyAPI v8.0.32**, up from v8.0.27. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8027-to-v8032-left-out). It brings:
@@ -96,6 +98,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
+- **Preserve xAI image credential prefixes**, and allow vendor-alias fallback under force-prefix.
+- **Keep OAuth query values out of access logs**, including arbitrary query parameters on v8 OAuth routes.
 - **Detect truncated Claude streams**, including Gemini, Vertex and OpenAI-compatible streams serving Claude; retain observed usage and emit one bounded, correctly framed terminal error.
 - **Filter private Meta subscription usage telemetry** from streamed and collected replies, Responses SSE and WebSocket forwarding.
 - **Preserve reasoning usage and first-token timing:** map both nested Chat Completions reasoning dialects to nonstream Responses, recognize flat SGLang reasoning counts, and count completed reasoning text as effective output.
