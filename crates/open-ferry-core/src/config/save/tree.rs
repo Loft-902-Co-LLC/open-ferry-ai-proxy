@@ -395,6 +395,8 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
             .count();
         logical_line = logical_line.saturating_add(1).saturating_add(extra_breaks);
     }
+    #[cfg(feature = "parity")]
+    super::parity::ablation::record_normalization(data, &out);
     out
 }
 

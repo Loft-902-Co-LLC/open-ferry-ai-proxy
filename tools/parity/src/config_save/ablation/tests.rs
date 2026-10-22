@@ -212,6 +212,8 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             .iter()
             .find(|p| p["kind"] == "options")
             .unwrap()["go"];
+        let traced=&row["probes"].as_array().unwrap().iter().find(|p|p["kind"]=="traced").unwrap()["go"];
+        assert!(trace_output(go,traced).is_some(),"instrumentation must preserve the complete uninstrumented result");
         let protected = Translator::ConfigSave.run_rust(&case).unwrap();
         if let Some(expected) = row.get("protected") {
             assert_eq!(&protected, expected);

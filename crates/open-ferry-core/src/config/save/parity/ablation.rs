@@ -103,58 +103,14 @@ pub fn with_trace<T>(call: impl FnOnce() -> T) -> (T, Trace) {
     (result, trace)
 }
 
-/// Bind every exact write to the final bytes, with no overlap or string search.
-/// The only permitted offset adjustment is the writer's existing indentation
-/// normalization: each line either stays identical or loses its leading blanks.
+/// Bind the recorded writes directly to this complete emission. No string
+/// search or inferred recipient can repair an offset or an absent write.
 pub fn bind_comments(emission: &Emission, output: &[u8]) -> Option<Vec<WrittenComment>> {
-    let mut prior_end = 0;
-    for c in &emission.comments {
-        let end = c.offset.checked_add(c.bytes.len())?;
-        if c.offset < prior_end
-            || c.bytes.is_empty()
-            || c.bytes[0] != b'#'
-            || emission.bytes.get(c.offset..end)? != c.bytes
-        {
-            return None;
-        }
-        prior_end = end;
-    }
-    let mut records = emission.comments.clone();
     if emission.bytes != output {
-        if super::super::normalize_comment_indentation(&emission.bytes) != output
-            && with_disabled(&[Protection::BlockScalarCommentIndentation], || {
-                super::super::normalize_comment_indentation(&emission.bytes)
-            }) != output
-        {
-            return None;
-        }
-        let mut old_at = 0;
-        let mut new_at = 0;
-        let old_lines: Vec<_> = emission.bytes.split_inclusive(|b| *b == b'\n').collect();
-        let new_lines: Vec<_> = output.split_inclusive(|b| *b == b'\n').collect();
-        if old_lines.len() != new_lines.len() {
-            return None;
-        }
-        for (old, new) in old_lines.into_iter().zip(new_lines) {
-            let removed = old.len().checked_sub(new.len())?;
-            if old.get(removed..)? != new
-                || old[..removed].iter().any(|b| !matches!(b, b' ' | b'\t'))
-            {
-                return None;
-            }
-            for c in &mut records {
-                // Read the original offset, not a previously mapped offset.
-                // Records belong to exactly one original line.
-                if c.offset >= old_at && c.offset < old_at + old.len() {
-                    c.offset = new_at + c.offset.checked_sub(old_at + removed)?;
-                }
-            }
-            old_at += old.len();
-            new_at += new.len();
-        }
+        return None;
     }
     let mut end = 0;
-    for c in &records {
+    for c in &emission.comments {
         let next = c.offset.checked_add(c.bytes.len())?;
         if c.offset < end
             || c.bytes.is_empty()
@@ -165,7 +121,60 @@ pub fn bind_comments(emission: &Emission, output: &[u8]) -> Option<Vec<WrittenCo
         }
         end = next;
     }
-    Some(records)
+    Some(emission.comments.clone())
+}
+
+/// Observe the actual writer postprocessing of the same emission. Keep its
+/// comment offsets current as indentation is removed, so proof consumers bind
+/// the recorded offsets directly to final bytes (never to a guessed rewrite).
+pub(crate) fn record_normalization(input: &[u8], output: &[u8]) {
+    if input == output {
+        return;
+    }
+    TRACE.with_borrow_mut(|state| {
+        let Some(trace) = state else {
+            return;
+        };
+        let Some(emission) = trace.emissions.iter().rev().find(|e| e.bytes == input) else {
+            return;
+        };
+        let Some(mut comments) = bind_comments(emission, input) else {
+            return;
+        };
+        let old_lines: Vec<_> = input.split_inclusive(|b| *b == b'\n').collect();
+        let new_lines: Vec<_> = output.split_inclusive(|b| *b == b'\n').collect();
+        if old_lines.len() != new_lines.len() {
+            return;
+        }
+        let (mut old_at, mut new_at) = (0, 0);
+        for (old, new) in old_lines.into_iter().zip(new_lines) {
+            let Some(removed) = old.len().checked_sub(new.len()) else {
+                return;
+            };
+            if old.get(removed..) != Some(new)
+                || old[..removed].iter().any(|b| !matches!(b, b' ' | b'\t'))
+            {
+                return;
+            }
+            for (mapped, original) in comments.iter_mut().zip(&emission.comments) {
+                if original.offset >= old_at && original.offset < old_at + old.len() {
+                    let Some(relative) = original.offset.checked_sub(old_at + removed) else {
+                        return;
+                    };
+                    mapped.offset = new_at + relative;
+                }
+            }
+            old_at += old.len();
+            new_at += new.len();
+        }
+        let normalized = Emission {
+            bytes: output.to_vec(),
+            comments,
+        };
+        if bind_comments(&normalized, output).is_some() {
+            trace.emissions.push(normalized);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -180,6 +189,33 @@ mod tests {
         Protection::EffectiveBlockScalarComment,
         Protection::BlockScalarCommentIndentation,
     ];
+
+    #[test]
+    fn normalized_trace_offsets_name_the_actual_final_bytes() {
+        let doc = super::super::super::unmarshal(
+            b"plugins:\n  configs:\n    demo:\n      # head\n      x: 1 # inline\n",
+        )
+        .unwrap();
+        let ((raw, normalized), trace) = with_trace(|| {
+            let raw = super::super::super::marshal_config(&doc).unwrap();
+            let normalized = super::super::super::normalize_comment_indentation(&raw);
+            (raw, normalized)
+        });
+        assert_ne!(raw, normalized);
+        let emission = trace
+            .emissions
+            .iter()
+            .rev()
+            .find(|e| e.bytes == normalized)
+            .unwrap();
+        let comments = bind_comments(emission, &normalized).unwrap();
+        assert_eq!(comments.len(), 2);
+        for c in comments {
+            assert_eq!(&normalized[c.offset..c.offset + c.bytes.len()], c.bytes);
+        }
+        let raw_emission = trace.emissions.iter().find(|e| e.bytes == raw).unwrap();
+        assert!(bind_comments(raw_emission, &normalized).is_none());
+    }
 
     #[test]
     fn nested_trace_scopes_restore_after_unwinding() {
