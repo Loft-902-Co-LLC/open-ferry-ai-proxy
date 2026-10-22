@@ -65,6 +65,8 @@ pub struct ServerConfig {
     /// The keys clients must present (`api-keys`). Keys are trimmed, and empty
     /// and repeated ones dropped. With none left, every request is let in.
     pub api_keys: Vec<String>,
+    /// Require configured credential prefixes, except built-in image vendor aliases.
+    pub force_model_prefix: bool,
     /// Whether to pass providers' response headers on to clients
     /// (`passthrough-headers`).
     pub passthrough_headers: bool,
@@ -109,6 +111,7 @@ impl Default for ServerConfig {
         Self {
             ingress: IngressConfig::default(),
             api_keys: Vec::new(),
+            force_model_prefix: false,
             passthrough_headers: false,
             nonstream_keepalive: None,
             streaming: StreamingConfig::default(),
@@ -154,6 +157,7 @@ impl From<&Config> for ServerConfig {
         Self {
             ingress: IngressConfig::from(&config.ingress_limits),
             api_keys: config.api_keys.clone(),
+            force_model_prefix: config.force_model_prefix,
             passthrough_headers: config.passthrough_headers,
             nonstream_keepalive: seconds(config.nonstream_keepalive_interval),
             streaming: StreamingConfig {

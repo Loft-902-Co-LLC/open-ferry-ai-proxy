@@ -433,20 +433,22 @@ impl Operation {
         T: Send + 'static,
     {
         let operation = self.clone();
-        #[allow(clippy::disallowed_methods)] // this is the way to start one with the operation
-        tokio::task::spawn_blocking(move || {
-            // Puts the previous value back on an unwind too, so a panic
-            // doesn't leave the operation on a reused pool thread.
-            struct Restore(Option<Operation>);
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    let previous = self.0.take();
-                    BLOCKING.with(|slot| *slot.borrow_mut() = previous);
-                }
+        #[allow(clippy::disallowed_methods)]
+        tokio::task::spawn_blocking(move || operation.scope_blocking(work))
+    }
+
+    /// Runs synchronous work on the current thread as this operation.
+    /// Dedicated workers use this without occupying the shared blocking pool.
+    pub fn scope_blocking<T>(&self, work: impl FnOnce() -> T) -> T {
+        struct Restore(Option<Operation>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                BLOCKING.with(|slot| *slot.borrow_mut() = previous);
             }
-            let _restore = Restore(BLOCKING.with(|slot| slot.replace(Some(operation))));
-            work()
-        })
+        }
+        let _restore = Restore(BLOCKING.with(|slot| slot.replace(Some(self.clone()))));
+        work()
     }
 }
 

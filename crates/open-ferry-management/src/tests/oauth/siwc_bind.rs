@@ -1,12 +1,37 @@
-// Ported from CLIProxyAPI internal/cmd/siwc_bind_test.go (v8.0.36, MIT).
+// Ported from CLIProxyAPI internal/cmd/siwc_bind_test.go and
+// internal/api/handlers/management/oauth_siwc_test.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;
 use open_ferry_core::auth::AuthStore as _;
 
+mod admission;
+mod mutation_identity;
+mod round3;
+mod round4;
+mod round5;
+mod round6;
+mod round7;
+mod route_parity;
+
 const START: &str =
     "/v8/management/oauth/auth-url?provider=codex&mode=siwc-bind&name=codex-bind.json";
 const OUTER: &str = r#"{"type":"codex","access_token":"outer-bind-test","refresh_token":"outer-refresh-test","priority":9,"unknown":{"keep":true},"siwc":{"device_id":"123e4567-e89b-42d3-a456-426614174000"}}"#;
+
+fn bind_api(dir: &AuthDir) -> Api {
+    bind_api_with(dir, dir.config())
+}
+fn bind_api_with(dir: &AuthDir, config: Config) -> Api {
+    let api = Api::over_with(dir, config, None);
+    api.manager.load().unwrap();
+    api
+}
+
+fn login_api(dir: &AuthDir, upstream: &str) -> Api {
+    let api = super::login_api(dir, upstream);
+    api.manager.load().unwrap();
+    api
+}
 
 fn tokens() -> Vec<u8> {
     http_response("200 OK", &[("Content-Type", "application/json")],
@@ -30,7 +55,7 @@ include!(concat!(
 #[tokio::test]
 async fn validates_targets_before_issuing_a_url() {
     let dir = AuthDir::new();
-    let api = Api::over(&dir);
+    let api = bind_api(&dir);
     for name in [
         "../escape.json",
         "missing.json",
@@ -74,12 +99,12 @@ async fn validates_targets_before_issuing_a_url() {
 async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
     let (logs, _capture) = Logs::capture();
     let upstream = Upstream::answering(tokens()).await;
-    for route in ["get", "post", "query", "fragment", "page", "forwarder"] {
+    for route in ["get", "post", "query", "forwarder"] {
         let dir = AuthDir::new();
         dir.write("codex-bind.json", OUTER);
         let mut config = dir.config();
         config.port = SERVER_PORT;
-        let api = Api::over_with(&dir, config, None);
+        let api = bind_api_with(&dir, config);
         api.state.oauth_sessions().overrides().endpoints = Some(upstream.url.clone());
         let start = if route == "forwarder" {
             format!("{START}&is_webui=1")
@@ -107,14 +132,20 @@ async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
                 let path = location
                     .strip_prefix(&format!("http://127.0.0.1:{SERVER_PORT}"))
                     .unwrap();
-                assert_eq!(open_page(&api, path).await.status, StatusCode::OK);
+                api.get(path).await.expect(StatusCode::OK);
             }
             _ => {
                 let body = if route == "post" {
                     json!({"state":state,"code":"siwc-code-test","client_id":"issued-bind-test"})
                 } else {
-                    let delimiter = if route == "fragment" { '#' } else { '?' };
-                    json!({"redirect_url":format!("http://127.0.0.1/cb{delimiter}state={state}&code=siwc-code-test&client_id=issued-bind-test")})
+                    let redirect = reqwest::Url::parse(url)
+                        .unwrap()
+                        .query_pairs()
+                        .find(|(key, _)| key == "redirect_uri")
+                        .unwrap()
+                        .1
+                        .into_owned();
+                    json!({"redirect_url":format!("{redirect}?state={state}&code=siwc-code-test&client_id=issued-bind-test")})
                 };
                 api.post("/v8/management/oauth/callback", &body.to_string())
                     .await
@@ -145,7 +176,7 @@ async fn callbacks_keep_issued_client_ids_and_sync_the_persisted_credential() {
         assert!(!status.body.contains("123e4567"));
     }
     let requests = upstream.requests();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 4);
     for request in requests {
         let body = request_body(&request);
         assert!(body.contains("client_id=issued-bind-test"));
@@ -301,9 +332,15 @@ async fn missing_client_and_exchange_errors_do_not_leak_or_save() {
             &json!({"state":state,"code":"bind-test","client_id":client_id}).to_string(),
         )
         .await
-        .expect(StatusCode::OK);
-        let status = failure(&api, &state).await;
-        assert!(!status.contains("123e4567"));
+        .expect(if missing {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        });
+        if !missing {
+            let status = failure(&api, &state).await;
+            assert!(!status.contains("123e4567"));
+        }
         assert!(std::fs::read(&path).unwrap() == before);
         assert!(api.sync.calls().is_empty());
         assert_eq!(upstream.requests().len(), usize::from(!missing));
@@ -331,15 +368,35 @@ async fn typo_modes_and_pasted_oauth_errors_never_start_or_save_outer_login() {
     }
     assert_eq!(api.state.oauth_sessions().running(), 0);
     let before = std::fs::read(&path).unwrap();
-    let state = start_login(&api, START).await;
+    let answer = api.get(START).await.expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    let redirect = reqwest::Url::parse(answer["url"].as_str().unwrap())
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
     api.post(
         "/v8/management/oauth/callback",
-        &json!({"redirect_url":format!("http://127.0.0.1/cb#state={state}&error=denied")})
+        &json!({"state":state, "redirect_url":format!("http://127.0.0.1/cb#state={state}&error=denied")})
             .to_string(),
     )
     .await
+    .expect(StatusCode::BAD_REQUEST);
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    api.post(
+        "/v8/management/oauth/callback",
+        &json!({"redirect_url":format!("{redirect}?state={state}&error=denied")}).to_string(),
+    )
+    .await
     .expect(StatusCode::OK);
-    assert!(!failure(&api, &state).await.is_empty());
+    assert!(!failure(&api, state).await.is_empty());
     assert!(upstream.requests().is_empty());
     assert!(std::fs::read(&path).unwrap() == before);
 }
@@ -646,7 +703,7 @@ async fn auth_directory_changed_during_bind_is_refused() {
 async fn claude_siwc_bind_mode_is_rejected_without_starting_login() {
     let dir = AuthDir::new();
     dir.write("codex-bind.json", OUTER);
-    let api = Api::over(&dir);
+    let api = bind_api(&dir);
     let answer = api
         .get("/v8/management/oauth/auth-url?provider=claude&mode=siwc-bind&name=codex-bind.json")
         .await;
@@ -701,7 +758,7 @@ async fn refuses_a_target_the_file_guard_refuses() {
             }
         },
     )));
-    let api = Api::over(&dir);
+    let api = bind_api(&dir);
     let path = dir.write("codex-bind.json", OUTER);
     assert_eq!(api.get(START).await.status, StatusCode::BAD_REQUEST);
     assert!(std::fs::read_to_string(path).unwrap() == OUTER);
@@ -732,4 +789,622 @@ async fn a_target_the_file_guard_refuses_at_save_time_is_not_saved() {
     assert!(!failure(&api, &state).await.is_empty());
     assert!(std::fs::read(&path).unwrap() == OUTER.as_bytes());
     assert!(api.sync.calls().is_empty());
+}
+
+#[tokio::test]
+async fn v8_bind_route_has_expiry_one_pending_target_and_no_listener() {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    let api = bind_api(&dir);
+    let port = occupied.local_addr().unwrap().port();
+    api.state.oauth_sessions().overrides().ports = Some((port, port));
+    let answer = api
+        .post(
+            "/v8/management/oauth/siwc/bind",
+            r#"{"name":"codex-bind.json"}"#,
+        )
+        .await
+        .expect(StatusCode::OK);
+    assert!(
+        api.state
+            .oauth_sessions()
+            .forwarder_addr(Provider::Codex)
+            .is_none()
+    );
+    assert_eq!(answer["flow"], "siwc_bind");
+    assert_eq!(answer["expires_in"], 300);
+    api.post(
+        "/v8/management/oauth/siwc/bind",
+        r#"{"name":"codex-bind.json"}"#,
+    )
+    .await
+    .expect(StatusCode::CONFLICT);
+    let state = answer["state"].as_str().unwrap();
+    api.call(
+        Method::DELETE,
+        &format!("/v8/management/oauth/session?state={state}"),
+        "",
+    )
+    .await
+    .expect(StatusCode::OK);
+    api.post(
+        "/v8/management/oauth/siwc/bind",
+        r#"{"name":"codex-bind.json"}"#,
+    )
+    .await
+    .expect(StatusCode::OK);
+    for body in ["null", "{", r#"{"name":4}"#, r#"{"name":""}"#] {
+        api.post("/v8/management/oauth/siwc/bind", body)
+            .await
+            .expect(StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn v8_bind_callbacks_reject_conflicts_without_spending_the_code() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api.get(START).await.expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    let redirect = reqwest::Url::parse(answer["url"].as_str().unwrap())
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    for suffix in [
+        "&state=other",
+        "&code=other",
+        "&client_id=other",
+        "&provider=codex",
+    ] {
+        api.get(&format!("/v8/management/oauth/callback?state={state}&code=dummy&client_id=dummy&provider=codex{suffix}")).await.expect(StatusCode::BAD_REQUEST);
+    }
+    for callback in [
+        format!("{redirect}?state={state}&code=other&client_id=dummy"),
+        format!("{redirect}?state={state}&code=dummy&code=other&client_id=dummy"),
+        format!("{redirect}#state={state}&code=dummy&client_id=dummy"),
+        format!("http://example.test/auth/callback?state={state}&code=dummy&client_id=dummy"),
+        format!(
+            "{}?state={state}&code=dummy&client_id=dummy",
+            redirect.replacen("://", "://@", 1)
+        ),
+    ] {
+        api.post(
+            "/v8/management/oauth/callback",
+            &json!({"state": state, "code":"dummy", "client_id":"dummy", "redirect_url":callback})
+                .to_string(),
+        )
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+    }
+    assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+}
+
+#[tokio::test]
+async fn auth_file_upload_invalidates_even_an_identical_pending_bind() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api.get(START).await.expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    api.post("/v8/management/credentials?name=codex-bind.json", OUTER)
+        .await
+        .expect(StatusCode::OK);
+    assert!(
+        !api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+}
+
+#[tokio::test]
+async fn v8_credentials_advertise_siwc_without_token_values() {
+    let dir = AuthDir::new();
+    let mut outer: Value = serde_json::from_str(OUTER).unwrap();
+    outer["siwc"] = json!({"access_token":"dummy-access", "refresh_token":"dummy-refresh", "client_id":"dummy-client", "expired":"2030-01-02T03:04:05Z"});
+    outer["use_siwc"] = json!(true);
+    dir.write("codex-bind.json", &outer.to_string());
+    let api = bind_api(&dir);
+    let response = api.get("/v8/management/credentials").await;
+    assert!(!response.body.contains("dummy-access"));
+    assert!(!response.body.contains("dummy-refresh"));
+    let response = response.expect(StatusCode::OK);
+    let file = &response["files"][0];
+    assert_eq!(file["siwc_bind_supported"], true);
+    assert_eq!(file["siwc_bound"], true);
+    assert_eq!(file["use_siwc"], true);
+    assert_eq!(file["siwc_expires_at"], "2030-01-02T03:04:05Z");
+    let legacy = api
+        .get("/v0/management/auth-files")
+        .await
+        .expect(StatusCode::OK);
+    assert!(legacy["files"][0].get("siwc_bind_supported").is_none());
+}
+
+#[tokio::test]
+async fn legacy_sinks_refuse_bind_states_and_leave_the_target_untouched() {
+    let dir = AuthDir::new();
+    let path = dir.write("codex-bind.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api.get(START).await.expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    api.get(&format!(
+        "/v0/management/oauth-callback?state={state}&code=dummy&client_id=dummy"
+    ))
+    .await
+    .expect(StatusCode::CONFLICT);
+    api.post(
+        "/v0/management/oauth-callback",
+        &json!({"state":state, "code":"dummy", "client_id":"dummy"}).to_string(),
+    )
+    .await
+    .expect(StatusCode::CONFLICT);
+    let page = open_page(
+        &api,
+        &format!("/codex/callback?state={state}&code=dummy&client_id=dummy"),
+    )
+    .await;
+    assert_eq!(page.status, StatusCode::CONFLICT);
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert_eq!(std::fs::read(path).unwrap(), OUTER.as_bytes());
+    assert!(api.sync.calls().is_empty());
+}
+
+#[tokio::test]
+async fn start_refuses_manager_disk_account_disagreement_including_empty_account() {
+    for initial in [None, Some("first-account")] {
+        let dir = AuthDir::new();
+        let mut outer: Value = serde_json::from_str(OUTER).unwrap();
+        outer["email"] = json!("dummy@example.test");
+        if let Some(account) = initial {
+            outer["account_id"] = json!(account);
+        }
+        dir.write("codex-bind.json", &outer.to_string());
+        let api = bind_api(&dir);
+        let id = api.manager.list()[0].id.clone();
+        api.manager
+            .edit_unsaved(&id, |auth| {
+                auth.metadata
+                    .insert("account_id".into(), json!("different-account"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        api.post(
+            "/v8/management/oauth/siwc/bind",
+            r#"{"name":"codex-bind.json"}"#,
+        )
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+        assert_eq!(api.state.oauth_sessions().running(), 0);
+        assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+    }
+}
+
+#[tokio::test]
+async fn pending_bind_fences_disk_watcher_and_legacy_upload_account_replacements() {
+    for replacement in ["disk", "watcher", "legacy-upload"] {
+        for initial in [None, Some("first-account")] {
+            let dir = AuthDir::new();
+            let mut outer: Value = serde_json::from_str(OUTER).unwrap();
+            outer["email"] = json!("dummy@example.test");
+            if let Some(account) = initial {
+                outer["account_id"] = json!(account);
+            }
+            let path = dir.write("codex-bind.json", &outer.to_string());
+            let upstream = Upstream::answering(tokens()).await;
+            let api = login_api(&dir, &upstream.url);
+            let state = start_login(&api, START).await;
+            outer["account_id"] = json!("different-account");
+            match replacement {
+                "disk" => atomic_replace(&path, outer.to_string().as_bytes()),
+                "watcher" => {
+                    let expected = api.manager.list()[0].clone();
+                    api.manager
+                        .edit_unsaved(&expected.id, |auth| {
+                            auth.metadata
+                                .insert("account_id".into(), json!("different-account"));
+                            Ok::<_, ()>(true)
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        api.manager.get(&expected.id).unwrap().registration_epoch,
+                        expected.registration_epoch
+                    );
+                }
+                _ => {
+                    api.post(
+                        "/v0/management/auth-files?name=codex-bind.json",
+                        &outer.to_string(),
+                    )
+                    .await
+                    .expect(StatusCode::OK);
+                }
+            }
+            let before = std::fs::read(&path).unwrap();
+            if replacement != "legacy-upload" {
+                deliver(&api, &state, "codex", issued());
+            }
+            assert!(!failure(&api, &state).await.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn legacy_and_v8_uploads_wait_for_codex_lock_even_when_replacing_provider() {
+    use open_ferry_core::auth::credential_lock::acquire_credential_lock;
+    for route in [
+        "/v0/management/auth-files?name=codex-bind.json",
+        "/v8/management/credentials?name=codex-bind.json",
+    ] {
+        for provider in ["codex", "claude"] {
+            let dir = AuthDir::new();
+            let path = dir.write("codex-bind.json", OUTER);
+            let api = Api::over(&dir);
+            let guard = acquire_credential_lock(&path).await.unwrap();
+            let payload = json!({"type":provider, "access_token":"dummy-upload", "refresh_token":"dummy-upload-refresh"}).to_string();
+            let mut upload = Box::pin(api.post(route, &payload));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut upload)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), OUTER.as_bytes());
+            drop(guard);
+            upload.await.expect(StatusCode::OK);
+            assert_eq!(dir.read_json("codex-bind.json")["type"], provider);
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_token_responses_never_enable_siwc() {
+    for body in [
+        r#"{"access_token":"dummy-access","id_token":"unsigned-test","scope":"openid chatgpt.tokens.use.direct"}"#,
+        r#"{"refresh_token":"dummy-refresh","id_token":"unsigned-test","scope":"openid chatgpt.tokens.use.direct"}"#,
+    ] {
+        let dir = AuthDir::new();
+        let path = dir.write("codex-bind.json", OUTER);
+        let upstream = Upstream::answering(http_response(
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            body.as_bytes(),
+        ))
+        .await;
+        let api = login_api(&dir, &upstream.url);
+        let state = start_login(&api, START).await;
+        deliver(&api, &state, "codex", issued());
+        assert!(!failure(&api, &state).await.is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), OUTER.as_bytes());
+        assert!(api.sync.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn bind_callback_rejects_normalized_alternatives_and_accepts_exact_url() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    api.state.oauth_sessions().overrides().ports = Some((1455, 1455));
+    let state = start_login(&api, START).await;
+    for url in [
+        "http://127.0.0.1:1455/other/../auth/callback",
+        "http://127.0.0.1:1455/./auth/callback",
+        "http://2130706433:1455/auth/callback",
+        "http://127.1:1455/auth/callback",
+        "http://0x7f.0.0.1:1455/auth/callback",
+    ] {
+        api.post("/v8/management/oauth/callback", &json!({
+            "state":state,"redirect_url":format!("{url}?state={state}&code=dummy&client_id=dummy")
+        }).to_string()).await.expect(StatusCode::BAD_REQUEST);
+        assert!(upstream.requests().is_empty());
+        assert!(
+            api.state
+                .oauth_sessions()
+                .store()
+                .is_pending(&state, "codex")
+        );
+    }
+    api.post("/v8/management/oauth/callback", &json!({
+        "redirect_url":format!("http://127.0.0.1:1455/auth/callback?state={state}&code=dummy&client_id=dummy")
+    }).to_string()).await.expect(StatusCode::OK);
+    completed(&api, &state).await;
+    assert_eq!(upstream.requests().len(), 1);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn differently_cased_upload_invalidates_the_same_bind_file() {
+    let dir = AuthDir::new();
+    dir.write("account.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api
+        .get(&START.replace("codex-bind.json", "account.json"))
+        .await
+        .expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    api.post("/v8/management/credentials?name=ACCOUNT.json", OUTER)
+        .await
+        .expect(StatusCode::OK);
+    assert!(
+        !api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .get(state)
+            .unwrap()
+            .status
+            .contains("target changed")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn differently_cased_distinct_upload_preserves_the_other_bind_file() {
+    let dir = AuthDir::new();
+    dir.write("account.json", OUTER);
+    let api = bind_api(&dir);
+    let answer = api
+        .get(&START.replace("codex-bind.json", "account.json"))
+        .await
+        .expect(StatusCode::OK);
+    let state = answer["state"].as_str().unwrap();
+    let upper = dir.path().join("ACCOUNT.json");
+    if upper.exists() {
+        eprintln!("UNVERIFIED: this filesystem is not case-sensitive");
+        return;
+    }
+    api.post("/v8/management/credentials?name=ACCOUNT.json", OUTER)
+        .await
+        .expect(StatusCode::OK);
+    assert!(upper.is_file());
+    assert!(
+        api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(state, "codex")
+    );
+    assert!(dir.read_json("account.json").get("use_siwc").is_none());
+}
+
+/// Holds a real shared mutation permit on another credential until released.
+struct ActiveMutation {
+    release: std::sync::mpsc::Sender<()>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ActiveMutation {
+    fn start(api: &Api) -> Self {
+        let manager = api.manager.clone();
+        let id = manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.file_name == "other.json")
+            .unwrap()
+            .id
+            .clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            manager
+                .edit_unsaved(&id, |_| {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok::<_, ()>(false)
+                })
+                .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        Self {
+            release,
+            task: Some(task),
+        }
+    }
+}
+
+impl Drop for ActiveMutation {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        if let Some(task) = self.task.take() {
+            task.join().unwrap();
+        }
+    }
+}
+
+fn watch_admission(api: &Api) -> Arc<tokio::sync::Notify> {
+    let waiting = Arc::new(tokio::sync::Notify::new());
+    api.state.oauth_sessions().overrides().bind_admission_wait = Some(waiting.clone());
+    waiting
+}
+
+async fn wait_for_bind_task(api: &Api) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while api.state.oauth_sessions().running() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bind task stopped while admission was busy");
+}
+
+#[tokio::test]
+async fn busy_bind_commits_despite_overlapping_mutations_on_another_credential() {
+    let dir = AuthDir::new();
+    dir.write("codex-bind.json", OUTER);
+    dir.write("other.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    let session = start_login(&api, START).await;
+    let waiting = watch_admission(&api);
+    let other = api
+        .manager
+        .list()
+        .into_iter()
+        .find(|auth| auth.file_name == "other.json")
+        .unwrap()
+        .id
+        .clone();
+    let active = ActiveMutation::start(&api);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let traffic: Vec<_> = (0..2)
+        .map(|_| {
+            let manager = api.manager.clone();
+            let id = other.clone();
+            let stop = stop.clone();
+            let mutations = mutations.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    manager
+                        .edit_unsaved(&id, |_| {
+                            mutations.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(20));
+                            Ok::<_, ()>(false)
+                        })
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    deliver(&api, &session, "codex", issued());
+    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+        .await
+        .unwrap();
+    // Both traffic threads can hold shared permits while one waits on the
+    // state mutex. The global reservation must stop their next iterations.
+    drop(active);
+    let result = tokio::time::timeout(Duration::from_secs(2), completed(&api, &session)).await;
+    stop.store(true, Ordering::SeqCst);
+    if result.is_err() {
+        api.state.oauth_sessions().store().cancel(&session);
+    }
+    tokio::task::spawn_blocking(move || {
+        for task in traffic {
+            task.join().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    result.expect("continuous unrelated traffic starved the bind");
+    assert!(mutations.load(Ordering::SeqCst) >= 2);
+    assert_eq!(dir.read_json("codex-bind.json")["use_siwc"], true);
+}
+
+#[tokio::test]
+async fn busy_bind_expiry_cancellation_and_owner_disconnect_release_admission() {
+    for stop in ["expiry", "cancel", "disconnect"] {
+        let (logs, _capture) = Logs::capture();
+        let dir = AuthDir::new();
+        let path = dir.write("codex-bind.json", OUTER);
+        dir.write("other.json", OUTER);
+        let upstream = Upstream::answering(tokens()).await;
+        let api = login_api(&dir, &upstream.url);
+        let session = start_login(&api, START).await;
+        let waiting = watch_admission(&api);
+        let active = ActiveMutation::start(&api);
+        deliver(&api, &session, "codex", issued());
+        tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+            .await
+            .unwrap();
+        match stop {
+            "expiry" => api
+                .state
+                .oauth_sessions()
+                .store()
+                .expire_bind_for_test(&session),
+            "cancel" => assert!(api.state.oauth_sessions().store().cancel(&session)),
+            // Aborting the owning login also drops its detached completion.
+            _ => api.state.oauth_sessions().shutdown().await,
+        }
+        wait_for_bind_task(&api).await;
+        if stop == "expiry" {
+            assert!(logs.text().contains("SIWC binding failed (Other, OS None)"));
+            assert!(logs.text().contains("Failed to save authentication tokens"));
+        }
+        assert!(std::fs::read(&path).unwrap() == OUTER.as_bytes());
+        assert!(api.sync.calls().is_empty());
+        drop(active);
+        // A leaked writer reservation would prevent this shared mutation.
+        let manager = api.manager.clone();
+        let (finished, done) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            let id = manager.list()[0].id.clone();
+            manager.edit_unsaved(&id, |_| Ok::<_, ()>(false)).unwrap();
+            finished.send(()).unwrap();
+        });
+        done.recv_timeout(Duration::from_secs(2))
+            .expect("cancelled bind leaked its reservation");
+        task.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn busy_bind_releases_both_locks_for_an_upload() {
+    use open_ferry_core::auth::credential_lock::acquire_credential_lock;
+    let dir = AuthDir::new();
+    let path = dir.write("codex-bind.json", OUTER);
+    dir.write("other.json", OUTER);
+    let upstream = Upstream::answering(tokens()).await;
+    let api = login_api(&dir, &upstream.url);
+    let session = start_login(&api, START).await;
+    let waiting = watch_admission(&api);
+    let active = ActiveMutation::start(&api);
+    deliver(&api, &session, "codex", issued());
+    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+        .await
+        .unwrap();
+    let mut body: Value = serde_json::from_str(OUTER).unwrap();
+    body["upload_marker"] = json!(true);
+    let body = body.to_string();
+    let mut upload = Box::pin(api.post("/v8/management/credentials?name=codex-bind.json", &body));
+    // Only synchronization waits for the other credential's active mutation.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut upload)
+            .await
+            .is_err()
+    );
+    assert_eq!(dir.read_json("codex-bind.json")["upload_marker"], true);
+    assert!(api.state.credential_lock().try_lock().is_ok());
+    let lock = tokio::time::timeout(Duration::from_millis(200), acquire_credential_lock(&path))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(lock);
+    wait_for_bind_task(&api).await;
+    drop(active);
+    tokio::time::timeout(Duration::from_secs(2), upload)
+        .await
+        .unwrap()
+        .expect(StatusCode::OK);
+    assert!(dir.read_json("codex-bind.json").get("use_siwc").is_none());
+    assert!(
+        !api.state
+            .oauth_sessions()
+            .store()
+            .is_pending(&session, "codex")
+    );
 }

@@ -356,7 +356,7 @@ fn gemini_key_dedup_id(key: &GeminiKey) -> String {
 }
 
 /// Upstream's `SanitizeVertexCompatKeys`: drops entries without a key and
-/// models without both a name and an alias, cleans up the rest, and keeps
+/// models without a name, cleans up the rest, and keeps
 /// the first of entries alike in key and base URL. Full publisher resource
 /// prefixes are retained; the executor interprets the endpoint path.
 pub fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
@@ -374,7 +374,7 @@ pub fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
         key.models.retain_mut(|model| {
             model.alias = model.alias.trim().to_owned();
             model.name = model.name.trim().to_owned();
-            !model.alias.is_empty() && !model.name.is_empty()
+            !model.name.is_empty()
         });
         seen.insert(format!("{}|{}", key.api_key, key.base_url))
     });
@@ -971,7 +971,7 @@ mod tests {
 
     // vertex_compat.go: SanitizeVertexCompatKeys (no upstream test).
     #[test]
-    fn vertex_keys_need_a_key_and_models_need_both_names() {
+    fn vertex_keys_need_a_key_and_models_need_a_name() {
         let model = |name: &str, alias: &str| VertexCompatModel {
             name: name.to_owned(),
             alias: alias.to_owned(),
@@ -1020,7 +1020,13 @@ mod tests {
             kept.headers,
             BTreeMap::from([("X-A".to_owned(), "1".to_owned())])
         );
-        assert_eq!(kept.models, [model("gemini-2.5-pro", "vertex-pro")]);
+        assert_eq!(
+            kept.models,
+            [
+                model("gemini-2.5-pro", "vertex-pro"),
+                model("gemini-2.5-flash", "")
+            ]
+        );
         assert_eq!(kept.excluded_models, strings(&["a"]));
         assert_eq!(keys[1].base_url, "");
     }
@@ -1226,5 +1232,20 @@ mod tests {
     fn typed_scoped_fields_are_upstream_paths() {
         let scoped: BTreeSet<&str> = super::super::v8::oauth_scoped_paths().collect();
         assert!(typed_oauth_scoped_fields().is_subset(&scoped));
+    }
+}
+
+#[cfg(test)]
+mod vertex_openapi_tests {
+    use super::*;
+    #[test]
+    fn name_only_models_survive_both_layouts() {
+        for text in [
+            "vertex-api-key: [{api-key: dummy, models: [{name: meta/llama}]}]",
+            "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy}], models: [{name: meta/llama}]}]",
+        ] {
+            let config = Config::parse(text).unwrap();
+            assert_eq!(config.vertex_api_key[0].models[0].name, "meta/llama");
+        }
     }
 }

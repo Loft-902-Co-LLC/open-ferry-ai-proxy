@@ -284,6 +284,11 @@ pub fn synthesize_auth_file(
     }
     apply_custom_headers_from_metadata(&mut auth);
     set_model_aliases_attribute(&mut auth, per_account_aliases);
+    let names = crate::auth::metadata::openapi_model_names(&metadata);
+    if !names.is_empty() {
+        auth.attributes
+            .insert("openapi_models".to_owned(), names.join(","));
+    }
     apply_auth_excluded_models_meta(&mut auth, &per_account_excluded, AUTH_KIND_OAUTH);
     if let Some(plan_type) = plan_type {
         auth.attributes.insert("plan_type".to_owned(), plan_type);
@@ -383,16 +388,14 @@ fn alias_json(alias: &ModelAlias) -> String {
     out
 }
 
-/// A credential file's model aliases, from `model_aliases` or else
-/// `model-aliases`. A list Go couldn't decode into aliases yields none.
+/// A credential file's model aliases, merged from `model_aliases`,
+/// `model-aliases` and `models`. A list Go couldn't decode into aliases yields none.
 fn extract_model_aliases(metadata: &Map<String, Value>) -> Vec<ModelAlias> {
-    let raw = metadata
-        .get("model_aliases")
-        .or_else(|| metadata.get("model-aliases"));
-    match raw {
-        Some(Value::Array(items)) => decode_model_aliases(items).unwrap_or_default(),
-        _ => Vec::new(),
-    }
+    ["model_aliases", "model-aliases", "models"]
+        .into_iter()
+        .filter_map(|key| metadata.get(key).and_then(Value::as_array))
+        .flat_map(|items| decode_model_aliases(items).unwrap_or_default())
+        .collect()
 }
 
 /// Go's `json.Unmarshal` into `[]OAuthModelAlias` of the list it marshaled
@@ -1095,10 +1098,11 @@ mod tests {
         );
         assert!(decode(json!({"model_aliases": [{"name": "m", "alias": "a"}, "x"]})).is_empty());
         assert!(decode(json!({"model_aliases": {"name": "m", "alias": "a"}})).is_empty());
-        // A null canonical key hides the legacy one.
-        assert!(
+        // Alias sources are merged, including when another source is null.
+        assert_eq!(
             decode(json!({"model_aliases": null, "model-aliases": [{"name": "m", "alias": "a"}]}))
-                .is_empty()
+                .len(),
+            1
         );
     }
 

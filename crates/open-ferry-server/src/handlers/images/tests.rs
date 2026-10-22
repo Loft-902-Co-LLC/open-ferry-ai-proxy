@@ -1201,3 +1201,243 @@ async fn image_keepalives_after_first_payload_do_not_need_the_pre_first_token_sw
         assert_eq!(dispatcher.live_streams(), 0);
     }
 }
+
+// Ports the registered-prefix and forced vendor-alias routing regressions.
+#[tokio::test]
+async fn xai_routing_keeps_prefix_separate_from_payload_for_every_body() {
+    for (requested, registered, forced, expected) in [
+        (
+            "team/Grok-Imagine-Image",
+            "team/grok-imagine-image",
+            true,
+            "team/grok-imagine-image",
+        ),
+        (
+            "XAI/Grok-Imagine-Image",
+            "xai/grok-imagine-image",
+            true,
+            "xai/grok-imagine-image",
+        ),
+        (
+            "xai/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "x-ai/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "grok/grok-imagine-image",
+            "grok-imagine-image",
+            true,
+            "grok-imagine-image",
+        ),
+        (
+            "xai/grok-imagine-image",
+            "grok-imagine-image",
+            false,
+            "grok-imagine-image",
+        ),
+    ] {
+        for body_kind in ["generation", "json-edit", "form-edit", "stream"] {
+            let catalog = FakeCatalog::new().serve(registered, &["xai"]);
+            let dispatcher =
+                FakeDispatcher::new(vec![Outcome::reply(r#"{"data":[{"b64_json":"AA=="}]}"#)]);
+            let config = ServerConfig {
+                api_keys: vec!["sk-test".into()],
+                force_model_prefix: forced,
+                ..ServerConfig::default()
+            };
+            let app = router(state(config, catalog, &dispatcher));
+            let request = match body_kind {
+                "form-edit" => post_form(
+                    &[("model", requested), ("prompt", "cat")],
+                    &[("image", "a.png", Some("image/png"), PNG)],
+                ),
+                kind => {
+                    let uri = if kind == "json-edit" {
+                        EDITS
+                    } else {
+                        GENERATIONS
+                    };
+                    post_json(uri, &serde_json::json!({"model": requested, "prompt": "cat", "image": "https://img.test/a.png", "stream": kind == "stream"}).to_string())
+                }
+            };
+            let (status, _, body) = send(&app, request).await;
+            assert_eq!(status, StatusCode::OK, "{requested} {body_kind}: {body}");
+            let calls = dispatcher.calls();
+            let call = &calls[0];
+            assert_eq!(call.request.model, expected);
+            assert_eq!(
+                json::str_at(&call.request.payload, "model"),
+                "grok-imagine-image"
+            );
+            assert_eq!(call.providers, ["xai"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn xai_custom_only_credentials_do_not_accept_unregistered_vendor_or_custom_prefix() {
+    for requested in ["xai/grok-imagine-image", "other/grok-imagine-image"] {
+        let dispatcher = FakeDispatcher::new(vec![]);
+        let catalog = FakeCatalog::new().serve("team/grok-imagine-image", &["xai"]);
+        let app = router(state(
+            ServerConfig {
+                api_keys: vec!["sk-test".into()],
+                force_model_prefix: true,
+                ..ServerConfig::default()
+            },
+            catalog,
+            &dispatcher,
+        ));
+        let (status, _, body) = send(
+            &app,
+            post_json(
+                GENERATIONS,
+                &serde_json::json!({"model": requested, "prompt": "cat"}).to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["error"]["type"], "invalid_request_error");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(requested))
+        );
+        assert!(dispatcher.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn xai_forced_prefixes_use_real_registration_and_credential_selection() {
+    use crate::state::AppState;
+    use open_ferry_core::auth::Auth;
+    use open_ferry_core::config::Config;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::registry::ModelRegistry;
+    use open_ferry_core::registry::registration::RegistrationRules;
+    use open_ferry_providers::xai::XaiExecutor;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let record = seen.clone();
+    let mock = Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
+        let record = record.clone();
+        async move {
+            assert_eq!(json::str_at(&body, "model"), "grok-imagine-image");
+            record
+                .lock()
+                .unwrap()
+                .push(headers[header::AUTHORIZATION].to_str().unwrap().to_owned());
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"data":[{"b64_json":"AA=="}]}"#,
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let serving = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    let mut config = Config::default();
+    config.force_model_prefix = true;
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Arc::new(Manager::new(
+        Settings::from(&config),
+        registry.clone(),
+        None,
+    ));
+    manager.register_executor(Arc::new(XaiExecutor::new("direct")));
+    let rules = RegistrationRules::from(&config);
+    for (id, prefix) in [("bare-a", ""), ("bare-b", ""), ("team-key", "team")] {
+        let auth = Auth {
+            id: id.into(),
+            provider: "xai".into(),
+            prefix: prefix.into(),
+            attributes: [
+                ("api_key".into(), id.into()),
+                ("base_url".into(), base.clone()),
+                ("auth_kind".into(), "apikey".into()),
+            ]
+            .into(),
+            ..Auth::default()
+        };
+        let registered = manager.register_unsaved(auth).unwrap();
+        registry.register_auth(&registered, &rules);
+    }
+    let app = router(AppState::new(
+        ServerConfig {
+            api_keys: vec!["sk-test".into()],
+            force_model_prefix: true,
+            ..ServerConfig::default()
+        },
+        manager.clone(),
+        registry.clone(),
+    ));
+    for requested in [
+        "grok-imagine-image",
+        "xai/grok-imagine-image",
+        "x-ai/grok-imagine-image",
+        "grok/grok-imagine-image",
+        "team/grok-imagine-image",
+    ] {
+        seen.lock().unwrap().clear();
+        for _ in 0..4 {
+            let (status, _, body) = send(
+                &app,
+                post_json(
+                    GENERATIONS,
+                    &serde_json::json!({"model":requested,"prompt":"cat"}).to_string(),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{requested}: {body}");
+        }
+        let selected: std::collections::BTreeSet<_> =
+            seen.lock().unwrap().iter().cloned().collect();
+        let expected: std::collections::BTreeSet<String> = if requested.starts_with("team/") {
+            ["Bearer team-key"].into_iter().map(str::to_owned).collect()
+        } else {
+            ["Bearer bare-a", "Bearer bare-b"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(
+            selected, expected,
+            "{requested} changed the eligible credentials"
+        );
+    }
+    // With only a custom-prefixed registration left, no vendor fallback can
+    // reach it. An unrelated custom prefix must also fail, with its error.
+    for id in ["bare-a", "bare-b"] {
+        registry.unregister_client(id);
+        manager.remove(id);
+    }
+    for requested in ["xai/grok-imagine-image", "other/grok-imagine-image"] {
+        seen.lock().unwrap().clear();
+        let (status, _, body) = send(
+            &app,
+            post_json(
+                GENERATIONS,
+                &serde_json::json!({"model":requested,"prompt":"cat"}).to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(requested))
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
+    serving.abort();
+}

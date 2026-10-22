@@ -1701,3 +1701,30 @@ fn partition_helpers_report_requested_rotated_and_landed() {
     assert_eq!(committed["expired"], "2099-01-01T00:00:00Z");
     assert_eq!(kept_on_disk.landed_in(&committed), outer);
 }
+
+#[test]
+fn siwc_bind_refuses_same_inode_rewrites_even_when_only_whitespace_changes() {
+    let dir = scratch();
+    let store = FileStore::new(dir.path());
+    let before = fixture();
+    store.save_new(&before).unwrap();
+    let path = dir.path().join("codex.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut rewritten = original.clone();
+    rewritten.extend_from_slice(b"\n ");
+    let changed = rewritten.clone();
+    let destination = path.clone();
+    crate::auth::credential_lock::set_test_hook(
+        &path,
+        Some(Arc::new(move |event| {
+            if event == "bind-before-replace" {
+                std::fs::write(&destination, &changed).unwrap();
+            }
+        })),
+    );
+    let guard = crate::auth::credential_lock::acquire_sync(&path).unwrap();
+    let result = store.bind_siwc_locked(&before, Map::new(), &guard, &|_, _| Ok(()));
+    crate::auth::credential_lock::set_test_hook(&path, None);
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), rewritten);
+}

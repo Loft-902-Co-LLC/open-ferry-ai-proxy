@@ -473,3 +473,24 @@ fn latency_prints_as_go_does() {
         assert_eq!(go_latency(elapsed), want, "{elapsed:?}");
     }
 }
+
+#[tokio::test]
+async fn v8_oauth_access_logs_suppress_the_whole_query() {
+    let app = logged(Router::new().fallback(|| async { StatusCode::OK }));
+    for path in [
+        "/v8/management/oauth/callback",
+        "/v8/management/oauth/status",
+        "/v8/management/oauth/siwc/bind",
+    ] {
+        let uri = format!(
+            "{path}?code=private-code&state=private-state&client_id=private-client&token=private-token&arbitrary=private-value"
+        );
+        let (_, logs) = send(&app, request(Method::GET, &uri)).await;
+        assert!(!logs.is_empty());
+        for event in logs {
+            assert!(event.message.contains(path));
+            assert!(!event.message.contains('?'));
+            assert!(!event.message.contains("private-"));
+        }
+    }
+}
