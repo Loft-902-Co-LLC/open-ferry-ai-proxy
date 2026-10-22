@@ -313,8 +313,30 @@ fn expand(node: &Node, budget: &mut usize, aliased: bool, depth: usize) -> Resul
 }
 
 /// `NormalizeCommentIndentation`: comment lines moved to the start of the
-/// line.
+/// line. Scalar body lines are data, including Markdown headings. The same
+/// scanner that reads the document identifies them without guessing from
+/// indentation or looking for `|` in a line of text.
 pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
+    use super::super::yaml3::parser::Parser;
+    use super::super::yaml3::types::{ScalarStyle, TokenType};
+    let mut parser = Parser::new(data);
+    let mut bodies = Vec::new();
+    while let Ok(token) = parser.scan() {
+        if matches!(token.typ, TokenType::No | TokenType::StreamEnd) {
+            break;
+        }
+        if token.typ == TokenType::Scalar
+            && matches!(token.style, ScalarStyle::Literal | ScalarStyle::Folded)
+        {
+            bodies.push(
+                token.start_mark.line.saturating_add(1)
+                    ..token
+                        .end_mark
+                        .line
+                        .saturating_add(usize::from(token.end_mark.column > 0)),
+            );
+        }
+    }
     let mut out = Vec::with_capacity(data.len());
     for (index, line) in data.split(|&byte| byte == b'\n').enumerate() {
         if index > 0 {
@@ -325,7 +347,7 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
             .position(|&byte| byte != b' ' && byte != b'\t')
             .unwrap_or(line.len());
         let trimmed = line.get(start..).unwrap_or_default();
-        if trimmed.first() == Some(&b'#') {
+        if trimmed.first() == Some(&b'#') && !bodies.iter().any(|body| body.contains(&index)) {
             out.extend_from_slice(trimmed);
         } else {
             out.extend_from_slice(line);
@@ -452,5 +474,24 @@ mod tests {
             b"a:\n# note\n  b: 1 # kept\n#tab\n"
         );
         assert_eq!(normalize_comment_indentation(b"x: 1"), b"x: 1");
+    }
+
+    #[test]
+    fn scalar_body_lines_are_not_comments_or_header_guesses() {
+        for indicator in ["|-", ">-", "|2-", ">2-"] {
+            let source = format!(
+                "note: {indicator} # header\n  before\n  # Heading\n  after\n  # body tail\n# outside\nnext: 1\n  # last comment\n"
+            );
+            let expected = source.replace("  # last comment", "# last comment");
+            assert_eq!(
+                normalize_comment_indentation(source.as_bytes()),
+                expected.as_bytes()
+            );
+        }
+        let source = b"note: 'contains | and >'\n  # actual comment\nnext: 1\n";
+        assert_eq!(
+            normalize_comment_indentation(source),
+            b"note: 'contains | and >'\n# actual comment\nnext: 1\n"
+        );
     }
 }

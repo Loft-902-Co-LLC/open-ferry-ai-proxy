@@ -1,0 +1,445 @@
+[
+  {
+    "Name": "typed-payload",
+    "Op": "save",
+    "Source": "payload:\n  override:\n    - models:\n        - name: gpt-*\n      params:\n        prompt: |-\n          before\n          # Heading\n          after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "payload:\n  override:\n    - models:\n        - name: gpt-*\n          protocol: \"\"\n          headers: {}\n          from-protocol: \"\"\n          match: []\n          not-match: []\n          exist: []\n          not-exist: []\n      params:\n        prompt: |-\n          before\n          # Heading\n          after\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+    "Value": {
+      "credential-concurrency": {
+        "busy-retry-max": "1s",
+        "busy-retry-min": "250ms",
+        "cleanup-interval": "5s",
+        "cpa-cancel-bound": "5s",
+        "cpa-heartbeat-timeout": "3s",
+        "max-limit": 1000000,
+        "reclaim-grace": "5s",
+        "release-flush-interval": "250ms",
+        "release-max-backoff": "2s"
+      },
+      "credential-in-flight": {
+        "max-aggregate-groups": 100000,
+        "max-details": 10000,
+        "max-part-bytes": 262144,
+        "max-part-count": 64,
+        "max-revision-bytes": 16777216,
+        "max-string-bytes": 256,
+        "snapshot-interval": "2s",
+        "staging-retention": "1m",
+        "stale-after": "10s"
+      },
+      "disable-cooling": false,
+      "discovery": {
+        "service-type": "_ai-gateway._tcp",
+        "subtypes": [
+          "_chat-completions",
+          "_responses",
+          "_messages",
+          "_generate-content",
+          "_interactions"
+        ]
+      },
+      "payload": {
+        "override": [
+          {
+            "models": [
+              {
+                "exist": [],
+                "from-protocol": "",
+                "headers": {},
+                "match": [],
+                "name": "gpt-*",
+                "not-exist": [],
+                "not-match": [],
+                "protocol": ""
+              }
+            ],
+            "params": {
+              "prompt": "before\nHEADING_PLACEHOLDER\nafter"
+            }
+          }
+        ]
+      },
+      "redis-usage-queue-retention-seconds": 60,
+      "request-retry": 0,
+      "ws-auth": true
+    }
+  },
+  {
+    "Name": "typed-payload",
+    "Op": "migrate",
+    "Source": "payload:\n  override:\n    - models:\n        - name: gpt-*\n      params:\n        prompt: |-\n          before\n          # Heading\n          after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "credentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\noauth:\n    providers:\n        aistudio:\n            ws-auth: true\nrequests:\n    payload:\n        override:\n            - models:\n                - name: gpt-*\n                  protocol: \"\"\n                  headers: {}\n                  from-protocol: \"\"\n                  match: []\n                  not-match: []\n                  exist: []\n                  not-exist: []\n              params:\n                prompt: |-\n                    before\n                    # Heading\n                    after\nconfig-version: 8\n",
+    "Value": {
+      "config-version": 8,
+      "credentials": {
+        "concurrency": {
+          "busy-retry-max": "1s",
+          "busy-retry-min": "250ms",
+          "cleanup-interval": "5s",
+          "cpa-cancel-bound": "5s",
+          "cpa-heartbeat-timeout": "3s",
+          "max-limit": 1000000,
+          "reclaim-grace": "5s",
+          "release-flush-interval": "250ms",
+          "release-max-backoff": "2s"
+        },
+        "in-flight": {
+          "max-aggregate-groups": 100000,
+          "max-details": 10000,
+          "max-part-bytes": 262144,
+          "max-part-count": 64,
+          "max-revision-bytes": 16777216,
+          "max-string-bytes": 256,
+          "snapshot-interval": "2s",
+          "staging-retention": "1m",
+          "stale-after": "10s"
+        }
+      },
+      "oauth": {
+        "providers": {
+          "aistudio": {
+            "ws-auth": true
+          }
+        }
+      },
+      "observability": {
+        "usage": {
+          "redis-usage-queue-retention-seconds": 60
+        }
+      },
+      "requests": {
+        "payload": {
+          "override": [
+            {
+              "models": [
+                {
+                  "exist": [],
+                  "from-protocol": "",
+                  "headers": {},
+                  "match": [],
+                  "name": "gpt-*",
+                  "not-exist": [],
+                  "not-match": [],
+                  "protocol": ""
+                }
+              ],
+              "params": {
+                "prompt": "before\nHEADING_PLACEHOLDER\nafter"
+              }
+            }
+          ]
+        }
+      },
+      "routing": {
+        "cooldown": {
+          "disable-cooling": false
+        },
+        "retry": {
+          "request-retry": 0
+        }
+      },
+      "server": {
+        "discovery": {
+          "service-type": "_ai-gateway._tcp",
+          "subtypes": [
+            "_chat-completions",
+            "_responses",
+            "_messages",
+            "_generate-content",
+            "_interactions"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "Name": "typed-payload",
+    "Op": "nested",
+    "Source": "payload:\n  override:\n    - models:\n        - name: gpt-*\n      params:\n        prompt: |-\n          before\n          # Heading\n          after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "payload:\n  override:\n    - models:\n        - name: gpt-*\n      params:\n        prompt: |-\n          before\n          # Heading\n          after\nauth-dir: /x\n",
+    "Value": {
+      "auth-dir": "/x",
+      "payload": {
+        "override": [
+          {
+            "models": [
+              {
+                "name": "gpt-*"
+              }
+            ],
+            "params": {
+              "prompt": "before\nHEADING_PLACEHOLDER\nafter"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "Name": "retained-pprof",
+    "Op": "save",
+    "Source": "pprof:\n  enable: true\n  note: |-\n    before\n    # Heading\n    after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "pprof:\n  enable: true\n  note: |-\n    before\n    # Heading\n    after\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+    "Value": {
+      "credential-concurrency": {
+        "busy-retry-max": "1s",
+        "busy-retry-min": "250ms",
+        "cleanup-interval": "5s",
+        "cpa-cancel-bound": "5s",
+        "cpa-heartbeat-timeout": "3s",
+        "max-limit": 1000000,
+        "reclaim-grace": "5s",
+        "release-flush-interval": "250ms",
+        "release-max-backoff": "2s"
+      },
+      "credential-in-flight": {
+        "max-aggregate-groups": 100000,
+        "max-details": 10000,
+        "max-part-bytes": 262144,
+        "max-part-count": 64,
+        "max-revision-bytes": 16777216,
+        "max-string-bytes": 256,
+        "snapshot-interval": "2s",
+        "staging-retention": "1m",
+        "stale-after": "10s"
+      },
+      "disable-cooling": false,
+      "discovery": {
+        "service-type": "_ai-gateway._tcp",
+        "subtypes": [
+          "_chat-completions",
+          "_responses",
+          "_messages",
+          "_generate-content",
+          "_interactions"
+        ]
+      },
+      "pprof": {
+        "enable": true,
+        "note": "before\nHEADING_PLACEHOLDER\nafter"
+      },
+      "redis-usage-queue-retention-seconds": 60,
+      "request-retry": 0,
+      "ws-auth": true
+    }
+  },
+  {
+    "Name": "retained-pprof",
+    "Op": "migrate",
+    "Source": "pprof:\n  enable: true\n  note: |-\n    before\n    # Heading\n    after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "credentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nobservability:\n    pprof:\n        enable: true\n    usage:\n        redis-usage-queue-retention-seconds: 60\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\noauth:\n    providers:\n        aistudio:\n            ws-auth: true\nconfig-version: 8\n\n# pprof:\n#     note: |-\n#         before\n#         # Heading\n#         after\n",
+    "Value": {
+      "config-version": 8,
+      "credentials": {
+        "concurrency": {
+          "busy-retry-max": "1s",
+          "busy-retry-min": "250ms",
+          "cleanup-interval": "5s",
+          "cpa-cancel-bound": "5s",
+          "cpa-heartbeat-timeout": "3s",
+          "max-limit": 1000000,
+          "reclaim-grace": "5s",
+          "release-flush-interval": "250ms",
+          "release-max-backoff": "2s"
+        },
+        "in-flight": {
+          "max-aggregate-groups": 100000,
+          "max-details": 10000,
+          "max-part-bytes": 262144,
+          "max-part-count": 64,
+          "max-revision-bytes": 16777216,
+          "max-string-bytes": 256,
+          "snapshot-interval": "2s",
+          "staging-retention": "1m",
+          "stale-after": "10s"
+        }
+      },
+      "oauth": {
+        "providers": {
+          "aistudio": {
+            "ws-auth": true
+          }
+        }
+      },
+      "observability": {
+        "pprof": {
+          "enable": true
+        },
+        "usage": {
+          "redis-usage-queue-retention-seconds": 60
+        }
+      },
+      "routing": {
+        "cooldown": {
+          "disable-cooling": false
+        },
+        "retry": {
+          "request-retry": 0
+        }
+      },
+      "server": {
+        "discovery": {
+          "service-type": "_ai-gateway._tcp",
+          "subtypes": [
+            "_chat-completions",
+            "_responses",
+            "_messages",
+            "_generate-content",
+            "_interactions"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "Name": "retained-pprof",
+    "Op": "nested",
+    "Source": "pprof:\n  enable: true\n  note: |-\n    before\n    # Heading\n    after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "pprof:\n  enable: true\n  note: |-\n    before\n    # Heading\n    after\nauth-dir: /x\n",
+    "Value": {
+      "auth-dir": "/x",
+      "pprof": {
+        "enable": true,
+        "note": "before\nHEADING_PLACEHOLDER\nafter"
+      }
+    }
+  },
+  {
+    "Name": "unknown",
+    "Op": "save",
+    "Source": "x-note: |-\n  before\n  # Heading\n  after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "x-note: |-\n  before\n  # Heading\n  after\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n",
+    "Value": {
+      "credential-concurrency": {
+        "busy-retry-max": "1s",
+        "busy-retry-min": "250ms",
+        "cleanup-interval": "5s",
+        "cpa-cancel-bound": "5s",
+        "cpa-heartbeat-timeout": "3s",
+        "max-limit": 1000000,
+        "reclaim-grace": "5s",
+        "release-flush-interval": "250ms",
+        "release-max-backoff": "2s"
+      },
+      "credential-in-flight": {
+        "max-aggregate-groups": 100000,
+        "max-details": 10000,
+        "max-part-bytes": 262144,
+        "max-part-count": 64,
+        "max-revision-bytes": 16777216,
+        "max-string-bytes": 256,
+        "snapshot-interval": "2s",
+        "staging-retention": "1m",
+        "stale-after": "10s"
+      },
+      "disable-cooling": false,
+      "discovery": {
+        "service-type": "_ai-gateway._tcp",
+        "subtypes": [
+          "_chat-completions",
+          "_responses",
+          "_messages",
+          "_generate-content",
+          "_interactions"
+        ]
+      },
+      "redis-usage-queue-retention-seconds": 60,
+      "request-retry": 0,
+      "ws-auth": true,
+      "x-note": "before\nHEADING_PLACEHOLDER\nafter"
+    }
+  },
+  {
+    "Name": "unknown",
+    "Op": "migrate",
+    "Source": "x-note: |-\n  before\n  # Heading\n  after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "credentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\noauth:\n    providers:\n        aistudio:\n            ws-auth: true\nconfig-version: 8\n\n# x-note: |-\n#     before\n#     # Heading\n#     after\n",
+    "Value": {
+      "config-version": 8,
+      "credentials": {
+        "concurrency": {
+          "busy-retry-max": "1s",
+          "busy-retry-min": "250ms",
+          "cleanup-interval": "5s",
+          "cpa-cancel-bound": "5s",
+          "cpa-heartbeat-timeout": "3s",
+          "max-limit": 1000000,
+          "reclaim-grace": "5s",
+          "release-flush-interval": "250ms",
+          "release-max-backoff": "2s"
+        },
+        "in-flight": {
+          "max-aggregate-groups": 100000,
+          "max-details": 10000,
+          "max-part-bytes": 262144,
+          "max-part-count": 64,
+          "max-revision-bytes": 16777216,
+          "max-string-bytes": 256,
+          "snapshot-interval": "2s",
+          "staging-retention": "1m",
+          "stale-after": "10s"
+        }
+      },
+      "oauth": {
+        "providers": {
+          "aistudio": {
+            "ws-auth": true
+          }
+        }
+      },
+      "observability": {
+        "usage": {
+          "redis-usage-queue-retention-seconds": 60
+        }
+      },
+      "routing": {
+        "cooldown": {
+          "disable-cooling": false
+        },
+        "retry": {
+          "request-retry": 0
+        }
+      },
+      "server": {
+        "discovery": {
+          "service-type": "_ai-gateway._tcp",
+          "subtypes": [
+            "_chat-completions",
+            "_responses",
+            "_messages",
+            "_generate-content",
+            "_interactions"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "Name": "unknown",
+    "Op": "nested",
+    "Source": "x-note: |-\n  before\n  # Heading\n  after\n",
+    "Error": "",
+    "ReloadError": "",
+    "File": "x-note: |-\n  before\n  # Heading\n  after\nauth-dir: /x\n",
+    "Value": {
+      "auth-dir": "/x",
+      "x-note": "before\nHEADING_PLACEHOLDER\nafter"
+    }
+  }
+]
