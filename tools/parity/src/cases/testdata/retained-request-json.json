@@ -1,0 +1,260 @@
+[
+  {
+    "case": "builtin-17-185",
+    "model": "grok-4(high)",
+    "request_text": "{\n  \"include\": [\n    [\n      \"reasoning.encrypted_content\"\n    ]\n  ],\n  \"stream\": 0,\n  \"model\": \" GROK-4.5 \",\n  \"parallel_tool_calls\": \"1\",\n  \"input\": [\n    {\n      \"type\": \"custom_tool_call\",\n      \"call_id\": \"call_2\",\n      \"name\": \"apply_patch\",\n      \"input\": \"\",\n      \"prompt_cache_breakpoint\": {\n        \"type\": \"ephemeral\"\n      }\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"system\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"\u00a0\u3000x-anthropic-billing-header: unicode spaces\"\n        },\n        {\n          \"type\": \"input_text\",\n          \"text\": [\n            \"a\",\n            1\n          ]\n        },\n        {\n          \"type\": \"refusal\",\n          \"text\": \"  x-anthropic-billing-header:indented\"\n        }\n      ]\n    }\n  ],\n  \"reasoning\": {\n    \"effort\": \"\",\n    \"summary\": \"auto\"\n  }\n}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": false
+    },
+    "upstream_output": {
+      "contents": [
+        {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "name": "apply_patch",
+                "args": {
+                  "input": ""
+                },
+                "id": "call_2"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "<system-reminder>\n\u00a0\u3000x-anthropic-billing-header: unicode spaces\n[\n            \"a\",\n            1\n          ]\n  x-anthropic-billing-header:indented\n</system-reminder>"
+            }
+          ]
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ],
+      "generationConfig": {
+        "thinkingConfig": {
+          "includeThoughts": true
+        }
+      }
+    }
+  },
+  {
+    "case": "builtin-17-326",
+    "model": "o3",
+    "request_text": "{\n  \"model\": \"gpt-5-codex\",\n  \"input\": [\n    {\n      \"type\": \"reasoning\",\n      \"id\": \"rs_1\",\n      \"summary\": [\n        {\n          \"type\": \"summary_text\",\n          \"text\": \"tab\\tand\\rreturn\"\n        }\n      ],\n      \"encrypted_content\": \"gAAAAABsignature\"\n    },\n    {\n      \"type\": \"function_call\",\n      \"call_id\": \"call_1\",\n      \"name\": \"get_weather\",\n      \"arguments\": \"{\\\"city\\\":\\\"Paris\\\"}\"\n    },\n    {\n      \"type\": \"message\",\n      \"role\": \"developer\",\n      \"content\": [\n        {\n          \"type\": 5,\n          \"text\": {\n            \"text\": \"nested\"\n          }\n        }\n      ]\n    },\n    \"hi\",\n    {\n      \"type\": \"message\",\n      \"role\": \"assistant\",\n      \"content\": []\n    }\n  ],\n  \"stream\": 0.5,\n  \"tools\": [],\n  \"include\": [\n    [\n      \"reasoning.encrypted_content\"\n    ]\n  ]\n}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": false
+    },
+    "upstream_output": {
+      "contents": [
+        {
+          "role": "model",
+          "parts": [
+            {
+              "text": "tab\tand\rreturn",
+              "thought": true
+            },
+            {
+              "functionCall": {
+                "name": "get_weather",
+                "args": {
+                  "city": "Paris"
+                },
+                "id": "call_1"
+              },
+              "thoughtSignature": "skip_thought_signature_validator"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "functionResponse": {
+                "name": "get_weather",
+                "response": {
+                  "result": "call interrupted, no output"
+                },
+                "id": "call_1"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "text": "<system-reminder>\n{\n            \"text\": \"nested\"\n          }\n</system-reminder>"
+            }
+          ]
+        }
+      ],
+      "safetySettings": [
+        {
+          "category": "HARM_CATEGORY_HARASSMENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_HATE_SPEECH",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "OFF"
+        },
+        {
+          "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+          "threshold": "BLOCK_NONE"
+        }
+      ]
+    }
+  },
+  {
+    "case": "builtin-17-3825",
+    "model": " Gemini-2.5-Pro ",
+    "request_text": "{\n  \"agent\": \"agents\\/custom-agent\",\n  \"stream\": false,\n  \"input\": [\n    {\n      \"type\": \"user_input\",\n      \"content\": [\n        {\n          \"type\": \"image\",\n          \"mime_type\": \"video\\/mp4\",\n          \"data\": \"aGVsbG8=\"\n        },\n        {\n          \"type\": \"image\",\n          \"mime_type\": \"text\\/plain\",\n          \"data\": \"aGVsbG8=\"\n        }\n      ]\n    },\n    {\n      \"type\": \"thought\",\n      \"thought_signature\": \"skip_thought_signature_validator\"\n    },\n    {\n      \"type\": \"user_input\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": []\n        },\n        {\n          \"type\": \"text\",\n          \"text\": \"tab\\tand\\rreturn\"\n        }\n      ]\n    },\n    {\n      \"type\": \"user_input\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"caf\\u00e9 na\\u00efve fa\\u00e7ade\"\n        },\n        {\n          \"type\": \"text\",\n          \"text\": \"\\ufeffbyte order mark\"\n        }\n      ]\n    }\n  ],\n  \"systemInstruction\": {\n    \"text\": \"null\"\n  },\n  \"tools\": [\n    {\n      \"function_declarations\": [\n        {\n          \"name\": \"run-shell\",\n          \"description\": \"\\n\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ]\n          }\n        },\n        {\n          \"name\": \"get_weather\",\n          \"description\": \"line one\\nline two\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ]\n          }\n        },\n        {\n          \"name\": \"run-shell\",\n          \"description\": \"\\u0130stanbul \\u0391\\u03a3\",\n          \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\n              \"city\": {\n                \"type\": \"string\"\n              }\n            },\n            \"required\": [\n              \"city\"\n            ]\n          }\n        }\n      ]\n    },\n    {\n      \"type\": \"url_context\"\n    },\n    {\n      \"type\": \"function\",\n      \"name\": {\n        \"a\": 1\n      },\n      \"description\": 5\n    }\n  ],\n  \"generation_config\": {\n    \"max_output_tokens\": 2335,\n    \"thinking_level\": \"medium\",\n    \"thinkingSummaries\": \"\"\n  },\n  \"tool_choice\": {\n    \"type\": \"function\",\n    \"name\": \"run-shell\"\n  },\n  \"environment\": {\n    \"id\": \"env_2\"\n  },\n  \"service_tier\": null\n}",
+    "options": {
+      "from": "interactions",
+      "to": "claude",
+      "stream": false
+    },
+    "upstream_output": {
+      "model": " Gemini-2.5-Pro ",
+      "max_tokens": 2335,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "video/mp4",
+                "data": "aGVsbG8="
+              }
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "text/plain",
+                "data": "aGVsbG8="
+              }
+            },
+            {
+              "type": "text",
+              "text": "[]"
+            },
+            {
+              "type": "text",
+              "text": "tab\tand\rreturn"
+            },
+            {
+              "type": "text",
+              "text": "caf\u00e9 na\u00efve fa\u00e7ade"
+            },
+            {
+              "type": "text",
+              "text": "\ufeffbyte order mark"
+            }
+          ]
+        }
+      ],
+      "system": "null",
+      "thinking": {
+        "type": "enabled",
+        "budget_tokens": 8192
+      },
+      "tool_choice": {
+        "type": "tool",
+        "name": "run-shell"
+      },
+      "tools": [
+        {
+          "name": "run-shell",
+          "input_schema": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "description": "\n"
+        },
+        {
+          "name": "get_weather",
+          "input_schema": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "description": "line one\nline two"
+        },
+        {
+          "name": "run-shell",
+          "input_schema": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "description": "\u0130stanbul \u0391\u03a3"
+        },
+        {
+          "name": "___________a___1________",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          },
+          "description": "5"
+        }
+      ]
+    }
+  }
+]
