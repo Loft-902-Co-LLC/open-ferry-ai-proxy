@@ -12,7 +12,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::Case;
-use super::config_diff::{ROOT_EXAMPLE, uncomment_root_example};
+use super::config_diff::{ROOT_EXAMPLE, VERTEX_OPENAPI, uncomment_root_example};
 
 fn case(name: &str, file: &str, steps: Vec<Value>) -> Case {
     Case::new(name, "", "").with_options(json!({ "file": file, "steps": steps }))
@@ -522,6 +522,26 @@ const PLUGINS_REWRITTEN: &str = "upstream writes the plugins section from the co
 
 pub fn steps(upstream: &Path) -> Vec<Case> {
     let mut cases = vec![
+        case(
+            "vertex-openapi-roundtrip",
+            VERTEX_OPENAPI,
+            vec![resave(false), resave(true), resave(false)],
+        ),
+        case(
+            "vertex-openapi-add-flip-clear",
+            "vertex-api-key: [{api-key: dummy}]\n",
+            vec![
+                save(VERTEX_OPENAPI, false),
+                save(&VERTEX_OPENAPI.replace("false", "true"), true),
+                save("vertex-api-key: [{api-key: dummy}]\n", false),
+            ],
+        )
+        .known_difference("upstream's zero-value pruning drops newly added openapi: false; open-ferry preserves the explicit routing override (see UPSTREAM.md)"),
+        case(
+            "vertex-openapi-v8",
+            "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy, openapi: false, openapi-location: global, models: [{name: partner/model, openapi: false}]}]}]\noauth:\n  model-alias: {vertex: [{name: model, alias: public, openapi: false}]}\n  settings: {vertex: [{name: model, openapi: false}]}\n",
+            vec![resave(false), resave(true)],
+        ),
         case(
             "vertex-name-only-legacy",
             "vertex-api-key: [{api-key: dummy, models: [{name: meta/llama}]}]\n",

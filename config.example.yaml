@@ -565,16 +565,20 @@ upstream:
 #       models:                                     # optional: map aliases to upstream model names
 #         - name: "gemini-2.5-flash"                # upstream model name
 #           alias: "vertex-flash"                   # client-visible alias
+#           openapi: false                         # optional model override; false keeps native generateContent
 #           display-name: "Vertex Flash"            # optional catalog display name
 #           thinking:                                # optional: exact thinking capability for this configured model
 #             levels: ["high", "medium", "low", "none", "auto"]
 #         - name: "gemini-2.5-pro"
 #           alias: "vertex-pro"
+#           openapi: true                          # optional model override; true uses endpoints/openapi
 #       excluded-models:                            # optional: models to exclude from listing
 #         - "imagen-3.0-generate-002"
 #         - "imagen-*"
 #       keys:
 #         - api-key: "vk-123..."                        # x-goog-api-key header
+#           openapi: false                             # optional credential override; omit for automatic publisher detection
+#           openapi-location: "global"                 # optional OpenAPI resource location and Google hostname override
 #           weight: 5                                    # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #
 #   # Codex API keys
@@ -835,6 +839,7 @@ oauth:
   #   vertex:
   #     - name: "gemini-2.5-pro"
   #       alias: "g2.5p"
+  #       openapi: true # optional Vertex model override, ahead of credential and automatic routing
   #   claude:
   #     - name: "claude-sonnet-4-5-20250929"
   #       alias: "cs4.5"
@@ -852,6 +857,9 @@ oauth:
   # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
   # Supported channels: vertex, claude, codex, xai, meta.
   # settings:
+  #   vertex:
+  #     - name: "partner/custom-model"
+  #       openapi: false # optional: keep this model on the native Vertex route
   #   codex:
   #     - name: "gpt-6-sol"
   #       max-context-length: 524288 # overrides context window advertised to Codex clients

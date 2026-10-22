@@ -6,7 +6,7 @@
 // DiffOAuthRequestScopedErrorsChanges,
 // summarizeOAuthRequestScopedErrorsList) and oauth_settings.go
 // (SummarizeOAuthSettings, DiffOAuthSettingsChanges,
-// summarizeOAuthSettingsList) (v8.0.36, MIT).
+// summarizeOAuthSettingsList) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The change lines of the per-channel OAuth maps: `oauth-excluded-models`,
@@ -60,6 +60,9 @@ pub(super) fn summarize_model_alias(
                     return None;
                 }
                 let mut key = format!("{name}->{alias_value}");
+                if let Some(openapi) = alias.openapi {
+                    key.push_str(&format!("|openapi={openapi}"));
+                }
                 if alias.fork {
                     key.push_str("|fork");
                 }
@@ -150,6 +153,9 @@ pub(super) fn summarize_settings(
                 continue;
             }
             let mut key = format!("{name}->{}", to_lower(setting.alias.trim()));
+            if let Some(openapi) = setting.openapi {
+                key.push_str(&format!("|openapi={openapi}"));
+            }
             if setting.max_context_length > 0 {
                 key.push_str(&format!(
                     "|max-context-length={}",

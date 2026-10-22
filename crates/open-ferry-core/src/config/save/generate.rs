@@ -3,7 +3,7 @@
 // fields), disable_image_generation_mode.go (MarshalYAML),
 // credential_concurrency.go (WithDefaults), credential_in_flight.go
 // (DefaultCredentialInFlightConfig) and config_load.go (the defaults
-// LoadConfig sets) (v8.0.36, MIT)
+// LoadConfig sets) (v8.0.38, MIT)
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The settings as upstream writes them: `yaml.Marshal(legacyConfig(cfg))`.
@@ -847,6 +847,7 @@ fn vertex_model(m: &VertexCompatModel) -> Value {
         .put("alias", s(&m.alias))
         .omit_empty("display-name", s(&m.display_name))
         .omit_empty("force-mapping", Value::Bool(m.force_mapping))
+        .pointer("openapi", m.openapi.map(Value::Bool))
         .pointer("thinking", m.thinking.as_ref().map(thinking))
         .done()
 }
@@ -865,11 +866,14 @@ fn vertex_key(k: &VertexCompatKey) -> Value {
         .pointer("disable-cooling", k.disable_cooling.map(Value::Bool))
         .pointer("request-retry", k.request_retry.map(Value::Int))
         .pointer("interactions", k.interactions.map(Value::Bool))
+        .pointer("openapi", k.openapi.map(Value::Bool))
+        .omit_empty("openapi-location", s(&k.openapi_location))
         .done()
 }
 
 fn oauth_model_alias(a: &OAuthModelAlias) -> Value {
     Fields::default()
+        .pointer("openapi", a.openapi.map(Value::Bool))
         .put("name", s(&a.name))
         .put("alias", s(&a.alias))
         .omit_empty("fork", Value::Bool(a.fork))
@@ -880,6 +884,7 @@ fn oauth_model_alias(a: &OAuthModelAlias) -> Value {
 
 fn oauth_model_setting(m: &OAuthModelSetting) -> Value {
     Fields::default()
+        .pointer("openapi", m.openapi.map(Value::Bool))
         .put("name", s(&m.name))
         .omit_empty("alias", s(&m.alias))
         .omit_empty("max-context-length", Value::Int(m.max_context_length))

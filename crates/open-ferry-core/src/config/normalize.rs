@@ -3,7 +3,7 @@
 // steps of config_load.go and parse.go, config_validation.go
 // (SanitizePayloadRules), internal/util/util.go
 // (ResolveAuthDir), and internal/config/oauth_scope.go
-// (ForAPIKey) (v8.0.36, MIT).
+// (ForAPIKey) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The checks and clean-ups upstream applies after decoding.
@@ -369,6 +369,7 @@ pub fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
         key.prefix = normalize_model_prefix(&key.prefix);
         key.base_url = key.base_url.trim().to_owned();
         key.proxy_url = key.proxy_url.trim().to_owned();
+        key.openapi_location = key.openapi_location.trim().to_owned();
         key.headers = normalize_headers(&key.headers);
         key.excluded_models = normalize_excluded_models(&key.excluded_models);
         key.models.retain_mut(|model| {
@@ -540,6 +541,7 @@ pub fn sanitize_oauth_model_alias(
                 continue;
             }
             clean.push(OAuthModelAlias {
+                openapi: entry.openapi,
                 name: name.to_owned(),
                 alias: alias.to_owned(),
                 fork: entry.fork,
@@ -578,6 +580,7 @@ fn sanitize_oauth_settings(
                 continue;
             }
             reversed.push(OAuthModelSetting {
+                openapi: entry.openapi,
                 name: name.to_owned(),
                 alias: alias.to_owned(),
                 max_context_length: entry.max_context_length,

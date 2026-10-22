@@ -53,6 +53,8 @@ pub(crate) fn uncomment_root_example() -> String {
     out
 }
 
+pub(crate) const VERTEX_OPENAPI: &str = "vertex-api-key: [{api-key: dummy, openapi: false, openapi-location: global, models: [{name: partner/model, alias: native, openapi: false}, {name: custom, alias: compat, openapi: true}]}]\noauth-model-alias: {vertex: [{name: custom, alias: public, openapi: true}]}\noauth-settings: {vertex: [{name: partner/model, openapi: false}]}\n";
+
 fn case(name: &str, old: &str, new: &str) -> Case {
     Case::new(name, "", "").with_options(json!({ "old": old, "new": new }))
 }
@@ -254,6 +256,24 @@ openai-compatibility:
 /// The hand-written cases for `config-diff/details`.
 pub fn details() -> Vec<Case> {
     let mut cases = vec![
+        case(
+            "vertex-openapi-added",
+            "vertex-api-key: [{api-key: dummy}]\n",
+            VERTEX_OPENAPI,
+        ),
+        case(
+            "vertex-openapi-cleared",
+            VERTEX_OPENAPI,
+            "vertex-api-key: [{api-key: dummy}]\n",
+        ),
+        case(
+            "vertex-openapi-flipped",
+            VERTEX_OPENAPI,
+            &VERTEX_OPENAPI
+                .replace("false", "true")
+                .replace("global", "us-central1"),
+        ),
+        case("vertex-openapi-unchanged", VERTEX_OPENAPI, VERTEX_OPENAPI),
         case("no-changes", FULL, FULL),
         case("everything-removed", FULL, "port: 8317\n"),
         case("everything-added", "port: 8317\n", FULL),

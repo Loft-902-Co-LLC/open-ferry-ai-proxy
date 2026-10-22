@@ -1,13 +1,16 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/vertex_openapi.go
-// and gemini_vertex_executor.go (v8.0.36, MIT).
+// and gemini_vertex_executor.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Vertex partner/open models use Chat Completions with the existing token cache,
 //! service-account validation, redaction and honest client identity.
 
 use super::*;
+
+mod settings;
 use crate::openai_compat::OpenAiCompatExecutor;
 use open_ferry_translate::go::{equal_fold, to_lower};
+pub(super) use settings::should_execute as should_execute_request;
 
 fn publisher_resource(model: &str) -> Option<(&str, &str)> {
     if !to_lower(model).starts_with("publishers/") {
@@ -40,21 +43,22 @@ fn is_partner(model: &str) -> bool {
             .any(|p| equal_fold(publisher, p))
 }
 
-pub(super) fn should_execute(auth: &Auth, model: &str) -> bool {
+fn explicit_setting(auth: &Auth) -> Option<bool> {
     let parse = |raw: &str| match to_lower(raw.trim()).as_str() {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
+        "true" | "t" | "1" => Some(true),
+        "false" | "f" | "0" => Some(false),
         _ => None,
     };
-    let explicit = auth.attribute("openapi").and_then(parse).or_else(|| {
+    auth.attribute("openapi").and_then(parse).or_else(|| {
         auth.metadata
             .get("openapi")
             .and_then(|v| v.as_bool().or_else(|| v.as_str().and_then(parse)))
-    });
-    explicit.map_or_else(
-        || is_partner(model),
-        |on| on && !is_imagen(base_model(model)),
-    )
+    })
+}
+
+#[cfg(test)]
+fn should_execute(auth: &Auth, model: &str) -> bool {
+    should_execute_request(None, auth, model, &Options::new(Format::OPENAI))
 }
 
 fn normalize_model(model: &str) -> String {
@@ -94,6 +98,24 @@ pub(super) fn normalize_request(request: &Request, options: &Options) -> (Reques
         request.model = model;
     }
     (request, options)
+}
+
+fn explicit_location(config: Option<&Config>, auth: &Auth) -> String {
+    for value in ["openapi_location", "openapi-location"]
+        .into_iter()
+        .filter_map(|key| auth.attribute(key))
+        .chain(
+            ["openapi_location", "openapi-location"]
+                .into_iter()
+                .filter_map(|key| auth.metadata_str(key)),
+        )
+        .chain(settings::resolve_config(config, auth).map(|key| key.openapi_location.as_str()))
+    {
+        if !value.trim().is_empty() {
+            return value.trim().to_owned();
+        }
+    }
+    String::new()
 }
 
 fn location(auth: &Auth, default: &str) -> String {
@@ -165,6 +187,12 @@ fn has_version(base: &str) -> bool {
 }
 
 fn base_url(base: &str, project: &str, location: &str) -> String {
+    let explicit = location.trim();
+    let location = if explicit.is_empty() {
+        DEFAULT_LOCATION
+    } else {
+        explicit
+    };
     let mut base = base.trim().trim_end_matches('/').to_owned();
     if base.is_empty() {
         base = if equal_fold(location, "global") {
@@ -174,13 +202,19 @@ fn base_url(base: &str, project: &str, location: &str) -> String {
         };
     }
     if base.ends_with("/endpoints/openapi") {
-        return base;
+        return format!(
+            "{}/endpoints/openapi",
+            rewrite_location(base.trim_end_matches("/endpoints/openapi"), explicit)
+        );
     }
     if let Some(index) = base.find("/publishers/") {
-        return format!("{}/endpoints/openapi", &base[..index]);
+        return format!(
+            "{}/endpoints/openapi",
+            rewrite_location(&base[..index], explicit)
+        );
     }
     if base.contains("/projects/") && base.contains("/locations/") {
-        return format!("{base}/endpoints/openapi");
+        return format!("{}/endpoints/openapi", rewrite_location(&base, explicit));
     }
     if !has_version(&base) {
         base.push_str("/v1");
@@ -191,7 +225,36 @@ fn base_url(base: &str, project: &str, location: &str) -> String {
             project.trim()
         ));
     }
-    format!("{base}/endpoints/openapi")
+    format!("{}/endpoints/openapi", rewrite_location(&base, explicit))
+}
+
+fn rewrite_location(base: &str, location: &str) -> String {
+    let location = location.trim();
+    if location.is_empty() {
+        return base.to_owned();
+    }
+    let mut rewritten = base.to_owned();
+    if let Some(index) = rewritten.find("/locations/") {
+        let start = index + "/locations/".len();
+        let end = rewritten[start..]
+            .find('/')
+            .map_or(rewritten.len(), |i| start + i);
+        rewritten.replace_range(start..end, location);
+    }
+    if google_host(&rewritten)
+        && let Ok(mut url) = url::Url::parse(&rewritten)
+    {
+        let host = if equal_fold(location, "global") {
+            "aiplatform.googleapis.com".into()
+        } else {
+            format!("{location}-aiplatform.googleapis.com")
+        };
+        let _ = url.set_scheme("https");
+        let _ = url.set_host(Some(&host));
+        let _ = url.set_port(None);
+        return url.to_string();
+    }
+    rewritten
 }
 
 impl VertexExecutor {
@@ -236,7 +299,12 @@ impl VertexExecutor {
             else {
                 unreachable!()
             };
-            let location = location(auth, &default);
+            let explicit = explicit_location(self.config.as_deref(), auth);
+            let location = if explicit.is_empty() {
+                location(auth, &default)
+            } else {
+                explicit.clone()
+            };
             let token = self
                 .tokens
                 .token(&self.clients.get(&auth.proxy_url), &account)
@@ -255,7 +323,12 @@ impl VertexExecutor {
                 .service_account_base_url
                 .as_deref()
                 .unwrap_or_else(|| auth_base_url(auth));
-            (base_url(base, &project, &location), token)
+            let location = if base.contains("/locations/") {
+                &explicit
+            } else {
+                &location
+            };
+            (base_url(base, &project, location), token)
         } else {
             // Static keys follow vertexAPICreds: only configuration attributes
             // may override the destination, never credential-file metadata.
@@ -268,11 +341,19 @@ impl VertexExecutor {
                 .filter(|v| !v.trim().is_empty())
                 .or_else(|| auth.metadata_str("project"))
                 .unwrap_or_default();
-            (base_url(base, project, &location(auth, "")), key.to_owned())
+            let explicit = explicit_location(self.config.as_deref(), auth);
+            let location = if !base.contains("/locations/") && explicit.is_empty() {
+                location(auth, "")
+            } else {
+                explicit
+            };
+            (base_url(base, project, &location), key.to_owned())
         };
         Ok(self.openapi_compat().with_vertex_credentials(base, token))
     }
 }
 
+#[cfg(test)]
+mod settings_tests;
 #[cfg(test)]
 mod tests;

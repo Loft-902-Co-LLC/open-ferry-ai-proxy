@@ -1888,7 +1888,10 @@ mod tests {
         assert!(config.oauth_model_alias.keys().eq(channels));
         assert!(config.oauth_excluded_models.keys().eq(channels));
         assert!(config.oauth_request_scoped_errors.keys().eq(channels));
-        assert!(config.oauth_settings.keys().eq(["codex"]));
+        assert!(config.oauth_settings.keys().eq(["codex", "vertex"]));
+        assert_eq!(config.vertex_api_key[0].openapi, Some(false));
+        assert_eq!(config.vertex_api_key[0].openapi_location, "global");
+        assert_eq!(config.oauth_settings["vertex"][0].openapi, Some(false));
         assert_eq!(config.gpt_image_2_base_model, "gpt-5.4-mini");
     }
 

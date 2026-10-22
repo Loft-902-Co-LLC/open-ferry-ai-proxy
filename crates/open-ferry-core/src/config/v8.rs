@@ -775,7 +775,10 @@ fn expand_v8_groups(groups: &Node, provider: &str) -> Result<Node, ConfigError> 
         }
         for (field, _) in group.pairs() {
             let field = field.value.as_str();
-            if !matches!(field, "name" | "base-url" | "keys") && !SHARED_KEY_FIELDS.contains(&field)
+            if !matches!(field, "name" | "base-url" | "keys")
+                && !SHARED_KEY_FIELDS.contains(&field)
+                // Vertex group defaults are an open-ferry extension to v8.0.38.
+                && !(provider == "vertex" && matches!(field, "openapi" | "openapi-location"))
             {
                 return Err(invalid(format!(
                     "api-keys.{provider}: unsupported group field {field}"
@@ -795,7 +798,11 @@ fn expand_v8_groups(groups: &Node, provider: &str) -> Result<Node, ConfigError> 
             }
             let mut item = Node::mapping();
             for (field, value) in group.pairs() {
-                if field.value == "base-url" || SHARED_KEY_FIELDS.contains(&field.value.as_str()) {
+                if field.value == "base-url"
+                    || SHARED_KEY_FIELDS.contains(&field.value.as_str())
+                    || (provider == "vertex"
+                        && matches!(field.value.as_str(), "openapi" | "openapi-location"))
+                {
                     set_yaml_path(&mut item, &field.value, value);
                 }
             }

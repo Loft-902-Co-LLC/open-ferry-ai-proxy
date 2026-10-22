@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config.go, sdk_config.go,
 // config_types.go, config_defaults.go and vertex_compat.go, and the strategy names of
-// sdk/cliproxy/service_config.go (v8.0.36, MIT).
+// sdk/cliproxy/service_config.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The typed configuration.
@@ -1168,8 +1168,7 @@ pub struct VertexCompatKey {
     pub proxy_url: String,
     /// Extra headers sent with this key.
     pub headers: BTreeMap<String, String>,
-    /// Upstream model names and their aliases. Only models with both are
-    /// kept.
+    /// Upstream model names and optional aliases. Models without a name are dropped.
     pub models: Vec<VertexCompatModel>,
     /// Models this key doesn't serve; lower case.
     pub excluded_models: Vec<String>,
@@ -1180,12 +1179,18 @@ pub struct VertexCompatKey {
     /// Opts into native Vertex Interactions routing. Unset is disabled;
     /// explicit false is retained, as upstream's optional boolean is.
     pub interactions: Option<bool>,
+    /// Overrides automatic OpenAPI routing; unset inherits model detection.
+    pub openapi: Option<bool>,
+    /// OpenAPI resource location and Google hostname override; empty inherits.
+    pub openapi_location: String,
 }
 
 impl fmt::Debug for VertexCompatKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VertexCompatKey")
             .field("interactions", &self.interactions)
+            .field("openapi", &self.openapi)
+            .field("openapi_location", &self.openapi_location)
             .field("api_key", &Redacted(&self.api_key))
             .field("priority", &self.priority)
             .field("weight", &self.weight)
@@ -1209,6 +1214,8 @@ impl fmt::Debug for VertexCompatKey {
     rename_all = "kebab-case"
 )]
 pub struct VertexCompatModel {
+    /// Overrides Vertex OpenAPI routing; unset inherits credential or automatic routing.
+    pub openapi: Option<bool>,
     /// The upstream model name.
     pub name: String,
     /// The name clients use.
@@ -1382,6 +1389,8 @@ pub struct RequestScopedErrorRule {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename = "config.OAuthModelAlias", rename_all = "kebab-case")]
 pub struct OAuthModelAlias {
+    /// Overrides Vertex OpenAPI routing; unset inherits credential or automatic routing.
+    pub openapi: Option<bool>,
     /// The upstream model name.
     pub name: String,
     /// The name clients use.
@@ -1402,6 +1411,8 @@ pub struct OAuthModelAlias {
     rename_all = "kebab-case"
 )]
 pub struct OAuthModelSetting {
+    /// Overrides Vertex OpenAPI routing; unset inherits credential or automatic routing.
+    pub openapi: Option<bool>,
     /// The model name.
     pub name: String,
     /// An alias the setting is limited to.
@@ -1714,6 +1725,7 @@ mod tests {
             name: name.to_owned(),
             alias: alias.to_owned(),
             max_context_length: length,
+            ..OAuthModelSetting::default()
         };
         let settings = vec![
             setting("gpt-5", "", 1),
@@ -1747,6 +1759,7 @@ mod tests {
                 name: "upstream".to_owned(),
                 alias: "public".to_owned(),
                 max_context_length: 1_048_576,
+                ..OAuthModelSetting::default()
             },
         ];
         let length = |id: &str, meta: &str| {

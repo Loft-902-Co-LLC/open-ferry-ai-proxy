@@ -2,7 +2,7 @@
 // (SummarizeGeminiModels, SummarizeClaudeModels, SummarizeCodexModels,
 // SummarizeVertexModels), oauth_excluded.go (SummarizeExcludedModels) and
 // model_hash.go (ComputeExcludedModelsHash, thinkingHashSuffix,
-// normalizeModelPairs, hashJoined) (v8.0.36, MIT).
+// normalizeModelPairs, hashJoined) (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Hashes of a key's model lists, so a change line can say a list changed
@@ -94,8 +94,12 @@ pub(super) fn vertex_models(models: &[VertexCompatModel]) -> Summary {
             }
             let shown = if alias.is_empty() { name } else { alias };
             Some(format!(
-                "{shown}|{}{}",
+                "{shown}|{}{}{}",
                 model.display_name.trim(),
+                model
+                    .openapi
+                    .map(|v| format!("|openapi={v}"))
+                    .unwrap_or_default(),
                 thinking_suffix(model.thinking.as_ref())
             ))
         })

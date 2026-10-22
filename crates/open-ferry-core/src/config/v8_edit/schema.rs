@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (legacyConfig) and
 // the structs it holds in internal/config, internal/pluginstore and
-// internal/registry (v8.0.36, MIT): their YAML field names, as yaml.v3
+// internal/registry (v8.0.38, MIT): their YAML field names, as yaml.v3
 // reads them with reflection.
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -311,6 +311,7 @@ static CONFIG_GEMINI_MODEL: Type = Type {
 static CONFIG_OAUTH_MODEL_ALIAS: Type = Type {
     name: "config.OAuthModelAlias",
     fields: &[
+        ("openapi", Field::Leaf),
         ("alias", Field::Leaf),
         ("display-name", Field::Leaf),
         ("force-mapping", Field::Leaf),
@@ -322,6 +323,7 @@ static CONFIG_OAUTH_MODEL_ALIAS: Type = Type {
 static CONFIG_OAUTH_MODEL_SETTING: Type = Type {
     name: "config.OAuthModelSetting",
     fields: &[
+        ("openapi", Field::Leaf),
         ("alias", Field::Leaf),
         ("max-context-length", Field::Leaf),
         ("name", Field::Leaf),
@@ -533,6 +535,8 @@ static CONFIG_TLS_CONFIG: Type = Type {
 static CONFIG_VERTEX_COMPAT_KEY: Type = Type {
     name: "config.VertexCompatKey",
     fields: &[
+        ("openapi", Field::Leaf),
+        ("openapi-location", Field::Leaf),
         ("api-key", Field::Leaf),
         ("base-url", Field::Leaf),
         ("disable-cooling", Field::Leaf),
@@ -551,6 +555,7 @@ static CONFIG_VERTEX_COMPAT_KEY: Type = Type {
 static CONFIG_VERTEX_COMPAT_MODEL: Type = Type {
     name: "config.VertexCompatModel",
     fields: &[
+        ("openapi", Field::Leaf),
         ("alias", Field::Leaf),
         ("display-name", Field::Leaf),
         ("force-mapping", Field::Leaf),

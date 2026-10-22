@@ -7,7 +7,7 @@
 // internal/config/config_normalization.go, internal/modelconfig/model_info.go,
 // ParseSuffix in internal/thinking/suffix.go, the per-account settings read
 // in internal/watcher/synthesizer/file.go and helpers.go, and the plan claim
-// in internal/auth/codex/jwt_parser.go (v8.0.36, MIT).
+// in internal/auth/codex/jwt_parser.go (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models a credential serves, and registering them.
@@ -258,6 +258,8 @@ impl From<&OpenAiCompatibilityModel> for CompatModel {
 /// `VertexCompatModel`, `ClaudeModel` and `CodexModel`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfiguredModel {
+    /// Vertex endpoint override, including the inherited credential setting.
+    pub openapi: Option<bool>,
     /// The provider's name for the model.
     pub name: String,
     /// The name to list it under, or empty for `name`.
@@ -315,6 +317,7 @@ impl From<&Config> for RegistrationRules {
                         is_compat: model.is_compat,
                         thinking: model.thinking.as_ref().map(thinking),
                         support_configuration_update: false,
+                        openapi: None,
                     })
                     .collect(),
                 excluded_models: key.excluded_models.clone(),
@@ -335,6 +338,7 @@ impl From<&Config> for RegistrationRules {
                         is_compat: model.is_compat,
                         thinking: model.thinking.as_ref().map(thinking),
                         support_configuration_update: model.support_configuration_update,
+                        openapi: None,
                     })
                     .collect(),
                 excluded_models: key.excluded_models.clone(),
@@ -361,6 +365,7 @@ impl From<&Config> for RegistrationRules {
                         .models
                         .iter()
                         .map(|model| ConfiguredModel {
+                            openapi: model.openapi.or(key.openapi),
                             name: model.name.clone(),
                             alias: model.alias.clone(),
                             display_name: model.display_name.clone(),
@@ -388,6 +393,7 @@ impl From<&Config> for RegistrationRules {
                             is_compat: model.is_compat,
                             thinking: model.thinking.as_ref().map(thinking),
                             support_configuration_update: false,
+                            openapi: None,
                         })
                         .collect(),
                     excluded_models: key.excluded_models.clone(),
@@ -421,6 +427,7 @@ impl From<&Config> for RegistrationRules {
 /// A configured Claude model.
 fn claude_model(model: &crate::config::ClaudeModel) -> ConfiguredModel {
     ConfiguredModel {
+        openapi: None,
         name: model.name.clone(),
         alias: model.alias.clone(),
         display_name: model.display_name.clone(),
@@ -1040,6 +1047,22 @@ fn build_config_models(
         if let Some(thinking) = resolve_thinking(name, model.thinking.as_ref()) {
             info.thinking = Some(thinking);
         }
+        if model_type == "vertex" {
+            let publisher = vertex_publisher(name);
+            if !equal_fold(&publisher, "google") {
+                info.owned_by = publisher;
+            }
+            if info.thinking.is_none()
+                && model
+                    .openapi
+                    .unwrap_or_else(|| is_vertex_openapi_model(name))
+            {
+                info.thinking = Some(ThinkingSupport {
+                    levels: vec!["low".into(), "medium".into(), "high".into()],
+                    ..ThinkingSupport::default()
+                });
+            }
+        }
         out.push(info);
     }
     out
@@ -1620,6 +1643,48 @@ fn claims_plan_type(token: &str) -> Option<String> {
     Some(plan_type)
 }
 
+fn vertex_publisher_parts(name: &str) -> Option<(&str, &str)> {
+    let base = parse_suffix(name.trim()).trim();
+    if go::to_lower(base).starts_with("publishers/") {
+        let (publisher, tail) = base[11..].trim().split_once('/')?;
+        let tail = tail.trim();
+        if !go::to_lower(tail).starts_with("models/") {
+            return None;
+        }
+        return Some((publisher.trim(), tail[7..].trim()));
+    }
+    base.split_once('/').map(|(p, m)| (p.trim(), m.trim()))
+}
+
+fn is_vertex_openapi_model(name: &str) -> bool {
+    vertex_publisher_parts(name).is_some_and(|(publisher, model)| {
+        !publisher.is_empty()
+            && !model.is_empty()
+            && !model.contains('/')
+            && !["google", "models", "publishers"]
+                .iter()
+                .any(|p| equal_fold(publisher, p))
+    })
+}
+
+fn vertex_publisher(name: &str) -> String {
+    let base = parse_suffix(name.trim()).trim();
+    let lower = go::to_lower(base);
+    if lower.starts_with("publishers/")
+        && let Some((publisher, model)) = vertex_publisher_parts(base)
+        && !publisher.is_empty()
+        && !model.is_empty()
+    {
+        return go::to_lower(publisher);
+    }
+    if lower.starts_with("models/") && !base[7..].trim().is_empty() {
+        return "google".into();
+    }
+    base.split_once('/')
+        .filter(|(publisher, model)| !publisher.trim().is_empty() && !model.trim().is_empty())
+        .map_or_else(|| "google".into(), |(publisher, _)| publisher.trim().into())
+}
+
 /// Credential and alias-declared MaaS names supplement the Vertex catalog.
 fn append_vertex_openapi_models(
     auth: &Auth,
@@ -1650,11 +1715,7 @@ fn append_vertex_openapi_models(
             metadata_model_id: name.to_owned(),
             object: "model".to_owned(),
             created: now,
-            owned_by: name
-                .split_once('/')
-                .filter(|(publisher, _)| !publisher.trim().is_empty())
-                .map_or("google", |(publisher, _)| publisher.trim())
-                .to_owned(),
+            owned_by: vertex_publisher(name),
             model_type: "vertex".to_owned(),
             display_name: name.to_owned(),
             user_defined: true,

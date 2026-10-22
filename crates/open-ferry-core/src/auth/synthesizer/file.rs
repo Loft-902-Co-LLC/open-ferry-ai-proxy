@@ -3,7 +3,7 @@
 // sdk/cliproxy/auth/oauth_model_alias.go, SanitizeOAuthModelAlias in
 // internal/config/config_normalization.go, and the plan-type read of
 // ParseJWTToken and GetPlanType in internal/auth/codex/jwt_parser.go
-// (v8.0.36, MIT).
+// (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records from the credential files at the top of the auth directory, as
@@ -289,6 +289,7 @@ pub fn synthesize_auth_file(
         auth.attributes
             .insert("openapi_models".to_owned(), names.join(","));
     }
+    super::vertex::apply_openapi_settings(&mut auth, &metadata);
     apply_auth_excluded_models_meta(&mut auth, &per_account_excluded, AUTH_KIND_OAUTH);
     if let Some(plan_type) = plan_type {
         auth.attributes.insert("plan_type".to_owned(), plan_type);
@@ -325,6 +326,8 @@ pub struct ModelAlias {
     pub display_name: String,
     /// Whether requests for the alias always map to the model.
     pub force_mapping: bool,
+    /// Vertex endpoint override; unset inherits credential or automatic routing.
+    pub openapi: Option<bool>,
 }
 
 /// Stores `aliases`, sanitized, as `auth`'s `model_aliases` attribute in
@@ -361,6 +364,7 @@ pub fn sanitize_model_aliases(aliases: Vec<ModelAlias>) -> Vec<ModelAlias> {
             fork: entry.fork,
             display_name: entry.display_name.trim().to_owned(),
             force_mapping: entry.force_mapping,
+            openapi: entry.openapi,
         });
     }
     out
@@ -370,7 +374,11 @@ pub fn sanitize_model_aliases(aliases: Vec<ModelAlias>) -> Vec<ModelAlias> {
 fn alias_json(alias: &ModelAlias) -> String {
     use open_ferry_translate::go::json_string;
     let mut out = format!(
-        "{{\"name\":{},\"alias\":{}",
+        "{{{}\"name\":{},\"alias\":{}",
+        alias
+            .openapi
+            .map(|v| format!("\"openapi\":{v},"))
+            .unwrap_or_default(),
         json_string(&alias.name),
         json_string(&alias.alias)
     );
@@ -389,20 +397,18 @@ fn alias_json(alias: &ModelAlias) -> String {
 }
 
 /// A credential file's model aliases, merged from `model_aliases`,
-/// `model-aliases` and `models`. A list Go couldn't decode into aliases yields none.
+/// `model-aliases` and `models`. Invalid items are skipped independently.
 fn extract_model_aliases(metadata: &Map<String, Value>) -> Vec<ModelAlias> {
     ["model_aliases", "model-aliases", "models"]
         .into_iter()
         .filter_map(|key| metadata.get(key).and_then(Value::as_array))
-        .flat_map(|items| decode_model_aliases(items).unwrap_or_default())
+        .flat_map(|items| decode_model_aliases(items))
         .collect()
 }
 
-/// Go's `json.Unmarshal` into `[]OAuthModelAlias` of the list it marshaled
-/// again: each key matching a field without regard to case decoded in
-/// sorted order, `null` leaving the field as it was, and any value of the
-/// wrong type failing the whole list.
-fn decode_model_aliases(items: &[Value]) -> Option<Vec<ModelAlias>> {
+/// Decodes each model object as Go remarshal/unmarshal does, skipping invalid
+/// entries so mixed string/object model lists retain their alias rules.
+pub fn decode_model_aliases(items: &[Value]) -> Vec<ModelAlias> {
     let text = |item: &Map<String, Value>, field: &str| {
         decode_field(
             remarshaled_fold_values(item, field),
@@ -415,7 +421,7 @@ fn decode_model_aliases(items: &[Value]) -> Option<Vec<ModelAlias>> {
     };
     items
         .iter()
-        .map(|item| match item {
+        .filter_map(|item| match item {
             Value::Null => Some(ModelAlias::default()),
             Value::Object(item) => Some(ModelAlias {
                 name: text(item, "name")?,
@@ -423,6 +429,15 @@ fn decode_model_aliases(items: &[Value]) -> Option<Vec<ModelAlias>> {
                 fork: flag(item, "fork")?,
                 display_name: text(item, "display-name")?,
                 force_mapping: flag(item, "force-mapping")?,
+                openapi: remarshaled_fold_values(item, "openapi")
+                    .into_iter()
+                    .try_fold(None, |_, value| {
+                        if value.is_null() {
+                            Some(None)
+                        } else {
+                            value.as_bool().map(Some)
+                        }
+                    })?,
             }),
             _ => None,
         })
@@ -1059,6 +1074,12 @@ mod tests {
     #[test]
     fn model_alias_decoding_matches_go() {
         let decode = |value: Value| extract_model_aliases(value.as_object().unwrap());
+        let rules = decode(
+            serde_json::json!({"models": ["unrelated", {"name":"m", "alias":"a", "OpenAPI":true, "openapi":null}, {"name":"other", "alias":"b", "openapi":false}]}),
+        );
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].openapi, None);
+        assert_eq!(rules[1].openapi, Some(false));
         // Go marshals the list again, sorting keys, and decodes each key in
         // turn: "name" comes after "Name", and a null leaves the name as it was.
         for aliases in [
@@ -1091,12 +1112,15 @@ mod tests {
             auth.attribute("model_aliases"),
             Some(r#"[{"name":"m","alias":"a","display-name":"Shown","force-mapping":true}]"#)
         );
-        // A value of the wrong type rejects the whole list.
-        assert!(
-            decode(json!({"model_aliases": [{"name": "m", "alias": "a"}, {"fork": "yes"}]}))
-                .is_empty()
+        // A bad item no longer discards adjacent valid model rules.
+        assert_eq!(
+            decode(json!({"model_aliases": [{"name": "m", "alias": "a"}, {"fork": "yes"}]})).len(),
+            1
         );
-        assert!(decode(json!({"model_aliases": [{"name": "m", "alias": "a"}, "x"]})).is_empty());
+        assert_eq!(
+            decode(json!({"model_aliases": [{"name": "m", "alias": "a"}, "x"]})).len(),
+            1
+        );
         assert!(decode(json!({"model_aliases": {"name": "m", "alias": "a"}})).is_empty());
         // Alias sources are merged, including when another source is null.
         assert_eq!(
