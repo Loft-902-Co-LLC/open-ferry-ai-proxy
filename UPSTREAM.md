@@ -305,8 +305,11 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Chat Completions tool call arguments that aren't JSON are left out.** Upstream copies a tool call's `function.arguments` into the Gemini request's `args` as raw JSON, so arguments such as `""`, or missing ones, make the request invalid JSON. We send the call without `args`.
 For the reviewed Interactions-to-Chat, Interactions-to-Claude and
 Responses-to-Gemini request text paths, parity accepts compacted JSON only
-when the exact Go span occurs as a non-string value in the lexical request
-bytes, never merely inside a client string. The Responses-to-Gemini text
+when the exact Go span is a complete lexical value in the request bytes,
+never merely inside a client string. A raw tool-result fallback can contain
+a complete quoted JSON string token; only that whole token is a witness,
+so its escape spelling may be compacted without accepting changed client
+text inside a string. The Responses-to-Gemini text
 may include the unchanged system-reminder wrapper. In Interactions-to-Claude,
 a collection-valued function tool name can also sanitize differently: Go
 sanitizes the raw JSON spelling, while open-ferry sanitizes compact JSON.
