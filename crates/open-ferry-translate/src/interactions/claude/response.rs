@@ -3,7 +3,7 @@
 // (v8.0.38, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Gemini Interactions responses → Claude Messages responses.
+//! Gemini Interactions responses â†’ Claude Messages responses.
 //!
 //! [`InteractionsToClaudeStream`] turns each Interactions stream event into
 //! Claude SSE events, one chunk per event, and
@@ -15,8 +15,9 @@
 //! taken out of the input count when only a total is given.
 //!
 //! Deviations from upstream:
-//! - An event or body that is not valid JSON is treated as having no fields.
-//!   gjson reads what it can from malformed JSON.
+//! - An event whose JSON is invalid, or a whole body whose first JSON value
+//!   is invalid, is treated as having no fields. gjson can read fields from
+//!   malformed values; whole bodies with a valid first value keep its fields.
 //! - Where upstream copies Interactions' JSON text into a string (a text,
 //!   name, ID or signature that is an object or an array, or a function
 //!   call's `arguments` streamed in `partial_json`), we write the same JSON
