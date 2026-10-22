@@ -1941,7 +1941,10 @@ impl Emitter {
 
     /// yaml_emitter_write_block_scalar_hints.
     fn write_block_scalar_hints(&mut self, value: &[u8]) -> Result<(), EmitterError> {
-        if is_space(value, 0) || is_break(value, 0) {
+        if is_space(value, 0)
+            || is_break(value, 0)
+            || (self.protect_config_comments && is_blank(value, 0))
+        {
             // Go's `'0' + byte(emitter.best_indent)`, truncating and
             // wrapping as Go does.
             let indent_hint = [b'0'.wrapping_add(self.best_indent as u8)];
@@ -2022,9 +2025,11 @@ impl Emitter {
         while i < value.len() {
             if is_break(value, i) {
                 if !breaks && !leading_spaces && at(value, i) == b'\n' {
-                    // yaml.v3 scans from the start of the value here, not
-                    // from i.
-                    let mut k = 0usize;
+                    // yaml.v3 looks from the value's start. With a more-indented
+                    // first line that suppresses every later folding escape.
+                    // Config writes use libyaml's lookahead from this break so
+                    // ordinary lines still reload with their original breaks.
+                    let mut k = if self.protect_config_comments { i } else { 0 };
                     while is_break(value, k) {
                         k = k.saturating_add(width(at(value, k)));
                     }
