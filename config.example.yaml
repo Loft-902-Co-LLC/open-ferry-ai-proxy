@@ -319,6 +319,13 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # Cache native upstream search results omitted from later Responses history.
+    # Memory: at most limit upstream-sized results, with no per-entry byte cap.
+    # Disabling or changing TTL/limit clears the in-process cache.
+    # web-search-result-cache:
+    #   enabled: false
+    #   ttl: "24h"
+    #   limit: 1024
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
@@ -640,6 +647,7 @@ upstream:
 #           max-context-length: 1048576         # optional: override Codex client context window metadata
 #           force-mapping: true                 # optional: rewrite response model fields back to the alias
 #           thinking:                           # optional: exact thinking capability for this configured model
+#             # disable-type: "between_tools"    # Sonnet 5.5; inherited from the catalog when omitted
 #             levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #       excluded-models:
 #         - "claude-opus-4-5-20251101" # exclude specific models (exact match)

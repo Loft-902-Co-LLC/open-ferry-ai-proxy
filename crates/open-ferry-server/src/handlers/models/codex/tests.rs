@@ -123,6 +123,7 @@ fn codex_config(enable_apply_patch: bool, optimize_multi_agent_v2: bool) -> Serv
         codex_client: CodexClientConfig {
             enable_apply_patch,
             optimize_multi_agent_v2,
+            ..CodexClientConfig::default()
         },
         ..ServerConfig::default()
     }

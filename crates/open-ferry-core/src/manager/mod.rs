@@ -70,6 +70,7 @@
 
 mod affinity;
 mod alpha_search;
+mod api_key_config;
 mod classify;
 pub mod clienterror;
 mod cooldown;
@@ -99,6 +100,7 @@ mod websocket;
 #[cfg(test)]
 mod tests;
 
+pub use api_key_config::{ApiKeyConfigEntry, config_index, resolve_api_key_config};
 pub use classify::has_unauthorized_auth_failure;
 pub use cooldown::CallResult;
 pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
@@ -111,7 +113,8 @@ pub use quota_signals::provider_supports_quota_observation;
 pub use refresh::ForceRefreshResult;
 pub use select::{ClientModels, ModelProjection};
 pub use settings::{
-    ApiKeyEntry, ModelAlias, OpenAiCompat, RequestScopedErrorRule, RoutingStrategy, Settings,
+    ApiKeyEntry, ClaudeModelConfig, ModelAlias, OpenAiCompat, RequestScopedErrorRule,
+    RoutingStrategy, Settings,
 };
 
 use std::collections::{BTreeMap, HashMap};

@@ -2302,3 +2302,50 @@ fn claude_cli_entries_use_their_entry() {
         BTreeSet::from(["max/opus".to_owned(), "opus".to_owned()])
     );
 }
+
+#[test]
+fn configured_thinking_inherits_catalog_disable_type() {
+    let configured = ThinkingSupport {
+        levels: vec!["high".into(), "low".into(), "none".into()],
+        ..ThinkingSupport::default()
+    };
+    let inherited = resolve_thinking("claude-sonnet-5-5[1m]", Some(&configured)).unwrap();
+    assert_eq!(inherited.disable_type, "between_tools");
+    assert_eq!(inherited.levels, configured.levels);
+    let explicit = ThinkingSupport {
+        disable_type: "disabled".into(),
+        ..configured.clone()
+    };
+    assert_eq!(
+        resolve_thinking("claude-sonnet-5-5", Some(&explicit))
+            .unwrap()
+            .disable_type,
+        "disabled"
+    );
+    assert_eq!(
+        resolve_thinking("claude-opus-5", Some(&configured))
+            .unwrap()
+            .disable_type,
+        ""
+    );
+}
+
+#[test]
+fn resolved_configured_model_is_authoritative_even_without_thinking() {
+    let unknown = resolve_model_info(" private-model(high) ", " claude ", None);
+    assert_eq!(unknown.id, "private-model(high)");
+    assert_eq!(unknown.model_type, "claude");
+    assert!(!unknown.user_defined);
+    assert!(unknown.thinking.is_none());
+
+    let configured = crate::config::ThinkingSupport {
+        levels: vec![" LOW ".into(), "none".into(), "low".into()],
+        ..Default::default()
+    };
+    let known = resolve_model_info("claude-sonnet-5-5[1m]", "claude", Some(&configured));
+    let support = known.thinking.unwrap();
+    assert!(!known.user_defined);
+    assert_eq!(support.levels, ["low", "none"]);
+    assert!(support.zero_allowed);
+    assert_eq!(support.disable_type, "between_tools");
+}

@@ -68,6 +68,7 @@ pub use catalog_store::CatalogStore;
 pub use definitions::{CatalogError, CodexPlan, StaticCatalog};
 pub use registration::{
     ApiKeyEntry, AuthModels, ConfiguredModel, ModelAlias, ModelSetting, RegistrationRules,
+    resolve_model_info,
 };
 
 /// The input token limit Claude model lists show when a model has none.

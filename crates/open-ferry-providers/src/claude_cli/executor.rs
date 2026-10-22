@@ -33,7 +33,7 @@ use super::process::{self, Invocation, Running};
 use super::prompt;
 use super::settings::{Entry, default_work_root};
 use crate::claude::executor::{
-    COMPACT_ALT, compact_error, original_request, response_format, translate_request,
+    COMPACT_ALT, compact_error, original_request, response_format, translate_request_for_auth,
 };
 use crate::claude::stream::apply_patch_error;
 use crate::claude::usage::ensure_responses_usage_details;
@@ -128,12 +128,14 @@ impl ClaudeCliExecutor {
                 "claude-cli: {base_model:?} isn't a model name"
             )));
         }
-        let mut translation = translate_request(
+        let mut translation = translate_request_for_auth(
             self.config.as_deref(),
+            auth,
             request,
             options,
             base_model,
             upstream_stream,
+            None,
         )?;
         if translation.get("stream") != Some(&Value::Bool(upstream_stream)) {
             json::set(&mut translation, "stream", Value::Bool(upstream_stream));

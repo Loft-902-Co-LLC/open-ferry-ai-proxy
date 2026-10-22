@@ -454,6 +454,8 @@ pub struct CodexClientConfig {
     pub optimize_multi_agent_v2: bool,
     /// Advertises freeform `apply_patch` for supported models.
     pub enable_apply_patch: bool,
+    /// Session-scoped native web search results for Responses clients.
+    pub web_search_result_cache: super::CodexWebSearchResultCacheConfig,
 }
 
 /// Streaming behavior.
@@ -1350,6 +1352,8 @@ pub struct ThinkingSupport {
     pub zero_allowed: bool,
     /// Whether a budget of -1 lets the model decide.
     pub dynamic_allowed: bool,
+    /// The API thinking type used to disable thinking; empty means `disabled`.
+    pub disable_type: String,
     /// Named effort levels, when the model uses them.
     pub levels: Vec<String>,
 }

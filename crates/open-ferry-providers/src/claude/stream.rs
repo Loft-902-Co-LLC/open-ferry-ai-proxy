@@ -142,6 +142,7 @@ pub(crate) struct StreamSetup {
     pub(crate) status: u16,
     /// The secrets the request sent, redacted from each error event.
     pub(crate) secrets: Secrets,
+    pub(crate) web_search: Option<super::web_search::Scope>,
 }
 
 /// The state of one stream.
@@ -194,6 +195,9 @@ impl State {
             None => return self.end(None),
         };
         let line = self.redact(line);
+        if let Some(scope) = &self.setup.web_search {
+            scope.record(&line);
+        }
         if !self.observation_overflow && self.observation.len() + line.len() < MAX_LINE {
             self.observation.extend_from_slice(&line);
             self.observation.push(b'\n');

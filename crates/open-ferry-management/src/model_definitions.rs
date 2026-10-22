@@ -172,6 +172,7 @@ fn model(model: &ModelInfo) -> Json {
                     thinking.max,
                     thinking.zero_allowed,
                     thinking.dynamic_allowed,
+                    &thinking.disable_type,
                     &thinking.levels,
                 )
             }),

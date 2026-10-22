@@ -194,12 +194,18 @@ pub(crate) fn ensure_model_max_tokens(
 /// `disableThinkingIfToolChoiceForced`: Claude doesn't allow thinking when
 /// `tool_choice` forces a tool.
 pub(crate) fn disable_thinking_if_tool_choice_forced(body: &mut Value) {
-    let choice = json::str_at(body, "tool_choice.type");
-    if choice == "any" || choice == "tool" {
+    if tool_choice_forces_tool_use(body) {
         json::delete(body, "thinking");
         json::delete(body, "output_config.effort");
         drop_empty_object(body, "output_config");
     }
+}
+
+fn tool_choice_forces_tool_use(body: &Value) -> bool {
+    matches!(
+        json::str_at(body, "tool_choice.type").as_str(),
+        "any" | "tool"
+    )
 }
 
 /// `normalizeClaudeSamplingForUpstream` for a client upstream doesn't
@@ -697,18 +703,23 @@ fn has_signed_thinking_block(body: &Value) -> bool {
 /// `thinking.block_binding.prefix_mismatch_behavior` to `drop_block`, so a
 /// prefix mismatch (a reconnect resending history, a changed tools list,
 /// rebuilt server-tool blocks) drops the bound blocks rather than failing the
-/// request with a 400. A behavior the caller set wins, and an explicit
-/// `thinking.type` is required so a bare `block_binding` object is never
-/// made up on a request without thinking. Runs before the payload rules,
+/// request with a 400. Omitted thinking on these models means adaptive, so
+/// synthesize it unless tool choice forces tool use. Explicit typeless
+/// thinking and a behavior the caller set stay untouched. Runs before payload rules,
 /// which stay the last word and may override or filter the value.
 pub(crate) fn apply_preserved_thinking_binding(body: &mut Value) {
     let model = json::str_at(body, "model");
     if !is_preserved_thinking_model(&model)
-        || !thinking_type_accepts_block_binding(&model, &json::str_at(body, "thinking.type"))
-        || json::get(body, "thinking.block_binding.prefix_mismatch_behavior").is_some()
+        || tool_choice_forces_tool_use(body)
+        || (body.get("thinking").is_some()
+            && (!thinking_type_accepts_block_binding(&model, &json::str_at(body, "thinking.type"))
+                || json::get(body, "thinking.block_binding.prefix_mismatch_behavior").is_some()))
         || !has_signed_thinking_block(body)
     {
         return;
+    }
+    if body.get("thinking").is_none() {
+        json::set(body, "thinking.type", json!("adaptive"));
     }
     json::set(
         body,
@@ -788,7 +799,8 @@ mod tests {
         let mut no_thinking = signed_history("claude-opus-5-5", json!(null));
         no_thinking.as_object_mut().unwrap().remove("thinking");
         apply_preserved_thinking_binding(&mut no_thinking);
-        assert!(no_thinking.get("thinking").is_none());
+        assert_eq!(no_thinking["thinking"]["type"], "adaptive");
+        assert_eq!(behavior(&no_thinking), "drop_block");
     }
 
     #[test]

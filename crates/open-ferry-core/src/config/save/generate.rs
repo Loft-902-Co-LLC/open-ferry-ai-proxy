@@ -178,6 +178,20 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                             "enable-apply-patch",
                             Value::Bool(cfg.client.codex.enable_apply_patch),
                         )
+                        .put(
+                            "web-search-result-cache",
+                            Fields::default()
+                                .put(
+                                    "enabled",
+                                    Value::Bool(cfg.client.codex.web_search_result_cache.enabled),
+                                )
+                                .put("ttl", s(&cfg.client.codex.web_search_result_cache.ttl))
+                                .put(
+                                    "limit",
+                                    Value::Int(cfg.client.codex.web_search_result_cache.limit),
+                                )
+                                .done(),
+                        )
                         .done(),
                 )
                 .done(),
@@ -634,6 +648,7 @@ fn thinking(t: &ThinkingSupport) -> Value {
         .omit_empty("max", Value::Int(t.max))
         .omit_empty("zero-allowed", Value::Bool(t.zero_allowed))
         .omit_empty("dynamic-allowed", Value::Bool(t.dynamic_allowed))
+        .omit_empty("disable-type", s(&t.disable_type))
         .omit_empty("levels", strings(&t.levels))
         .done()
 }

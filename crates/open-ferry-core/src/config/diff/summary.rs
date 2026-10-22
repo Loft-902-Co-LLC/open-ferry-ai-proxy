@@ -184,6 +184,12 @@ fn thinking_suffix(thinking: Option<&ThinkingSupport>) -> String {
     if thinking.dynamic_allowed {
         fields.push("\"dynamic_allowed\":true".to_owned());
     }
+    if !thinking.disable_type.is_empty() {
+        fields.push(format!(
+            "\"disable_type\":{}",
+            json_string(&thinking.disable_type)
+        ));
+    }
     if !thinking.levels.is_empty() {
         let levels: Vec<String> = thinking.levels.iter().map(|l| json_string(l)).collect();
         fields.push(format!("\"levels\":[{}]", levels.join(",")));
@@ -208,13 +214,14 @@ mod tests {
             max: 2048,
             zero_allowed: true,
             dynamic_allowed: true,
+            disable_type: "between_tools".into(),
             levels: vec!["low".to_owned(), "<high>".to_owned()],
         };
         assert_eq!(
             thinking_suffix(Some(&thinking)),
             concat!(
                 r#"|thinking={"min":-1,"max":2048,"zero_allowed":true,"#,
-                r#""dynamic_allowed":true,"levels":["low","\u003chigh\u003e"]}"#
+                r#""dynamic_allowed":true,"disable_type":"between_tools","levels":["low","\u003chigh\u003e"]}"#
             )
         );
     }

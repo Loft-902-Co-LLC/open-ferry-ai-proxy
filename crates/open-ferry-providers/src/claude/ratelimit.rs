@@ -22,6 +22,8 @@
 //! - HTTP dates don't have their weekday checked; Go checks only that it's a
 //!   weekday name.
 
+mod per_minute_body;
+
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -148,6 +150,43 @@ fn utilization_healthy(raw: &str) -> bool {
 /// (`ParseClaudeRateLimitReset`).
 pub(crate) fn rate_limit_reset(headers: &HeaderMap, now: DateTime<Utc>) -> Option<Duration> {
     rate_limit_reset_with_fuzz(headers, now, FUZZ_MIN_SECONDS, FUZZ_MAX_SECONDS)
+}
+
+/// Body-aware exception for an exact per-minute error and one usable retry deadline.
+/// A declared quota window or ambiguous header keeps the conservative parser in charge.
+fn rate_limit_reset_for_error(
+    headers: &HeaderMap,
+    body: &[u8],
+    now: DateTime<Utc>,
+) -> Option<Duration> {
+    const STATUS_HEADERS: [&str; 5] = [
+        "anthropic-ratelimit-unified-status",
+        "anthropic-ratelimit-unified-5h-status",
+        "anthropic-ratelimit-unified-7d-status",
+        "anthropic-ratelimit-unified-7d_oi-status",
+        "anthropic-ratelimit-unified-overage-status",
+    ];
+    let per_minute = per_minute_body::is_explicit(body);
+    let quota_status = STATUS_HEADERS.iter().any(|name| {
+        headers
+            .get_all(*name)
+            .iter()
+            .any(|value| !String::from_utf8_lossy(value.as_bytes()).trim().is_empty())
+    });
+    if per_minute && !quota_status {
+        let mut retries = headers.get_all("retry-after").iter();
+        if let Some(raw) = retries.next().and_then(|value| value.to_str().ok())
+            && retries.next().is_none()
+            && let Some(retry_at) = parse_retry_after(raw, now)
+            && retry_at > now
+            && retry_at - now <= chrono::TimeDelta::hours(7 * 24 + 1)
+        {
+            let mut headers = headers.clone();
+            headers.remove("anthropic-ratelimit-unified-reset");
+            return rate_limit_reset(&headers, now);
+        }
+    }
+    rate_limit_reset(headers, now)
 }
 
 fn rate_limit_reset_with_fuzz(
@@ -369,7 +408,7 @@ pub(crate) fn classify(
     let mut error = ExecError::upstream(status, String::from_utf8_lossy(body));
     error.headers = error_headers(headers);
     if (400..600).contains(&status) {
-        error.retry_after = rate_limit_reset(headers, Utc::now());
+        error.retry_after = rate_limit_reset_for_error(headers, body, Utc::now());
     }
     if status == 429 {
         if !model_level_cooling && unified_rejection(headers) {
@@ -422,7 +461,7 @@ pub(crate) fn fast_direct_error(status: u16, headers: &HeaderMap, body: &[u8]) -
     let mut error = ExecError::upstream(status, String::from_utf8_lossy(body));
     error.headers = error_headers(headers);
     if status == 429 {
-        error.retry_after = rate_limit_reset(headers, Utc::now());
+        error.retry_after = rate_limit_reset_for_error(headers, body, Utc::now());
         error.credential_scoped = unified_rejection(headers);
     }
     error.request_scoped = !error.credential_scoped;
@@ -816,5 +855,258 @@ mod tests {
         let error = fast_direct_error(400, &response, b"bad");
         assert!(error.request_scoped && !error.credential_scoped);
         assert_eq!(error.retry_after, None);
+    }
+}
+
+#[cfg(test)]
+mod per_minute_tests {
+    use super::*;
+    use chrono::TimeDelta;
+    use serde_json::json;
+
+    fn body(message: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"error": {"type": "rate_limit_error", "message": message}}))
+            .unwrap()
+    }
+    const MESSAGE: &str =
+        "This request would exceed the requests per minute rate limit. Please try again later.";
+    fn headers(now: DateTime<Utc>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "30".parse().unwrap());
+        headers.insert(
+            "anthropic-ratelimit-unified-reset",
+            (now + TimeDelta::hours(4))
+                .timestamp()
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+    fn assert_range(headers: &HeaderMap, body: &[u8], now: DateTime<Utc>, seconds: u64) {
+        let before = headers.clone();
+        let reset = rate_limit_reset_for_error(headers, body, now).unwrap();
+        assert!(
+            (seconds + 1..=seconds + 30).contains(&reset.as_secs()),
+            "{reset:?}; body={:?}",
+            String::from_utf8_lossy(body)
+        );
+        assert_eq!(*headers, before);
+    }
+    #[test]
+    fn exact_per_minute_messages_use_the_single_retry_deadline() {
+        let now = Utc::now();
+        for unit in ["requests", "input tokens", "output tokens"] {
+            let message = format!(
+                "  THIS REQUEST WOULD EXCEED THE {} PER MINUTE RATE LIMIT. PLEASE TRY AGAIN LATER.\n",
+                unit.to_uppercase()
+            );
+            assert_range(&headers(now), &body(&message), now, 30);
+        }
+        let mut h = headers(now);
+        h.insert(
+            "retry-after",
+            (now + TimeDelta::seconds(30))
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+        let now = DateTime::from_timestamp(now.timestamp(), 0).unwrap();
+        assert_range(&h, &body(MESSAGE), now, 30);
+    }
+    #[test]
+    fn per_minute_body_matches_go_case_insensitive_fields() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for value in [
+            json!({"error":{"Type":"rate_limit_error", "message":MESSAGE}}),
+            json!({"ERROR":{"tYpE":"rate_limit_error", "Meſſage":MESSAGE}}),
+        ] {
+            assert_range(&headers(now), &serde_json::to_vec(&value).unwrap(), now, 30);
+        }
+        for raw in [
+            format!(
+                r#"{{"Error":{{"type":"other","Type":"rate_limit_error","message":{0},"Message":null}},"error":null}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"ERROR":{{"Type":"rate_limit_error"}},"error":{{"MESSAGE":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+        ] {
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+        }
+        for raw in [
+            format!(
+                r#"{{"error":{{"Type":"rate_limit_error","type":"other","message":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"error":{{"type":false,"Type":"rate_limit_error","message":{0}}}}}"#,
+                json!(MESSAGE)
+            ),
+            format!(
+                r#"{{"error":{{"Type":"rate_limit_error","message":{0}}}}} {{}}"#,
+                json!(MESSAGE)
+            ),
+        ] {
+            assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+        }
+    }
+
+    #[test]
+    fn ignored_invalid_unicode_keys_keep_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for ignored in [r#""x\ud800":1"#, r#""x\udc00":1"#] {
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{},{ignored}}},{ignored}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+        }
+        let mut raw = format!(
+            r#"{{"error":{{"type":"rate_limit_error","message":{},"x"#,
+            json!(MESSAGE)
+        )
+        .into_bytes();
+        raw.push(0xff);
+        raw.extend_from_slice(b"\":1}}");
+        assert_range(&headers(now), &raw, now, 30);
+    }
+
+    #[test]
+    fn duplicate_message_with_lone_surrogate_keeps_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for malformed in [r#""\ud800""#, r#""\udc00""#, r#""x\ud800\n""#] {
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{malformed},"message":{}}}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 30);
+            // A malformed last value must replace, rather than disappear.
+            let raw = format!(
+                r#"{{"error":{{"type":"rate_limit_error","message":{},"message":{malformed},"message":null}}}}"#,
+                json!(MESSAGE)
+            );
+            assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+        }
+    }
+
+    #[test]
+    fn duplicate_type_with_lone_surrogate_keeps_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let raw = format!(
+            r#"{{"error":{{"type":"x\ud800","type":"rate_limit_error","message":{}}}}}"#,
+            json!(MESSAGE)
+        );
+        assert_range(&headers(now), raw.as_bytes(), now, 30);
+        let raw = format!(
+            r#"{{"error":{{"type":"rate_limit_error","type":"rate_limit_error\ud800","message":{}}}}}"#,
+            json!(MESSAGE)
+        );
+        assert_range(&headers(now), raw.as_bytes(), now, 4 * 3600);
+    }
+
+    #[test]
+    fn duplicate_values_with_invalid_utf8_keep_the_per_minute_exception() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for field in ["type", "message"] {
+            let mut raw = format!(r#"{{"error":{{"{field}":"x"#).into_bytes();
+            raw.push(0xff);
+            raw.extend_from_slice(
+                format!(
+                    r#"","type":"rate_limit_error","message":{}}}}}"#,
+                    json!(MESSAGE)
+                )
+                .as_bytes(),
+            );
+            assert_range(&headers(now), &raw, now, 30);
+        }
+    }
+
+    #[test]
+    fn malformed_ambiguous_and_quota_inputs_keep_conservative_cooldown() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        for (retry, seconds) in [
+            ("invalid", 4 * 3600),
+            ("0", 4 * 3600),
+            ("-30", 4 * 3600),
+            ("1e300", 4 * 3600),
+            ("608401", 4 * 3600),
+            ("30, 30", 4 * 3600),
+        ] {
+            let mut h = headers(now);
+            h.insert("retry-after", retry.parse().unwrap());
+            assert_range(&h, &body(MESSAGE), now, seconds);
+        }
+        let mut h = headers(now);
+        h.append("Retry-After", "30".parse().unwrap());
+        assert_range(&h, &body(MESSAGE), now, 4 * 3600);
+        for name in [
+            "anthropic-ratelimit-unified-status",
+            "anthropic-ratelimit-unified-5h-status",
+            "anthropic-ratelimit-unified-7d-status",
+            "anthropic-ratelimit-unified-7d_oi-status",
+            "anthropic-ratelimit-unified-overage-status",
+        ] {
+            let mut h = headers(now);
+            h.append(
+                http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                "".parse().unwrap(),
+            );
+            h.append(
+                http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                "rejected".parse().unwrap(),
+            );
+            assert_range(&h, &body(MESSAGE), now, 4 * 3600);
+        }
+        for message in [
+            "Requests per minute rate limit",
+            "This request would NOT exceed the requests per minute rate limit. Please try again later.",
+            "This request would exceed the requests per minute rate limit. Please try again later. Also quota exhausted.",
+        ] {
+            assert_range(&headers(now), &body(message), now, 4 * 3600);
+        }
+        for invalid in [
+            b"{".as_slice(),
+            b"null",
+            b"{}",
+            b"{\"error\":{\"type\":\"api_error\"}}",
+        ] {
+            assert_range(&headers(now), invalid, now, 4 * 3600);
+        }
+    }
+    #[test]
+    fn retry_deadlines_use_the_same_recoverable_window_as_the_conservative_parser() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let maximum = (7 * 24 + 1) * 3600;
+        for seconds in [maximum - 1800, maximum] {
+            let mut h = headers(now);
+            h.insert("retry-after", seconds.to_string().parse().unwrap());
+            h.insert(
+                "anthropic-ratelimit-unified-reset",
+                (now + TimeDelta::seconds(maximum))
+                    .timestamp()
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+            assert_range(&h, &body(MESSAGE), now, seconds as u64);
+        }
+        let mut h = headers(now);
+        h.insert("retry-after", (maximum + 1).to_string().parse().unwrap());
+        assert_range(&h, &body(MESSAGE), now, 4 * 3600);
+    }
+    #[test]
+    fn standard_and_fast_direct_errors_use_body_aware_reset() {
+        let now = Utc::now();
+        for error in [
+            classify(429, &headers(now), &body(MESSAGE), false),
+            fast_direct_error(429, &headers(now), &body(MESSAGE)),
+        ] {
+            let retry = error.retry_after.unwrap().as_secs();
+            assert!((30..=60).contains(&retry));
+            assert!(!error.credential_scoped);
+        }
     }
 }

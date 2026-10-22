@@ -56,7 +56,7 @@ pub fn requests() -> Vec<Case> {
         ]
     });
 
-    vec![
+    let mut cases = vec![
         request(
             "text",
             "gpt-5",
@@ -213,7 +213,27 @@ pub fn requests() -> Vec<Case> {
             false,
             json!({ "service_tier": " Fast ", "contents": [user("hi")] }),
         ),
-    ]
+    ];
+    for model in [
+        "claude-opus-4-7",
+        "claude-opus-4-8[1m]",
+        "claude-fable-5-1-20261001",
+    ] {
+        for setting in [
+            json!({"thinkingLevel": "xhigh"}),
+            json!({"thinkingLevel": "auto"}),
+            json!({"thinkingBudget": -1}),
+            json!({"thinkingBudget": 64000}),
+        ] {
+            cases.push(request(
+                &format!("adaptive-{model}-{setting}"),
+                model,
+                false,
+                json!({"contents": [user("hi")], "generationConfig": {"thinkingConfig": setting}}),
+            ));
+        }
+    }
+    cases
 }
 
 /// The Codex streams written for the Claude response translators, and

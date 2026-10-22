@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::quota_rank::QuotaPrefs;
@@ -187,9 +188,29 @@ pub struct OpenAiCompat {
     pub request_scoped_errors: Vec<RequestScopedErrorRule>,
 }
 
+/// Original Claude entries captured alongside their compiled routing aliases.
+/// Keeping the config records avoids a separate capability table.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaudeModelConfig {
+    pub claude_api_key: Vec<config::ClaudeKey>,
+    pub claude_cli: Vec<config::ClaudeCli>,
+}
+
+impl From<&Config> for ClaudeModelConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            claude_api_key: config.claude_api_key.clone(),
+            claude_cli: config.claude_cli.clone(),
+        }
+    }
+}
+
 /// The manager's settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
+    /// Original config for per-attempt capabilities, from the same snapshot
+    /// that produced these aliases. No separate capability table is maintained.
+    pub model_config: Option<Arc<ClaudeModelConfig>>,
     /// Extra rounds over the credentials after every one has failed
     /// (`request-retry`).
     pub request_retry: usize,
@@ -383,6 +404,7 @@ impl From<&Config> for Settings {
                 .collect(),
         );
         Self {
+            model_config: Some(Arc::new(ClaudeModelConfig::from(config))),
             request_retry: count(config.request_retry),
             max_retry_credentials: count(config.max_retry_credentials),
             max_retry_interval: Duration::from_secs(
