@@ -700,6 +700,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 .get(&Deviation::UpstreamLossyPluginReencode)
                 .copied()
                 .unwrap_or_default(),
+            upstream_counterfactuals: tally
+                .deviations
+                .get(&Deviation::UpstreamBlockScalarCounterfactual)
+                .copied()
+                .unwrap_or_default(),
         });
     }
     if let Some(path) = &args.summary {
@@ -762,7 +767,7 @@ fn check(
         .zip(&go_results)
         .enumerate()
         .try_for_each(|(index, (case, go))| {
-            let evaluated = evaluate(translator, case, go);
+            let evaluated = evaluate_with_counterfactual(translator, case, go, upstream, work_dir)?;
             let proof = proofs.next_if(|((candidate, _), _)| *candidate == index);
             let mut checked = case.clone();
             if checked.known_difference.is_none()
@@ -946,6 +951,79 @@ struct Evaluated {
     /// Upstream's output as read for comparison.
     go_value: Option<Value>,
     rust_output: Result<Value, String>,
+}
+
+fn evaluate_with_counterfactual(
+    translator: Translator,
+    case: &Case,
+    go: &GoResult,
+    upstream: &Upstream,
+    work_dir: &Path,
+) -> Result<Evaluated, Box<dyn Error>> {
+    let mut evaluated = evaluate(translator, case, go);
+    if translator != Translator::ConfigSave || !matches!(evaluated.outcome, Outcome::Different(_)) {
+        return Ok(evaluated);
+    }
+    let Some(original_go) = serde_json::from_str::<Value>(&evaluated.go_output).ok() else {
+        return Ok(evaluated);
+    };
+    if !["error", "unloadable"].iter().any(|key| {
+        original_go[*key]
+            .as_str()
+            .is_some_and(|e| e.contains("yaml:"))
+    }) {
+        return Ok(evaluated);
+    }
+    let Some(candidate) = config_save::counterfactual::rewritten(case) else {
+        return Ok(evaluated);
+    };
+    let results = upstream.run(translator.key(), std::slice::from_ref(&candidate), work_dir)?;
+    let counterfactual = evaluate(translator, &candidate, &results[0]);
+    let Some(counterfactual_go) = serde_json::from_str::<Value>(&counterfactual.go_output).ok()
+    else {
+        return Ok(evaluated);
+    };
+    if let (Ok(rust_original), Ok(rust_rewritten)) =
+        (&evaluated.rust_output, &counterfactual.rust_output)
+        && config_save::counterfactual::proves(
+            case,
+            &candidate,
+            &original_go,
+            &counterfactual_go,
+            matches!(
+                counterfactual.outcome,
+                Outcome::Identical | Outcome::Equivalent(_)
+            ),
+            rust_original,
+            rust_rewritten,
+        )
+    {
+        let dir = work_dir.join("counterfactual");
+        fs::create_dir_all(&dir)?;
+        if !case
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err("unsafe counterfactual evidence filename".into());
+        }
+        let proof = config_save::counterfactual::evidence(
+            case,
+            &candidate,
+            &original_go,
+            &counterfactual_go,
+            rust_original,
+            rust_rewritten,
+        );
+        fs::write(
+            dir.join(format!("{}.json", case.name)),
+            serde_json::to_vec_pretty(&proof)?,
+        )?;
+        evaluated.outcome = Outcome::Equivalent(BTreeSet::from([
+            Deviation::UpstreamBlockScalarCounterfactual,
+        ]));
+    }
+    Ok(evaluated)
 }
 
 fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {

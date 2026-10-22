@@ -25,6 +25,8 @@ pub struct SuiteResult {
     /// Cases whose source plugin scalar survives our write but upstream
     /// loses into a comment; counted separately within equivalent cases.
     pub upstream_lossy_plugins: usize,
+    /// Failed original Go runs justified by a successful scalar-only rewrite.
+    pub upstream_counterfactuals: usize,
 }
 
 /// What the run compared against, and how its random cases were made.
@@ -80,6 +82,11 @@ pub fn render(run: &RunInfo<'_>, suites: &[SuiteResult]) -> String {
         out,
         "Upstream lossy plugin re-encode: {} cases (included in Equivalent).",
         thousands(total(|s| s.upstream_lossy_plugins))
+    );
+    let _ = writeln!(
+        out,
+        "Upstream block scalar counterfactual: {} cases (included in Equivalent).",
+        thousands(total(|s| s.upstream_counterfactuals))
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "<details>");
@@ -161,6 +168,7 @@ mod tests {
             known: 0,
             different,
             upstream_lossy_plugins: 1,
+            upstream_counterfactuals: 1,
         }
     }
 
@@ -191,6 +199,11 @@ mod tests {
         assert!(text.ends_with("</details>\n"));
         assert!(
             text.contains("Upstream lossy plugin re-encode: 2 cases (included in Equivalent).")
+        );
+        assert!(
+            text.contains(
+                "Upstream block scalar counterfactual: 2 cases (included in Equivalent)."
+            )
         );
     }
 

@@ -11,7 +11,7 @@ publish.workspace = true
 base64 = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 http = "1.5.0"
-open-ferry-core.workspace = true
+open-ferry-core = { workspace = true, features = ["parity"] }
 open-ferry-providers.workspace = true
 open-ferry-translate.workspace = true
 serde_json.workspace = true
