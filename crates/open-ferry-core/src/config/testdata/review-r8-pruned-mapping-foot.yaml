@@ -1,0 +1,171 @@
+# c186
+
+# c187
+'oauth-model-alias':
+    aistudio: &m188 # c189
+    # c190
+    # c191
+    - fork: true
+      force-mapping: false #c192
+      #c193
+      name: &s194 'İstanbul' # c195
+      # c196
+      alias: "sol"
+      #c197
+      display-name: ''
+    # c198
+    'antigravity':
+    # c199
+    - {fork: false, name: 'İstanbul', "alias": 'Pro', display-name: ""} # c200
+#   c201 with words
+"interactions-api-key": #   c202 with words
+- api-key: 'sk-été' #c203
+# c204
+  # c205
+  'proxy-url': 'https://ünicode.example/' #c206
+  #c207
+  headers: # c208
+      #c209
+      'X-Empty': 'Bearer secret' # c210
+      x-team: ' padded ' # c211
+      #c212
+      ' X-Pad ': a
+  # c213
+  excluded-models:
+  - 'gpt-5.5-mini' #   c214 with words
+  # c215
+  - >- # c216
+    gpt-5.5-mini
+  - gpt-5.5-mini #c217
+# c218
+  request-retry: 0
+# c219
+"plugins": {enabled: false, configs: {alpha: {enabled: true}}}
+# c220
+request-retry: 1 #c221
+#   c222 with words
+x-extension: {owner: "ops", notes: [first, "second note"], limits: {burst: 10}} # c223
+
+# c224
+openai-compatibility:
+# c225
+# c226
+- name: dup
+  # c227
+  "base-url": "https://user:pass@b.example/v1?k=secret" #c228
+  headers: {X-Team: 'a'} #   c229 with words
+  #c230
+  "disable-cooling": true
+# c231
+- name: "provider-a" # c232
+  base-url: "https://a.example/v1"
+  models: # c233
+  - {name: claude-sonnet-4-6, alias: "pro"} #c234
+  # c235
+  - name: "claude-sonnet-4-6" #c236
+    #c237
+    'alias': Pro
+  #   c238 with words
+  'headers': {' X-Pad ': "b", X-Team: ' padded '} # c239
+# c240
+- name: '' # c241
+  base-url: ''
+  models: [{name: '<b>&</b>', alias: ' a1 '}, {name: '', alias: ' a1 '}] # c242
+  # c243
+  headers: # c244
+      # c245
+      Authorization: ' padded ' #   c246 with words
+  #c247
+  request-retry: 2 #c248
+
+auth-dir: &s249 /tmp/auth
+"client": # c250
+    # c251
+    codex: #   c252 with words
+        optimize-multi-agent-v2: true #   c253 with words
+#   c254 with words
+oauth-request-scoped-errors:
+    # c255
+    vertex: [{status: 429, action: '', match: ['*-preview']}, {status: 0, action: 'continue', match: [' gemini-1.5-* ']}]
+    # c256
+    antigravity: # c257
+    - status: 400 # c258
+      # c259
+      action: '' #c260
+      #c261
+      match: ['<tag>'] #   c262 with words
+      match-regexr: ["^context.*$"] #   c263 with words
+max-retry-credentials: 1 # c264
+
+#c265
+#   c266 with words
+'redis-usage-queue-retention-seconds': 5000 #c267
+port: 8317
+#   c268 with words
+payload: #   c269 with words
+    default: # c270
+    # c271
+    - models:
+      # c272
+      - name: 'gemini-*' # c273
+        #   c274 with words
+        protocol: "codex" # c275
+      #c276
+      # c277
+      - name: "gemini-*" # c278
+        # c279
+        protocol: openai # c280
+      params: # c281
+          tools.0.name: 'über' # c282
+# c283
+          max_output_tokens: 2 #c284
+    #c285
+    - models:
+      - {"name": "gemini-*", protocol: gemini} #c286
+      #   c287 with words
+      - name: &s288 '*'
+        #c289
+        protocol: >- # c290
+            claude
+      params: #c291
+          # c292
+          # c293
+          metadata: {nested: {deep: true}}
+          #   c294 with words
+          tools.0.name: -7 #   c295 with words
+    #c296
+    filter: # c297
+# c298
+    - models:
+      #c299
+      #c300
+      - name: 'gemini-*' #   c301 with words
+        protocol: "gemini" # c302
+      # c303
+      - name: 'gpt-*'
+# c304
+        protocol: 'claude' #   c305 with words
+#c306
+      params: #   c307 with words
+      #c308
+      # c309
+      - reasoning.effort # c310
+      # c311
+      # c312
+      - store
+    #   c313 with words
+    - models:
+      #c314
+      - name: *s288
+      #c315
+      - name: claude-sonnet-4-6
+        "protocol": "gemini" # c316
+      # c317
+      params: # c318
+      # c319
+      - "generationConfig.thinkingConfig"
+      #   c320 with words
+      - 'reasoning.effort'
+#c321
+#   c322 with words
+'proxy-url': socks5://proxy.example.com:1080/
