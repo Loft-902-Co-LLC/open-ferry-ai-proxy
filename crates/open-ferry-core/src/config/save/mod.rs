@@ -2122,3 +2122,6 @@ mod null_plugin_tests;
 
 #[cfg(test)]
 mod folded_tests;
+
+#[cfg(test)]
+mod pending_map_tests;

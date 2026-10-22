@@ -1005,13 +1005,27 @@ impl Emitter {
             return self.pop_state();
         }
         self.write_indent()?;
+        if self.protect_config_comments
+            && event.empty_block_mapping_value
+            && (!self.line_comment.is_empty() || !self.key_line_comment.is_empty())
+        {
+            // The block-style event is emitted as {} because it is empty.
+            // Deferring its comment as for a block value puts {} at column 0.
+            // Keep pending and current key comments before this key instead.
+            let current = mem::take(&mut self.line_comment);
+            self.line_comment = mem::take(&mut self.key_line_comment);
+            self.process_line_comment()?;
+            self.line_comment = current;
+            self.process_line_comment()?;
+            self.write_indent()?;
+        }
         if !self.line_comment.is_empty() {
             // [Go] A line comment was provided for the key. That's unusual
             //      as the scanner associates line comments with the value.
             //      Either way, save the line comment and render it
             //      appropriately later.
             if self.protect_config_comments
-                && event.empty_null_value
+                && event.empty_inline_value
                 && !self.key_line_comment.is_empty()
             {
                 // Go overwrites the older pending key comment here. Preserve

@@ -196,7 +196,8 @@ pub(crate) struct Encoder {
     flow: bool,
     indent: usize,
     done_init: bool,
-    empty_null_value: bool,
+    empty_inline_value: bool,
+    empty_block_mapping_value: bool,
 }
 
 impl Encoder {
@@ -209,7 +210,8 @@ impl Encoder {
             flow: false,
             indent: 0,
             done_init: false,
-            empty_null_value: false,
+            empty_inline_value: false,
+            empty_block_mapping_value: false,
         }
     }
 
@@ -394,7 +396,8 @@ impl Encoder {
         event.foot_comment = comments.foot.as_bytes().to_vec();
         event.tail_comment = comments.tail.as_bytes().to_vec();
         event.start_mark = comments.mark;
-        event.empty_null_value = std::mem::take(&mut self.empty_null_value);
+        event.empty_inline_value = std::mem::take(&mut self.empty_inline_value);
+        event.empty_block_mapping_value = std::mem::take(&mut self.empty_block_mapping_value);
         self.emit(event)
     }
 
@@ -519,10 +522,15 @@ impl Encoder {
                 let mut tail = "";
                 for [key, value] in node.content.as_chunks::<2>().0 {
                     let key_foot = key.foot_comment.as_str();
-                    self.empty_null_value = key.kind == Kind::Scalar
-                        && value.kind == Kind::Scalar
-                        && short_tag(&value.tag) == super::NULL_TAG
-                        && value.value.is_empty();
+                    self.empty_block_mapping_value = key.kind == Kind::Scalar
+                        && value.kind == Kind::Mapping
+                        && value.content.is_empty()
+                        && !value.style.has(Style::FLOW);
+                    self.empty_inline_value = key.kind == Kind::Scalar
+                        && ((value.kind == Kind::Scalar
+                            && short_tag(&value.tag) == super::NULL_TAG
+                            && value.value.is_empty())
+                            || (value.kind == Kind::Mapping && value.content.is_empty()));
                     self.node(key, tail, !key_foot.is_empty(), depth)?;
                     tail = key_foot;
                     self.node(value, "", false, depth)?;
