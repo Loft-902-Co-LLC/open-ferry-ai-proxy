@@ -522,6 +522,16 @@ const PLUGINS_REWRITTEN: &str = "upstream writes the plugins section from the co
 
 pub fn steps(upstream: &Path) -> Vec<Case> {
     let mut cases = vec![
+        case(
+            "vertex-name-only-legacy",
+            "vertex-api-key: [{api-key: dummy, models: [{name: meta/llama}]}]\n",
+            vec![resave(false), resave(true)],
+        ),
+        case(
+            "vertex-name-only-v8",
+            "config-version: 8\napi-keys:\n  vertex: [{keys: [{api-key: dummy}], models: [{name: meta/llama}]}]\n",
+            vec![resave(false), resave(true)],
+        ),
         case("legacy-resave", LEGACY, vec![resave(false)]),
         case("legacy-change", LEGACY, vec![save(LEGACY_CHANGED, false)]),
         case("legacy-migrate", LEGACY, vec![resave(true)]),

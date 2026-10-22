@@ -8,6 +8,7 @@ import {
   credentialCooldowns,
   credentialHealth,
   explainCooldown,
+  explainBindError,
   explainReason,
   explainSignInError,
   explainStartError,
@@ -485,5 +486,23 @@ describe("the small words", () => {
     expect(used({})).toBeNull();
     expect(lastUsed(credential({ recent_requests: [] }))).toBeNull();
     expect(lastUsed(credential({ recent_requests: undefined }))).toBeNull();
+  });
+});
+
+
+describe("binding session failures", () => {
+  it("explains shutdown in a bind session status", () => {
+    expect(explainBindError("server shutting down")).toEqual({
+      title: "The server is shutting down",
+      meaning: "It stopped this binding before saving it.",
+      action: "Start again once it is running again.",
+    });
+  });
+  it("explains worker exhaustion in a bind session status", () => {
+    expect(explainBindError("SIWC bind workers are busy; start a new binding")).toEqual({
+      title: "The server is busy saving bindings",
+      meaning: "All binding workers are occupied. This binding wasn't saved.",
+      action: "Wait for the other bindings to finish, then start a new binding.",
+    });
   });
 });

@@ -663,10 +663,16 @@ fn apply_max_tokens(entry: &mut Map<String, Value>, model: &ModelInfo) {
     }
 }
 
-/// Clears capabilities other providers' models must not advertise. Codex
-/// rejects a list without these keys, so they stay, as `null`
-/// (`nullCodexClientRequiredOptions`).
+/// Resets Codex-only capabilities for synthesized or non-Codex routes:
+/// direct tool mode, disabled Responses capabilities, and null optional fields.
+/// Codex requires the keys to remain (`nullCodexClientRequiredOptions`).
 fn null_required_options(entry: &mut Map<String, Value>) {
+    entry.insert("tool_mode".into(), Value::from("direct"));
+    entry.insert("use_responses_lite".into(), Value::Bool(false));
+    entry.insert(
+        "supports_reasoning_effort_updates".into(),
+        Value::Bool(false),
+    );
     for key in ["apply_patch_tool_type", "upgrade", "availability_nux"] {
         entry.insert(key.into(), Value::Null);
     }

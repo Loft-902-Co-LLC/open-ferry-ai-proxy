@@ -11,7 +11,8 @@
 //! accepts: its `url` and `proxy_url`, and the `Location` of a redirect.
 //!
 //! Only what the decisions need is kept: the scheme, in lower case; the
-//! host, `%`-escapes decoded; and the user name and password, decoded.
+//! host and path, `%`-escapes decoded without path normalization; and the
+//! user name and password, decoded. SIWC callback matching uses these components.
 //! The URL that is sent is the `url` crate's reading of the same text.
 //!
 //! Go reads a host with two colons or more strictly only for `http` and
@@ -27,6 +28,8 @@ pub(crate) struct GoUrl {
     pub(crate) scheme: String,
     /// The host and port, decoded, or empty.
     pub(crate) host: Vec<u8>,
+    /// The decoded path, with dot segments and host spelling unchanged.
+    pub(crate) path: Vec<u8>,
     /// The user name and password, decoded, when the URL has an `@`.
     pub(crate) user: Option<(Vec<u8>, Option<Vec<u8>>)>,
 }
@@ -93,7 +96,7 @@ fn parse_url(raw: &[u8]) -> Option<GoUrl> {
         url.user = user;
         url.host = host;
     }
-    unescape(path, Mode::Path)?;
+    url.path = unescape(path, Mode::Path)?;
     Some(url)
 }
 
@@ -348,6 +351,7 @@ mod tests {
         let url = parse(b"HTTPS://u%41:p%3A@Example.com:8443/a%20b?x#y").unwrap();
         assert_eq!(url.scheme, "https");
         assert_eq!(url.host, b"Example.com:8443");
+        assert_eq!(url.path, b"/a b");
         assert_eq!(url.user, Some((b"uA".to_vec(), Some(b"p:".to_vec()))));
         assert_eq!(host("http://h"), Some("h".into()));
         assert_eq!(host("http://h:"), Some("h:".into()));

@@ -79,7 +79,7 @@ struct Inner {
     clients: Clients,
     oauth_sessions: oauth::Sessions,
     /// Upstream's `authStatusMu`.
-    credential_lock: tokio::sync::Mutex<()>,
+    credential_lock: Arc<tokio::sync::Mutex<()>>,
     /// Upstream's `mu`, as the handlers that change the config take it.
     config_write_lock: tokio::sync::Mutex<()>,
 }
@@ -151,7 +151,7 @@ impl ManagementState {
                 updating: Updating::default(),
                 clients: Clients::default(),
                 oauth_sessions: oauth::Sessions::default(),
-                credential_lock: tokio::sync::Mutex::new(()),
+                credential_lock: Arc::new(tokio::sync::Mutex::new(())),
                 config_write_lock: tokio::sync::Mutex::new(()),
             }),
             parts: Arc::default(),
@@ -423,8 +423,9 @@ impl ManagementState {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Stops the OAuth logins in progress and waits for them to end; no
-    /// login starts after this. The service calls it as it shuts down.
+    /// Refuses new OAuth logins and stops existing ones after at most a
+    /// ten-second grace for SIWC workers and session finalization. A committed
+    /// collector can outlive the grace while the process remains alive.
     pub async fn shutdown(&self) {
         self.inner.oauth_sessions.shutdown().await;
     }
@@ -535,6 +536,14 @@ impl ManagementState {
     /// The way to reload the running service's config, if it set one.
     pub(crate) fn config_reload(&self) -> Option<&Arc<dyn ConfigReload>> {
         self.parts.config_reload.as_ref()
+    }
+
+    /// Non-waiting owned guard acquired on the dedicated bind worker and
+    /// returned to its async collector until sync revision allocation.
+    pub(crate) fn try_credential_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        Arc::clone(&self.inner.credential_lock)
+            .try_lock_owned()
+            .ok()
     }
 
     /// The lock that orders the handlers changing the config, as upstream's

@@ -87,11 +87,15 @@ pub(crate) async fn layer(request: Request, next: Next) -> Response {
     let Some(context) = request_context::of(request.extensions()).cloned() else {
         return next.run(request).await;
     };
-    let query = request
-        .uri()
-        .query()
-        .map(mask_sensitive_query)
-        .unwrap_or_default();
+    let query = if context.path.starts_with("/v8/management/oauth/") {
+        String::new()
+    } else {
+        request
+            .uri()
+            .query()
+            .map(mask_sensitive_query)
+            .unwrap_or_default()
+    };
     let request_id = is_ai_api_path(&context.path).then(|| context.id.to_string());
     let span = match &request_id {
         Some(id) => tracing::info_span!("request", request_id = %id),

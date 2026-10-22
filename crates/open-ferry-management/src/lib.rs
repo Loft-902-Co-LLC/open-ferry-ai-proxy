@@ -50,6 +50,10 @@
 // in clippy.toml is for the code they test.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use oauth::test_support;
+
 mod access;
 mod api_call;
 mod auth_files;
