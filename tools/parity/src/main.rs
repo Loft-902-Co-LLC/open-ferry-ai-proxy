@@ -1267,7 +1267,7 @@ fn write_failure(
 fn clip(text: &str) -> String {
     const MAX: usize = 160;
     match text.char_indices().nth(MAX) {
-        Some((end, _)) => format!("{}Ã¢â‚¬Â¦", &text[..end]),
+        Some((end, _)) => format!("{}…", &text[..end]),
         None => text.to_owned(),
     }
 }
@@ -1316,7 +1316,10 @@ mod tests {
         );
         let mut unknown = catalog();
         assert_eq!(
-            filter_suites(&mut unknown, &parse(&["--suite", "config-sav"]).suites),
+            filter_suites(
+                &mut unknown,
+                &["config-sav".to_owned()].into_iter().collect()
+            ),
             Err("unknown suite \"config-sav\"; use a suite directory slug".into())
         );
         assert_eq!(unknown.len(), 3);
