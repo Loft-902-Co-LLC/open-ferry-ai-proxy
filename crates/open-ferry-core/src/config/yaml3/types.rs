@@ -285,8 +285,10 @@ impl fmt::Display for EventType {
 /// An event (`yaml_event_t`).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Event {
-    /// Config-writer hint: this scalar key precedes an empty null value.
-    pub(crate) empty_null_value: bool,
+    /// Config-writer hint: this key precedes an empty null or empty mapping.
+    pub(crate) empty_inline_value: bool,
+    /// An empty block-style mapping will actually be emitted in flow style.
+    pub(crate) empty_block_mapping_value: bool,
     /// The event type.
     pub(crate) typ: EventType,
     /// The beginning of the event.
