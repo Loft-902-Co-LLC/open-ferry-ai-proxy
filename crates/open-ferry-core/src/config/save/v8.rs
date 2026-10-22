@@ -630,6 +630,7 @@ pub(crate) fn restore_v8_layout(
 fn preserve_v8_comments(dst: &mut Node, src: &Node) {
     src.head_comment.clone_into(&mut dst.head_comment);
     src.line_comment.clone_into(&mut dst.line_comment);
+    src.line_comment_id.clone_into(&mut dst.line_comment_id);
     src.foot_comment.clone_into(&mut dst.foot_comment);
     if dst.kind != Kind::Mapping || src.kind != Kind::Mapping {
         return;
