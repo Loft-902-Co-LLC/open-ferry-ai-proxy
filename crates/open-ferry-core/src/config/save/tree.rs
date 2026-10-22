@@ -338,6 +338,7 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
         }
     }
     let mut out = Vec::with_capacity(data.len());
+    let mut logical_line = 0usize;
     for (index, line) in data.split(|&byte| byte == b'\n').enumerate() {
         if index > 0 {
             out.push(b'\n');
@@ -347,11 +348,20 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
             .position(|&byte| byte != b' ' && byte != b'\t')
             .unwrap_or(line.len());
         let trimmed = line.get(start..).unwrap_or_default();
-        if trimmed.first() == Some(&b'#') && !bodies.iter().any(|body| body.contains(&index)) {
+        if trimmed.first() == Some(&b'#') && !bodies.iter().any(|body| body.contains(&logical_line))
+        {
             out.extend_from_slice(trimmed);
         } else {
             out.extend_from_slice(line);
         }
+        // The scanner counts YAML line separators too; CR before this split's
+        // LF belongs to the same CRLF break, rather than a second line.
+        let without_crlf = line.strip_suffix(b"\r").unwrap_or(line);
+        let extra_breaks = String::from_utf8_lossy(without_crlf)
+            .chars()
+            .filter(|c| matches!(c, '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+            .count();
+        logical_line = logical_line.saturating_add(1).saturating_add(extra_breaks);
     }
     out
 }
@@ -493,5 +503,14 @@ mod tests {
             normalize_comment_indentation(source),
             b"note: 'contains | and >'\n# actual comment\nnext: 1\n"
         );
+        for separator in ["\r\n", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let source =
+                format!("note: |-\n  before{separator}  body\n  # Heading\nnext: 1\n  # outside\n");
+            let expected = source.replace("  # outside", "# outside");
+            assert_eq!(
+                normalize_comment_indentation(source.as_bytes()),
+                expected.as_bytes()
+            );
+        }
     }
 }
