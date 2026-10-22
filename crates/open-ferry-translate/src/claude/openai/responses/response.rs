@@ -87,6 +87,7 @@ pub struct ClaudeToOpenAIResponsesStream {
     /// request.
     echo: Option<Vec<(&'static str, Value)>>,
     error: Option<ToolInputError>,
+    initialized: bool,
     completed: bool,
     seq: i64,
     response_id: String,
@@ -246,6 +247,7 @@ impl ClaudeToOpenAIResponsesStream {
             tools: RequestTools::with_tool_search(picked.unwrap_or(&Value::Null), enabled),
             echo: picked.map(|request| echo_fields(request, |_| None)),
             error: None,
+            initialized: false,
             completed: false,
             seq: 0,
             response_id: String::new(),
@@ -282,6 +284,7 @@ impl ClaudeToOpenAIResponsesStream {
     /// `data:` lines each, or `""`. Nothing follows the final event or
     /// `response.failed`.
     pub fn translate_line(&mut self, line: &[u8]) -> String {
+        self.initialized = true;
         let mut out = String::new();
         if self.error.is_some() || self.completed {
             return out;
@@ -336,7 +339,7 @@ impl ClaudeToOpenAIResponsesStream {
     /// returns `response.failed`, since a patch may be cut short.
     pub fn finalize_tool_input(&mut self) -> String {
         let mut out = String::new();
-        if self.error.is_some() || self.completed {
+        if !self.initialized || self.error.is_some() || self.completed {
             return out;
         }
         if !patch_enabled(&self.tools) {

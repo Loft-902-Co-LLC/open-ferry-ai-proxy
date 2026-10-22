@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor_execute.go
-// (translateMetaCompleted, metaAsCompletedEvent) (v8.0.32, MIT).
+// (translateMetaCompleted, metaAsCompletedEvent) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reading Meta's answer to a call that didn't ask for a stream.
@@ -102,8 +102,12 @@ pub(super) fn translate_completed(
     data: &[u8],
 ) -> Result<Vec<u8>, StatusError> {
     let mut items = OutputItems::default();
-    for line in data.split(|&byte| byte == b'\n') {
-        let Some(rest) = line.strip_prefix(b"data:") else {
+    let mut filter = super::telemetry::Filter::default();
+    for line in data
+        .split(|&byte| byte == b'\n')
+        .flat_map(|line| filter.line(line.to_vec()))
+    {
+        let Some(rest) = trim_space(&line).strip_prefix(b"data:") else {
             continue;
         };
         let event_data = trim_space(rest);

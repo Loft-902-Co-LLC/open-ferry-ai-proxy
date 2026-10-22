@@ -41,10 +41,10 @@ fn search_sse() -> String {
             if event["type"] == "message_start" {
                 event["message"]["model"] = "claude-sonnet-4-5".into();
             }
-            format!("data: {event}")
+            format!("data: {event}\n\n")
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .concat()
 }
 
 #[test]

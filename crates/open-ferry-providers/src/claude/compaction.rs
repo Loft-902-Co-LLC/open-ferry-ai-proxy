@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_compaction.go
-// and helps/antigravity_compaction.go (the Claude capsule path) (v8.0.32, MIT).
+// and helps/antigravity_compaction.go (the Claude capsule path) (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Responses compaction through a Claude summary, with CPA-compatible sealed
@@ -46,7 +46,7 @@ fn key() -> Result<LessSafeKey, ExecError> {
         .map_err(|_| plain_error("create cipher: invalid compaction key"))
 }
 
-pub(super) fn seal(summary: &str, model: &str) -> Result<String, ExecError> {
+pub(crate) fn seal(summary: &str, model: &str) -> Result<String, ExecError> {
     let mut plaintext = serde_json::to_vec(&Capsule {
         summary: summary.into(),
         model: model.into(),
@@ -134,6 +134,10 @@ fn contains_compaction(raw: &[u8]) -> bool {
 }
 
 fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
+    expand_payload_for(raw, "claude")
+}
+
+fn expand_payload_for(raw: &Bytes, provider: &str) -> Result<Bytes, ExecError> {
     if !contains_compaction(raw) {
         return Ok(raw.clone());
     }
@@ -168,7 +172,7 @@ fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
     if dropped > 0 {
         tracing::warn!(
             dropped,
-            "claude compaction: dropped non-CPA compaction items"
+            "{provider} compaction: dropped non-CPA compaction items"
         );
     }
     if !changed {
@@ -176,6 +180,19 @@ fn expand_payload(raw: &Bytes) -> Result<Bytes, ExecError> {
     }
     *input = expanded;
     Ok(Bytes::from(body.to_string()))
+}
+
+/// The same capsule format is shared by Claude and Meta Responses routes.
+pub(crate) fn expand_for(
+    request: &Request,
+    options: &Options,
+    provider: &str,
+) -> Result<(Request, Options), ExecError> {
+    let mut request = request.clone();
+    let mut options = options.clone();
+    request.payload = expand_payload_for(&request.payload, provider)?;
+    options.original_request = expand_payload_for(&options.original_request, provider)?;
+    Ok((request, options))
 }
 
 pub(super) fn expand(
@@ -206,13 +223,13 @@ fn has_trigger(raw: &[u8]) -> bool {
         })
 }
 
-pub(super) fn requested(request: &Request, options: &Options) -> bool {
+pub(crate) fn requested(request: &Request, options: &Options) -> bool {
     options.alt == COMPACT_ALT
         || has_trigger(&request.payload)
         || has_trigger(&options.original_request)
 }
 
-fn summary_payload(request: &Request, options: &Options) -> Bytes {
+pub(crate) fn summary_payload(request: &Request, options: &Options) -> Bytes {
     let source = if request.payload.is_empty()
         || (!has_trigger(&request.payload) && has_trigger(&options.original_request))
     {
@@ -356,7 +373,7 @@ impl ClaudeExecutor {
     }
 }
 
-pub(super) fn into_stream(response: Response) -> Result<StreamResponse, ExecError> {
+pub(crate) fn into_stream(response: Response) -> Result<StreamResponse, ExecError> {
     let mut completed: Value = serde_json::from_slice(&response.payload)
         .map_err(|error| plain_error(error.to_string()))?;
     let item = completed["output"][0].clone();

@@ -651,7 +651,7 @@ async fn cut_off_stream_ends_with_an_error() {
     assert_eq!(error.status, 0);
     assert!(!error.message.is_empty());
 
-    // A clean end without message_stop just ends.
+    // A clean end without message_stop is also a truncation.
     let mock = Mock::start(Reply::sse(partial)).await;
     let response = mock
         .executor()
@@ -663,7 +663,9 @@ async fn cut_off_stream_ends_with_an_error() {
         .await
         .unwrap();
     let chunks = collect(response).await;
-    assert!(chunks.iter().all(Result::is_ok));
+    let error = chunks.last().unwrap().as_ref().unwrap_err();
+    assert_eq!(error.status, 502);
+    assert_eq!(error.message, "upstream stream closed before message_stop");
 }
 
 fn openai_payload(stream: bool) -> Value {
@@ -2102,8 +2104,11 @@ async fn error_event_in_a_stream_is_forwarded() {
         .await
         .unwrap();
     let chunks = collect(response).await;
-    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks.len(), 3);
     assert!(text(&chunks[1]).contains("overloaded_error"));
+    let error = chunks[2].as_ref().unwrap_err();
+    assert_eq!(error.status, 502);
+    assert!(error.message.contains("overloaded_error"));
 }
 
 // Not upstream's: an error event in a stream that quotes the key has it
@@ -2130,7 +2135,12 @@ async fn an_error_event_in_a_stream_hides_the_key() {
         )
         .await
         .unwrap();
-    let joined: String = collect(response).await.iter().map(text).collect();
+    let mut chunks = collect(response).await;
+    let failure = chunks.pop().unwrap().unwrap_err();
+    assert_eq!(failure.status, 502);
+    assert!(failure.message.contains("bad key [redacted]"));
+    assert!(!failure.message.contains(API_KEY));
+    let joined: String = chunks.iter().map(text).collect();
     assert_eq!(joined, format!("{start}{}", error("[redacted]")));
 
     let mock = Mock::start(Reply::sse(&format!("{start}{}", error(API_KEY)))).await;
@@ -2143,7 +2153,12 @@ async fn an_error_event_in_a_stream_hides_the_key() {
         )
         .await
         .unwrap();
-    let joined: String = collect(response).await.iter().map(text).collect();
+    let mut chunks = collect(response).await;
+    let failure = chunks.pop().unwrap().unwrap_err();
+    assert_eq!(failure.status, 502);
+    assert!(failure.message.contains("bad key [redacted]"));
+    assert!(!failure.message.contains(API_KEY));
+    let joined: String = chunks.iter().map(text).collect();
     assert!(joined.contains("bad key [redacted]"), "{joined}");
     assert!(!joined.contains(API_KEY), "{joined}");
 }
@@ -2685,4 +2700,71 @@ payload:
     assert!(sent.get("prompt_cache_options").is_none(), "{sent}");
     // The rule did apply.
     assert_eq!(sent["top_k"], 7, "{sent}");
+}
+
+// TestClaudeExecutor{TranslatedStreamTruncationReportsError,StreamCompleteNoError,
+// MultiLineDataMessageStopAndErrorEvents}; the empty Responses tool case is separate.
+#[tokio::test]
+async fn stream_truncation_and_multiline_terminal_events() {
+    for format in [Format::CLAUDE, Format::OPENAI] {
+        for (body, expected) in [
+            ("", Some("upstream stream closed before message_stop")),
+            ("data: {\"type\":\"message_stop\"}", None),
+            ("data: {\"type\":\ndata: \"message_stop\"}\n\n", None),
+            ("{\"type\":\"message\",\"stop_reason\":\"end_turn\"}", None),
+            (
+                "data: {\"type\":\ndata: \"error\",\"error\":{\"message\":\"failed\"}}\n\n",
+                Some("failed"),
+            ),
+        ] {
+            let mock = Mock::start(Reply::sse(body)).await;
+            let response = mock
+                .executor()
+                .execute_stream(
+                    api_key_auth(),
+                    request(claude_payload()),
+                    stream_options(format.clone()),
+                )
+                .await
+                .unwrap();
+            let chunks = collect(response).await;
+            let errors: Vec<_> = chunks
+                .iter()
+                .filter_map(|chunk| chunk.as_ref().err())
+                .collect();
+            assert_eq!(
+                errors.len(),
+                usize::from(expected.is_some()),
+                "{format} {body:?}: {chunks:?}"
+            );
+            if let Some(expected) = expected {
+                assert_eq!(errors[0].status, 502);
+                assert!(errors[0].message.contains(expected));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn initializes_empty_responses_patch_stream_before_finalizing() {
+    let mock = Mock::start(Reply::sse("")).await;
+    let payload = json!({"model":"claude-sonnet-4-5","input":"hi","tools":[{"type":"custom","name":"apply_patch"}]});
+    let mut opts = stream_options(Format::OPENAI_RESPONSE);
+    opts.original_request = Bytes::from(payload.to_string());
+    let response = mock
+        .executor()
+        .execute_stream(api_key_auth(), request(payload), opts)
+        .await
+        .unwrap();
+    let chunks = collect(response).await;
+    assert!(
+        chunks
+            .iter()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .any(|chunk| String::from_utf8_lossy(chunk).contains("response.failed"))
+    );
+    assert_eq!(
+        chunks.last().unwrap().as_ref().unwrap_err().message,
+        stream::APPLY_PATCH_ERROR_MESSAGE
+    );
 }

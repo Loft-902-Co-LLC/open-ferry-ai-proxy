@@ -2,7 +2,7 @@
 // (ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput,
 // CanFinalizeResponseStream) and shell_tool.go (responsesToolInputFailure)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → OpenAI Responses responses.
@@ -1368,7 +1368,9 @@ fn non_stream(
                 );
             }
             counts.insert("output_tokens".into(), count("completion_tokens").into());
-            if let Some(reasoning) = path(usage, "output_tokens_details.reasoning_tokens") {
+            if let Some(reasoning) = path(usage, "output_tokens_details.reasoning_tokens")
+                .or_else(|| path(usage, "completion_tokens_details.reasoning_tokens"))
+            {
                 counts.insert(
                     "output_tokens_details".into(),
                     json!({"reasoning_tokens": int_of(reasoning)}),

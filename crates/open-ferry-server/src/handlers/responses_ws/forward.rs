@@ -212,6 +212,9 @@ pub(super) async fn forward<S: Socket>(
 
         for mut payload in payloads_from_chunk(&chunk) {
             let event_type = str_at(&payload, "type");
+            if event_type == "response.subscription_usage" {
+                continue;
+            }
             if event_type == "response.created" {
                 response_started = true;
                 completed = false;

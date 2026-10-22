@@ -1,5 +1,5 @@
 // Ported from responsesSSEFramer and its helpers in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.32, MIT).
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Puts a Responses event stream back into whole events as it passes, drops
@@ -192,7 +192,7 @@ impl Framer {
             if name.is_empty() || is_error_event(name) {
                 return false;
             }
-            if name.starts_with("responsesapi.") {
+            if name.starts_with("responsesapi.") || name == "response.subscription_usage" {
                 return true;
             }
             if self.is_codex_client {

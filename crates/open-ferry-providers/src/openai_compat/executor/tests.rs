@@ -1939,3 +1939,34 @@ async fn video_input() {
         }
     }
 }
+
+// TestOpenAICompatExecutorClaudeEOF{Before,After}FinishReason*.
+#[tokio::test]
+async fn claude_stream_requires_done_or_finish_reason() {
+    for (tail, fails) in [
+        ("", true),
+        ("data: [DONE]\n\n", false),
+        (
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            false,
+        ),
+    ] {
+        let body =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"hello\"}}}}]}}\n\n{tail}");
+        let mock = Mock::start(Reply::sse(&body)).await;
+        let response = executor(vec![])
+            .execute_stream(
+                plain_auth(&mock.url),
+                request("test", r#"{"messages":[{"role":"user","content":"hi"}]}"#),
+                stream_options(&Format::CLAUDE),
+            )
+            .await
+            .unwrap();
+        let (chunks, error) = collect(response).await;
+        assert_eq!(error.is_some(), fails, "{tail:?}: {chunks:?}");
+        if let Some(error) = error {
+            assert_eq!(error.status, 502);
+            assert!(error.keeps_usage);
+        }
+    }
+}
