@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_response.go
 // (ConvertOpenAIResponseToClaude, ConvertOpenAIResponseToClaudeNonStream, ClaudeTokenCount)
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → Claude Messages responses.
@@ -63,6 +63,8 @@ pub struct OpenAIToClaudeStream {
     content_seen: bool,
     /// Tool calls by their index in the stream.
     tool_calls: BTreeMap<i64, ToolCall>,
+    /// Active call for each chunk-local position when indexes are omitted.
+    omitted_tool_call_indexes: HashMap<usize, i64>,
     /// The content block index of each started call that hasn't finished.
     tool_blocks: HashMap<i64, i64>,
     /// The stream index of the call whose block is open, or -1. A call with
@@ -120,6 +122,7 @@ impl OpenAIToClaudeStream {
             next_block: 0,
             content_seen: false,
             tool_calls: BTreeMap::new(),
+            omitted_tool_call_indexes: HashMap::new(),
             tool_blocks: HashMap::new(),
             open_tool_call: -1,
             saw_tool_call: false,
@@ -298,17 +301,37 @@ impl OpenAIToClaudeStream {
     }
 
     fn tool_call_delta(&mut self, position: usize, delta: &Value, out: &mut Vec<String>) {
+        let incoming_id = delta.get("id").and_then(Value::as_str).unwrap_or("");
         let index = match delta.get("index") {
             Some(index) => int_of(index),
-            None => position as i64,
+            None => {
+                let mut index = self
+                    .omitted_tool_call_indexes
+                    .get(&position)
+                    .copied()
+                    .unwrap_or(position as i64);
+                if let Some(existing) = self.tool_calls.get(&index)
+                    && !incoming_id.is_empty()
+                    && !existing.id.is_empty()
+                    && existing.id != incoming_id
+                {
+                    index = self
+                        .tool_calls
+                        .keys()
+                        .next_back()
+                        .copied()
+                        .unwrap_or(index)
+                        .max(index)
+                        .saturating_add(1);
+                    self.omitted_tool_call_indexes.insert(position, index);
+                }
+                index
+            }
         };
         let names = self.tool_names.as_ref();
         let call = self.tool_calls.entry(index).or_default();
-        // Only a non-empty string replaces the ID.
-        if let Some(Value::String(id)) = delta.get("id")
-            && !id.is_empty()
-        {
-            call.id.clone_from(id);
+        if !incoming_id.is_empty() && !call.started {
+            call.id = incoming_id.to_owned();
         }
         if let Some(function) = delta.get("function") {
             // The name is only taken until the block starts: some providers
@@ -543,7 +566,7 @@ pub fn convert_openai_response_to_claude_non_stream(
     let names = tool_name_map_from_claude_request(original_request);
     let names = names.as_ref();
     let mut out = message_template(&str_of(response.get("id")), &str_of(response.get("model")));
-    let mut stop_reason_set = false;
+    let mut finish_reason = String::new();
     let mut has_tool_call = false;
     let mut blocks = Vec::new();
 
@@ -551,8 +574,7 @@ pub fn convert_openai_response_to_claude_non_stream(
         && let Some(choice) = choices.first()
     {
         if let Some(reason) = choice.get("finish_reason") {
-            out["stop_reason"] = stop_reason(&str_of(Some(reason))).into();
-            stop_reason_set = true;
+            finish_reason = str_of(Some(reason)).into_owned();
         }
         if let Some(message) = choice.get("message") {
             match message.get("content") {
@@ -613,14 +635,7 @@ pub fn convert_openai_response_to_claude_non_stream(
     if let Some(usage) = response.get("usage") {
         out["usage"] = usage_object(extract_usage(usage));
     }
-    if !stop_reason_set {
-        out["stop_reason"] = if has_tool_call {
-            "tool_use"
-        } else {
-            "end_turn"
-        }
-        .into();
-    }
+    out["stop_reason"] = non_stream_stop_reason(&finish_reason, has_tool_call).into();
     out
 }
 
@@ -643,14 +658,19 @@ fn chunk_message(chunk: &Value) -> Value {
         if !text.is_empty() {
             blocks.push(text_block(&text));
         }
+        let has_tool_call = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
         if let Some(Value::Array(calls)) = message.get("tool_calls") {
             blocks.extend(calls.iter().map(|call| tool_use_block(call, None)));
         }
         if !blocks.is_empty() {
             out["content"] = Value::Array(blocks);
         }
-        if let Some(reason) = choice.get("finish_reason") {
-            out["stop_reason"] = stop_reason(&str_of(Some(reason))).into();
+        if choice.get("finish_reason").is_some() || has_tool_call {
+            out["stop_reason"] =
+                non_stream_stop_reason(&str_of(choice.get("finish_reason")), has_tool_call).into();
         }
     }
     if let Some(usage) = chunk.get("usage") {
@@ -757,6 +777,14 @@ fn stop_reason(finish_reason: &str) -> &'static str {
         "length" => "max_tokens",
         "tool_calls" | "function_call" => "tool_use",
         _ => "end_turn",
+    }
+}
+
+fn non_stream_stop_reason(reason: &str, has_tool_call: bool) -> &'static str {
+    if has_tool_call && !matches!(reason, "length" | "content_filter") {
+        "tool_use"
+    } else {
+        stop_reason(reason)
     }
 }
 

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_response.go
-// (v8.0.32, MIT).
+// (v8.0.36, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages events → OpenAI Chat Completions responses.
@@ -44,6 +44,7 @@ pub struct ClaudeToOpenAIChatCompletionsStream {
     created_at: i64,
     usage: Usage,
     trailing_usage_sent: bool,
+    context_window_exceeded: bool,
     /// Tool calls whose blocks haven't ended, by block index.
     tool_calls: HashMap<i64, ToolCall>,
     /// The `index` the next tool call gets in the chunks.
@@ -69,6 +70,7 @@ impl ClaudeToOpenAIChatCompletionsStream {
             created_at: 0,
             usage: Usage::default(),
             trailing_usage_sent: false,
+            context_window_exceeded: false,
             tool_calls: HashMap::new(),
             next_tool_call_index: 0,
         }
@@ -149,6 +151,10 @@ impl ClaudeToOpenAIChatCompletionsStream {
             "message_delta" => {
                 let mut chunk = self.chunk();
                 if let Some(reason) = path(&event, "delta.stop_reason") {
+                    if is_context_window_exceeded(&str_of(Some(reason))) {
+                        self.context_window_exceeded = true;
+                        return Some(context_window_error());
+                    }
                     let finish = finish_reason(&str_of(Some(reason)));
                     if let Some(Value::Object(choice)) = first_choice(&mut chunk) {
                         choice.insert("finish_reason".into(), finish.into());
@@ -162,7 +168,8 @@ impl ClaudeToOpenAIChatCompletionsStream {
             }
             "message_stop" => {
                 // OpenAI's trailing usage chunk, with no choices.
-                if !self.usage.reported || self.trailing_usage_sent {
+                if self.context_window_exceeded || !self.usage.reported || self.trailing_usage_sent
+                {
                     return None;
                 }
                 self.trailing_usage_sent = true;
@@ -331,6 +338,9 @@ pub fn convert_claude_response_to_openai_chat_completions_non_stream(response: &
     if !calls.is_empty() {
         message.insert("tool_calls".into(), calls.into());
     }
+    if is_context_window_exceeded(&stop_reason) {
+        return context_window_error();
+    }
     let usage = if usage.reported {
         usage.to_openai()
     } else {
@@ -353,6 +363,17 @@ pub fn convert_claude_response_to_openai_chat_completions_non_stream(response: &
 fn parse_data_line(line: &[u8]) -> Option<Value> {
     let data = std::str::from_utf8(line.strip_prefix(b"data:")?).ok()?;
     serde_json::from_str(data.trim()).ok()
+}
+
+fn is_context_window_exceeded(reason: &str) -> bool {
+    crate::go::equal_fold(reason.trim(), "model_context_window_exceeded")
+}
+
+fn context_window_error() -> Value {
+    json!({"error":{
+        "message":"Claude stopped because the conversation filled the model context window (stop_reason: model_context_window_exceeded).",
+        "type":"invalid_request_error","code":"context_length_exceeded"
+    }})
 }
 
 /// A Claude stop reason as a Chat Completions finish reason.

@@ -1,4 +1,4 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.32).
+//! Ports internal/util/gemini_schema_test.go (v8.0.36).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A
@@ -18,8 +18,6 @@
 //! - TestCleanJSONSchemaStripsPropertyNamesUnderPropertyNamedProperties: the
 //!   assertion that `additionalProperties` is removed is dropped, since this
 //!   cleaner keeps it (upstream's own Issue5959 test checks it is kept).
-//! - TestCleanJSONSchema_RemovesDraft04IdAndSchemaIdentifierKeywords: the `$ref`
-//!   half is dropped. It tests Antigravity's local `$ref` inlining.
 //! - TestCleanJSONSchema_PreservesLargeNumberPrecision ran Antigravity's
 //!   response cleaner, which moves `minimum` into the description. Here
 //!   `minimum` stays, and the test checks its digits survive the re-encoding.
@@ -1169,7 +1167,7 @@ fn matches_upstream_output() {
         ),
         (
             r##"{"type":"object","properties":{"p":{"$ref":"#/$defs/Foo~1Bar","description":"x"}},"$defs":{"Foo/Bar":{"type":"string"}}}"##,
-            r#"{"type":"object","properties":{"p":{"type":"object","description":"x (See: Foo/Bar)"}}}"#,
+            r#"{"type":"object","properties":{"p":{"type":"string","description":"x"}}}"#,
         ),
         (
             r#"{"allOf":[{"properties":{"a.b":{"type":"string"}},"required":["a.b"]},{"required":["c"],"if":{}}],"type":"object","properties":{"c":{"type":"integer"}}}"#,
@@ -1194,7 +1192,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":["array","null"],"items":{"type":"string"},"x-a":1,"properties":{"x-b":{"x-c":2}}}"#,
-            r#"{"type":"object","items":{"type":"string"},"properties":{"x-b":{}}}"#,
+            r#"{"type":"object","properties":{"x-b":{}}}"#,
         ),
         // A root const: upstream's path ".enum" names a key under "".
         (
@@ -1574,7 +1572,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":["array","object"],"items":{"type":"string"},"properties":{"x":{"type":"string"}}}}}"#,
-            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"x":{"type":"string"}},"description":"Accepts: array | object"}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"x":{"type":"string"}},"description":"Accepts: array | object"}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":"OBJECT","properties":{}}}}"#,
@@ -1626,7 +1624,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":"array","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
-            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}}}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"},{"type":"string"}]}}}"#,
@@ -2568,4 +2566,111 @@ fn gemini_duplicate_append_names_still_charge_both_copies() {
     );
     assert!(cost.bytes >= branch.to_string().len());
     assert!(cost.nodes >= copy_cost(&branch).unwrap().nodes);
+}
+
+#[test]
+fn removes_content_annotations_but_keeps_same_named_properties_issue6699() {
+    let out = clean_schema(&json!({
+        "type":"object", "contentMediaType":"application/json", "contentEncoding":"utf-8",
+        "properties": {
+            "value":{"anyOf":[{"type":"object","properties":{}},
+                {"type":"string","contentMediaType":"application/json","contentEncoding":"base64"}]},
+            "directPayload":{"type":"string","contentMediaType":"application/json","contentEncoding":"base64"},
+            "contentMediaType":{"type":"string","contentMediaType":"text/plain"},
+            "contentEncoding":{"type":"string","contentEncoding":"base64"}
+        }
+    }));
+    for node in [
+        &out,
+        &out["properties"]["value"]["anyOf"][1],
+        &out["properties"]["directPayload"],
+        &out["properties"]["contentMediaType"],
+        &out["properties"]["contentEncoding"],
+    ] {
+        assert!(node.get("contentMediaType").is_none(), "{out}");
+        assert!(node.get("contentEncoding").is_none(), "{out}");
+    }
+    assert_eq!(
+        out["properties"]["value"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(out["properties"]["value"]["anyOf"][1]["type"], "string");
+    for name in ["contentMediaType", "contentEncoding"] {
+        assert_eq!(out["properties"][name]["type"], "string");
+    }
+}
+
+#[test]
+fn removes_access_annotations_but_keeps_names_and_literal_values_issue6778() {
+    let field = json!({"type":"string","description":"Database resource name","readOnly":true,"writeOnly":false});
+    let literal = json!({"readOnly":true,"writeOnly":false,"contentMediaType":"text/plain","contentEncoding":"base64"});
+    let out = clean_schema(&json!({"type":"object","readOnly":false,"writeOnly":false,
+        "properties":{"database":{"type":"object","properties":{"name":field,"uid":field,"etag":field}},
+            "itemsList":{"type":"array","items":field},
+            "unionField":{"anyOf":[field,{"type":"integer","writeOnly":true}]},
+            "readOnly":{"type":"boolean","readOnly":true},"writeOnly":{"type":"boolean","writeOnly":true},
+            "literal":{"type":"object","default":literal,"example":literal,"examples":[literal]}}}));
+    for node in [
+        &out,
+        &out["properties"]["database"]["properties"]["name"],
+        &out["properties"]["database"]["properties"]["uid"],
+        &out["properties"]["database"]["properties"]["etag"],
+        &out["properties"]["itemsList"]["items"],
+        &out["properties"]["unionField"]["anyOf"][0],
+        &out["properties"]["unionField"]["anyOf"][1],
+        &out["properties"]["readOnly"],
+        &out["properties"]["writeOnly"],
+    ] {
+        assert!(node.get("readOnly").is_none(), "{out}");
+        assert!(node.get("writeOnly").is_none(), "{out}");
+    }
+    for name in ["readOnly", "writeOnly"] {
+        assert_eq!(out["properties"][name]["type"], "boolean");
+    }
+    assert_eq!(
+        out["properties"]["database"]["properties"]["name"]["description"],
+        "Database resource name"
+    );
+    assert_eq!(out["properties"]["literal"]["default"], literal);
+    assert_eq!(out["properties"]["literal"]["example"], literal);
+    assert_eq!(out["properties"]["literal"]["examples"], json!([literal]));
+}
+
+#[test]
+fn every_path_writer_preflights_depth_before_recursing() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            for count in [128, 5_000, 20_000] {
+                let path = vec!["p"; count].join(".");
+                let mut doc = json!({});
+                set(&mut doc, &path, json!({"type":"string"}));
+                assert_eq!(doc, json!({}), "{count} path keys");
+            }
+            let mut doc = json!({});
+            set(
+                &mut doc,
+                &vec!["p"; 127].join("."),
+                json!({"type":"string"}),
+            );
+            assert!(local_refs::fits_at_depth(&doc, 0));
+            assert!(!doc.as_object().unwrap().is_empty());
+            assert!(!serde_json::to_vec(&doc).unwrap().is_empty());
+            drop(doc);
+
+            // Definition-shaped keys in copied literal data still count.
+            let mut literal = json!({});
+            for _ in 0..126 {
+                literal = json!({"$defs":literal});
+            }
+            let mut doc = json!({});
+            set(&mut doc, "example.value", literal);
+            assert_eq!(doc, json!({}));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
