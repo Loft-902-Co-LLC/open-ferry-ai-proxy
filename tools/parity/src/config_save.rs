@@ -3,6 +3,7 @@
 //! `open_ferry_core::config::save` (see `go/parity_config_save.go`).
 
 pub mod counterfactual;
+pub mod folded;
 
 use std::env;
 use std::fs;

@@ -1,0 +1,69 @@
+[
+  {
+    "case": "styles-change",
+    "options": {
+      "file": "port: 8317\nauth-dir: '~/.cli-proxy-api'\nproxy-url: \"http://proxy.example:3128\"\n'debug': false\n\"request-retry\": 3\napi-keys:\n  - 'single ''quoted'''\n  - \"double \\\"quoted\\\" é\"\n  - plain key\n  - |\n    literal\n    block\n  - >\n    folded\n    block\n  - \"-starts-with-dash\"\n  - \"123\"\n  - \"true\"\n  - \"null\"\n  - \"\"\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\n",
+      "steps": [
+        {
+          "op": "save",
+          "config": "port: 8318\napi-keys: [\"single 'quoted'\", plain key, new key]\n",
+          "migrate": false
+        }
+      ]
+    },
+    "upstream_output": {
+      "files": [
+        "port: 8318\nauth-dir: ''\nproxy-url: \"\"\n'debug': false\nrequest-retry: 0\napi-keys:\n  - 'single ''quoted'''\n  - plain key\n  - new key\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nws-auth: true\n"
+      ]
+    },
+    "open_ferry_output": {
+      "files": [
+        "port: 8318\nauth-dir: ''\nproxy-url: \"\"\n'debug': false\nrequest-retry: 0\napi-keys:\n  - 'single ''quoted'''\n  - plain key\n  - new key\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nws-auth: true\n"
+      ]
+    }
+  },
+  {
+    "case": "styles-migrate",
+    "options": {
+      "file": "port: 8317\nauth-dir: '~/.cli-proxy-api'\nproxy-url: \"http://proxy.example:3128\"\n'debug': false\n\"request-retry\": 3\napi-keys:\n  - 'single ''quoted'''\n  - \"double \\\"quoted\\\" é\"\n  - plain key\n  - |\n    literal\n    block\n  - >\n    folded\n    block\n  - \"-starts-with-dash\"\n  - \"123\"\n  - \"true\"\n  - \"null\"\n  - \"\"\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\n",
+      "steps": [
+        {
+          "op": "save",
+          "migrate": true
+        }
+      ]
+    },
+    "upstream_output": {
+      "files": [
+        "requests:\n    proxy-url: \"http://proxy.example:3128\"\naccess:\n    api-keys:\n        - 'single ''quoted'''\n        - \"double \\\"quoted\\\" é\"\n        - plain key\n        - |\n          literal\n          block\n        - >\n          folded block\n\n        - \"-starts-with-dash\"\n        - \"123\"\n        - \"true\"\n        - \"null\"\n        - \"\"\nserver:\n    port: 8317\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: '~/.cli-proxy-api'\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 3\nconfig-version: 8\n\n# unknown-styles:\n#     literal: |-\n#         keep\n#         this\n#     folded: >+\n#         keep\n# \n# \n# \n#     quoted: 'it''s'\n#     number: \"8317\"\n#     bool: 'false'\n"
+      ]
+    },
+    "open_ferry_output": {
+      "files": [
+        "requests:\n    proxy-url: \"http://proxy.example:3128\"\naccess:\n    api-keys:\n        - 'single ''quoted'''\n        - \"double \\\"quoted\\\" é\"\n        - plain key\n        - |\n          literal\n          block\n        - >\n          folded block\n        - \"-starts-with-dash\"\n        - \"123\"\n        - \"true\"\n        - \"null\"\n        - \"\"\nserver:\n    port: 8317\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: '~/.cli-proxy-api'\n    providers:\n        aistudio:\n            ws-auth: true\nobservability:\n    logs:\n        debug: false\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 3\nconfig-version: 8\n\n# unknown-styles:\n#     literal: |-\n#         keep\n#         this\n#     folded: >+\n#         keep\n# \n#     quoted: 'it''s'\n#     number: \"8317\"\n#     bool: 'false'\n"
+      ]
+    }
+  },
+  {
+    "case": "styles-resave",
+    "options": {
+      "file": "port: 8317\nauth-dir: '~/.cli-proxy-api'\nproxy-url: \"http://proxy.example:3128\"\n'debug': false\n\"request-retry\": 3\napi-keys:\n  - 'single ''quoted'''\n  - \"double \\\"quoted\\\" é\"\n  - plain key\n  - |\n    literal\n    block\n  - >\n    folded\n    block\n  - \"-starts-with-dash\"\n  - \"123\"\n  - \"true\"\n  - \"null\"\n  - \"\"\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\n",
+      "steps": [
+        {
+          "op": "save",
+          "migrate": false
+        }
+      ]
+    },
+    "upstream_output": {
+      "files": [
+        "port: 8317\nauth-dir: '~/.cli-proxy-api'\nproxy-url: \"http://proxy.example:3128\"\n'debug': false\nrequest-retry: 3\napi-keys:\n  - 'single ''quoted'''\n  - \"double \\\"quoted\\\" é\"\n  - plain key\n  - |\n    literal\n    block\n  - >\n    folded block\n\n  - \"-starts-with-dash\"\n  - \"123\"\n  - \"true\"\n  - \"null\"\n  - \"\"\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nws-auth: true\n"
+      ]
+    },
+    "open_ferry_output": {
+      "files": [
+        "port: 8317\nauth-dir: '~/.cli-proxy-api'\nproxy-url: \"http://proxy.example:3128\"\n'debug': false\nrequest-retry: 3\napi-keys:\n  - 'single ''quoted'''\n  - \"double \\\"quoted\\\" é\"\n  - plain key\n  - |\n    literal\n    block\n  - >\n    folded block\n  - \"-starts-with-dash\"\n  - \"123\"\n  - \"true\"\n  - \"null\"\n  - \"\"\nunknown-styles:\n  literal: |-\n    keep\n    this\n  folded: >+\n    keep\n\n  quoted: 'it''s'\n  number: \"8317\"\n  bool: 'false'\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nws-auth: true\n"
+      ]
+    }
+  }
+]

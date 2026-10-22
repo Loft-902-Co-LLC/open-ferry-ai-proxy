@@ -29,6 +29,7 @@ pub struct SuiteResult {
     pub upstream_counterfactuals: usize,
     /// Successful Go archives whose scalar/comment loss has a complete counterfactual.
     pub upstream_archived_counterfactuals: usize,
+    pub upstream_folded_reencodes: usize,
 }
 
 /// What the run compared against, and how its random cases were made.
@@ -94,6 +95,11 @@ pub fn render(run: &RunInfo<'_>, suites: &[SuiteResult]) -> String {
         out,
         "Upstream archived scalar counterfactual: {} cases (included in Equivalent).",
         thousands(total(|s| s.upstream_archived_counterfactuals))
+    );
+    let _ = writeln!(
+        out,
+        "Upstream folded scalar re-encode: {} cases (included in Equivalent).",
+        thousands(total(|s| s.upstream_folded_reencodes))
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "<details>");
@@ -177,6 +183,7 @@ mod tests {
             upstream_lossy_plugins: 1,
             upstream_counterfactuals: 1,
             upstream_archived_counterfactuals: 1,
+            upstream_folded_reencodes: 1,
         }
     }
 

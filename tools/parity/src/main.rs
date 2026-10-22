@@ -713,6 +713,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 .get(&Deviation::UpstreamArchivedScalarCounterfactual)
                 .copied()
                 .unwrap_or_default(),
+            upstream_folded_reencodes: tally
+                .deviations
+                .get(&Deviation::UpstreamFoldedScalarReencode)
+                .copied()
+                .unwrap_or_default(),
             upstream_counterfactuals: tally
                 .deviations
                 .get(&Deviation::UpstreamBlockScalarCounterfactual)
@@ -1026,6 +1031,12 @@ fn evaluate_with_whole_counterfactual(
     let Ok(rust) = &evaluated.rust_output else {
         return Ok(evaluated);
     };
+    if let Some(proof) = config_save::folded::evidence(case, &original_go, rust) {
+        save_counterfactual(work_dir, case, &proof)?;
+        evaluated.outcome =
+            Outcome::Equivalent(BTreeSet::from([Deviation::UpstreamFoldedScalarReencode]));
+        return Ok(evaluated);
+    }
     let Some(reason) = config_save::counterfactual::reason(case, &original_go, rust) else {
         return Ok(evaluated);
     };

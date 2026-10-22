@@ -140,6 +140,15 @@ pub(crate) fn marshal_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlEr
     protected_node(node, indent).map(|(bytes, _)| bytes)
 }
 
+#[cfg(any(feature = "parity", test))]
+pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlError> {
+    let mut encoder = Encoder::new();
+    encoder.set_indent(indent);
+    encoder.encode_node(node)?;
+    encoder.finish()?;
+    Ok(encoder.emitter.into_output())
+}
+
 /// Config writer protection, also exposing exactly which source scalars the
 /// emitter quotes for the offline counterfactual proof.
 pub(crate) fn protected_node(

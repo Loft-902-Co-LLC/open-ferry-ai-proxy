@@ -50,6 +50,8 @@ pub enum Deviation {
     UpstreamBlockScalarCounterfactual,
     /// A protected scalar in an archived section absorbs a source comment into data.
     UpstreamArchivedScalarCounterfactual,
+    /// Exact source-preserved folded scalars replay both emitter modes.
+    UpstreamFoldedScalarReencode,
     /// Our reload log has a change line for a setting upstream reloads
     /// without one; upstream logs nothing for it.
     UnloggedChangeLine,
@@ -72,6 +74,7 @@ impl Deviation {
             Self::UpstreamLossyPluginReencode => "upstream lossy plugin re-encode",
             Self::UpstreamBlockScalarCounterfactual => "upstream block scalar counterfactual",
             Self::UpstreamArchivedScalarCounterfactual => "upstream archived scalar counterfactual",
+            Self::UpstreamFoldedScalarReencode => "upstream folded scalar re-encode",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
     }
