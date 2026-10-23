@@ -47,35 +47,6 @@ fn pr_and_nightly_profiles_keep_all_handwritten_config_save_cases() {
     }
 }
 
-fn skip_include_trivia(mut text: &str) -> &str {
-    loop {
-        text = text.trim_start();
-        if let Some(rest) = text.strip_prefix("//") {
-            text = rest.split_once('\n').map_or("", |(_, tail)| tail);
-        } else if let Some(mut rest) = text.strip_prefix("/*") {
-            let mut depth = 1;
-            while depth > 0 {
-                if let Some(tail) = rest.strip_prefix("/*") {
-                    depth += 1;
-                    rest = tail;
-                } else if let Some(tail) = rest.strip_prefix("*/") {
-                    depth -= 1;
-                    rest = tail;
-                } else {
-                    rest = &rest[rest
-                        .chars()
-                        .next()
-                        .expect("unclosed include comment")
-                        .len_utf8()..];
-                }
-            }
-            text = rest;
-        } else {
-            return text;
-        }
-    }
-}
-
 fn assert_include_closure(root: &Path, paths: &[&str]) {
     let hashed: BTreeSet<_> = paths
         .iter()
@@ -83,32 +54,7 @@ fn assert_include_closure(root: &Path, paths: &[&str]) {
         .collect();
     for path in paths.iter().filter(|path| path.ends_with(".rs")) {
         let source = fs::read_to_string(root.join(path)).unwrap();
-        for name in ["include_str", "include_bytes"] {
-            for tail in source.split(name).skip(1) {
-                let Some(tail) = skip_include_trivia(tail).strip_prefix('!') else {
-                    continue;
-                };
-                let tail = skip_include_trivia(tail).strip_prefix('(').unwrap();
-                let (literal, _) = tail.split_once(')').unwrap();
-                // Reject expressions or unsupported literal spellings rather
-                // than silently overlooking an include that needs review.
-                let target: String =
-                    serde_json::from_str(literal.trim().trim_end_matches(',').trim())
-                        .expect("generator includes must use a relative string literal");
-                let target = root
-                    .join(path)
-                    .parent()
-                    .unwrap()
-                    .join(target)
-                    .canonicalize()
-                    .unwrap();
-                assert!(
-                    hashed.contains(&target),
-                    "{path}: {name}! target is not fingerprinted: {}",
-                    target.display()
-                );
-            }
-        }
+        super::closure::check(root, path, &source, &hashed).unwrap();
     }
 }
 
@@ -144,7 +90,7 @@ fn include_closure_scan_rejects_unhashed_text_and_byte_targets() {
         for trivia in [" ", " /* nested /* comment */ */ // comment\n"] {
             fs::write(
                 root.join("nested/generator.rs"),
-                format!("const INPUT = {name}{trivia}!{trivia}(\n\"../input.txt\",\n);\n"),
+                format!("const INPUT: &str = {name}{trivia}!{trivia}(\n\"../input.txt\",\n);\n"),
             )
             .unwrap();
             assert!(
@@ -160,12 +106,12 @@ fn include_closure_scan_rejects_unhashed_text_and_byte_targets() {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn check_generator_label(root: &Path) -> std::result::Result<(), String> {
-    let baseline: Baseline = read(&root.join("tools/parity/baseline/config-save.json")).unwrap();
+fn check_generator_label(root: &Path, baseline_path: &Path) -> std::result::Result<(), String> {
+    let baseline: Baseline = read(baseline_path).unwrap();
     let actual = fingerprint_at(root, "pin").unwrap();
     if actual["generator_sha256"] != baseline.fingerprint["generator_sha256"] {
         return Err(format!(
-            "generator_sha256 differs from the committed baseline; verify case inputs, relabel matching observations and run a full refresh: {REFRESH}"
+            "generator_sha256 differs from the committed baseline; run {RELABEL} for matching recorded random probes; changed probes or classifier versions need reclassification/full refresh: {REFRESH}"
         ));
     }
     Ok(())
@@ -173,7 +119,11 @@ fn check_generator_label(root: &Path) -> std::result::Result<(), String> {
 
 #[test]
 fn committed_generator_fingerprint_matches_real_tree() {
-    check_generator_label(root()).unwrap();
+    check_generator_label(
+        root(),
+        &root().join("tools/parity/baseline/config-save.json"),
+    )
+    .unwrap();
 
     // Exercise the same comparison after a real source edit, so replacing its
     // computed hash with a constant cannot turn this into a vacuous check.
@@ -187,12 +137,31 @@ fn committed_generator_fingerprint_matches_real_tree() {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::copy(root().join(path), target).unwrap();
     }
-    check_generator_label(&copy).unwrap();
+    check_generator_label(&copy, &copy.join("tools/parity/baseline/config-save.json")).unwrap();
     fs::write(copy.join(GENERATOR_PATHS[0]), "changed random generator\n").unwrap();
-    let error = check_generator_label(&copy).unwrap_err();
+    let error = check_generator_label(&copy, &copy.join("tools/parity/baseline/config-save.json"))
+        .unwrap_err();
     assert!(
-        error.contains("relabel") && error.contains(REFRESH),
+        error.contains(RELABEL) && error.contains(REFRESH),
         "{error}"
+    );
+    // Independently change the committed-JSON side too. A constant expected
+    // hash must fail even when the generator itself is unchanged.
+    fs::copy(
+        root().join(GENERATOR_PATHS[0]),
+        copy.join(GENERATOR_PATHS[0]),
+    )
+    .unwrap();
+    let baseline_path = copy.join("tools/parity/baseline/config-save.json");
+    let mut edited: Baseline = read(&baseline_path).unwrap();
+    edited
+        .fingerprint
+        .insert("generator_sha256".into(), "f".repeat(64));
+    write(&baseline_path, &edited).unwrap();
+    assert!(
+        check_generator_label(&copy, &baseline_path)
+            .unwrap_err()
+            .contains(RELABEL)
     );
     fs::remove_dir_all(copy).unwrap();
 }
@@ -221,14 +190,17 @@ fn comment_free_oracle_cannot_stop_before_completed_go() {
         json!({"files":[go["files"][0]],"error":"x"}),
         json!({"files":go["files"],"unloadable":"x"}),
     ] {
+        assert!(oracle_stops_early(go, &oracle));
         let proof = ablation::certify(&case, go, &protected, |_| {
             Ok(GoResult::Output(serde_json::to_vec(&oracle).unwrap()))
         })
         .unwrap();
         assert!(proof.deviations.is_none());
+        assert_eq!(proof.evidence["original_go"], *go);
+        assert_eq!(proof.evidence["comment_free_go"], oracle);
         assert_eq!(
             proof.evidence["failures"][0]["reason"],
-            "comment_free_go_malformed"
+            "comment_free_go_early"
         );
         assert!(difference_kinds(&case.options, &proof.evidence, go, Some(&protected)).is_none());
     }
@@ -272,7 +244,7 @@ fn comment_free_completion_after_original_go_failure_keeps_kinds() {
             if early {
                 assert_eq!(
                     proof.evidence["failures"][0]["reason"],
-                    "comment_free_go_malformed"
+                    "comment_free_go_early"
                 );
                 assert!(kinds.is_none());
             } else {
@@ -284,4 +256,91 @@ fn comment_free_completion_after_original_go_failure_keeps_kinds() {
             }
         }
     }
+}
+
+#[test]
+fn import_early_oracle_is_fatal_but_missing_legacy_wrappers_keep_behavior() {
+    let fixture = oracle_fixture();
+    let case = Case::new("random-32-1072", "", "").with_options(fixture["options"].clone());
+    let go = &fixture["go"];
+    let protected = Translator::ConfigSave.run_rust(&case).unwrap();
+    let saved: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/comment-free-prefix.json")).unwrap();
+    let full = ablation::certify(&case, go, &protected, |_| {
+        Ok(GoResult::Output(
+            serde_json::to_vec(&saved[0]["comment_free_go"]).unwrap(),
+        ))
+    })
+    .unwrap();
+    let directory =
+        std::env::temp_dir().join(format!("parity-import-early-{}", std::process::id()));
+    let failures = directory.join("failures");
+    let proofs = directory.join("proofs");
+    fs::create_dir_all(&failures).unwrap();
+    fs::create_dir_all(&proofs).unwrap();
+    write(&failures.join("random-32-1072.json"), &json!({"case":case.name,"options":case.options,"upstream_output_raw":serde_json::to_string(go).unwrap(),"open_ferry_output":protected})).unwrap();
+    for (early, missing) in [
+        (false, None),
+        (true, None),
+        (true, Some("original_go")),
+        (true, Some("comment_free_go")),
+    ] {
+        let mut proof = full.evidence.clone();
+        if early {
+            proof["comment_free_go"] = json!({"files":[],"error":"x"});
+        }
+        if let Some(key) = missing {
+            proof.as_object_mut().unwrap().remove(key);
+        }
+        write(&proofs.join("random-32-1072.json"), &proof).unwrap();
+        let imported = import(
+            &failures,
+            &proofs,
+            Observation {
+                fingerprint: fingerprint("pin").unwrap(),
+                seed: 32,
+                random: 5000,
+                cases: 1,
+                selected: true,
+                different: 0,
+                non_certification: 0,
+                case_kinds: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(imported.different, 1);
+        if early && missing.is_none() {
+            assert_eq!(imported.non_certification, 1);
+            assert!(imported.case_kinds.is_empty());
+        } else {
+            assert_eq!(imported.non_certification, 0);
+            assert_eq!(
+                imported.case_kinds["random-32-1072"],
+                BTreeSet::from(["check-3/owner_budget/save".into()])
+            );
+        }
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn early_oracle_reason_is_fatal_in_top_level_failures_and_trials() {
+    let options = json!({"steps":[{"op":"save"}]});
+    let go = json!({"files":["debug: true\n"]});
+    let ordinary = json!({"check":3,"step":0,"reason":"owner_budget"});
+    let early = json!({"check":2,"step":0,"reason":"comment_free_go_early"});
+    for proof in [
+        json!({"kind":"uncertified-protection-ablation","reason":"check 2: Go oracle stopped early","failures":[ordinary]}),
+        json!({"kind":"uncertified-protection-ablation","failures":[early]}),
+        json!({"kind":"uncertified-protection-ablation","failures":[ordinary],"trials":[{"failures":[early]}]}),
+    ] {
+        assert!(difference_kinds(&options, &proof, &go, Some(&go)).is_none());
+    }
+    let baseline: Baseline = read(&root().join("tools/parity/baseline/config-save.json")).unwrap();
+    assert!(
+        baseline
+            .kinds
+            .iter()
+            .all(|kind| !kind.contains("comment_free_go_early"))
+    );
 }

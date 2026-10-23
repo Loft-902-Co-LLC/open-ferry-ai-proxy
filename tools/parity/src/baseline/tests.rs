@@ -1,7 +1,9 @@
 use super::*;
 use serde_json::json;
 
+mod closure;
 mod followups;
+mod relabel;
 mod review_r13;
 
 fn failed_go() -> Value {
@@ -26,6 +28,7 @@ fn observation() -> Observation {
 fn baseline() -> Baseline {
     let o = observation();
     Baseline {
+        random_case_probes: None,
         fingerprint: o.fingerprint,
         kinds: o.case_kinds["old"].clone(),
         max_different_per_1000: 2,

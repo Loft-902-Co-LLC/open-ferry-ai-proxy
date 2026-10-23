@@ -11,8 +11,11 @@ use std::{
 };
 
 pub const REFRESH: &str = "cargo run --locked -p open-ferry-parity -- --write-baseline tools/parity/baseline/config-save.json --baseline-observation <run.json> ... (see tools/parity/README.md)";
+pub const RELABEL: &str = "cargo run --locked -p open-ferry-parity -- --relabel-baseline tools/parity/baseline/config-save.json";
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub type Fingerprint = BTreeMap<String, String>;
+
+pub mod probes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +39,9 @@ pub struct Baseline {
     max_different_per_1000: usize,
     pr_different_cases: BTreeSet<String>,
     calibration: Vec<Calibration>,
+    /// Canonical random-case SHA-256 values recorded by a full refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    random_case_probes: Option<probes::Digests>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,10 +66,10 @@ const GENERATOR_PATHS: &[&str] = &[
     "tools/parity/src/cases.rs",
 ];
 
-/// Hash the source closure of random config-save generation to invalidate rate
-/// calibration when its distribution changes. Every hand-written case runs in
-/// both profiles; a new Different ID fails the exact PR case-set gate instead.
-/// Product, certifier, harness and toolchain changes are judged by the verdict.
+/// Hash whole files in the random config-save source closure. Unrelated code
+/// in these files also changes the hash; matching recorded probes permit a
+/// generator-only relabel. Hand-written cases use the exact PR case-set gate.
+/// Classifier changes require reclassification and a full refresh instead.
 fn fingerprint_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
     fn collect(root: &Path, path: PathBuf, files: &mut BTreeSet<PathBuf>) -> Result<()> {
         if path.is_dir() {
@@ -100,7 +106,7 @@ fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
     }
     let generator_hash = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(BTreeMap::from([
-        ("classifier_version".into(), "2".into()),
+        ("classifier_version".into(), "3".into()),
         ("upstream_pin".into(), upstream.trim().into()),
         ("generator_sha256".into(), generator_hash),
     ]))
@@ -152,7 +158,7 @@ pub fn config_output(value: &Value) -> bool {
 }
 
 /// `unloadable` includes the rejected file; `error` contains only successful
-/// snapshots. Compare the same successful-prefix boundary on both sides.
+/// snapshots. A successful wrapper returns its full files length.
 pub(crate) fn successful_prefix(value: &Value) -> Option<usize> {
     let count = value["files"].as_array()?.len();
     if value.get("unloadable").is_some() {
@@ -160,6 +166,10 @@ pub(crate) fn successful_prefix(value: &Value) -> Option<usize> {
     } else {
         Some(count)
     }
+}
+
+pub(crate) fn oracle_stops_early(original: &Value, oracle: &Value) -> bool {
+    successful_prefix(oracle) < successful_prefix(original)
 }
 
 /// Only an actual failed certifier attempt can supply a kind. Panics, malformed
@@ -176,6 +186,14 @@ pub fn difference_kinds(
     {
         return None;
     }
+    // Older saved proofs can carry a well-formed oracle that live certify now
+    // refuses. Keep import/reclassification on the same prefix rule. Proofs
+    // lacking either wrapper retain their existing classification behavior.
+    if let (Some(original), Some(oracle)) = (proof.get("original_go"), proof.get("comment_free_go"))
+        && oracle_stops_early(original, oracle)
+    {
+        return None;
+    }
     let steps = options["steps"].as_array()?;
     if proof["trials"].as_array().is_some_and(|trials| {
         trials.iter().any(|trial| {
@@ -187,6 +205,7 @@ pub fn difference_kinds(
                             "replay_unavailable"
                                 | "comment_free_go_panicked"
                                 | "comment_free_go_malformed"
+                                | "comment_free_go_early"
                         )
                     )
                 })
@@ -218,7 +237,10 @@ pub fn difference_kinds(
         if reason.is_empty()
             || !reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
             || reason.contains("panicked")
-            || matches!(reason, "replay_unavailable" | "comment_free_go_malformed")
+            || matches!(
+                reason,
+                "replay_unavailable" | "comment_free_go_malformed" | "comment_free_go_early"
+            )
         {
             return None;
         }
@@ -384,11 +406,18 @@ impl Baseline {
     pub fn validate(&self, fingerprint: &Fingerprint) -> Result<()> {
         if &self.fingerprint != fingerprint {
             return Err(
-                format!("config-save baseline fingerprint mismatch; refresh: {REFRESH}").into(),
+                format!("config-save baseline fingerprint mismatch; generator-only changes with matching recorded probes: {RELABEL}; otherwise reclassify/full refresh: {REFRESH}").into(),
             );
         }
         if self.max_different_per_1000 > 1000 || self.calibration.is_empty() {
             return Err("invalid config-save baseline".into());
+        }
+        if self
+            .random_case_probes
+            .as_ref()
+            .is_some_and(|digests| !probes::valid(digests))
+        {
+            return Err(format!("invalid random_case_probes; full refresh: {REFRESH}").into());
         }
         Ok(())
     }
@@ -594,7 +623,43 @@ fn refresh_with_existing(
         max_different_per_1000: max_rate,
         pr_different_cases: pr.ok_or("baseline refresh needs seed 1 / random 25")?,
         calibration: calibration.into_iter().collect(),
+        random_case_probes: existing.map_or_else(
+            || Some(probes::digests().clone()),
+            |baseline| baseline.random_case_probes.clone(),
+        ),
     })
+}
+
+/// Change only the generator label after both recorded random probes match.
+pub fn relabel(path: &Path, current: &Fingerprint) -> Result<()> {
+    let mut baseline: Baseline = read(path)?;
+    for key in ["classifier_version", "upstream_pin"] {
+        if baseline.fingerprint.get(key) != current.get(key) {
+            return Err(format!("{key} differs; relabel covers only generator_sha256. Reclassify observations for classifier changes, then full refresh: {REFRESH}").into());
+        }
+    }
+    let recorded = baseline
+        .random_case_probes
+        .as_ref()
+        .ok_or_else(|| format!("baseline has no random_case_probes; full refresh: {REFRESH}"))?;
+    let changed: Vec<_> = probes::digests()
+        .iter()
+        .filter(|(profile, digest)| recorded.get(*profile) != Some(*digest))
+        .map(|(profile, _)| profile.as_str())
+        .collect();
+    if !changed.is_empty() {
+        return Err(format!(
+            "random config-save probe changed: {}; full refresh required: {REFRESH}",
+            changed.join(", ")
+        )
+        .into());
+    }
+    baseline.fingerprint.insert(
+        "generator_sha256".into(),
+        current["generator_sha256"].clone(),
+    );
+    baseline.validate(current)?;
+    write(path, &baseline)
 }
 
 pub fn observations(paths: &[PathBuf]) -> Result<Vec<Observation>> {

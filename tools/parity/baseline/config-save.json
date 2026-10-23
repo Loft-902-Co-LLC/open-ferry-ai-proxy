@@ -121,7 +121,7 @@
     }
   ],
   "fingerprint": {
-    "classifier_version": "2",
+    "classifier_version": "3",
     "generator_sha256": "b60703f808d12349bcb65771191b1cd6c89b4da29b8efd249160376502b02cfc",
     "upstream_pin": "0db19025571684b198a2ef508f99b41c717337e8"
   },
@@ -141,5 +141,9 @@
     "protected-replay/missing_snapshot/save"
   ],
   "max_different_per_1000": 75,
-  "pr_different_cases": []
+  "pr_different_cases": [],
+  "random_case_probes": {
+    "seed-1-random-25": "6be17b05676b0b73b5c3a1ecff8fd8a4168296c6d78c7f18980f5f6a1d82e570",
+    "seed-38-random-5000": "296ec0871a83c5027fabea754d0bc575fd599d695930cd76dec81af9f73ae23d"
+  }
 }

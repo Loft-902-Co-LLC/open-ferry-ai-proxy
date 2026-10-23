@@ -292,6 +292,15 @@ error or trace event, so this matcher requires the complete message shape.
 Comment-free Go oracle replies must have a valid wrapper and one snapshot per
 successful step, or a consistent error/unloadable boundary; malformed replies
 remain fatal as `comment_free_go_malformed`.
+An internally consistent reply that stops before original Go is fatal as
+`comment_free_go_early`. A successful run's prefix is its full files length;
+an unloadable reply's prefix excludes its last, rejected snapshot. Thus an
+oracle error or unloadable reply after original Go completed also stops early.
+This reason is never a baseline kind. Inspect `original_go` and
+`comment_free_go` in the refusal artifact, compare their successful prefixes,
+and reproduce the cleaned case with the pinned Go harness. Investigate comment
+stripping, loader behavior or harness drift; fix and rerun instead of adding
+this refusal to the budget.
 
 The committed budget is the maximum final-certifier observed total rate plus 20%,
 rounded up to the next multiple of five per 1,000. It uses ten random-5000
@@ -374,20 +383,70 @@ The writer sorts keys, kinds and calibration rows; input order does not affect
 the bytes. It rejects non-certification failures and mismatched fingerprints.
 The fingerprint contains only `classifier_version`, `upstream_pin` and
 `generator_sha256` (normalized paths listed in `GENERATOR_PATHS` in
-`src/baseline.rs`). The generator hash covers exactly the source closure of
-random config-save case generation, including shared case construction. It
-invalidates rate calibration when the random distribution changes. Hand-written
+`src/baseline.rs`). The generator hash covers whole files in the source closure
+of random config-save generation, including shared case construction. Unrelated
+code in those files also changes the hash. It invalidates rate calibration when
+the random distribution changes, with the probe-verified relabel exception below.
+Hand-written
 config-save case inputs are not fingerprinted: every PR and nightly profile runs
 all of them, and the exact PR case set rejects any that becomes Different (the
 committed `pr_different_cases` set is currently empty). Product, certifier,
-harness, manifest and toolchain changes are judged by the verdict. Changes to
-the random generator source closure,
-upstream pin or classifier version require matching new observations.
+harness, manifest and toolchain changes are judged by the verdict. In particular,
+serde_json's `preserve_order` feature and locked version affect generated map
+order but are excluded from this hash by policy: dependency changes go through
+review and the lock file. A generator-only relabel must pass the probes below;
+changed probe inputs or an upstream pin change require a full calibration refresh.
 **Adding a kind or raising a bound must
 be explained in the PR**; follow-up fixes lower the baseline rather than weaken
 the certifier. The refresh command never silently updates a running CI budget.
 The kind classifier has an explicit `classifier_version` in the fingerprint;
 bump it when changing how diagnostic kinds are assigned.
+
+### Fingerprint-only relabel
+
+A full refresh records `random_case_probes`, a map from `seed-1-random-25` and
+`seed-38-random-5000` to SHA-256 digests of their canonical random config-save
+exports. Each compact JSON export includes IDs and every input field: model,
+request, translated request, events, options and the known-difference marker.
+Records stay in generator order. JSON framing has no platform line endings;
+embedded input bytes, including deliberate CR/LF characters, are preserved.
+The exporter is the same code used by refresh and relabel:
+
+```sh
+cargo run --locked -p open-ferry-parity -- \
+  --export-config-cases pr-cases.json --seed 1 --random 25
+cargo run --locked -p open-ferry-parity -- \
+  --export-config-cases nightly-cases.json --seed 38 --random 5000
+```
+
+If an unrelated edit to a hashed file changes only the generator fingerprint,
+run this offline command (no Go execution or upstream checkout is required):
+
+```sh
+cargo run --locked -p open-ferry-parity -- \
+  --relabel-baseline tools/parity/baseline/config-save.json
+```
+
+It recomputes both exports and permits relabeling only if their bytes' digests
+match the recorded probes. It changes only `generator_sha256`, preserving the
+probes, kinds, bound, calibration rows, PR set, pin and classifier version. A
+changed probe is named in the error and requires full refresh with matching
+observations. The command refuses classifier-version or upstream-pin changes.
+Legacy baselines without `random_case_probes` remain readable and valid for
+ordinary assessment when their fingerprints match, but cannot be relabeled; a
+full refresh must first record the probes. Incremental refresh preserves existing probes, including their
+absence in a legacy baseline.
+
+### Classifier-version reclassification
+
+A classifier-version change requires reclassifying every saved observation with
+the new classifier through `--import-config-failures` and its bound proof files,
+as shown below. Write new observation copies; do not edit old fingerprints.
+Compare every per-case kind set, the per-case and total counts, and
+non-certification failures with the prior observations. Stop for review if any
+of these change. Only then perform a full refresh under the new classifier,
+keeping held-out observations outside the calibration set. The fingerprint-only
+relabel command refuses this transition even when random probes match.
 
 Historical fixtures can be imported with the committed classifier:
 
@@ -403,8 +462,12 @@ cargo run --locked -p open-ferry-parity -- \
 ```
 
 Import attaches the current fingerprint: use it only after verifying that the
-saved outputs came from the same product and certification behavior. Round 11
-re-executes Round 10's calibration inputs after its certifier fixes. This is not permission to
-relabel old evidence after a generator or certifier change. GitHub summaries
+saved outputs came from the same product and generated inputs. When a classifier
+changes, reclassification must follow the comparison and full-refresh procedure
+above; matching probe bytes authorize only a generator-hash relabel, never a
+classifier change. Saved proofs carrying both `original_go` and `comment_free_go`
+receive the same early-oracle prefix check as live certification. Legacy proofs
+missing either wrapper retain their previous classification behavior; import
+does not reconstruct their missing oracle evidence. GitHub summaries
 show each kind's count/rate and the total bound; the always-uploaded observation
 can be reused in a reviewed refresh.
