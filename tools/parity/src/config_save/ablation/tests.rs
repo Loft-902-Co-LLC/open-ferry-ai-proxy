@@ -116,6 +116,57 @@ fn check_two_rejects_changed_and_dropped_values_after_invalid_go() {
 }
 
 #[test]
+fn check_two_does_not_treat_non_string_keyed_maps_as_equal_values() {
+    let case = single("x: {1: old}\nauth-dir: /old # c\n");
+    let bad = "x: {1: old}\nauth-dir: # c\n{}\n";
+    assert!(Config::load_bytes(bad.as_bytes()).is_err());
+    let replay = Replay {
+        output: json!({"files":[bad],"unloadable":"invalid"}),
+        traces: vec![Trace {
+            rejected: vec![core::ablation::Rejected {
+                stage: "write",
+                bytes: bad.as_bytes().to_vec(),
+            }],
+            emissions: vec![core::ablation::Emission {
+                bytes: bad.as_bytes().to_vec(),
+                comments: vec![core::ablation::WrittenComment {
+                    offset: bad.find("# c").unwrap(),
+                    bytes: b"# c".to_vec(),
+                }],
+            }],
+        }],
+    };
+    let protected = json!({"files":["x: {1: changed}\nauth-dir: /x # c\n"]});
+    let expected = json!({"files":["x: {1: old}\nauth-dir: /x\n"]});
+    let checks = evaluate_boundary(
+        &case,
+        &replay.output,
+        &protected,
+        &expected,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    assert_eq!(checks, [true, false, true, true, true]);
+    assert!(!accepted(checks));
+    let failures = diagnostics::failures(
+        Proof {
+            case: &case,
+            go: &replay.output,
+            protected: &protected,
+            expectation: &expected,
+            ablated: &replay,
+            go_trace: None,
+            mask: 1,
+            matches: &[(1, true)],
+        },
+        checks,
+    );
+    assert_eq!(failures[0]["reason"], "unsupported_value_path");
+    assert_eq!(failures[0]["path"], json!(["x"]));
+}
+
+#[test]
 fn check_three_rejects_invention_excess_copies_and_w_lost_duplicate() {
     for (source, g, r) in [
         (

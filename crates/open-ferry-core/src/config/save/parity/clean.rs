@@ -25,8 +25,42 @@ pub fn comment_free_source(text: &str) -> Option<String> {
     (same_values(text, &out)?).then_some(out)
 }
 
-/// All YAML values, including untyped/plugin values, not just typed settings.
+/// Decoded YAML values, including untyped/plugin values. Non-string-keyed maps
+/// are represented only by `AnyMap`, so their contents cannot be compared.
 pub fn same_values(a: &str, b: &str) -> Option<bool> {
     use crate::config::AnyValue;
-    Some(AnyValue::parse_yaml(a).ok()? == AnyValue::parse_yaml(b).ok()?)
+    fn complete(value: &AnyValue) -> bool {
+        match value {
+            AnyValue::AnyMap => false,
+            AnyValue::Map(values) => values.values().all(complete),
+            AnyValue::Seq(values) => values.iter().all(complete),
+            _ => true,
+        }
+    }
+    let (a, b) = (AnyValue::parse_yaml(a).ok()?, AnyValue::parse_yaml(b).ok()?);
+    (complete(&a) && complete(&b)).then_some(a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn opaque_mapping_markers_never_prove_value_equality() {
+        for source in [
+            "x: {1: old}\n",
+            "plugins:\n  configs:\n    demo:\n      - {true: old}\n",
+        ] {
+            assert_eq!(same_values(source, source), None);
+            assert_eq!(same_values(source, &source.replace("old", "changed")), None);
+            assert!(comment_free_source(source).is_none());
+        }
+        assert_eq!(
+            same_values("x: {'1': old}\n", "x: {'1': old}\n"),
+            Some(true)
+        );
+        assert_eq!(
+            same_values("x: {'1': old}\n", "x: {'1': changed}\n"),
+            Some(false)
+        );
+    }
 }

@@ -78,6 +78,31 @@ fn first_value(a: &AnyValue, b: &AnyValue, path: &mut Vec<Value>) -> bool {
     }
     true
 }
+fn first_opaque(value: &AnyValue, path: &mut Vec<Value>) -> bool {
+    match value {
+        AnyValue::AnyMap => return true,
+        AnyValue::Map(values) => {
+            for (key, value) in values {
+                path.push(json!(key));
+                if first_opaque(value, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        AnyValue::Seq(values) => {
+            for (i, value) in values.iter().enumerate() {
+                path.push(json!(i));
+                if first_opaque(value, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+    false
+}
 fn value_failure(case: &Case, protected: &Value, expectation: &Value) -> Value {
     let (Some(r), Some(e)) = (
         protected["files"].as_array(),
@@ -103,6 +128,9 @@ fn value_failure(case: &Case, protected: &Value, expectation: &Value) -> Value {
             return at(2, i, json!({"reason":"value_parse"}));
         };
         let mut path = vec![];
+        if first_opaque(&r, &mut path) || first_opaque(&e, &mut path) {
+            return at(2, i, json!({"reason":"unsupported_value_path","path":path}));
+        }
         if first_value(&r, &e, &mut path) {
             return at(2, i, json!({"reason":"value_path","path":path}));
         }
@@ -282,13 +310,21 @@ pub(super) fn comment_free_failure(case: &Case) -> Value {
         if let Some(faithful) = core::faithful_without_comments(text)
             && let (Ok(source), Ok(clean)) =
                 (AnyValue::parse_yaml(text), AnyValue::parse_yaml(&faithful))
-            && first_value(&source, &clean, &mut path)
         {
-            return at(
-                2,
-                index,
-                json!({"reason":"comment_free_value_path","stage":stage,"path":path}),
-            );
+            if first_opaque(&source, &mut path) || first_opaque(&clean, &mut path) {
+                return at(
+                    2,
+                    index,
+                    json!({"reason":"unsupported_value_path","stage":stage,"path":path}),
+                );
+            }
+            if first_value(&source, &clean, &mut path) {
+                return at(
+                    2,
+                    index,
+                    json!({"reason":"comment_free_value_path","stage":stage,"path":path}),
+                );
+            }
         }
         at(
             2,

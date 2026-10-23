@@ -356,8 +356,13 @@ pub fn certify(
         }
         if oracle.is_none() {
             let Some(clean) = comment_free(case) else {
-                let mut result = refused("check 2: comment-free source changes values");
                 let failure = diagnostics::comment_free_failure(case);
+                let reason = if failure["reason"] == "unsupported_value_path" {
+                    "check 2: unsupported non-string-keyed values"
+                } else {
+                    "check 2: comment-free source changes values"
+                };
+                let mut result = refused(reason);
                 trials.push(json!({"mask":mask,"failures":[failure]}));
                 result.evidence["failures"] = json!([failure]);
                 result.evidence["trials"] = json!(trials);
