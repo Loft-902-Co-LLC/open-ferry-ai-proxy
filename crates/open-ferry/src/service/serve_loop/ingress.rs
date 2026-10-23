@@ -458,6 +458,15 @@ impl Traffic {
                 if let Some(reset_at) = progress.reset_at {
                     consider(reset_at + RESET_GRACE, "stream reset grace", None);
                 } else if progress.pending != 0 {
+                    debug_assert!(
+                        progress.progressed.is_some(),
+                        "pending delivery bytes must have a progress timestamp"
+                    );
+                    // A broken delivery must not take down the detached watcher
+                    // and disable the connection's other deadlines in release.
+                    let Some(progressed) = progress.progressed else {
+                        continue;
+                    };
                     let stream = (state.protocol == Protocol::Http2).then_some(id);
                     let grace = if connection_blocked {
                         STREAM_STALL_GRACE
@@ -465,7 +474,7 @@ impl Traffic {
                         Duration::ZERO
                     };
                     consider(
-                        progress.progressed.unwrap() + duration + grace,
+                        progressed + duration + grace,
                         "response write progress",
                         stream,
                     );
