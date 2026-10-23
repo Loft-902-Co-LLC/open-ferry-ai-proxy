@@ -177,6 +177,16 @@ pub(crate) struct PendingSave {
     id: String,
 }
 
+/// One result mutation's admission. Only the async fast path may opt out of
+/// Codex tail detachment, after checking eligibility under this state lock.
+struct ResultAdmission<'a> {
+    gate: super::ReloadGuard,
+    operation: Option<crate::gate::Operation>,
+    state: MutexGuard<'a, State>,
+    now: Timestamp,
+    inline_ineligible: bool,
+}
+
 impl Drop for PendingSave {
     fn drop(&mut self) {
         let mut state = lock(&self.shared.state);
@@ -2519,8 +2529,19 @@ impl Manager {
             Ok(operation) => {
                 operation
                     .scope(async {
-                        if self.try_record_result(result, session, neutral) {
-                            return Ok(());
+                        // Match spawn_blocking's panic boundary. Unwinding
+                        // drops/poisons the same guards before this catch;
+                        // manager locks recover poison on both paths.
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.try_record_result(result, session, neutral)
+                        })) {
+                            Ok(true) => return Ok(()),
+                            Ok(false) => {}
+                            Err(_) => {
+                                return Err(ManagerError::Store(std::io::Error::other(
+                                    "persistence task failed",
+                                )));
+                            }
                         }
                         let result = result.clone();
                         let session = session.cloned();
@@ -2549,8 +2570,15 @@ impl Manager {
     /// Only immutable, permanently ineligible snapshots may finish inline.
     /// Check eligibility and mutate under the SAME state lock so a concurrent
     /// credential edit cannot turn this into runtime-worker disk IO. Reuse the
-    /// reload permit through publication and the (ineligible) persistence tail,
-    /// retaining pending-save counts and sequence watermarks even without IO.
+    /// reload permit through the state mutation and (ineligible) persistence
+    /// tail, retaining pending-save counts and sequence watermarks without IO.
+    /// The tail releases it BEFORE model projections and affinity publication,
+    /// just as on the blocking path. Those later short lock acquisitions can
+    /// wait behind a reload's state rebuild on a runtime worker. Dispatch
+    /// already takes the same state lock synchronously (execute.rs's
+    /// execute_unary/execute_streaming selection and resolver snapshots).
+    /// Keeping the old release point preserves reload ordering and avoids
+    /// extending shared admission across publication callbacks.
     /// A queued/active reload or contended admission falls back before mutation.
     /// The surrounding operation scope retains the usual drain admission on
     /// both paths; no await/cancellation point separates admission and mutation.
@@ -2580,9 +2608,16 @@ impl Manager {
             return false;
         }
         let operation = crate::gate::Operation::current();
+        let admission = ResultAdmission {
+            gate,
+            operation,
+            state,
+            now,
+            inline_ineligible: true,
+        };
         if neutral {
-            self.record_neutral_result_admitted(result, gate, operation, state, now);
-        } else if self.record_result_admitted(result, gate, operation, state, now, model_key) {
+            self.record_neutral_result_admitted(result, admission);
+        } else if self.record_result_admitted(result, admission, model_key) {
             self.update_result_affinity(result, session);
         }
         true
@@ -2870,8 +2905,25 @@ impl Manager {
         gate: super::ReloadGuard,
         operation: Option<crate::gate::Operation>,
     ) {
-        let detach = !self.permanently_ineligible(&snapshot)
-            && crate::auth::codex_refresh::is_codex_auth(&snapshot);
+        self.persist_result(snapshot, discard_epoch, pending, gate, operation, false);
+    }
+
+    fn persist_result(
+        &self,
+        snapshot: Arc<Auth>,
+        discard_epoch: u64,
+        pending: Option<PendingSave>,
+        gate: super::ReloadGuard,
+        operation: Option<crate::gate::Operation>,
+        inline_ineligible: bool,
+    ) {
+        debug_assert!(!inline_ineligible || self.permanently_ineligible(&snapshot));
+        // Preserve detachment/refusal warnings for all synchronous callers.
+        // Only a fast-path result, admitted with an immutable ineligible
+        // snapshot, may complete its tail inline on a runtime worker.
+        let detach = self.shared.store.is_some()
+            && crate::auth::codex_refresh::is_codex_auth(&snapshot)
+            && !inline_ineligible;
         let manager = self.clone();
         let work = move || {
             let mut deferred = false;
@@ -2959,18 +3011,32 @@ impl Manager {
         let gate = self.mutation_gate();
         let now = self.now();
         let model_key = canonical_model_key(&result.model);
-        self.record_result_admitted(result, gate, operation, self.lock(), now, model_key)
+        self.record_result_admitted(
+            result,
+            ResultAdmission {
+                gate,
+                operation,
+                state: self.lock(),
+                now,
+                inline_ineligible: false,
+            },
+            model_key,
+        )
     }
 
     fn record_result_admitted(
         &self,
         result: &CallResult,
-        gate: super::ReloadGuard,
-        operation: Option<crate::gate::Operation>,
-        mut guard: MutexGuard<'_, State>,
-        now: Timestamp,
+        admission: ResultAdmission<'_>,
         mut model_key: String,
     ) -> bool {
+        let ResultAdmission {
+            gate,
+            operation,
+            state: mut guard,
+            now,
+            inline_ineligible,
+        } = admission;
         if result.auth_id.is_empty() {
             return true;
         }
@@ -3044,7 +3110,14 @@ impl Manager {
             (committed.0, committed.1, committed.2, committed.3, pending)
         };
         drop(guard);
-        self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
+        self.persist_result(
+            snapshot.clone(),
+            discard_epoch,
+            pending,
+            gate,
+            operation,
+            inline_ineligible,
+        );
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
         self.publish_error_event(result, &snapshot);
@@ -3066,17 +3139,26 @@ impl Manager {
             crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
-        self.record_neutral_result_admitted(result, gate, operation, self.lock(), now);
+        self.record_neutral_result_admitted(
+            result,
+            ResultAdmission {
+                gate,
+                operation,
+                state: self.lock(),
+                now,
+                inline_ineligible: false,
+            },
+        );
     }
 
-    fn record_neutral_result_admitted(
-        &self,
-        result: &CallResult,
-        gate: super::ReloadGuard,
-        operation: Option<crate::gate::Operation>,
-        mut guard: MutexGuard<'_, State>,
-        now: Timestamp,
-    ) {
+    fn record_neutral_result_admitted(&self, result: &CallResult, admission: ResultAdmission<'_>) {
+        let ResultAdmission {
+            gate,
+            operation,
+            state: mut guard,
+            now,
+            inline_ineligible,
+        } = admission;
         if result.auth_id.is_empty() {
             return;
         }
@@ -3102,7 +3184,14 @@ impl Manager {
             (committed.0, committed.1, committed.2, committed.3, pending)
         };
         drop(guard);
-        self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
+        self.persist_result(
+            snapshot.clone(),
+            discard_epoch,
+            pending,
+            gate,
+            operation,
+            inline_ineligible,
+        );
         self.publish_error_event(result, &snapshot);
     }
 
