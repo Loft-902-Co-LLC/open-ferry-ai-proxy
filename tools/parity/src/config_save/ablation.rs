@@ -468,7 +468,23 @@ pub fn certify(
             let expectation = match oracle_output(
                 run_go(&clean)?,
                 clean.options["steps"].as_array().unwrap().len(),
-            ) {
+            )
+            .and_then(|expectation| {
+                // Removing comments cannot shorten Go's successful prefix or
+                // turn a completed run into a refusal. Such an oracle cannot
+                // supply a value expectation, just like a malformed wrapper.
+                if crate::baseline::successful_prefix(&expectation)
+                    < crate::baseline::successful_prefix(go)
+                    || (go.get("error").is_none()
+                        && go.get("unloadable").is_none()
+                        && (expectation.get("error").is_some()
+                            || expectation.get("unloadable").is_some()))
+                {
+                    Err("comment_free_go_malformed")
+                } else {
+                    Ok(expectation)
+                }
+            }) {
                 Ok(expectation) => expectation,
                 Err(reason) => {
                     let mut result = refused(if reason == "comment_free_go_panicked" {

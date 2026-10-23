@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::json;
 
+mod followups;
 mod review_r13;
 
 fn failed_go() -> Value {
@@ -253,11 +254,7 @@ fn fingerprint_fixture(name: &str) -> PathBuf {
     let root =
         std::env::temp_dir().join(format!("parity-fingerprint-{name}-{}", std::process::id()));
     for path in GENERATOR_PATHS {
-        let path = if *path == "tools/parity/src/cases/testdata" {
-            root.join(path).join("fixture.yaml")
-        } else {
-            root.join(path)
-        };
+        let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "generator fixture\n").unwrap();
     }
@@ -277,9 +274,7 @@ fn fingerprint_paths_exclude_manifests_product_harness_and_certifier() {
         assert!(!path.starts_with("crates/"));
         assert!(!path.starts_with("tools/parity/go"));
         assert!(
-            path.starts_with("tools/parity/src/generate")
-                || path == "tools/parity/src/cases/config_save.rs"
-                || path.starts_with("tools/parity/src/cases/testdata/")
+            path.starts_with("tools/parity/src/generate") || path == "tools/parity/src/cases.rs"
         );
     }
     fs::remove_dir_all(root).unwrap();
@@ -305,6 +300,10 @@ fn certifier_and_product_edits_do_not_change_the_fingerprint() {
         "tools/parity/src/main.rs",
         "tools/parity/src/compare.rs",
         "tools/parity/src/baseline.rs",
+        "tools/parity/src/cases/config_save.rs",
+        "tools/parity/src/cases/config_diff.rs",
+        "tools/parity/src/cases/testdata/config-save-ablation-replays.json",
+        "config.example.yaml",
     ] {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
