@@ -231,7 +231,7 @@ struct State {
     read_frames: Frames,
     write_frames: Frames,
     write_pending: Option<Instant>,
-    deliveries: HashMap<u64, StreamProgress>,
+    deliveries: Deliveries,
     protocol_tasks: usize,
     send_window: i64,
     connection_blocked_since: Option<Instant>,
@@ -264,7 +264,7 @@ impl Traffic {
                 read_frames: Frames::default(),
                 write_frames: Frames::default(),
                 write_pending: None,
-                deliveries: HashMap::new(),
+                deliveries: Deliveries::default(),
                 protocol_tasks: 0,
                 send_window: 65535,
                 connection_blocked_since: None,
@@ -454,7 +454,7 @@ impl Traffic {
             {
                 consider(at + duration, "connection window progress", None);
             }
-            for (&id, progress) in &state.deliveries {
+            for (id, progress) in state.deliveries.iter() {
                 if let Some(reset_at) = progress.reset_at {
                     consider(reset_at + RESET_GRACE, "stream reset grace", None);
                 } else if progress.pending != 0 {
@@ -465,7 +465,7 @@ impl Traffic {
                         Duration::ZERO
                     };
                     consider(
-                        progress.progressed + duration + grace,
+                        progress.progressed.unwrap() + duration + grace,
                         "response write progress",
                         stream,
                     );
@@ -620,9 +620,55 @@ pub(super) async fn watch_traffic(core: Weak<ConnCore>, traffic: Arc<Traffic>) {
 /// future. Waiting for an upstream/SSE producer therefore never looks idle.
 struct StreamProgress {
     pending: usize,
-    progressed: Instant,
+    // Only meaningful while bytes are pending. Starting a delivery sets it.
+    progressed: Option<Instant>,
     cancel: Option<Arc<TaskCancel>>,
     reset_at: Option<Instant>,
+}
+
+/// HTTP/1 normally has just one response delivery. Keep that entry inline,
+/// without allocating or hashing on each chunk. Retain the map for HTTP/2 and
+/// for any overlapping HTTP/1 deliveries (including queued pipelined output).
+#[derive(Default)]
+struct Deliveries {
+    http1: Option<(u64, StreamProgress)>,
+    streams: HashMap<u64, StreamProgress>,
+}
+
+impl Deliveries {
+    fn insert(&mut self, id: u64, progress: StreamProgress, http1: bool) {
+        if http1 && self.http1.is_none() {
+            self.http1 = Some((id, progress));
+        } else {
+            self.streams.insert(id, progress);
+        }
+    }
+
+    fn get_mut(&mut self, id: &u64) -> Option<&mut StreamProgress> {
+        match self.http1.as_mut() {
+            Some((known, progress)) if known == id => Some(progress),
+            _ => self.streams.get_mut(id),
+        }
+    }
+
+    fn remove(&mut self, id: &u64) {
+        if self.http1.as_ref().is_some_and(|(known, _)| known == id) {
+            self.http1 = None;
+        } else {
+            self.streams.remove(id);
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u64, &StreamProgress)> {
+        self.http1
+            .iter()
+            .map(|(id, progress)| (*id, progress))
+            .chain(self.streams.iter().map(|(&id, progress)| (id, progress)))
+    }
+
+    fn values(&self) -> impl Iterator<Item = &StreamProgress> {
+        self.iter().map(|(_, progress)| progress)
+    }
 }
 
 #[derive(Default)]
@@ -726,18 +772,21 @@ impl Flight {
             state.first_head = None;
             let id = state.next_delivery;
             state.next_delivery = state.next_delivery.wrapping_add(1);
+            let http1 = state.protocol == Protocol::Http1;
             state.deliveries.insert(
                 id,
                 StreamProgress {
                     pending: 0,
-                    progressed: Instant::now(),
+                    progressed: None,
                     cancel: None,
                     reset_at: None,
                 },
+                http1,
             );
             id
         };
-        traffic.changed.notify_one();
+        // Starting a request only removes header/idle deadlines. Their old
+        // timer can recheck; the first pending response bytes arm a write timer.
         Arc::new(Self { traffic, id })
     }
 }
@@ -808,7 +857,7 @@ impl Delivery {
             let progress = state.deliveries.get_mut(&flight.id).unwrap();
             let starting = progress.pending == 0;
             if starting {
-                progress.progressed = Instant::now();
+                progress.progressed = Some(Instant::now());
             }
             progress.pending = progress.pending.saturating_add(bytes.len());
             if starting {
@@ -824,13 +873,11 @@ impl Delivery {
         let mut state = self.flight.traffic.state();
         let progress = state.deliveries.get_mut(&self.flight.id).unwrap();
         progress.pending = progress.pending.saturating_sub(count);
-        if made_progress {
-            progress.progressed = Instant::now();
+        if made_progress && progress.pending != 0 {
+            progress.progressed = Some(Instant::now());
         }
-        // Extending an armed deadline needs no wake: its old timer rechecks.
-        if progress.pending == 0 {
-            self.flight.traffic.changed.notify_one();
-        }
+        // Extending or removing an armed deadline needs no wake: its old timer
+        // rechecks. Flight's drop separately wakes the watcher to arm idle.
     }
 }
 impl Buf for Delivery {
