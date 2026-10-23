@@ -1943,9 +1943,11 @@ dependencies = [
  "open-ferry-core",
  "open-ferry-providers",
  "open-ferry-translate",
+ "proc-macro2",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "syn 2.0.119",
  "ureq",
 ]
 

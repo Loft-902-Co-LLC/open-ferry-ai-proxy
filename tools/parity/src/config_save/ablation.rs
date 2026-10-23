@@ -468,23 +468,7 @@ pub fn certify(
             let expectation = match oracle_output(
                 run_go(&clean)?,
                 clean.options["steps"].as_array().unwrap().len(),
-            )
-            .and_then(|expectation| {
-                // Removing comments cannot shorten Go's successful prefix or
-                // turn a completed run into a refusal. Such an oracle cannot
-                // supply a value expectation, just like a malformed wrapper.
-                if crate::baseline::successful_prefix(&expectation)
-                    < crate::baseline::successful_prefix(go)
-                    || (go.get("error").is_none()
-                        && go.get("unloadable").is_none()
-                        && (expectation.get("error").is_some()
-                            || expectation.get("unloadable").is_some()))
-                {
-                    Err("comment_free_go_malformed")
-                } else {
-                    Ok(expectation)
-                }
-            }) {
+            ) {
                 Ok(expectation) => expectation,
                 Err(reason) => {
                     let mut result = refused(if reason == "comment_free_go_panicked" {
@@ -498,6 +482,19 @@ pub fn certify(
                     return Ok(result);
                 }
             };
+            // Validated errors have fewer than steps successful snapshots;
+            // unloadable replies have at most steps - 1. Thus this comparison
+            // also rejects every oracle failure after completed original Go;
+            // a second success/failure clause would be redundant.
+            if crate::baseline::oracle_stops_early(go, &expectation) {
+                let mut result = refused("check 2: Go oracle stopped early");
+                let prefix = crate::baseline::successful_prefix(&expectation).unwrap();
+                result.evidence["failures"] = json!([{"check":2,"step":prefix,"file":prefix,"reason":"comment_free_go_early"}]);
+                result.evidence["original_go"] = go.clone();
+                result.evidence["comment_free_go"] = expectation;
+                result.evidence["trials"] = json!(trials);
+                return Ok(result);
+            }
             oracle = Some((clean, expectation));
         }
         let (clean, expectation) = oracle.as_ref().unwrap();

@@ -64,6 +64,10 @@ options:
   --write-baseline <file> refresh deterministically from --baseline-observation files
                  add --baseline <existing> for an incremental refresh
   --baseline-observation <file> repeat for refresh or --baseline replay (no Go run)
+  --export-config-cases <file> export canonical random config-save inputs for --seed/--random
+                 (no upstream checkout or Go run)
+  --relabel-baseline <file> update only generator_sha256 if both recorded probes match
+                 (fixed seed-1/25 and seed-38/5000 probes; no Go run)
   --import-config-failures <dir> import saved fixtures, with --import-proofs <dir>,
                  --import-cases <n> and --observation <file> (no Go run)
   --selected-failures mark imported selected failures as kind coverage only
@@ -94,6 +98,8 @@ struct Args {
     import_cases: Option<usize>,
     selected_failures: bool,
     replay_config_failures: Option<PathBuf>,
+    export_config_cases: Option<PathBuf>,
+    relabel_baseline: Option<PathBuf>,
 }
 
 impl Args {
@@ -118,6 +124,8 @@ impl Args {
             import_cases: None,
             selected_failures: false,
             replay_config_failures: None,
+            export_config_cases: None,
+            relabel_baseline: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -139,6 +147,8 @@ impl Args {
                 "--import-cases" => parsed.import_cases = Some(parse_number(&flag, &value()?)?),
                 "--selected-failures" => parsed.selected_failures = true,
                 "--replay-config-failures" => parsed.replay_config_failures = Some(value()?.into()),
+                "--export-config-cases" => parsed.export_config_cases = Some(value()?.into()),
+                "--relabel-baseline" => parsed.relabel_baseline = Some(value()?.into()),
                 "--suite" => {
                     parsed.suites.insert(value()?);
                 }
@@ -147,6 +157,28 @@ impl Args {
             }
         }
         let replay = !parsed.baseline_observations.is_empty();
+        let maintenance = parsed.export_config_cases.is_some() || parsed.relabel_baseline.is_some();
+        if maintenance {
+            if (parsed.export_config_cases.is_some() && parsed.relabel_baseline.is_some())
+                || replay
+                || parsed.baseline.is_some()
+                || parsed.write_baseline.is_some()
+                || parsed.observation.is_some()
+                || parsed.live.is_some()
+                || parsed.model.is_some()
+                || parsed.import_config_failures.is_some()
+                || parsed.import_proofs.is_some()
+                || parsed.import_cases.is_some()
+                || parsed.selected_failures
+                || parsed.replay_config_failures.is_some()
+                || !parsed.suites.is_empty()
+                || parsed.summary.is_some()
+                || upstream.is_some()
+            {
+                return Err("export/relabel must run separately from parity runs and baseline imports/refreshes".into());
+            }
+            return Ok(parsed);
+        }
         if (parsed.write_baseline.is_some() && !replay)
             || (replay && parsed.write_baseline.is_none() && parsed.baseline.is_none())
         {
@@ -740,6 +772,25 @@ fn filter_suites(suites: &mut Vec<Suite>, names: &BTreeSet<String>) -> Result<()
 
 /// Returns whether every case matched upstream, allowing documented deviations.
 fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
+    if let Some(path) = &args.export_config_cases {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, baseline::probes::export(args.seed, args.random)?)?;
+        println!(
+            "Canonical random config-save cases written to {}",
+            path.display()
+        );
+        return Ok(true);
+    }
+    if let Some(path) = &args.relabel_baseline {
+        baseline::relabel(path, &baseline::pinned_fingerprint()?)?;
+        println!(
+            "Generator fingerprint relabeled in {}; both random probes match.",
+            path.display()
+        );
+        return Ok(true);
+    }
     if let Some(failures) = &args.import_config_failures {
         let observation = baseline::import(
             failures,
