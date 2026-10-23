@@ -236,6 +236,7 @@ pub struct Options {
     /// as `self-update` in the config says. Not upstream's.
     pub self_update: bool,
 }
+
 /// Serves until `stop` resolves, or until the server fails.
 pub async fn run(
     config: Config,
@@ -264,7 +265,8 @@ pub async fn run(
     }
     let config = Arc::new(config);
     let update_client = update_client::UpdateClient::start(&config, options.self_update);
-    // Build on a closed gate; the first activation opens it (review 3 T2).
+    // Construction is not a write: the service is built on a closed gate,
+    // and the first activation opens it (review 3 T2).
     let (gate, key) = ActiveGate::standby();
     let mut service = Service::prepared(
         Arc::clone(&config),
@@ -438,6 +440,7 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
         None => work(),
     }
 }
+
 /// Builds open-ferry's own updater without starting its timer, or warns
 /// and returns `None` when checks can't run. The
 /// checks follow `config`'s `self-update`; while it is `off` they make no
@@ -1355,6 +1358,7 @@ impl Service {
             crate::scope::runtime_probe(),
         )
     }
+
     fn with_probe(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -1475,6 +1479,7 @@ impl Service {
             shutdown_hooks: None,
         }
     }
+
     /// A service on `gate` with the run's options applied and the executors
     /// registered, as an unsupervised run and a worker both start it.
     fn prepared(
@@ -1495,6 +1500,7 @@ impl Service {
             crate::scope::runtime_probe(),
         )
     }
+
     fn prepared_with_probe(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -1515,6 +1521,7 @@ impl Service {
         service.register_executors();
         service
     }
+
     /// Starts open-ferry's own update checks, when they can run.
     fn start_update_checks(&mut self, client: Option<update_client::UpdateClient>) {
         self.prepare_update_checks(None, client);
@@ -1522,6 +1529,7 @@ impl Service {
             updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
         }
     }
+
     /// Attaches the updater before any router clones the management state.
     /// `installation` names the worker's data and installed binary; `None` is the user's.
     fn prepare_update_checks(
@@ -1537,6 +1545,7 @@ impl Service {
             self.management = self.management.clone().with_updates(updates);
         }
     }
+
     /// Starts the credential auto-refresh.
     fn start_auto_refresh(&self) {
         if let Err(error) = self.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {

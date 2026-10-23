@@ -68,14 +68,10 @@ impl UpdateClient {
 
 impl Drop for UpdateClient {
     fn drop(&mut self) {
-        // Authorization or another boot step can return before the downloader
-        // is used. Still join it, including propagating a build panic. During
-        // an existing unwind, retain that original panic rather than aborting.
-        if let Some(task) = self.task.take()
-            && let Err(payload) = task.join()
-            && !std::thread::panicking()
-        {
-            std::panic::resume_unwind(payload);
+        // Boot never reached the synchronous build point. Join, but discard
+        // the unused result, including a panic, to preserve boot's own outcome.
+        if let Some(task) = self.task.take() {
+            let _ = task.join();
         }
     }
 }
@@ -318,13 +314,11 @@ mod tests {
     }
 
     #[test]
-    fn early_boot_return_still_joins_and_propagates_build_panic() {
+    fn unused_client_build_panic_is_discarded_on_drop() {
         let make_fetch: MakeFetch = Arc::new(|_| std::panic::panic_any(903_u32));
         let client =
             UpdateClient::start_with(&Config::default(), true, || None, || make_fetch).unwrap();
-        let panic =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(client))).unwrap_err();
-        assert_eq!(panic.downcast_ref::<u32>(), Some(&903));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(client))).is_ok());
     }
 
     #[test]
