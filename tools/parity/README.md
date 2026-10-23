@@ -266,3 +266,64 @@ cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI \
 Model output varies between runs, so live mode compares the shape of each reply: HTTP status, the final event, the output item types and the function call names. It also checks that each reply is the kind the case asks for, such as a function call or a JSON object. There are 7 cases, 2 requests each, all with low reasoning effort.
 
 The replies are real Codex event streams, so each one is then run through every response translator, upstream's and ours, which must agree exactly. For the non-streaming translators, an empty `output` in the final event is filled with the streamed items first, as upstream's executor does. This sends no further requests. Bodies, replies and any failing response cases are saved to `target/parity/live/`.
+
+## Config-save baseline
+
+The CI script passes `--baseline tools/parity/baseline/config-save.json`.
+Without that option the tool keeps its strict exit verdict. The baseline
+applies only after config-save certification fails: those cases remain
+**Different** in the totals and artifacts. Harness failures, panics, unavailable
+replays and every other suite remain fatal. A new check/reason/operation kind,
+an excessive total rate, or any new Different case in seed 1 / random 25 fails.
+No paths, comment text or byte offsets enter kind signatures. A case with
+several failed checks contributes to several kind rows but only once to the
+total budget. No-reproducing-subset kinds include all failed trials.
+
+The committed budget is the maximum Round 10 observed total rate plus 20%,
+rounded up to the next multiple of five per 1,000. It uses ten random-5000
+config sweeps (30–39), full random-500 runs (11, 12, 38, 39), and the exact PR
+profile. The 170/164 saved scheduled failures for seeds 11/12 add kind coverage
+only: selected failures are not unbiased rate samples. The file records that
+distinction. An observation below the calibration minimum for its profile (or
+with fewer PR case IDs) prints “Baseline can be lowered” and the refresh command.
+
+Collect new observations with the unchanged verdict logic, for example:
+
+```sh
+cargo run --locked -p open-ferry-parity -- --upstream reference/cliproxyapi \
+  --suite config-save --seed 30 --random 5000 --observation target/seed30.json
+# Repeat for at least ten distinct large seeds, and seed 1 / random 25.
+# A strict run may exit 1 while still writing a usable certification observation.
+cargo run --locked -p open-ferry-parity -- \
+  --write-baseline tools/parity/baseline/config-save.json \
+  --baseline-observation target/seed30.json \
+  --baseline-observation target/seed31.json # ... all ten plus the PR observation
+```
+
+The writer sorts keys, kinds and calibration rows; input order does not affect
+the bytes. It rejects non-certification failures and mismatched fingerprints.
+The fingerprint hashes normalized generator/fixture sources, certifier and
+config/parser dependencies, Go harnesses and the upstream gitlink. Changed
+dependencies require new observations. **Adding a kind or raising a bound must
+be explained in the PR**; follow-up fixes lower the baseline rather than weaken
+the certifier. The refresh command never silently updates a running CI budget.
+
+Historical fixtures can be imported with the committed classifier:
+
+```sh
+cargo run --locked -p open-ferry-parity -- --import-config-failures DIR/config-save \
+  --import-proofs PROOFS --import-cases 5109 --seed 30 --random 5000 \
+  --observation target/seed30.json
+# Add --selected-failures for selected historical failures, using their replay
+# count as --import-cases. Their rates are never used or accepted as full sweeps.
+cargo run --locked -p open-ferry-parity -- \
+  --baseline tools/parity/baseline/config-save.json \
+  --baseline-observation target/seed30.json # repeat to check the entire corpus
+```
+
+Import attaches the current fingerprint: use it only after verifying that the
+saved outputs came from the same product and certification behavior. Round 11
+imports Round 10's final evidence on that basis. This is not permission to
+relabel old evidence after a generator or certifier change. GitHub summaries
+show each kind's count/rate and the total bound; the always-uploaded observation
+can be reused in a reviewed refresh.
