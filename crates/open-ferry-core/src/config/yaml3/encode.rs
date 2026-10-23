@@ -255,6 +255,7 @@ pub(crate) fn protected_node(
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
     let mut node = node.clone();
+    protect_pending_item_foot(&mut node);
     protect_conflicting_key_comments(&mut node, indent, true)?;
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
@@ -263,6 +264,36 @@ pub(crate) fn protected_node(
     encoder.finish()?;
     let protected = std::mem::take(&mut encoder.emitter.protected_scalars);
     Ok((encoder.emitter.into_output(), protected))
+}
+
+/// A mapping item's foot cannot reload on the item in block style: yaml.v3
+/// attaches a block mapping's terminal foot to its last key. At the protected
+/// empty-value boundary, retain the item's flow form as well as its indentation.
+fn protect_pending_item_foot(node: &mut Node) {
+    fn flow_footed_items(node: &mut Node) {
+        if node.kind == Kind::Sequence {
+            for item in &mut node.content {
+                if item.kind == Kind::Mapping && !item.foot_comment.is_empty() {
+                    item.style |= Style::FLOW;
+                }
+            }
+        }
+        for child in &mut node.content {
+            flow_footed_items(child);
+        }
+    }
+    if node.kind == Kind::Mapping {
+        for index in (2..node.content.len()).step_by(2) {
+            if node.content.get(index + 1).is_some_and(|value| {
+                matches!(value.kind, Kind::Mapping | Kind::Sequence) && value.content.is_empty()
+            }) {
+                flow_footed_items(&mut node.content[index - 1]);
+            }
+        }
+    }
+    for child in &mut node.content {
+        protect_pending_item_foot(child);
+    }
 }
 
 /// Transfer only comments the emitter actually quotes into a block scalar or
