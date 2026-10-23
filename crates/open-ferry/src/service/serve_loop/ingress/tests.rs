@@ -1,5 +1,135 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn http1_delivery_progress_and_idle_deadlines_rearm_a_sleeping_watcher() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (client, server) = tokio::join!(
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let (_client, (server, _)) = (client.unwrap(), server.unwrap());
+    let control = ServeControl::new();
+    let core = ConnCore::register(&control.shared, &server).unwrap();
+    let config = IngressConfig {
+        header_timeout: None,
+        idle_timeout: Some(Duration::from_secs(2)),
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"GET / HTTP/1.1\r\n\r\n");
+    let watcher = tokio::spawn(watch_traffic(Arc::downgrade(&core), traffic.clone()));
+    for round in 0..2 {
+        let flight = Flight::new(traffic.clone());
+        // No deadline applies while the upstream producer is silent, including
+        // after the watcher's old idle timer fires without a start notification.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!core.is_cut());
+        let mut bytes = Delivery::new(Bytes::from_static(b"abc"), flight.clone());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        bytes.advance(1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!core.is_cut(), "progress did not extend the old timer");
+        if round == 0 {
+            bytes.advance(2);
+            assert!(traffic.due().is_none());
+            drop((bytes, flight));
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            assert!(!core.is_cut());
+        } else {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(core.is_cut(), "pending HTTP/1 bytes lost their deadline");
+        }
+    }
+    watcher.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn http1_overlapping_deliveries_keep_independent_deadlines() {
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"GET / HTTP/1.1\r\n\r\n");
+    let a = Flight::new(traffic.clone());
+    let b = Flight::new(traffic.clone());
+    let queued = Delivery::new(Bytes::from_static(b"a"), a.clone());
+    let mut progressing = Delivery::new(Bytes::from_static(b"bbbb"), b.clone());
+    let started = Instant::now();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        progressing.advance(1);
+        assert_eq!(traffic.due().unwrap().0, started + Duration::from_secs(2));
+    }
+    drop((queued, a));
+    assert_eq!(
+        traffic.due().unwrap().0,
+        Instant::now() + Duration::from_secs(2)
+    );
+    progressing.advance(1);
+    assert!(traffic.due().is_none());
+    drop((progressing, b));
+    assert_eq!(traffic.state().active, 0);
+    assert!(traffic.state().deliveries.values().next().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn completing_http1_delivery_still_arms_the_idle_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (client, server) = tokio::join!(
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let (_client, (server, _)) = (client.unwrap(), server.unwrap());
+    let control = ServeControl::new();
+    let core = ConnCore::register(&control.shared, &server).unwrap();
+    let config = IngressConfig {
+        header_timeout: None,
+        idle_timeout: Some(Duration::from_secs(2)),
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        ..IngressConfig::default()
+    };
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    traffic.received(b"GET / HTTP/1.1\r\n\r\n");
+    let watcher = tokio::spawn(watch_traffic(Arc::downgrade(&core), traffic.clone()));
+    let flight = Flight::new(traffic.clone());
+    let mut bytes = Delivery::new(Bytes::from_static(b"abc"), flight.clone());
+    bytes.advance(3);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(traffic.due().is_none());
+    drop((bytes, flight));
+    assert_eq!(
+        traffic.due(),
+        Some((
+            Instant::now() + Duration::from_secs(2),
+            "idle connection",
+            None
+        ))
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(core.is_cut(), "completion did not wake the idle watcher");
+    watcher.await.unwrap();
+}
+
 #[test]
 fn descriptor_reserve_two_listeners_and_two_handles_are_accounted_for() {
     assert_eq!(cap_from_limit(1024), 128);

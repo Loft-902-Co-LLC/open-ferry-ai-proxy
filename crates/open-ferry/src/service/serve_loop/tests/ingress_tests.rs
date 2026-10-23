@@ -515,6 +515,112 @@ async fn ingress_release_and_cut_keep_their_behavior_with_guards_active() {
 }
 
 #[tokio::test]
+async fn ingress_cut_during_a_stalled_http1_write_closes_without_the_deadline() {
+    let served = start_limited(limits(), None, Some(sse_routes()));
+    let mut stream = connect(served.addr).await;
+    SockRef::from(&stream).set_recv_buffer_size(1024).unwrap();
+    until(|| traffic(&served).is_some()).await;
+    let core = served
+        .control
+        .shared
+        .connections()
+        .map
+        .values()
+        .find_map(Weak::upgrade)
+        .unwrap();
+    core.socket
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .set_send_buffer_size(4096)
+        .unwrap();
+    get_request(&mut stream, "/sse", false).await;
+    until(|| traffic(&served).is_some_and(|traffic| traffic.has_pending_write())).await;
+    // Keep virtual time fixed: cut must wake the stalled writer itself.
+    tokio::time::pause();
+    let cut_at = tokio::time::Instant::now();
+    assert_eq!(served.control.cut(), 1);
+    assert_eq!(served.control.live_count(), 0);
+    within(served.server).await.unwrap().unwrap();
+    assert_eq!(tokio::time::Instant::now(), cut_at);
+    tokio::time::resume();
+    let mut bytes = Vec::new();
+    if let Err(error) = within(stream.read_to_end(&mut bytes)).await {
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+        ));
+    }
+}
+
+#[tokio::test]
+async fn ingress_release_after_reusing_http1_delivery_sends_connection_close() {
+    let served = start_limited(limits(), None, None);
+    let mut stream = connect(served.addr).await;
+    for _ in 0..3 {
+        get_request(&mut stream, "/", false).await;
+        assert!(is_ok(&read_response(&mut stream).await));
+    }
+    get_request(&mut stream, "/slow", false).await;
+    within(served.gate.started.notified()).await;
+    let drained = served.control.release();
+    served.gate.proceed.notify_one();
+    let response = read_response(&mut stream).await;
+    assert!(is_ok(&response));
+    assert!(response.0.contains("connection: close"));
+    assert_eq!(response.1, "done");
+    closed(&mut stream).await;
+    within(drained).await;
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn ingress_h2_stalled_stream_does_not_prevent_healthy_streams_or_release() {
+    let gate = Gate::default();
+    let served = start_limited(limits(), None, Some(sse_routes().merge(app(gate.clone()))));
+    let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .initial_stream_window_size(1)
+        .handshake(TokioIo::new(connect(served.addr).await))
+        .await
+        .unwrap();
+    let driver = tokio::spawn(connection);
+    let stalled = within(sender.send_request(super::h2_get("/sse")))
+        .await
+        .unwrap();
+    let pending = tokio::spawn(sender.send_request(super::h2_get("/slow")));
+    within(gate.started.notified()).await;
+    let healthy = within(sender.send_request(super::h2_get("/")))
+        .await
+        .unwrap();
+    assert_eq!(body_text(healthy).await, "hello 127.0.0.1");
+    until(|| traffic(&served).unwrap().has_pending_delivery()).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    settle().await;
+    tokio::time::resume();
+    assert_eq!(served.control.live_count(), 1);
+    within(axum::body::to_bytes(
+        Body::new(stalled.into_body()),
+        usize::MAX,
+    ))
+    .await
+    .expect_err("stalled stream was not reset");
+    let drained = served.control.release();
+    gate.proceed.notify_one();
+    let response = within(pending).await.unwrap().unwrap();
+    assert_eq!(body_text(response).await, "done");
+    within(driver).await.unwrap().unwrap();
+    assert!(
+        within(sender.ready()).await.is_err(),
+        "GOAWAY was not received"
+    );
+    within(drained).await;
+    assert_eq!(served.control.live_count(), 0);
+    within(served.server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn ingress_body_timeout_answers_408_then_closes_the_socket() {
     let served = start_limited(limits(), None, None);
     let mut stream = connect(served.addr).await;

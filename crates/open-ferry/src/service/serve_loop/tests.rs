@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 use super::*;
 mod ingress_tests;
+mod tracking_tests;
 
 /// How long a test waits for something that should happen.
 const WAIT: Duration = Duration::from_secs(10);

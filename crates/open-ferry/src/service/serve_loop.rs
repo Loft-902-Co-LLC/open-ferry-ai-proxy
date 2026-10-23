@@ -729,6 +729,17 @@ fn cut_error() -> io::Error {
 struct Tracked<T> {
     inner: T,
     core: Arc<ConnCore>,
+    wakers: [Option<Waker>; 2],
+}
+
+impl<T> Tracked<T> {
+    fn watch(&mut self, slot: usize, waker: &Waker) {
+        let known = &mut self.wakers[slot];
+        if !known.as_ref().is_some_and(|known| known.will_wake(waker)) {
+            self.core.watch(slot, waker);
+            *known = Some(waker.clone());
+        }
+    }
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for Tracked<T> {
@@ -738,9 +749,10 @@ impl<T: AsyncRead + Unpin> AsyncRead for Tracked<T> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        // The waker goes in before the flag is read, so a cut between the
-        // two still wakes this task.
-        this.core.watch(READ, cx.waker());
+        // Register a changed waker before reading the flag, so a cut between
+        // the two still wakes this task. An unchanged waker is already in the
+        // core; caching it here avoids locking the core on every IO poll.
+        this.watch(READ, cx.waker());
         if this.core.is_cut() {
             return Poll::Ready(Err(cut_error()));
         }
@@ -755,7 +767,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Tracked<T> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.core.watch(WRITE, cx.waker());
+        this.watch(WRITE, cx.waker());
         if this.core.is_cut() {
             return Poll::Ready(Err(cut_error()));
         }
@@ -768,7 +780,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Tracked<T> {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        this.core.watch(WRITE, cx.waker());
+        this.watch(WRITE, cx.waker());
         if this.core.is_cut() {
             return Poll::Ready(Err(cut_error()));
         }
@@ -781,7 +793,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Tracked<T> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.core.watch(WRITE, cx.waker());
+        this.watch(WRITE, cx.waker());
         if this.core.is_cut() {
             return Poll::Ready(Err(cut_error()));
         }
@@ -790,7 +802,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Tracked<T> {
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.core.watch(WRITE, cx.waker());
+        this.watch(WRITE, cx.waker());
         if this.core.is_cut() {
             return Poll::Ready(Err(cut_error()));
         }
@@ -1101,6 +1113,7 @@ async fn serve_connection<I>(
         inner: Tracked {
             inner: io,
             core: core.clone(),
+            wakers: [None, None],
         },
         traffic: traffic.clone(),
     });
