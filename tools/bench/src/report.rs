@@ -12,7 +12,7 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
 use crate::load::{Outcome, Percentiles};
 use crate::ports::PortRule;
-use crate::proxy::Memory;
+use crate::proxy::{Memory, STDERR_LOG, STDOUT_LOG};
 
 pub const START: &str = "<!-- bench-results:start -->";
 pub const END: &str = "<!-- bench-results:end -->";
@@ -189,7 +189,10 @@ pub fn render(
     out.push('\n');
     let _ = writeln!(
         out,
-        "The fake upstream waited {} before each answer. Each load level ran for {}. \
+        "Each run keeps `config.yaml` in its root and captures proxy output in \
+         `{STDOUT_LOG}` and `{STDERR_LOG}`. The logs directory is created before \
+         the proxy starts, keeping log writes outside its nonrecursive config watch.\n\n\
+         The fake upstream waited {} before each answer. Each load level ran for {}. \
          For the start time each proxy was started {}, after a start that wasn't \
          measured. Each kind of long conversation request was sent {}, one after \
          another.",
