@@ -192,6 +192,7 @@ mod management_listener;
 pub(crate) mod serve_loop;
 #[cfg(test)]
 mod shutdown_diagnostics;
+mod update_client;
 pub(crate) mod worker;
 
 /// How often background refresh looks for tokens to renew.
@@ -235,7 +236,6 @@ pub struct Options {
     /// as `self-update` in the config says. Not upstream's.
     pub self_update: bool,
 }
-
 /// Serves until `stop` resolves, or until the server fails.
 pub async fn run(
     config: Config,
@@ -263,8 +263,8 @@ pub async fn run(
         );
     }
     let config = Arc::new(config);
-    // Construction is not a write: the service is built on a closed gate,
-    // and the first activation opens it (review 3 T2).
+    let update_client = update_client::UpdateClient::start(&config, options.self_update);
+    // Build on a closed gate; the first activation opens it (review 3 T2).
     let (gate, key) = ActiveGate::standby();
     let mut service = Service::prepared(
         Arc::clone(&config),
@@ -275,7 +275,7 @@ pub async fn run(
         gate,
     );
     if options.self_update {
-        service.start_update_checks();
+        service.start_update_checks(update_client);
     }
     claude_cli::warn_outdated_guarded(&config.claude_cli, service.claude_guard.clone());
     // An unsupervised run activates at once and never closes the gate.
@@ -438,7 +438,6 @@ async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> 
         None => work(),
     }
 }
-
 /// Builds open-ferry's own updater without starting its timer, or warns
 /// and returns `None` when checks can't run. The
 /// checks follow `config`'s `self-update`; while it is `off` they make no
@@ -451,6 +450,7 @@ fn prepare_update_checks(
     probe: &dyn crate::scope::Probe,
     config: &Config,
     installation: Option<(&Path, &Path)>,
+    fetch: impl FnOnce() -> (update_checks::MakeFetch, update_client::BuiltFetch),
 ) -> Option<UpdateService> {
     let unavailable = |why: &str| {
         if installation.is_some() {
@@ -466,11 +466,11 @@ fn prepare_update_checks(
             return None;
         }
     };
-    let make_fetch = update_checks::http_fetch();
     // Each check makes its own downloader from the config in force, so a
     // `proxy-url` that can't be used yet only fails the checks it is
     // in force for.
-    let fetch = match make_fetch(&config.proxy_url).or_else(|_| make_fetch("")) {
+    let (make_fetch, fetch) = fetch();
+    let fetch = match fetch {
         Ok(fetch) => fetch,
         Err(error) => {
             tracing::warn!("update checks don't run: {error}");
@@ -1355,7 +1355,6 @@ impl Service {
             crate::scope::runtime_probe(),
         )
     }
-
     fn with_probe(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -1476,7 +1475,6 @@ impl Service {
             shutdown_hooks: None,
         }
     }
-
     /// A service on `gate` with the run's options applied and the executors
     /// registered, as an unsupervised run and a worker both start it.
     fn prepared(
@@ -1497,7 +1495,6 @@ impl Service {
             crate::scope::runtime_probe(),
         )
     }
-
     fn prepared_with_probe(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -1518,25 +1515,28 @@ impl Service {
         service.register_executors();
         service
     }
-
     /// Starts open-ferry's own update checks, when they can run.
-    fn start_update_checks(&mut self) {
-        self.prepare_update_checks(None);
+    fn start_update_checks(&mut self, client: Option<update_client::UpdateClient>) {
+        self.prepare_update_checks(None, client);
         if let Some(updates) = self.management.updates() {
             updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
         }
     }
-
     /// Attaches the updater before any router clones the management state.
     /// `installation` names the worker's data and installed binary; `None` is the user's.
-    fn prepare_update_checks(&mut self, installation: Option<(&Path, &Path)>) {
+    fn prepare_update_checks(
+        &mut self,
+        installation: Option<(&Path, &Path)>,
+        client: Option<update_client::UpdateClient>,
+    ) {
         if let Some(updates) =
-            prepare_update_checks(self.probe.as_ref(), &self.config, installation)
+            prepare_update_checks(self.probe.as_ref(), &self.config, installation, || {
+                update_client::finish(client, &self.config)
+            })
         {
             self.management = self.management.clone().with_updates(updates);
         }
     }
-
     /// Starts the credential auto-refresh.
     fn start_auto_refresh(&self) {
         if let Err(error) = self.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {
