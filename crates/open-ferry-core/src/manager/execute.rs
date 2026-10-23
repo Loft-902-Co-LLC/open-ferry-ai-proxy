@@ -1621,6 +1621,32 @@ mod tests {
         Options::new(Format::from("openai"))
     }
 
+    #[test]
+    fn dispatch_futures_do_not_embed_refresh_transactions() {
+        use crate::exec::Dispatcher;
+        use crate::registry::ModelRegistry;
+
+        let manager = Manager::new(Default::default(), Arc::new(ModelRegistry::new()), None);
+        let providers = [];
+        let unary = manager.execute(&providers, Request::default(), opts());
+        let stream = manager.execute_stream(&providers, Request::default(), opts());
+        let count = manager.count_tokens(&providers, Request::default(), opts());
+        // Inspect the boxed futures' dynamic layouts, without polling or IO.
+        // They normally occupy about 6 KiB. 12 KiB allows layout/platform
+        // variation but catches an inline refresh transaction (about 65 KiB).
+        // Raise this bound only after measuring the dispatch and refresh
+        // layouts and checking that rare refresh work remains behind a box.
+        for (name, size) in [
+            ("unary", std::mem::size_of_val(&*unary)),
+            ("stream", std::mem::size_of_val(&*stream)),
+            ("count", std::mem::size_of_val(&*count)),
+        ] {
+            assert!(size <= 12 * 1024, "{name} dispatch future: {size} bytes");
+        }
+        let refresh = manager.force_refresh("unused");
+        assert!(std::mem::size_of_val(&refresh) <= 1024);
+    }
+
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|&name| name.to_owned()).collect()
     }

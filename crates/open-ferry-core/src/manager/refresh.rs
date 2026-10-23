@@ -1447,8 +1447,10 @@ impl Manager {
         };
         if tokio::runtime::Handle::try_current().is_err() {
             // No runtime to own the task: run it here, still as the
-            // operation.
-            return operation.scope(work).await;
+            // operation. Keep this rare await boxed: embedding the refresh
+            // transaction here also inflates every dispatch and idle worker
+            // future, even when a runtime always takes the spawned path.
+            return Box::pin(operation.scope(work)).await;
         }
         let task = gate
             .spawn(&operation, work)
