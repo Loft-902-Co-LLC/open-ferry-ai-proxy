@@ -521,22 +521,6 @@ fn comment_unknown_v8_fields(
         // Archive prefixes are LF-based, but YAML comments also end at LS,
         // PS and NEL. Escape these in every archived scalar so a later parse cannot
         // discard the prefix or treat the remainder as a live scalar body.
-        fn quote_archive_breaks(node: &mut Node) {
-            if node.kind == Kind::Scalar
-                && node.value.contains(['\u{2028}', '\u{2029}', '\u{0085}'])
-            {
-                node.style = if node.tag != STR_TAG
-                    || node.style.has(super::super::yaml3::Style::TAGGED)
-                {
-                    super::super::yaml3::Style::DOUBLE_QUOTED | super::super::yaml3::Style::TAGGED
-                } else {
-                    super::super::yaml3::Style::DOUBLE_QUOTED
-                };
-            }
-            for child in &mut node.content {
-                quote_archive_breaks(child);
-            }
-        }
         quote_archive_breaks(&mut entry);
         let data = marshal(&entry)?;
         let text = String::from_utf8_lossy(&data);
@@ -547,6 +531,19 @@ fn comment_unknown_v8_fields(
         *foot = format!("{foot}\n{}", comments.join("\n")).trim().to_owned();
     }
     Ok(())
+}
+
+pub(super) fn quote_archive_breaks(node: &mut Node) {
+    if node.kind == Kind::Scalar && node.value.contains(['\u{2028}', '\u{2029}', '\u{0085}']) {
+        node.style = if node.tag != STR_TAG || node.style.has(super::super::yaml3::Style::TAGGED) {
+            super::super::yaml3::Style::DOUBLE_QUOTED | super::super::yaml3::Style::TAGGED
+        } else {
+            super::super::yaml3::Style::DOUBLE_QUOTED
+        };
+    }
+    for child in &mut node.content {
+        quote_archive_breaks(child);
+    }
 }
 
 /// `normalizeV8PrivateIPAlias`: resolves the deprecated
