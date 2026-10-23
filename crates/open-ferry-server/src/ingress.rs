@@ -612,6 +612,11 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
+        // Empty parser allowances and uncharged buffers have no accounting
+        // to return. In particular, ordinary JSON never charges its parser.
+        if self.bytes == 0 {
+            return;
+        }
         if let Some(budget) = &self.budget {
             let mut accounting = budget.0.lock().unwrap_or_else(PoisonError::into_inner);
             accounting.used -= self.bytes;
