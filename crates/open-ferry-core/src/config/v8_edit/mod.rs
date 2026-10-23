@@ -71,10 +71,12 @@ pub use validate::validate_v8_config;
 use super::AnyValue;
 use super::Config;
 use super::layout::decode_any_value;
+#[cfg(test)]
+use super::save::unmarshal;
 use super::save::{
     self, Node, copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index,
     marshal, normalize_config_layout, normalize_config_layout_doc, project_v8_config_aliases,
-    remove_map_key, set_yaml_path_with_comments, unmarshal, v8_aliases, yaml_path, yaml_path_mut,
+    remove_map_key, set_yaml_path_with_comments, v8_aliases, yaml_path, yaml_path_mut,
 };
 use super::v8::V8_SHARED_STRUCT_PATHS;
 use super::yaml::{self as loader_yaml, Kind as LoaderKind};
@@ -315,6 +317,8 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         doc.head_comment = replacement.head_comment;
         doc.foot_comment = replacement.foot_comment;
     }
+    // Generated intermediates must already agree in the loader and writer.
+    super::yaml3::encode::quote_config_unicode(&mut doc);
     let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
@@ -329,7 +333,8 @@ fn apply_body(root: &mut Node, parts: &[&str], edit: &V8Edit) -> Result<Node, V8
     if !edit.yaml && !json_valid(&edit.body) {
         return Err(V8EditError::InvalidJson);
     }
-    let mut update = unmarshal(&edit.body).map_err(|_| V8EditError::InvalidBody)?;
+    let mut update =
+        super::yaml3::compose::unmarshal(&edit.body).map_err(|_| V8EditError::InvalidBody)?;
     strip_auth_indexes_from_update(parts, &mut update);
     let Some(mut value) = std::mem::take(&mut update.content).into_iter().next() else {
         return Err(V8EditError::InvalidBody);

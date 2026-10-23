@@ -107,35 +107,43 @@ fn review_r10_empty_boundary_reconstructed_controls_match_faithful_and_go() {
 }
 
 #[test]
-fn review_r10_pending_item_foot_and_empty_key_head_keep_their_owners() {
+fn review_r10_styled_item_foot_and_empty_key_head_keep_their_owners() {
     for between in ["      # item foot\n\n", "# item foot\n"] {
         let source = format!(
             "oauth:\n  model-alias:\n    antigravity:\n      - {{name: a, alias: b}}\n{between}  # rse head\n  request-scoped-errors: {{}}\nconfig-version: 8\n"
         );
+        let mut doc = compose::unmarshal(source.as_bytes()).unwrap();
+        normalize_collection_node_styles(&mut doc);
+        let styled = String::from_utf8(encode::protected_node(&doc, 4).unwrap().0).unwrap();
+        assert!(
+            parity::retained_unloadable_comments(&source, &styled, &[]),
+            "{styled}"
+        );
+        let parsed = compose::unmarshal(styled.as_bytes()).unwrap();
+        let root = &parsed.content[0];
+        assert_eq!(
+            yaml_path(root, "oauth.model-alias.antigravity")
+                .unwrap()
+                .content[0]
+                .foot_comment,
+            "# item foot"
+        );
+        let oauth = yaml_path(root, "oauth").unwrap();
+        let i = find_map_key_index(oauth, "request-scoped-errors").unwrap();
+        assert_eq!(oauth.content[i].head_comment.trim(), "# rse head");
+        // Steer 1 item 5 defers the column-zero normalizer's A2 owner changes.
+        // Keep the end-to-end evidence as a negative rather than normalizing
+        // this defect away in the certifier or claiming it is repaired.
         for op in ["save", "migrate", "save2", "put"] {
-            let mut previous = source.clone();
             for out in outputs(&source, op).unwrap() {
                 Config::load_bytes(out.as_bytes()).unwrap();
                 assert!(
-                    parity::retained_unloadable_comments(&previous, &out, &[]),
+                    !parity::retained_unloadable_comments(&source, &out, &[]),
                     "{op}: {out}"
                 );
                 for comment in ["# item foot", "# rse head"] {
                     assert_eq!(parity::comment_occurrences(&out, comment, false), Some(1));
                 }
-                let parsed = unmarshal(out.as_bytes()).unwrap();
-                let root = &parsed.content[0];
-                assert_eq!(
-                    yaml_path(root, "oauth.model-alias.antigravity")
-                        .unwrap()
-                        .content[0]
-                        .foot_comment,
-                    "# item foot"
-                );
-                let oauth = yaml_path(root, "oauth").unwrap();
-                let index = find_map_key_index(oauth, "request-scoped-errors").unwrap();
-                assert_eq!(oauth.content[index].head_comment.trim(), "# rse head");
-                previous = out;
             }
         }
     }

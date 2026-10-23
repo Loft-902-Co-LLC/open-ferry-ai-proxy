@@ -224,7 +224,6 @@ pub(crate) fn marshal_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlEr
     protected_node(node, indent).map(|(bytes, _)| bytes)
 }
 
-#[cfg(any(feature = "parity", test))]
 pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlError> {
     let mut encoder = Encoder::new();
     encoder.set_indent(indent);
@@ -443,13 +442,39 @@ impl Encoder {
             .map_err(|error| YamlError::fail(error.message()))
     }
 
+    /// Without a document marker, the first paragraph of a first key's
+    /// multipart head is parsed as a document comment. Keep a canonical
+    /// version head on its key, under the existing version protection.
+    fn implicit_config_start(&self, node: &Node) -> bool {
+        let protected = self.emitter.protect_config_comments;
+        #[cfg(feature = "parity")]
+        let protected = protected
+            && crate::config::save::parity::ablation::enabled(
+                crate::config::save::parity::ablation::Protection::CanonicalVersionComment,
+            );
+        let root = if node.kind == Kind::Document {
+            node.content.first().unwrap_or(node)
+        } else {
+            node
+        };
+        !(protected
+            && root.kind == Kind::Mapping
+            && root.content.first().is_some_and(|key| {
+                key.value == "config-version" && key.head_comment.contains("\n\n")
+            }))
+    }
+
     /// `Encoder.Encode(node)` for a `*yaml.Node` (`marshalDoc`).
     pub(crate) fn encode_node(&mut self, node: &Node) -> Result<(), YamlError> {
         self.init()?;
         if node.kind == Kind::Document {
             return self.node(node, "", false, 0);
         }
-        self.emit(Event::document_start(None, Vec::new(), true))?;
+        self.emit(Event::document_start(
+            None,
+            Vec::new(),
+            self.implicit_config_start(node),
+        ))?;
         self.node(node, "", false, 0)?;
         self.emit(Event::document_end(true))
     }
@@ -670,7 +695,8 @@ impl Encoder {
 
         match node.kind {
             Kind::Document => {
-                let mut event = Event::document_start(None, Vec::new(), true);
+                let mut event =
+                    Event::document_start(None, Vec::new(), self.implicit_config_start(node));
                 event.head_comment = node.head_comment.as_bytes().to_vec();
                 self.emit(event)?;
                 for child in &node.content {

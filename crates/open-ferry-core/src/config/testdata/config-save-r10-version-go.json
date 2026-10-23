@@ -1,0 +1,122 @@
+[
+  {
+    "case": "C8",
+    "op": "raw",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8",
+    "op": "raw2",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8",
+    "op": "normalize",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8",
+    "op": "normalize2",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8",
+    "op": "save",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "C8",
+    "op": "save2",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "C8",
+    "op": "migrate",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "C8",
+    "op": "migrate2",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "C8",
+    "op": "put",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+  },
+  {
+    "case": "C8",
+    "op": "patch",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+    "go": "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+  },
+  {
+    "case": "V17",
+    "op": "raw",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n"
+  },
+  {
+    "case": "V17",
+    "op": "raw2",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n"
+  },
+  {
+    "case": "V17",
+    "op": "normalize",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n"
+  },
+  {
+    "case": "V17",
+    "op": "normalize2",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n"
+  },
+  {
+    "case": "V17",
+    "op": "save",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "V17",
+    "op": "save2",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "V17",
+    "op": "migrate",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "V17",
+    "op": "migrate2",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+  },
+  {
+    "case": "V17",
+    "op": "put",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n"
+  },
+  {
+    "case": "V17",
+    "op": "patch",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n",
+    "go": "models: {}\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\noauth:\n    auth-dir: \"/x\"\n"
+  }
+]

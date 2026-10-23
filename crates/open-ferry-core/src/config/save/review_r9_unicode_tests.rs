@@ -53,7 +53,7 @@ fn review_r9_unicode_sources_preserve_loader_values_or_refuse_without_writing() 
                         let after = std::fs::read(&path).unwrap();
                         if let Err(error) = result {
                             assert!(
-                                error.contains("Unicode line separator; write refused"),
+                                error.contains("write refused, file unchanged"),
                                 "{op}: {error}"
                             );
                             assert_eq!(after, source.as_bytes());

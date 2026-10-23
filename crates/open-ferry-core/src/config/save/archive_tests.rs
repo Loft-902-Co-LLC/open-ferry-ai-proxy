@@ -3,6 +3,30 @@ use super::*;
 use crate::config::testing::TempDir;
 use crate::config::v8_edit::{V8Edit, V8Method, edit_v8, preview_v8};
 
+/// Re-express the writer's decoded test value with explicit escapes. This
+/// source agrees in both parsers while still requiring archive quoting after
+/// the escapes have been decoded. Keep raw tags, anchors and aliases intact.
+pub(super) fn escaped_writer_source(source: &str) -> String {
+    let mut doc = compose::unmarshal(source.as_bytes()).unwrap();
+    // Exercise the actual quoting boundary on the original literal/block
+    // presentation too. The escaped source below would otherwise carry an
+    // already-quoted style and make an omitted archive quote invisible.
+    let mut archive = doc.clone();
+    v8::quote_archive_breaks(&mut archive);
+    let quoted = String::from_utf8(encode::faithful_node(&archive, 4).unwrap()).unwrap();
+    assert!(!quoted.contains(['\u{0085}', '\u{2028}', '\u{2029}']));
+    fn quote(node: &mut Node) {
+        if node.kind == Kind::Scalar && node.value.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+            node.style |= super::super::yaml3::Style::DOUBLE_QUOTED;
+        }
+        for child in &mut node.content {
+            quote(child);
+        }
+    }
+    quote(&mut doc);
+    String::from_utf8(encode::faithful_node(&doc, 4).unwrap()).unwrap()
+}
+
 fn value(bytes: &[u8]) -> (String, String) {
     let doc = unmarshal(bytes).unwrap();
     if let Some(n) = yaml_path(&doc.content[0], "x") {
@@ -30,6 +54,7 @@ fn check(op: &str) {
         }
     }
     assert_eq!(shapes.len(), 10);
+    let mut exercised = 0;
     for mut source in shapes {
         source.push_str("auth-dir: /old\ndebug: false\n");
         if op == "raw-v8" {
@@ -72,10 +97,11 @@ fn check(op: &str) {
                     edit_v8(&path, &edit).unwrap_err().to_string()
                 }
             };
-            assert!(error.contains("Unicode line separator; write refused"));
+            assert!(error.contains("write refused, file unchanged"));
             assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
-            continue;
+            source = escaped_writer_source(&source);
         }
+        exercised += 1;
         let original = value(source.as_bytes());
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
@@ -121,6 +147,7 @@ fn check(op: &str) {
             );
         }
     }
+    assert_eq!(exercised, 10, "every shape must reach archive emission");
 }
 macro_rules! path_test {
     ($name:ident,$op:literal) => {

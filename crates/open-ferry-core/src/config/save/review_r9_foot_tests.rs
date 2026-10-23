@@ -70,7 +70,10 @@ fn review_r9_pending_collection_foot_precedes_the_next_empty_keys_head() {
 }
 
 #[test]
-fn review_r9_exact_top_level_input_keeps_both_comment_owners() {
+fn review_r9_top_level_raw_write_is_an_unchanged_owner_control() {
+    // This top-level raw write already passes the base: retain it as a
+    // Go-identical owner control. The nested styled/emitter tests discriminate
+    // the pending-foot changes; this control must never acquire extra bytes.
     let source = "plugins:\n  enabled: false\n# plugins foot\n\n# models head\nmodels: {}\nconfig-version: 8\n";
     let dir = TempDir::new();
     let path = dir.join("config.yaml");
