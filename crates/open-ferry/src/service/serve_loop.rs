@@ -574,6 +574,9 @@ struct ConnCore {
     seen_request: AtomicBool,
     seen_request_wake: Notify,
     cut: AtomicBool,
+    /// Cuts after the next flag snapshot, to test registration ordering.
+    #[cfg(test)]
+    cut_after_flag_read: AtomicBool,
     cut_wake: Notify,
     state: Mutex<CoreState>,
     /// A duplicate of the accepted socket, which a cut shuts down so the
@@ -605,6 +608,8 @@ impl ConnCore {
             seen_request: AtomicBool::new(false),
             seen_request_wake: Notify::new(),
             cut: AtomicBool::new(false),
+            #[cfg(test)]
+            cut_after_flag_read: AtomicBool::new(false),
             cut_wake: Notify::new(),
             state: Mutex::new(CoreState::default()),
             socket: Mutex::new(Some(socket)),
@@ -669,7 +674,12 @@ impl ConnCore {
     }
 
     fn is_cut(&self) -> bool {
-        self.cut.load(Ordering::Acquire)
+        let cut = self.cut.load(Ordering::Acquire);
+        #[cfg(test)]
+        if self.cut_after_flag_read.swap(false, Ordering::AcqRel) {
+            self.cut();
+        }
+        cut
     }
 
     /// Whether this call cut it. The socket is shut down, so the peer sees

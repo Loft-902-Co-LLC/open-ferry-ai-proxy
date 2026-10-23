@@ -537,7 +537,8 @@ async fn ingress_cut_during_a_stalled_http1_write_closes_without_the_deadline() 
         .unwrap();
     get_request(&mut stream, "/sse", false).await;
     until(|| traffic(&served).is_some_and(|traffic| traffic.has_pending_write())).await;
-    // Keep virtual time fixed: cut must wake the stalled writer itself.
+    // End-to-end cut coverage: cut_wake and socket shutdown can both end the
+    // connection. Keep virtual time fixed to exclude deadline-driven closure.
     tokio::time::pause();
     let cut_at = tokio::time::Instant::now();
     assert_eq!(served.control.cut(), 1);
