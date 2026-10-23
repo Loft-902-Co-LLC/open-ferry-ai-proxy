@@ -1842,6 +1842,7 @@ dependencies = [
  "futures-util",
  "http",
  "libc",
+ "memchr",
  "notify",
  "open-ferry-translate",
  "rand 0.10.3",

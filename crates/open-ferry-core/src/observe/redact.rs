@@ -46,6 +46,11 @@ pub const REDACTED: &str = "[redacted]";
 /// an ordinary word of the message, and hiding it would garble the message.
 const MIN_SECRET: usize = 8;
 
+// Bound the cold precheck to at most sixteen SIMD substring scans. Typical
+// attempts have only a few credential forms; larger sets amortize one
+// automaton build over the stream rather than scanning an unbounded list.
+const PRECHECK_PATTERNS: usize = 16;
+
 /// The metadata keys a credential keeps its keys and tokens under, at the
 /// top level or in a nested `token` object.
 const METADATA_SECRETS: [&str; 8] = [
@@ -83,9 +88,9 @@ pub enum Policy {
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Secrets(Vec<String>, Searchers);
 
-/// The searchers [`Secrets::bytes`] built, one for each policy, kept so a
-/// stream scrubbed line by line builds each once. Adding a secret drops
-/// them. They don't count in equality.
+/// Each policy caches its pattern list independently of its lazy automaton.
+/// A clean stream need never build one. Adding a secret drops both caches;
+/// neither cache counts in equality.
 #[derive(Clone, Default)]
 struct Searchers([OnceLock<Searcher>; 2]);
 
@@ -113,27 +118,19 @@ impl PartialEq for Searchers {
 
 impl Eq for Searchers {}
 
-/// The forms of the secrets one policy hides, and the automaton that finds
-/// them (`None` when there are none, or it couldn't be built).
+/// The forms one policy hides, plus an independently initialized automaton.
+/// An initialized None retains the original builder-failure fallback.
 #[derive(Clone)]
 struct Searcher {
     patterns: Vec<String>,
-    automaton: Option<AhoCorasick>,
+    automaton: OnceLock<Option<AhoCorasick>>,
 }
 
 impl Searcher {
     fn new(patterns: Vec<String>) -> Self {
-        let automaton = if patterns.is_empty() {
-            None
-        } else {
-            AhoCorasick::builder()
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(&patterns)
-                .ok()
-        };
         Self {
             patterns,
-            automaton,
+            automaton: OnceLock::new(),
         }
     }
 }
@@ -331,12 +328,71 @@ impl Secrets {
         if searcher.patterns.is_empty() {
             return Cow::Borrowed(body);
         }
+        // Leftmost-longest has a match iff some literal pattern occurs.
+        // Before building it, absence of every pattern therefore proves the
+        // identical borrowed result, including for JSON-escaped forms.
+        if searcher.automaton.get().is_none()
+            && searcher.patterns.len() <= PRECHECK_PATTERNS
+            && !searcher
+                .patterns
+                .iter()
+                .any(|pattern| memchr::memmem::find(body, pattern.as_bytes()).is_some())
+        {
+            return Cow::Borrowed(body);
+        }
         let Some(Ok(matches)) = searcher
             .automaton
+            .get_or_init(|| {
+                AhoCorasick::builder()
+                    .match_kind(MatchKind::LeftmostLongest)
+                    .build(&searcher.patterns)
+                    .ok()
+            })
             .as_ref()
             .map(|automaton| automaton.try_find_iter(Input::new(body)))
         else {
             return replace_each(body, searcher.patterns.clone());
+        };
+        let mut out: Option<Vec<u8>> = None;
+        let mut last = 0;
+        for found in matches {
+            let buffer = out.get_or_insert_with(|| Vec::with_capacity(body.len()));
+            buffer.extend_from_slice(body.get(last..found.start()).unwrap_or_default());
+            buffer.extend_from_slice(REDACTED.as_bytes());
+            last = found.end();
+        }
+        match out {
+            None => Cow::Borrowed(body),
+            Some(mut out) => {
+                out.extend_from_slice(body.get(last..).unwrap_or_default());
+                Cow::Owned(out)
+            }
+        }
+    }
+
+    // Previous eager implementation, retained only as an output oracle.
+    #[cfg(test)]
+    fn old_bytes<'a>(&self, body: &'a [u8], policy: Policy) -> Cow<'a, [u8]> {
+        if body.is_empty() {
+            return Cow::Borrowed(body);
+        }
+        let patterns = self.patterns(policy);
+        let automaton = if patterns.is_empty() {
+            None
+        } else {
+            AhoCorasick::builder()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(&patterns)
+                .ok()
+        };
+        if patterns.is_empty() {
+            return Cow::Borrowed(body);
+        }
+        let Some(Ok(matches)) = automaton
+            .as_ref()
+            .map(|automaton| automaton.try_find_iter(Input::new(body)))
+        else {
+            return replace_each(body, patterns.clone());
         };
         let mut out: Option<Vec<u8>> = None;
         let mut last = 0;
@@ -547,6 +603,102 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn clean_bodies_cache_patterns_without_building_automata() {
+        let secrets = Secrets::from_iter(["long-credential", "x"]);
+        for policy in [Policy::Client, Policy::Disk] {
+            for line in [b"ordinary body".as_slice(), b"data: harmless\n"] {
+                assert!(matches!(secrets.bytes(line, policy), Cow::Borrowed(_)));
+            }
+        }
+        for slot in &secrets.1.0 {
+            let searcher = slot.get().expect("pattern list cached");
+            assert!(!searcher.patterns.is_empty());
+            assert!(searcher.automaton.get().is_none());
+        }
+        let many = Secrets::from_iter((0..17).map(|n| format!("credential-{n:02}")));
+        many.bytes(b"harmless", Policy::Client);
+        assert!(
+            many.1.0[0].get().unwrap().automaton.get().is_some(),
+            "large lists bypass repeated scans"
+        );
+    }
+
+    #[test]
+    fn adding_a_secret_resets_pattern_and_automaton_caches_for_both_policies() {
+        let mut secrets = Secrets::from_iter(["initial-secret"]);
+        for policy in [Policy::Client, Policy::Disk] {
+            assert_eq!(
+                secrets.bytes(b"initial-secret", policy).as_ref(),
+                REDACTED.as_bytes()
+            );
+        }
+        assert!(
+            secrets
+                .1
+                .0
+                .iter()
+                .all(|slot| slot.get().unwrap().automaton.get().is_some())
+        );
+        secrets.add("second-secret");
+        assert!(secrets.1.0.iter().all(|slot| slot.get().is_none()));
+        for policy in [Policy::Client, Policy::Disk] {
+            assert_eq!(
+                secrets
+                    .bytes(b"initial-secret second-secret", policy)
+                    .as_ref(),
+                b"[redacted] [redacted]"
+            );
+        }
+        let mut clean = Secrets::from_iter(["old-secret"]);
+        clean.bytes(b"harmless", Policy::Client);
+        clean.add("new-secret");
+        assert_eq!(
+            clean.bytes(b"new-secret", Policy::Client).as_ref(),
+            b"[redacted]"
+        );
+    }
+
+    #[test]
+    fn lazy_automata_match_the_eager_oracle_for_bodies_and_stream_lines() {
+        let mut seed = 0x39d1_a72b_0c64_f813_u64;
+        for iteration in 0..96 {
+            let mut secrets = Secrets::from_iter([
+                "short",
+                "a",
+                "12345678",
+                "x12345678x",
+                "quote\"slash\\line\nbreak",
+                "λ-secret",
+            ]);
+            for n in 0..iteration % 20 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                secrets.add(&format!("generated-{n}-{seed:016x}"));
+            }
+            let joined = secrets.iter().collect::<Vec<_>>().join(" / ");
+            let json = serde_json::to_vec(&json!({"text":joined})).unwrap();
+            let bodies = [
+                b"harmless stream data\nnext line\n".to_vec(),
+                joined.into_bytes(),
+                json,
+                b"x12345678x12345678\nshort\nquote\"slash\\line\nbreak".to_vec(),
+                vec![0xff, b'a', 0, b'\n'],
+            ];
+            for policy in [Policy::Client, Policy::Disk] {
+                for body in &bodies {
+                    assert_eq!(
+                        secrets.bytes(body, policy),
+                        secrets.old_bytes(body, policy),
+                        "iteration={iteration}, policy={policy:?}"
+                    );
+                    for line in body.split_inclusive(|byte| *byte == b'\n') {
+                        assert_eq!(secrets.bytes(line, policy), secrets.old_bytes(line, policy));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn replaces_every_copy_of_the_secret() {
