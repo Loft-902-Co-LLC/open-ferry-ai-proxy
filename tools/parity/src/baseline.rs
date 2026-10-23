@@ -53,77 +53,68 @@ pub struct Assessment {
     pub markdown: String,
 }
 
-/// Hash source dependencies with checkout-independent line endings and paths.
-pub fn fingerprint(upstream: &str) -> Result<Fingerprint> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .unwrap();
-    let hash = |paths: &[&str]| -> Result<String> {
-        fn collect(path: PathBuf, files: &mut BTreeSet<PathBuf>) -> Result<()> {
-            if path.is_dir() {
-                for entry in fs::read_dir(path)? {
-                    collect(entry?.path(), files)?;
-                }
-            } else {
-                files.insert(path);
+const GENERATOR_PATHS: &[&str] = &[
+    "tools/parity/src/generate.rs",
+    "tools/parity/src/generate/config_save.rs",
+    "tools/parity/src/generate/config_diff.rs",
+    "tools/parity/src/cases/config_save.rs",
+    "tools/parity/src/cases/testdata",
+];
+
+/// Hash only the generator paths listed in `GENERATOR_PATHS`; other case inputs
+/// are not fingerprinted yet. Product, certifier, harness and toolchain changes
+/// are judged by the resulting verdict instead.
+fn fingerprint_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    fn collect(root: &Path, path: PathBuf, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                collect(root, entry?.path(), files)?;
             }
-            Ok(())
+        } else {
+            files.insert(path.strip_prefix(root)?.to_owned());
         }
-        let mut files = BTreeSet::new();
-        for path in paths {
-            collect(root.join(path), &mut files)?;
-        }
-        // Sort normalized relative paths, not platform-specific separators.
-        let mut normalized = BTreeMap::new();
-        for path in files {
-            normalized.insert(
-                path.strip_prefix(root)?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-                fs::read_to_string(path)?.replace("\r\n", "\n"),
-            );
-        }
-        let mut hash = Sha256::new();
-        for (path, text) in normalized {
-            hash.update(path.as_bytes());
-            hash.update([0]);
-            hash.update(text.as_bytes());
-            hash.update([0]);
-        }
-        Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
-    };
+        Ok(())
+    }
+    let mut files = BTreeSet::new();
+    for path in GENERATOR_PATHS {
+        collect(root, root.join(path), &mut files)?;
+    }
+    Ok(files)
+}
+
+fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
+    // Sort normalized relative paths, not platform-specific separators.
+    let mut normalized = BTreeMap::new();
+    for path in fingerprint_paths(root)? {
+        normalized.insert(
+            path.to_string_lossy().replace('\\', "/"),
+            fs::read_to_string(root.join(path))?.replace("\r\n", "\n"),
+        );
+    }
+    let mut hash = Sha256::new();
+    for (path, text) in normalized {
+        hash.update(path.as_bytes());
+        hash.update([0]);
+        hash.update(text.as_bytes());
+        hash.update([0]);
+    }
+    let generator_hash = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(BTreeMap::from([
-        ("classifier_version".into(), "1".into()),
+        ("classifier_version".into(), "2".into()),
         ("upstream_pin".into(), upstream.trim().into()),
-        (
-            "generator_sha256".into(),
-            hash(&[
-                "tools/parity/src/generate.rs",
-                "tools/parity/src/generate/config_save.rs",
-                "tools/parity/src/generate/config_diff.rs",
-                "tools/parity/src/cases/config_save.rs",
-                "tools/parity/src/cases/testdata",
-            ])?,
-        ),
-        (
-            "certifier_sha256".into(),
-            hash(&[
-                "tools/parity/src/main.rs",
-                "tools/parity/src/config_save.rs",
-                "tools/parity/src/config_save",
-                "tools/parity/src/compare.rs",
-                "tools/parity/src/translator.rs",
-                "Cargo.lock",
-                "Cargo.toml",
-                "rust-toolchain.toml",
-                "tools/parity/Cargo.toml",
-                "crates/open-ferry-core/Cargo.toml",
-                "tools/parity/go",
-                "crates/open-ferry-core/src/config",
-            ])?,
-        ),
+        ("generator_sha256".into(), generator_hash),
     ]))
+}
+
+/// Hash `GENERATOR_PATHS` with checkout-independent line endings and paths.
+pub fn fingerprint(upstream: &str) -> Result<Fingerprint> {
+    fingerprint_at(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap(),
+        upstream,
+    )
 }
 
 pub fn pinned_fingerprint() -> Result<Fingerprint> {
@@ -160,14 +151,31 @@ pub fn config_output(value: &Value) -> bool {
         && !(value.get("error").is_some() && value.get("unloadable").is_some())
 }
 
+/// `unloadable` includes the rejected file; `error` contains only successful
+/// snapshots. Compare the same successful-prefix boundary on both sides.
+fn successful_prefix(value: &Value) -> Option<usize> {
+    let count = value["files"].as_array()?.len();
+    if value.get("unloadable").is_some() {
+        count.checked_sub(1)
+    } else if value.get("error").is_some() {
+        Some(count)
+    } else {
+        None
+    }
+}
+
 /// Only an actual failed certifier attempt can supply a kind. Panics, malformed
 /// wrappers, missing diagnostics and unavailable replays remain fatal.
 pub fn difference_kinds(
     options: &Value,
     proof: &Value,
+    go: &Value,
     protected: Option<&Value>,
 ) -> Option<BTreeSet<String>> {
-    if proof["kind"] != "uncertified-protection-ablation" {
+    if proof["kind"] != "uncertified-protection-ablation"
+        || !config_output(go)
+        || protected.is_some_and(|value| !config_output(value))
+    {
         return None;
     }
     let steps = options["steps"].as_array()?;
@@ -177,7 +185,11 @@ pub fn difference_kinds(
                 failures.iter().any(|f| {
                     matches!(
                         f["reason"].as_str(),
-                        Some("replay_unavailable" | "comment_free_go_panicked")
+                        Some(
+                            "replay_unavailable"
+                                | "comment_free_go_panicked"
+                                | "comment_free_go_malformed"
+                        )
                     )
                 })
             })
@@ -185,13 +197,30 @@ pub fn difference_kinds(
     }) {
         return None;
     }
+    if let Some(protected) = protected
+        && (protected.get("error").is_some() || protected.get("unloadable").is_some())
+        && (!(go.get("error").is_some() || go.get("unloadable").is_some())
+            || successful_prefix(go)? > successful_prefix(protected)?)
+    {
+        // A Rust-only refusal is not a comment-placement limitation. Only the
+        // existing Unicode guard gets its own (deliberately unbaselined) kind.
+        if !protected["error"]
+            .as_str()
+            .is_some_and(unicode_guard_refusal)
+        {
+            return None;
+        }
+        let op = steps.get(protected["files"].as_array()?.len())?["op"].as_str()?;
+        return matches!(op, "save" | "nested" | "write")
+            .then(|| BTreeSet::from([format!("rust-refusal/unicode-guard/{op}")]));
+    }
     let mut kinds = BTreeSet::new();
     let mut add = |failure: &Value, prefix: &str| -> Option<()> {
         let reason = failure["reason"].as_str()?;
         if reason.is_empty()
             || !reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
             || reason.contains("panicked")
-            || reason == "replay_unavailable"
+            || matches!(reason, "replay_unavailable" | "comment_free_go_malformed")
         {
             return None;
         }
@@ -257,6 +286,50 @@ pub fn difference_kinds(
         _ => return None,
     }
     (!kinds.is_empty()).then_some(kinds)
+}
+
+/// The portable wrapper has only text errors. `SaveErrorKind::Unwritable` is
+/// shared with other refusals and the trace has no guard-specific event, so
+/// recognize the complete guard message, never a substring or error prefix.
+fn unicode_guard_refusal(message: &str) -> bool {
+    let Some(message) = message.strip_suffix("; write refused, file unchanged") else {
+        return false;
+    };
+    let Some((location, separators)) = message
+        .rsplit_once(", is read differently by the saphyr loader and writer in input containing ")
+    else {
+        return false;
+    };
+    let Some(location) = location
+        .strip_prefix("config scalar at line ")
+        .or_else(|| location.strip_prefix("config value at line "))
+    else {
+        return false;
+    };
+    let Some((line, path)) = location.split_once(", path ") else {
+        return false;
+    };
+    if line.is_empty()
+        || !line.bytes().all(|b| b.is_ascii_digit())
+        || !line.parse::<usize>().is_ok_and(|n| n > 0)
+        || !path.starts_with('$')
+    {
+        return false;
+    }
+    let names = [
+        "U+2028 (LINE SEPARATOR)",
+        "U+2029 (PARAGRAPH SEPARATOR)",
+        "U+0085 (NEXT LINE)",
+    ];
+    (1..8).any(|mask| {
+        names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| (mask & (1 << i) != 0).then_some(*name))
+            .collect::<Vec<_>>()
+            .join(", ")
+            == separators
+    })
 }
 
 pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -445,11 +518,33 @@ impl Baseline {
 /// Refresh requires ten independent nightly-sized config samples and the exact
 /// PR profile. Selected historical failures may add kinds, never inflate rates.
 pub fn refresh(observations: &[Observation], fingerprint: &Fingerprint) -> Result<Baseline> {
+    refresh_with_existing(observations, fingerprint, None)
+}
+
+/// Reviewed additions need only their own observations. Incremental refresh
+/// preserves the PR set and cannot lower the bound; a full refresh can lower it.
+pub fn refresh_incremental(
+    existing: &Baseline,
+    observations: &[Observation],
+    fingerprint: &Fingerprint,
+) -> Result<Baseline> {
+    existing.validate(fingerprint)?;
+    refresh_with_existing(observations, fingerprint, Some(existing))
+}
+
+fn refresh_with_existing(
+    observations: &[Observation],
+    fingerprint: &Fingerprint,
+    existing: Option<&Baseline>,
+) -> Result<Baseline> {
     let mut seeds = BTreeSet::new();
-    let mut calibration = BTreeSet::new();
-    let mut kinds = BTreeSet::new();
-    let mut max_rate = 0;
-    let mut pr = None;
+    let mut calibration: BTreeSet<_> = existing
+        .into_iter()
+        .flat_map(|b| b.calibration.iter().cloned())
+        .collect();
+    let mut kinds = existing.map(|b| b.kinds.clone()).unwrap_or_default();
+    let mut max_rate = existing.map(|b| b.max_different_per_1000).unwrap_or(0);
+    let mut pr = existing.map(|b| b.pr_different_cases.clone());
     for observation in observations {
         observation.validate(fingerprint)?;
         if observation.non_certification != 0 {
@@ -468,6 +563,12 @@ pub fn refresh(observations: &[Observation], fingerprint: &Fingerprint) -> Resul
             if observation.seed == 1 && observation.random == 25 {
                 let ids: BTreeSet<_> = observation.case_kinds.keys().cloned().collect();
                 if pr.as_ref().is_some_and(|old| old != &ids) {
+                    if existing.is_some() {
+                        return Err(
+                            "PR observation conflicts with existing baseline's Different case set"
+                                .into(),
+                        );
+                    }
                     return Err("inconsistent PR observations".into());
                 }
                 pr = Some(ids);
@@ -484,7 +585,7 @@ pub fn refresh(observations: &[Observation], fingerprint: &Fingerprint) -> Resul
             different: observation.different,
         });
     }
-    if seeds.len() < 10 {
+    if existing.is_none() && seeds.len() < 10 {
         return Err(
             "baseline refresh needs at least ten distinct nightly-sized config seeds".into(),
         );
@@ -575,7 +676,14 @@ pub fn import(failures: &Path, proofs: &Path, mut observation: Observation) -> R
                 .get("protected_rust")
                 .is_none_or(|p| p == &case["open_ferry_output"]);
         let kinds = bound
-            .then(|| difference_kinds(&case["options"], &proof, Some(&case["open_ferry_output"])))
+            .then(|| {
+                difference_kinds(
+                    &case["options"],
+                    &proof,
+                    go.as_ref().unwrap(),
+                    Some(&case["open_ferry_output"]),
+                )
+            })
             .flatten();
         observation.different += 1;
         if let Some(kinds) = kinds {

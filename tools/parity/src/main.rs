@@ -62,6 +62,7 @@ options:
   --baseline <file> apply the config-save certification-failure budget
   --observation <file> write portable config-save baseline observations
   --write-baseline <file> refresh deterministically from --baseline-observation files
+                 add --baseline <existing> for an incremental refresh
   --baseline-observation <file> repeat for refresh or --baseline replay (no Go run)
   --import-config-failures <dir> import saved fixtures, with --import-proofs <dir>,
                  --import-cases <n> and --observation <file> (no Go run)
@@ -144,9 +145,6 @@ impl Args {
                 "-h" | "--help" => return Err(String::new()),
                 _ => return Err(format!("unknown argument {flag}")),
             }
-        }
-        if parsed.write_baseline.is_some() && parsed.baseline.is_some() {
-            return Err("--write-baseline cannot be combined with --baseline".into());
         }
         let replay = !parsed.baseline_observations.is_empty();
         if (parsed.write_baseline.is_some() && !replay)
@@ -764,7 +762,16 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         let fingerprint = baseline::pinned_fingerprint()?;
         let observations = baseline::observations(&args.baseline_observations)?;
         if let Some(path) = &args.write_baseline {
-            baseline::write(path, &baseline::refresh(&observations, &fingerprint)?)?;
+            let refreshed = if let Some(existing) = &args.baseline {
+                baseline::refresh_incremental(
+                    &baseline::read(existing)?,
+                    &observations,
+                    &fingerprint,
+                )?
+            } else {
+                baseline::refresh(&observations, &fingerprint)?
+            };
+            baseline::write(path, &refreshed)?;
             println!(
                 "Baseline written to {}; raises/additional kinds require a PR explanation.",
                 path.display()
@@ -846,27 +853,18 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         tally.print(args.show, &dir);
         let mut matched = tally.different == 0;
         if translator == Translator::ConfigSave {
-            let observation = baseline::Observation {
-                fingerprint: fingerprint.clone(),
-                seed: args.seed,
-                random: args.random,
-                cases: cases.len(),
-                selected: args.replay_config_failures.is_some(),
-                different: tally.different,
-                non_certification: tally.different - tally.certification_failures.len(),
-                case_kinds: tally.certification_failures.clone(),
-            };
-            baseline::write(
+            (matched, ratchet_summary) = config_save_result(
+                &tally,
+                args,
+                &fingerprint,
+                cases.len(),
+                budget.as_ref().zip(args.baseline.as_deref()),
                 args.observation
                     .as_deref()
                     .unwrap_or(&work_dir.join("config-save-observation.json")),
-                &observation,
             )?;
-            if let (Some(budget), Some(path)) = (&budget, &args.baseline) {
-                let assessment = budget.assess(&observation, path)?;
-                matched = assessment.passed;
-                println!("{}", assessment.markdown);
-                ratchet_summary = assessment.markdown;
+            if !ratchet_summary.is_empty() {
+                println!("{ratchet_summary}");
             }
         }
         all_match &= matched;
@@ -1132,6 +1130,34 @@ as expected {expected}/{}",
     Ok(same == cases.len() && responses_match)
 }
 
+/// The live config suite uses this same observation and assessment for its
+/// printed summary and returned verdict. Other suites keep the strict tally.
+fn config_save_result(
+    tally: &Tally,
+    args: &Args,
+    fingerprint: &baseline::Fingerprint,
+    cases: usize,
+    budget: Option<(&baseline::Baseline, &Path)>,
+    observation_path: &Path,
+) -> Result<(bool, String), Box<dyn Error>> {
+    let observation = baseline::Observation {
+        fingerprint: fingerprint.clone(),
+        seed: args.seed,
+        random: args.random,
+        cases,
+        selected: args.replay_config_failures.is_some(),
+        different: tally.different,
+        non_certification: tally.different - tally.certification_failures.len(),
+        case_kinds: tally.certification_failures.clone(),
+    };
+    baseline::write(observation_path, &observation)?;
+    let Some((budget, path)) = budget else {
+        return Ok((tally.different == 0, String::new()));
+    };
+    let assessment = budget.assess(&observation, path)?;
+    Ok((assessment.passed, assessment.markdown))
+}
+
 /// Empties `dir`, creating it if needed.
 fn fresh_dir(dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     if dir.exists() {
@@ -1196,12 +1222,13 @@ fn evaluate_with_counterfactual(
         if let Some(deviations) = proof.deviations {
             evaluated.outcome = Outcome::Equivalent(deviations);
         } else {
-            evaluated.certification_failure =
-                if baseline::config_output(&original_go) && baseline::config_output(rust) {
-                    baseline::difference_kinds(&case.options, &proof.evidence, Some(rust))
-                } else {
-                    None
-                };
+            evaluated.certification_failure = if baseline::config_output(&original_go)
+                && baseline::config_output(rust)
+            {
+                baseline::difference_kinds(&case.options, &proof.evidence, &original_go, Some(rust))
+            } else {
+                None
+            };
         }
     }
     Ok(evaluated)
@@ -1738,6 +1765,85 @@ mod tests {
         assert_eq!(suites[0].2.len(), 2);
         args.suites.insert("unknown-suite".into());
         assert!(selected_suites(&args).is_err());
+    }
+
+    #[test]
+    fn incremental_baseline_cli_needs_observations_but_no_upstream() {
+        let flags = [
+            "--write-baseline",
+            "out.json",
+            "--baseline",
+            "existing.json",
+        ];
+        assert!(Args::parse(flags.into_iter().map(str::to_owned)).is_err());
+        let parsed = Args::parse(
+            flags
+                .into_iter()
+                .chain(["--baseline-observation", "nightly.json"])
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(parsed.write_baseline.unwrap(), Path::new("out.json"));
+        assert_eq!(parsed.baseline.unwrap(), Path::new("existing.json"));
+        assert!(parsed.upstream.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn review_r13_live_config_verdict_follows_each_ratchet_failure() {
+        let value: Value =
+            serde_json::from_str(include_str!("../baseline/config-save.json")).unwrap();
+        let budget: baseline::Baseline = serde_json::from_value(value.clone()).unwrap();
+        let fingerprint = serde_json::from_value(value["fingerprint"].clone()).unwrap();
+        let args = Args::parse(
+            ["--upstream", ".", "--seed", "30", "--random", "5000"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("parity-live-verdict-{}", std::process::id()));
+        let path = dir.join("observation.json");
+        for (cases, different, kind, expected, message) in [
+            (
+                10,
+                1,
+                Some("check-3/owner_budget/save"),
+                false,
+                "rate exceeds baseline",
+            ),
+            (1000, 1, Some("new/kind/save"), false, "new difference kind"),
+            (1000, 1, None, false, "non-certification failures"),
+            (1000, 0, None, true, "Ratchet verdict: **PASS**"),
+        ] {
+            let tally = Tally {
+                different,
+                certification_failures: kind
+                    .map(|kind| BTreeMap::from([("case".into(), BTreeSet::from([kind.into()]))]))
+                    .unwrap_or_default(),
+                ..Tally::default()
+            };
+            let (matched, markdown) = config_save_result(
+                &tally,
+                &args,
+                &fingerprint,
+                cases,
+                Some((&budget, Path::new("baseline.json"))),
+                &path,
+            )
+            .unwrap();
+            assert_eq!(matched, expected, "{markdown}");
+            assert!(markdown.contains(message), "{markdown}");
+            let saved: baseline::Observation = baseline::read(&path).unwrap();
+            assert_eq!(
+                saved.non_certification,
+                usize::from(different > 0 && kind.is_none())
+            );
+            let (strict, markdown) =
+                config_save_result(&tally, &args, &fingerprint, cases, None, &path).unwrap();
+            assert_eq!(strict, different == 0);
+            assert!(markdown.is_empty());
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 
     #[test]

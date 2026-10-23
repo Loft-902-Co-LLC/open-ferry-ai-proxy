@@ -7,7 +7,14 @@ use super::super::{Node, unmarshal};
 pub fn single_document(text: &str) -> bool {
     use crate::config::yaml;
     if yaml::parse_document(text).is_ok() {
-        return !yaml::has_more_documents(text);
+        if yaml::has_more_documents(text) {
+            return false;
+        }
+        // The loader does not split comments on these YAML line breaks, but
+        // the writer does. Scan them too, even after a successful loader parse.
+        if !text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+            return true;
+        }
     }
     let (mut started, mut ended) = (false, false);
     for line in text.split(['\n', '\r', '\u{0085}', '\u{2028}', '\u{2029}']) {

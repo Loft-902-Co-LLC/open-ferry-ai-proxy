@@ -511,9 +511,13 @@ without any named owner rule.
 Every comment Go kept also needs its ordered witness at that Go owner; an
 identical source comment at another owner cannot replace it. Sequence indexes
 cannot supply source-only budgets when their enclosing sequence values change;
-Go must retain those occurrences at the same owner. Multi-document sources and
-snapshots are outside these single-document witnesses, and `!!binary` values
-are declined rather than compared through a lossy UTF-8 decode.
+Go must retain those occurrences at the same owner. The witnesses decline later
+documents recognized by the loader. Inputs and snapshots containing LS, PS or
+NEL, and rejected text the loader cannot parse, also undergo a conservative
+lexical boundary scan: a document boundary after content or content after an
+end marker declines proof, even if a boundary-looking line could be quoted
+data. `!!binary` values are declined rather than compared through a lossy UTF-8
+decode.
 
 The offline parity feature has six call-scoped diagnostic switches: the empty
 mapping flush (`RetainedUpstreamEmptyMappingComment`), canonical-version comment
@@ -1421,6 +1425,15 @@ non-certification failures still fail. Follow-up fixes lower this baseline.
 Refresh with `open-ferry-parity --write-baseline ... --baseline-observation ...`
 as documented in [the parity README](tools/parity/README.md#config-save-baseline).
 Adding a kind or raising a bound requires an explanation in the changing PR.
+The fingerprint covers the classifier version, upstream pin and the generator
+paths listed in `GENERATOR_PATHS` in `tools/parity/src/baseline.rs`; other case
+inputs are not fingerprinted yet. Code and dependency changes are judged by
+the resulting verdict.
+For a reviewed newly seen existing limitation, add `--baseline EXISTING` to
+refresh incrementally without lowering the bound or changing the exact PR set.
+Early kind-novelty estimates are about 1 in 10 to 1 in 16 nights, separate from
+the conditional 0.019% rate-only estimate. Follow-ups lower the budget with a
+full refresh.
 
 ## Deliberately not ported
 
