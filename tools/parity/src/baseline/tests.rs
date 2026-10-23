@@ -79,6 +79,21 @@ fn fewer_pass_with_lowering_message_and_refresh_command() {
     o.random = 25;
     assert!(assess(&o).markdown.contains("Baseline can be lowered"));
 }
+
+#[test]
+fn lowering_compares_the_recorded_seed_before_the_profile_minimum() {
+    let mut b = baseline();
+    b.calibration.push(Calibration {
+        seed: 31,
+        different: 2,
+        ..b.calibration[0].clone()
+    });
+    let mut o = observation();
+    o.seed = 31;
+    let result = b.assess(&o, Path::new("b.json")).unwrap();
+    assert!(result.passed);
+    assert!(result.markdown.contains("Baseline can be lowered"));
+}
 #[test]
 fn fingerprint_mismatch_fails_with_refresh_command() {
     let mut o = observation();
@@ -93,6 +108,15 @@ fn fingerprint_mismatch_fails_with_refresh_command() {
 }
 #[test]
 fn non_certification_failures_never_absorbed_or_refreshed() {
+    assert!(config_output(&json!({"files":[],"error":"write refused"})));
+    for value in [
+        json!({"panic":"failed"}),
+        json!({"files":[],"panic":"failed"}),
+        json!({"files":[null]}),
+        json!({"files":[],"error":"a","unloadable":"b"}),
+    ] {
+        assert!(!config_output(&value));
+    }
     let mut o = observation();
     o.case_kinds.clear();
     o.non_certification = 1;
@@ -106,33 +130,33 @@ fn non_certification_failures_never_absorbed_or_refreshed() {
         json!({"kind":"uncertified-protection-ablation", "reason":"check 2: Go oracle panicked"}),
         json!({"kind":"uncertified-protection-ablation", "reason":"check 1: no reproducing subset", "trials":[{"failures":[{"check":1,"step":0,"reason":"replay_unavailable"}]}]}),
     ] {
-        assert!(difference_kinds(&options, &proof).is_none());
+        assert!(difference_kinds(&options, &proof, None).is_none());
     }
 }
 #[test]
 fn kinds_ignore_content_paths_and_offsets_but_keep_check_reason_and_operation() {
     let options = json!({"steps":[{"op":"nested"},{"op":"save"}]});
     let mut p = json!({"kind":"uncertified-protection-ablation", "failures":[{"check":3,"step":0,"reason":"owner_budget","text":"# private","owner":{"path":"secret"}}]});
-    let before = difference_kinds(&options, &p).unwrap();
+    let before = difference_kinds(&options, &p, None).unwrap();
     assert_eq!(
         before,
         BTreeSet::from(["check-3/owner_budget/nested".into()])
     );
     p["failures"][0]["text"] = "other".into();
     p["failures"][0]["owner"] = Value::Null;
-    assert_eq!(difference_kinds(&options, &p).unwrap(), before);
+    assert_eq!(difference_kinds(&options, &p, None).unwrap(), before);
     p["failures"][0]["step"] = 1.into();
-    assert_ne!(difference_kinds(&options, &p).unwrap(), before);
+    assert_ne!(difference_kinds(&options, &p, None).unwrap(), before);
     p["failures"][0]["reason"] = "owner_order".into();
-    assert_ne!(difference_kinds(&options, &p).unwrap(), before);
+    assert_ne!(difference_kinds(&options, &p, None).unwrap(), before);
     p["failures"][0]["check"] = 4.into();
-    assert_ne!(difference_kinds(&options, &p).unwrap(), before);
+    assert_ne!(difference_kinds(&options, &p, None).unwrap(), before);
 }
 #[test]
 fn no_subset_uses_all_failed_trials_not_the_first_only() {
     let p = json!({"kind":"uncertified-protection-ablation", "reason":"check 1: no reproducing subset", "trials":[{"failures":[{"check":1,"step":0,"reason":"snapshot_bytes"}]},{"failures":[{"check":1,"step":1,"reason":"missing_snapshot"}]}]});
     assert_eq!(
-        difference_kinds(&json!({"steps":[{"op":"write"},{"op":"save"}]}), &p).unwrap(),
+        difference_kinds(&json!({"steps":[{"op":"write"},{"op":"save"}]}), &p, None).unwrap(),
         BTreeSet::from([
             "check-1-no-subset/snapshot_bytes/write".into(),
             "check-1-no-subset/missing_snapshot/save".into()
@@ -178,4 +202,24 @@ fn refresh_is_sorted_deterministic_and_selected_failures_cannot_inflate_rate() {
     assert!(text.find("\"calibration\"").unwrap() < text.find("\"fingerprint\"").unwrap());
     fs::remove_file(path).unwrap();
     fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn protected_replay_mismatch_is_fatal_except_the_recorded_yaml_refusal_boundary() {
+    let options = json!({"steps":[{"op":"save"}]});
+    let mut proof = json!({"kind":"uncertified-protection-ablation","reason":"protected replay mismatch","failures":[{"stage":"protected_replay","reason":"missing_snapshot","step":0}]});
+    assert!(difference_kinds(&options, &proof, None).is_none());
+    assert!(
+        difference_kinds(
+            &options,
+            &proof,
+            Some(&json!({"files":[],"error":"harness failure"}))
+        )
+        .is_none()
+    );
+    let refused =
+        json!({"files":[],"error":"failed to parse config file: yaml: invalid attempted file"});
+    assert!(difference_kinds(&options, &proof, Some(&refused)).is_some());
+    proof["failures"][0]["reason"] = "snapshot_bytes".into();
+    assert!(difference_kinds(&options, &proof, Some(&refused)).is_none());
 }

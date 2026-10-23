@@ -11,12 +11,14 @@ use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 pub mod ablation;
 
 mod clean;
-pub use clean::{comment_free_source, faithful_without_comments, same_values};
+pub use clean::{
+    comment_free_source, faithful_without_comments, has_binary_values, same_values, single_document,
+};
 
 mod comments;
 pub use comments::{
     CommentOwnership, comment_occurrences, comment_ownership_analysis, retained_comment_ownership,
-    retained_unloadable_comments,
+    retained_unloadable_comments, unobserved_comment_ownership,
 };
 
 mod folded;

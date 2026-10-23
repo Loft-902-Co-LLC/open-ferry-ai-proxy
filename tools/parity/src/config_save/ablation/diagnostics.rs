@@ -124,6 +124,12 @@ fn value_failure(case: &Case, protected: &Value, expectation: &Value) -> Value {
         if Config::load_bytes(e.as_bytes()).is_err() {
             return at(2, i, json!({"reason":"oracle_unloadable"}));
         }
+        if core::has_binary_values(r) == Some(true) || core::has_binary_values(e) == Some(true) {
+            return at(2, i, json!({"reason":"unsupported_binary_values"}));
+        }
+        if !core::single_document(r) || !core::single_document(e) {
+            return at(2, i, json!({"reason":"multiple_documents"}));
+        }
         let (Ok(r), Ok(e)) = (AnyValue::parse_yaml(r), AnyValue::parse_yaml(e)) else {
             return at(2, i, json!({"reason":"value_parse"}));
         };
@@ -191,7 +197,7 @@ pub(super) fn comments(
                 .map_err(|_| at(3, i, json!({"reason":"comment_trace_utf8"})))?;
             core::comment_ownership_analysis(source, None, r, &written)
         } else if g.is_none() {
-            core::comment_ownership_analysis(source, None, r, &[])
+            core::unobserved_comment_ownership(source, r)
         } else {
             return Err(at(3, i, json!({"reason":"missing_comment_trace"})));
         };
@@ -229,18 +235,20 @@ pub(super) fn failures(proof: Proof<'_>, checks: [bool; 5]) -> Vec<Value> {
         out.push(failure);
     }
     if !checks[1] {
-        out.push(value_failure(
-            proof.case,
-            proof.protected,
-            proof.expectation,
-        ));
+        out.push(if !documents_right(proof) {
+            at(2, 0, json!({"reason":"multiple_documents"}))
+        } else {
+            value_failure(proof.case, proof.protected, proof.expectation)
+        });
     }
     if !checks[2] {
-        out.push(
+        out.push(if !documents_right(proof) {
+            at(3, 0, json!({"reason":"multiple_documents"}))
+        } else {
             comments(proof.case, proof.protected, proof.ablated)
                 .err()
-                .unwrap_or_else(|| at(3, 0, json!({"reason":"comment_check_inconsistent"}))),
-        );
+                .unwrap_or_else(|| at(3, 0, json!({"reason":"comment_check_inconsistent"})))
+        });
     }
     if !checks[3] {
         let mut failure = at(4, 0, json!({"reason":"faithful_snapshot_shape"}));
@@ -275,6 +283,9 @@ pub(super) fn failures(proof: Proof<'_>, checks: [bool; 5]) -> Vec<Value> {
                 }
             }
         }
+        if !documents_right(proof) {
+            failure = at(4, 0, json!({"reason":"multiple_documents"}));
+        }
         out.push(failure);
     }
     if !checks[4] {
@@ -306,6 +317,20 @@ pub(super) fn no_reproduction(go: &Value, replay: &Replay, go_trace: Option<&Val
 
 pub(super) fn comment_free_failure(case: &Case) -> Value {
     let diagnose = |text: &str, index, stage| {
+        if !core::single_document(text) {
+            return at(
+                2,
+                index,
+                json!({"reason":"multiple_documents","stage":stage}),
+            );
+        }
+        if core::has_binary_values(text) == Some(true) {
+            return at(
+                2,
+                index,
+                json!({"reason":"unsupported_binary_values","stage":stage}),
+            );
+        }
         let mut path = Vec::new();
         if let Some(faithful) = core::faithful_without_comments(text)
             && let (Ok(source), Ok(clean)) =

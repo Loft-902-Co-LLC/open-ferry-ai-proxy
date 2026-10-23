@@ -413,7 +413,7 @@ fn full_tag(tag: &Tag) -> String {
 }
 
 /// yaml.v3's `shortTag`.
-fn short_tag(tag: &str) -> String {
+pub(crate) fn short_tag(tag: &str) -> String {
     match tag.strip_prefix("tag:yaml.org,2002:") {
         Some(rest) => format!("!!{rest}"),
         None => tag.to_owned(),

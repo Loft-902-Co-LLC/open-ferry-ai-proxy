@@ -166,6 +166,148 @@ fn check_two_does_not_treat_non_string_keyed_maps_as_equal_values() {
     assert_eq!(failures[0]["path"], json!(["x"]));
 }
 
+fn invalid_review_replay(bad: &str, comments: &[&str]) -> Replay {
+    Replay {
+        output: json!({"files":[bad],"unloadable":"invalid"}),
+        traces: vec![Trace {
+            rejected: vec![core::ablation::Rejected {
+                stage: "write",
+                bytes: bad.as_bytes().to_vec(),
+            }],
+            emissions: vec![core::ablation::Emission {
+                bytes: bad.as_bytes().to_vec(),
+                comments: comments
+                    .iter()
+                    .map(|comment| core::ablation::WrittenComment {
+                        offset: bad.find(comment).unwrap(),
+                        bytes: comment.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn review_r11_03_binary_bytes_must_not_compare_lossily() {
+    let case = single("x: !!binary /w==\nauth-dir: /old # c\n");
+    let replay = invalid_review_replay("x: !!binary /w==\nauth-dir: # c\n{}\n", &["# c"]);
+    let protected = json!({"files":["x: !!binary /g==\nauth-dir: /x # c\n"]});
+    let oracle = json!({"files":["x: !!binary /w==\nauth-dir: /x\n"]});
+    let checks = evaluate_boundary(
+        &case,
+        &replay.output,
+        &protected,
+        &oracle,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    eprintln!("finding 3 checks={checks:?}");
+    assert!(!checks[1]);
+    assert!(!accepted(checks));
+}
+
+#[test]
+fn review_r11_05_multidocument_snapshots_fail_checks_two_through_four() {
+    let source = "auth-dir: /x\n---\ntail: 1 # keep\n";
+    let wrong = "auth-dir: /x\n---\ntail: 2 # invented\n";
+    let case = single(source);
+    let replay = replay_output(source);
+    let checks = evaluate_boundary(
+        &case,
+        &replay.output,
+        &json!({"files":[wrong]}),
+        &replay.output,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    eprintln!("finding 5 checks={checks:?}");
+    assert_eq!(&checks[1..4], &[false, false, false]);
+}
+
+#[test]
+fn review_r11_06_unobserved_step_cannot_use_unloadable_line_promotion() {
+    let mut case = single("auth-dir: /old # bad\ndebug: false # later\n");
+    case.options["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"op":"nested","keys":["auth-dir"],"value":"/y"}));
+    let replay = invalid_review_replay(
+        "auth-dir: # bad\n{}\ndebug: false # later\n",
+        &["# bad", "# later"],
+    );
+    let protected = json!({"files":["auth-dir: /x # bad\ndebug: false # later\n", "auth-dir: /y # bad\n# later\ndebug: false\n"]});
+    let oracle = json!({"files":["auth-dir: /x\ndebug: false\n", "auth-dir: /y\ndebug: false\n"]});
+    let checks = evaluate_boundary(
+        &case,
+        &replay.output,
+        &protected,
+        &oracle,
+        &replay,
+        1,
+        &[(1, true)],
+    );
+    eprintln!("finding 6 checks={checks:?}");
+    assert!(!checks[2]);
+}
+
+#[test]
+fn review_r11_opus_unobserved_steps_cannot_drop_or_promote() {
+    let source = "auth-dir: /old # c\ndebug: false # d\n";
+    let mut case = single(source);
+    case.options["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"op":"nested","keys":["auth-dir"],"value":"/y"}));
+    let replay = invalid_review_replay(
+        "auth-dir: |\n# c\n  /x\ndebug: false # d\n",
+        &["# c", "# d"],
+    );
+    let oracle = json!({"files":["auth-dir: /x\ndebug: false\n","auth-dir: /y\ndebug: false\n"]});
+    let r0 = "# c\nauth-dir: /x\ndebug: false # d\n";
+    for (name, first, last, reason, key) in [
+        (
+            "drop_after",
+            r0,
+            "auth-dir: /y\ndebug: false\n",
+            "source_owner_witness",
+            "auth-dir",
+        ),
+        (
+            "rule_a_after",
+            r0,
+            "# c\nauth-dir: /y\n# d\ndebug: false\n",
+            "owner_budget",
+            "debug",
+        ),
+        (
+            "drop_step0",
+            "auth-dir: /x\ndebug: false\n",
+            "auth-dir: /y\ndebug: false\n",
+            "go_budget",
+            "auth-dir",
+        ),
+    ] {
+        let protected = json!({"files":[first,last]});
+        let checks = evaluate_boundary(
+            &case,
+            &replay.output,
+            &protected,
+            &oracle,
+            &replay,
+            1,
+            &[(1, true)],
+        );
+        let failure = diagnostics::comments(&case, &protected, &replay).unwrap_err();
+        eprintln!("{name}: {checks:?}; {failure}");
+        assert!(!checks[2], "{name}");
+        assert_eq!(failure["reason"], reason, "{name}");
+        assert_eq!(failure["owner"]["path"][0]["key"], key, "{name}");
+    }
+}
+
 #[test]
 fn check_three_rejects_invention_excess_copies_and_w_lost_duplicate() {
     for (source, g, r) in [
@@ -287,6 +429,16 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             Ok(GoResult::Output(p["go"].to_string().into_bytes()))
         })
         .unwrap();
+        if result.deviations.is_some() {
+            assert_eq!(
+                result.evidence["trials"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["owner_rules"],
+                result.evidence["owner_rules"]
+            );
+        }
         if let Some(dir) = std::env::var_os("PARITY_R8_PROBES") {
             fs::write(
                 std::path::PathBuf::from(dir).join(format!("certified-{}.json", case.name)),

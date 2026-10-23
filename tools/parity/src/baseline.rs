@@ -146,9 +146,27 @@ pub fn pinned_fingerprint() -> Result<Fingerprint> {
     )
 }
 
+pub fn config_output(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object
+            .keys()
+            .all(|key| matches!(key.as_str(), "files" | "error" | "unloadable"))
+    }) && value["files"]
+        .as_array()
+        .is_some_and(|files| files.iter().all(Value::is_string))
+        && ["error", "unloadable"]
+            .iter()
+            .all(|key| value.get(key).is_none_or(Value::is_string))
+        && !(value.get("error").is_some() && value.get("unloadable").is_some())
+}
+
 /// Only an actual failed certifier attempt can supply a kind. Panics, malformed
 /// wrappers, missing diagnostics and unavailable replays remain fatal.
-pub fn difference_kinds(options: &Value, proof: &Value) -> Option<BTreeSet<String>> {
+pub fn difference_kinds(
+    options: &Value,
+    proof: &Value,
+    protected: Option<&Value>,
+) -> Option<BTreeSet<String>> {
     if proof["kind"] != "uncertified-protection-ablation" {
         return None;
     }
@@ -204,8 +222,22 @@ pub fn difference_kinds(options: &Value, proof: &Value) -> Option<BTreeSet<Strin
         Some("protected replay mismatch") => {
             // The existing replay records attempted rejected bytes while the
             // ordinary writer returns its unchanged successful prefix.
-            for failure in proof["failures"].as_array()? {
-                if failure["stage"] != "protected_replay" {
+            let protected = protected?;
+            if !protected["error"]
+                .as_str()?
+                .starts_with("failed to parse config file: yaml:")
+            {
+                return None;
+            }
+            let failures = proof["failures"].as_array()?;
+            if failures.len() != 1 {
+                return None;
+            }
+            for failure in failures {
+                if failure["stage"] != "protected_replay"
+                    || failure["reason"] != "missing_snapshot"
+                    || failure["step"].as_u64()? as usize != protected["files"].as_array()?.len()
+                {
                     return None;
                 }
                 add(failure, "protected-replay")?;
@@ -214,7 +246,9 @@ pub fn difference_kinds(options: &Value, proof: &Value) -> Option<BTreeSet<Strin
         None
         | Some(
             "check 2: comment-free source changes values"
-            | "check 2: unsupported non-string-keyed values",
+            | "check 2: unsupported non-string-keyed values"
+            | "check 2: unsupported binary values"
+            | "check 2: multiple YAML documents",
         ) => {
             for failure in proof["failures"].as_array()? {
                 add(failure, "")?;
@@ -373,9 +407,16 @@ impl Baseline {
         let reference = self
             .calibration
             .iter()
-            .filter(|c| !c.selected && c.random == observation.random)
+            .filter(|c| !c.selected && c.random == observation.random && c.seed == observation.seed)
             .map(|c| c.different as u128 * observation.cases as u128 / c.cases as u128)
-            .min();
+            .min()
+            .or_else(|| {
+                self.calibration
+                    .iter()
+                    .filter(|c| !c.selected && c.random == observation.random)
+                    .map(|c| c.different as u128 * observation.cases as u128 / c.cases as u128)
+                    .min()
+            });
         if errors.is_empty()
             && ((pr && observation.case_kinds.len() < self.pr_different_cases.len())
                 || (!observation.selected
@@ -461,6 +502,44 @@ pub fn observations(paths: &[PathBuf]) -> Result<Vec<Observation>> {
     paths.iter().map(|path| read(path)).collect()
 }
 
+pub fn replay_cases(path: &Path) -> Result<Vec<crate::cases::Case>> {
+    let mut paths = BTreeSet::new();
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            paths.insert(path);
+        }
+    }
+    let mut cases = Vec::new();
+    for path in paths {
+        let saved: Value = read(&path)?;
+        let name = saved["case"]
+            .as_str()
+            .ok_or("saved fixture without case ID")?;
+        if !crate::safe_case_name(name)
+            || !saved["options"]["file"].is_string()
+            || !saved["options"]["steps"].is_array()
+        {
+            return Err("invalid saved config-save fixture".into());
+        }
+        cases.push(
+            crate::cases::Case::new(
+                name,
+                saved["model"].as_str().unwrap_or(""),
+                saved["request_text"].as_str().unwrap_or(""),
+            )
+            .with_options(saved["options"].clone()),
+        );
+    }
+    if cases.is_empty() {
+        return Err("no saved config-save fixtures".into());
+    }
+    Ok(cases)
+}
+
 /// Import complete saved failure fixtures using the very same classifier as a
 /// live offline sweep. `cases` is its original suite denominator; selected
 /// replays are marked explicitly and are excluded from rate calibration.
@@ -486,14 +565,9 @@ pub fn import(failures: &Path, proofs: &Path, mut observation: Observation) -> R
         let go = case["upstream_output_raw"]
             .as_str()
             .and_then(|s| serde_json::from_str::<Value>(s).ok());
-        let wrapper = |v: &Value| {
-            v["files"]
-                .as_array()
-                .is_some_and(|f| f.iter().all(Value::is_string))
-        };
         let bound = proof["case"] == id
-            && go.as_ref().is_some_and(wrapper)
-            && wrapper(&case["open_ferry_output"])
+            && go.as_ref().is_some_and(config_output)
+            && config_output(&case["open_ferry_output"])
             && proof
                 .get("original_go")
                 .is_none_or(|p| Some(p) == go.as_ref())
@@ -501,7 +575,7 @@ pub fn import(failures: &Path, proofs: &Path, mut observation: Observation) -> R
                 .get("protected_rust")
                 .is_none_or(|p| p == &case["open_ferry_output"]);
         let kinds = bound
-            .then(|| difference_kinds(&case["options"], &proof))
+            .then(|| difference_kinds(&case["options"], &proof, Some(&case["open_ferry_output"])))
             .flatten();
         observation.different += 1;
         if let Some(kinds) = kinds {

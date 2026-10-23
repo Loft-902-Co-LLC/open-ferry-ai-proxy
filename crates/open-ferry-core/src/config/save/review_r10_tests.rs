@@ -22,6 +22,9 @@ pub(super) fn outputs(source: &str, op: &str) -> Result<Vec<String>, Box<dyn std
                 config.auth_dir = if pass == 0 { "/x" } else { "/y" }.into();
                 save_preserving_comments(&path, &config, op.starts_with("migrate"))?;
             }
+            "nested" => {
+                update_nested_scalar(&path, &["auth-dir"], if pass == 0 { "/x" } else { "/y" })?
+            }
             "put" | "patch" => {
                 let patch = op == "patch";
                 let edit = V8Edit {
