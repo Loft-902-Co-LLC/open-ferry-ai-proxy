@@ -280,6 +280,8 @@ pub(crate) struct Emitter {
     pub(crate) emitted_comments: Vec<super::CommentEmission>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
+    /// Indentation at the owner of a deferred collection foot comment.
+    pending_foot_indent: Option<i64>,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
 }
 
@@ -366,6 +368,7 @@ impl Emitter {
             record_comments: false,
             emitted_comments: Vec::new(),
             protect_config_comments: false,
+            pending_foot_indent: None,
             protected_scalars: Vec::new(),
         }
     }
@@ -1032,7 +1035,15 @@ impl Emitter {
             && event.empty_collection_value
             && !self.foot_comment.is_empty();
         if pending_collection_foot {
+            let indent = self.indent;
+            if let Some(owner_indent) = self.pending_foot_indent.take() {
+                self.indent = owner_indent;
+            }
             self.process_foot_comment()?;
+            self.indent = indent;
+            // Separate the incoming head even when the foot's owner was
+            // deeper than this key, before collection ends unwound the stack.
+            self.foot_indent = indent;
         }
         self.process_head_comment()?;
         if event.typ == EventType::MappingEnd {
@@ -1467,6 +1478,7 @@ impl Emitter {
         }
         self.write_indent()?;
         let foot_comment = mem::take(&mut self.foot_comment);
+        self.pending_foot_indent = None;
         self.write_comment(&foot_comment)?;
         self.foot_indent = self.indent;
         if self.foot_indent < 0 {
@@ -1710,6 +1722,14 @@ impl Emitter {
         }
         if !event.foot_comment.is_empty() {
             self.foot_comment = mem::take(&mut event.foot_comment);
+            self.pending_foot_indent =
+                matches!(event.typ, EventType::MappingEnd | EventType::SequenceEnd).then(|| {
+                    if self.flow_level > 0 {
+                        self.indent.max(0)
+                    } else {
+                        self.indents.last().copied().unwrap_or(self.indent).max(0)
+                    }
+                });
         }
         if !event.tail_comment.is_empty() {
             self.tail_comment = mem::take(&mut event.tail_comment);

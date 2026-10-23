@@ -1,0 +1,788 @@
+[
+  {
+    "name": "reconstructed-no-foot-block-none",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "map",
+              "c": [],
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: {}\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-block-head",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "map",
+              "c": [],
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: {}\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-block-line",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "map",
+              "c": [],
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: {} # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-block-both",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "map",
+              "c": [],
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: {} # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-flow-none",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "map",
+              "c": [],
+              "style": "flow",
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: {}\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-flow-head",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "map",
+              "c": [],
+              "style": "flow",
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: {}\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-flow-line",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "map",
+              "c": [],
+              "style": "flow",
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: {} # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-flow-both",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "map",
+              "c": [],
+              "style": "flow",
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: {} # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-sequence-none",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "seq",
+              "c": [],
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: []\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-sequence-head",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "seq",
+              "c": [],
+              "line": ""
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: []\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-sequence-line",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": ""
+            },
+            {
+              "k": "seq",
+              "c": [],
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  empty: [] # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-no-foot-sequence-both",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            },
+            {
+              "k": "scalar",
+              "v": "empty",
+              "head": "# empty head"
+            },
+            {
+              "k": "seq",
+              "c": [],
+              "line": "# empty line"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # empty head\n  empty: [] # empty line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-pending-foot-nonempty-scalar",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ],
+              "foot": "# previous foot"
+            },
+            {
+              "k": "scalar",
+              "v": "next",
+              "head": "# next head",
+              "line": "# next line"
+            },
+            {
+              "k": "scalar",
+              "v": "value"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # next head\n  next: value # next line\n  # previous foot\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-pending-foot-nonempty-map",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ],
+              "foot": "# previous foot"
+            },
+            {
+              "k": "scalar",
+              "v": "next",
+              "head": "# next head",
+              "line": "# next line"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # next head\n  next: # next line\n  # previous foot\n    child: value\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-pending-foot-nonempty-sequence",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ],
+              "foot": "# previous foot"
+            },
+            {
+              "k": "scalar",
+              "v": "next",
+              "head": "# next head",
+              "line": "# next line"
+            },
+            {
+              "k": "seq",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n  # next head\n  next: # next line\n  # previous foot\n    - value\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-deeper-foot-outer-nonempty",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "previous"
+            },
+            {
+              "k": "map",
+              "c": [
+                {
+                  "k": "scalar",
+                  "v": "child"
+                },
+                {
+                  "k": "scalar",
+                  "v": "value"
+                }
+              ],
+              "foot": "# previous foot"
+            }
+          ]
+        },
+        {
+          "k": "scalar",
+          "v": "next",
+          "head": "# next head"
+        },
+        {
+          "k": "scalar",
+          "v": "value"
+        }
+      ]
+    },
+    "go": "parent:\n  previous:\n    child: value\n# next head\nnext: value\n# previous foot\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  },
+  {
+    "name": "reconstructed-first-nested-key",
+    "tree": {
+      "k": "map",
+      "c": [
+        {
+          "k": "scalar",
+          "v": "parent"
+        },
+        {
+          "k": "map",
+          "c": [
+            {
+              "k": "scalar",
+              "v": "first",
+              "head": "# first head",
+              "line": "# first line"
+            },
+            {
+              "k": "scalar",
+              "v": "value"
+            }
+          ]
+        }
+      ]
+    },
+    "go": "parent:\n  # first head\n  first: value # first line\n",
+    "provenance": "Reconstructed control, independently encoded by pinned yaml.v3."
+  }
+]
