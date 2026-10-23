@@ -866,6 +866,22 @@ impl ReloadState {
 }
 
 impl ReloadBarrier {
+    /// Admit a short mutation without waiting, with the same reload priority
+    /// as acquire(false). The returned permit must be reused, never followed
+    /// by another shared acquisition: a reload queued meanwhile would wait
+    /// for this permit while that second acquisition waited for the reload.
+    fn try_acquire_shared(self: &Arc<Self>) -> Option<ReloadGuard> {
+        let mut state = try_lock(&self.state)?;
+        if state.exclusive || state.waiting_exclusive != 0 || state.shared_paused() {
+            return None;
+        }
+        state.shared += 1;
+        Some(ReloadGuard {
+            barrier: self.clone(),
+            reload: false,
+        })
+    }
+
     fn acquire(self: &Arc<Self>, reload: bool) -> ReloadGuard {
         let mut state = lock(&self.state);
         if reload {
@@ -917,6 +933,15 @@ impl Drop for ReloadGuard {
 /// leaves the state whole, so a panic elsewhere doesn't corrupt it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The nonwaiting counterpart of lock, with the same poison recovery.
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 impl Dispatcher for Manager {
