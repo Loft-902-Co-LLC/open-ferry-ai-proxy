@@ -237,6 +237,22 @@ fn review_r8_generated_node_rebind_uses_the_emitted_comment_position() {
 
 #[test]
 fn review_r8_archive_tag_table_survives_two_writes() {
+    fn presentation(n: &Node) -> Vec<(Kind, String, String, String)> {
+        let mut result = vec![(
+            n.kind,
+            n.tag.clone(),
+            n.anchor.clone(),
+            if n.kind == Kind::Alias {
+                n.value.clone()
+            } else {
+                String::new()
+            },
+        )];
+        for child in &n.content {
+            result.extend(presentation(child));
+        }
+        result
+    }
     fn scalar_values(n: &Node) -> Vec<(String, String)> {
         let mut result = Vec::new();
         if n.kind == Kind::Scalar {
@@ -277,7 +293,24 @@ fn review_r8_archive_tag_table_survives_two_writes() {
             continue;
         }
         let original = unmarshal(source.as_bytes()).unwrap();
-        let original = expand_config_aliases(&original.content[0]).unwrap();
+        let mut raw = original.content[0].clone();
+        if name == "non-specific" {
+            // yaml.v3's composer resolves the non-specific `!` immediately.
+            // Exercise that raw tag at the quoting boundary, before resolution.
+            yaml_path_mut(&mut raw, "x").unwrap().tag = "!".into();
+        }
+        let expected_presentation = presentation(&raw);
+        v8::quote_archive_breaks(&mut raw);
+        assert_eq!(presentation(&raw), expected_presentation, "{name}");
+        let quoted = String::from_utf8(encode::faithful_node(&raw, 4).unwrap()).unwrap();
+        if name == "non-specific" {
+            assert!(quoted.contains("! \""), "{quoted}");
+        }
+        if name == "anchor" {
+            assert!(quoted.contains("&a") && quoted.contains("*a"), "{quoted}");
+        }
+        let raw = &original.content[0];
+        let original = expand_config_aliases(raw).unwrap();
         let expected = scalar_values(yaml_path(&original, "x").unwrap());
         for op in ["raw", "normalize", "put"] {
             let fixture = serde_json::json!({"source":source,"op":op});
@@ -302,6 +335,8 @@ fn review_r8_archive_tag_table_survives_two_writes() {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let archived = unmarshal(archive.as_bytes()).unwrap();
+                // Layout normalization intentionally expands aliases. The
+                // independent raw checks above pin the quoting transform.
                 let archived = expand_config_aliases(&archived.content[0]).unwrap();
                 assert_eq!(
                     scalar_values(yaml_path(&archived, "x").unwrap()),
