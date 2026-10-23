@@ -1690,6 +1690,10 @@ fn prepare(
             "unsafe example API key configured; proxy API endpoints disabled until api-keys is updated"
         );
     }
+    let prepare_updates = options.self_update;
+    #[cfg(test)]
+    let prepare_updates = prepare_updates && context.updates.is_none();
+    let update_client = super::update_client::UpdateClient::start(&config, prepare_updates);
     let topology = Topology::from_welcome(welcome, listeners)?;
     topology.warn_once(&config, &mut false);
     let tls = if topology.needs_tls() {
@@ -1724,15 +1728,16 @@ fn prepare(
     let mut first_check =
         super::update_settings::between(super::FIRST_CHECK.0, super::FIRST_CHECK.1);
     if options.self_update {
+        let installation = Some((context.data_dir.as_path(), context.installed.as_path()));
         #[cfg(test)]
         if let Some(updates) = context.updates {
             service.management = service.management.clone().with_updates(updates);
             first_check = Duration::ZERO;
         } else {
-            service.prepare_update_checks(Some((&context.data_dir, &context.installed)));
+            service.prepare_update_checks(installation, update_client);
         }
         #[cfg(not(test))]
-        service.prepare_update_checks(Some((&context.data_dir, &context.installed)));
+        service.prepare_update_checks(installation, update_client);
     }
     let handles = Handles {
         gate: service.gate.clone(),
@@ -1768,7 +1773,6 @@ fn dry_build(prepared: &Prepared) -> Result<(), String> {
     }));
     built.map_err(|_| "building the routes panicked".to_owned())
 }
-
 /// How a worker came to be activated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Launch {
@@ -1778,7 +1782,6 @@ enum Launch {
     /// starts at `go`.
     TakeOver,
 }
-
 /// Makes a prepared worker the active one: the first activation, serving
 /// the topology, and the service loop's task. A first start also starts the
 /// background work; a take over leaves it to `go`.
@@ -1796,7 +1799,6 @@ async fn activate(
             Aborted::Cancelled => "the activation was cancelled".to_owned(),
         })
 }
-
 /// Why an activation didn't end in an active worker.
 enum Aborted {
     Failed(String),
@@ -1805,13 +1807,11 @@ enum Aborted {
     /// failed: it keeps the lease and hands over.
     Cancelled,
 }
-
 impl From<String> for Aborted {
     fn from(reason: String) -> Self {
         Self::Failed(reason)
     }
 }
-
 /// [`activate`], which a take over's `cancel` can stop right before the last
 /// step, the one that can't be taken back.
 async fn activate_unless_cancelled(
