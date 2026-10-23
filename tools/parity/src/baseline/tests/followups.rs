@@ -79,6 +79,36 @@ fn random_generator_source_closure_is_fingerprinted() {
             .all(|path| root().join(path).is_file())
     );
     assert_include_closure(root(), GENERATOR_PATHS);
+    // Embedding the same sources must not introduce another hash input.
+    assert_eq!(
+        sources::EMBEDDED
+            .iter()
+            .map(|(path, _)| *path)
+            .collect::<BTreeSet<_>>(),
+        GENERATOR_PATHS.iter().copied().collect()
+    );
+    let hashed = GENERATOR_PATHS
+        .iter()
+        .map(|path| root().join(path).canonicalize().unwrap())
+        .collect();
+    super::closure::check(
+        root(),
+        "tools/parity/src/baseline/sources.rs",
+        &fs::read_to_string(root().join("tools/parity/src/baseline/sources.rs")).unwrap(),
+        &hashed,
+    )
+    .unwrap();
+    super::closure::check_unhashed_impls(root(), &hashed).unwrap();
+}
+
+#[test]
+fn committed_random_case_probes_match_compiled_generator() {
+    let baseline: Baseline = read(&root().join("tools/parity/baseline/config-save.json")).unwrap();
+    assert_eq!(
+        baseline.random_case_probes.as_ref(),
+        Some(probes::digests()),
+        "generator case lists changed since the baseline was recorded; full refresh required: {REFRESH}"
+    );
 }
 
 #[test]

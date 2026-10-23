@@ -16,6 +16,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub type Fingerprint = BTreeMap<String, String>;
 
 pub mod probes;
+mod sources;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,15 +89,23 @@ fn fingerprint_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
     Ok(files)
 }
 
-fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
-    // Sort normalized relative paths, not platform-specific separators.
-    let mut normalized = BTreeMap::new();
+fn generator_sources_at(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut sources = BTreeMap::new();
     for path in fingerprint_paths(root)? {
-        normalized.insert(
-            path.to_string_lossy().replace('\\', "/"),
-            fs::read_to_string(root.join(path))?.replace("\r\n", "\n"),
+        sources.insert(
+            path.to_string_lossy().into_owned(),
+            fs::read_to_string(root.join(path))?,
         );
     }
+    Ok(sources)
+}
+
+fn generator_hash<'a>(sources: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    // The embedded and on-disk sources use exactly the same normalized hash.
+    let normalized: BTreeMap<_, _> = sources
+        .into_iter()
+        .map(|(path, text)| (path.replace('\\', "/"), text.replace("\r\n", "\n")))
+        .collect();
     let mut hash = Sha256::new();
     for (path, text) in normalized {
         hash.update(path.as_bytes());
@@ -104,7 +113,12 @@ fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
         hash.update(text.as_bytes());
         hash.update([0]);
     }
-    let generator_hash = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
+    let sources = generator_sources_at(root)?;
+    let generator_hash = generator_hash(sources.iter().map(|(p, s)| (p.as_str(), s.as_str())));
     Ok(BTreeMap::from([
         ("classifier_version".into(), "3".into()),
         ("upstream_pin".into(), upstream.trim().into()),
@@ -632,6 +646,26 @@ fn refresh_with_existing(
 
 /// Change only the generator label after both recorded random probes match.
 pub fn relabel(path: &Path, current: &Fingerprint) -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap();
+    relabel_with_sources(path, current, &generator_sources_at(root)?)
+}
+
+fn relabel_with_sources(
+    path: &Path,
+    current: &Fingerprint,
+    on_disk: &BTreeMap<String, String>,
+) -> Result<()> {
+    if generator_hash(sources::EMBEDDED.iter().copied())
+        != generator_hash(on_disk.iter().map(|(p, s)| (p.as_str(), s.as_str())))
+    {
+        return Err(format!(
+            "binary is older than the generator sources; rebuild before relabeling: {RELABEL}"
+        )
+        .into());
+    }
     let mut baseline: Baseline = read(path)?;
     for key in ["classifier_version", "upstream_pin"] {
         if baseline.fingerprint.get(key) != current.get(key) {
