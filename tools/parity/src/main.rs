@@ -65,7 +65,8 @@ options:
   --baseline-observation <file> repeat for refresh or --baseline replay (no Go run)
   --import-config-failures <dir> import saved fixtures, with --import-proofs <dir>,
                  --import-cases <n> and --observation <file> (no Go run)
-  --selected-failures mark imported selected failures as kind coverage only";
+  --selected-failures mark imported selected failures as kind coverage only
+  --replay-config-failures <dir> execute saved config-save inputs (selected replay)";
 
 /// Failing cases written to disk; the rest are only counted.
 const MAX_FAILURE_FILES: usize = 200;
@@ -91,6 +92,7 @@ struct Args {
     import_proofs: Option<PathBuf>,
     import_cases: Option<usize>,
     selected_failures: bool,
+    replay_config_failures: Option<PathBuf>,
 }
 
 impl Args {
@@ -114,6 +116,7 @@ impl Args {
             import_proofs: None,
             import_cases: None,
             selected_failures: false,
+            replay_config_failures: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -134,6 +137,7 @@ impl Args {
                 "--import-proofs" => parsed.import_proofs = Some(value()?.into()),
                 "--import-cases" => parsed.import_cases = Some(parse_number(&flag, &value()?)?),
                 "--selected-failures" => parsed.selected_failures = true,
+                "--replay-config-failures" => parsed.replay_config_failures = Some(value()?.into()),
                 "--suite" => {
                     parsed.suites.insert(value()?);
                 }
@@ -159,6 +163,14 @@ impl Args {
                 || parsed.baseline.is_some())
         {
             return Err("import needs --import-proofs, --import-cases and --observation; cannot apply a baseline".into());
+        }
+        if parsed.replay_config_failures.is_some()
+            && (import
+                || replay
+                || parsed.live.is_some()
+                || parsed.suites.iter().any(|s| s != "config-save"))
+        {
+            return Err("--replay-config-failures selects only offline config-save inputs".into());
         }
         if !import
             && (parsed.import_proofs.is_some()
@@ -224,6 +236,11 @@ fn main() -> ExitCode {
 type Suite = (Translator, Vec<Case>, Vec<Case>);
 
 fn selected_suites(args: &Args) -> Result<Vec<Suite>, String> {
+    if let Some(path) = &args.replay_config_failures {
+        return baseline::replay_cases(path)
+            .map(|cases| vec![(Translator::ConfigSave, cases, vec![])])
+            .map_err(|error| error.to_string());
+    }
     let seed = args.seed;
     let random = args.random;
     let wanted =
@@ -834,7 +851,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 seed: args.seed,
                 random: args.random,
                 cases: cases.len(),
-                selected: false,
+                selected: args.replay_config_failures.is_some(),
                 different: tally.different,
                 non_certification: tally.different - tally.certification_failures.len(),
                 case_kinds: tally.certification_failures.clone(),
@@ -1180,7 +1197,11 @@ fn evaluate_with_counterfactual(
             evaluated.outcome = Outcome::Equivalent(deviations);
         } else {
             evaluated.certification_failure =
-                baseline::difference_kinds(&case.options, &proof.evidence);
+                if baseline::config_output(&original_go) && baseline::config_output(rust) {
+                    baseline::difference_kinds(&case.options, &proof.evidence, Some(rust))
+                } else {
+                    None
+                };
         }
     }
     Ok(evaluated)

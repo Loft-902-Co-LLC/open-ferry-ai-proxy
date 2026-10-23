@@ -279,26 +279,46 @@ No paths, comment text or byte offsets enter kind signatures. A case with
 several failed checks contributes to several kind rows but only once to the
 total budget. No-reproducing-subset kinds include all failed trials.
 
-The committed budget is the maximum Round 10 observed total rate plus 20%,
+The committed budget is the maximum final-certifier observed total rate plus 20%,
 rounded up to the next multiple of five per 1,000. It uses ten random-5000
 config sweeps (30–39), full random-500 runs (11, 12, 38, 39), and the exact PR
 profile. The 170/164 saved scheduled failures for seeds 11/12 add kind coverage
 only: selected failures are not unbiased rate samples. The file records that
-distinction. An observation below the calibration minimum for its profile (or
+distinction. An observation below its recorded seed/profile count (or
 with fewer PR case IDs) prints “Baseline can be lowered” and the refresh command.
 
-Collect new observations with the unchanged verdict logic, for example:
+Collect new observations with the unchanged verdict logic. This Bash example
+collects ten full config profiles and the exact PR profile:
 
 ```sh
-cargo run --locked -p open-ferry-parity -- --upstream reference/cliproxyapi \
-  --suite config-save --seed 30 --random 5000 --observation target/seed30.json
-# Repeat for at least ten distinct large seeds, and seed 1 / random 25.
-# A strict run may exit 1 while still writing a usable certification observation.
+set -e
+export CARGO_BUILD_JOBS=4 GOMAXPROCS=4 GOTOOLCHAIN=local
+mkdir -p target/parity-calibration
+for seed in {30..39}; do
+  cargo run --locked --release -p open-ferry-parity -- \
+    --upstream reference/cliproxyapi --suite config-save --seed "$seed" --random 5000 \
+    --observation "target/parity-calibration/seed${seed}.json" || test "$?" -eq 1
+done
+cargo run --locked --release -p open-ferry-parity -- \
+  --upstream reference/cliproxyapi --suite config-save --seed 1 --random 25 \
+  --observation target/parity-calibration/pr.json || test "$?" -eq 1
+# Also re-execute the full profiles and saved scheduled inputs recorded in the
+# baseline, writing their observations into this same directory. For example:
+# --replay-config-failures ARTIFACT/config-save --seed 11 --random 5000
+# --observation target/parity-calibration/scheduled11.json
+observations=()
+for file in target/parity-calibration/*.json; do
+  observations+=(--baseline-observation "$file")
+done
 cargo run --locked -p open-ferry-parity -- \
-  --write-baseline tools/parity/baseline/config-save.json \
-  --baseline-observation target/seed30.json \
-  --baseline-observation target/seed31.json # ... all ten plus the PR observation
+  --write-baseline tools/parity/baseline/config-save.json "${observations[@]}"
 ```
+
+A strict collection run can exit 1 while writing a usable observation; refresh
+still rejects observations containing any non-certification failure. Saved
+inputs are **re-executed**, not certified from their old proof files. An unseen
+seed below its profile's calibration minimum, or a known seed below its own
+recorded count, prints the lowering message.
 
 The writer sorts keys, kinds and calibration rows; input order does not affect
 the bytes. It rejects non-certification failures and mismatched fingerprints.
@@ -307,6 +327,8 @@ config/parser dependencies, Go harnesses and the upstream gitlink. Changed
 dependencies require new observations. **Adding a kind or raising a bound must
 be explained in the PR**; follow-up fixes lower the baseline rather than weaken
 the certifier. The refresh command never silently updates a running CI budget.
+The kind classifier has an explicit `classifier_version` in the fingerprint;
+bump it when changing how diagnostic kinds are assigned.
 
 Historical fixtures can be imported with the committed classifier:
 
@@ -323,7 +345,7 @@ cargo run --locked -p open-ferry-parity -- \
 
 Import attaches the current fingerprint: use it only after verifying that the
 saved outputs came from the same product and certification behavior. Round 11
-imports Round 10's final evidence on that basis. This is not permission to
+re-executes Round 10's calibration inputs after its certifier fixes. This is not permission to
 relabel old evidence after a generator or certifier change. GitHub summaries
 show each kind's count/rate and the total bound; the always-uploaded observation
 can be reused in a reviewed refresh.

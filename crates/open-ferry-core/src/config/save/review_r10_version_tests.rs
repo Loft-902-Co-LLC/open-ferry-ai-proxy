@@ -48,14 +48,25 @@ fn review_r10_version_paragraph_repairs_keep_each_owner() {
                     .filter(|c| source.contains(c))
                 {
                     assert!(
-                        root.content[at]
-                            .head_comment
-                            .lines()
-                            .any(|line| line == comment),
+                        format!(
+                            "{}\n{}",
+                            if at == 0 {
+                                doc.head_comment.as_str()
+                            } else {
+                                ""
+                            },
+                            root.content[at].head_comment
+                        )
+                        .lines()
+                        .any(|line| line == comment),
                         "{op}: {out}"
                     );
                     assert_eq!(parity::comment_occurrences(&out, comment, false), Some(1));
                 }
+                assert!(
+                    parity::retained_unloadable_comments(source, &out, &[]),
+                    "{op}: {out}"
+                );
             }
         }
     }

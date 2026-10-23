@@ -38,8 +38,13 @@ struct Occurrence {
     text: String,
     owner: Owner,
     entry_line: bool,
+    /// An index is a source witness only while its enclosing sequences agree.
+    sequences: Vec<Value>,
 }
 fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
+    if !super::single_document(text) {
+        return None;
+    }
     let doc = unmarshal(text.as_bytes()).ok()?;
     let root = doc.content.first()?;
     let expanded;
@@ -55,6 +60,7 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
         side: Side,
         key_line: usize,
         out: &mut Vec<Occurrence>,
+        sequences: &mut Vec<Value>,
     ) -> Option<()> {
         for (slot, text) in [
             (Slot::Head, &n.head_comment),
@@ -81,6 +87,7 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
                         && key_line > 0
                         && n.line == key_line
                         && n.line_comment_line == key_line,
+                    sequences: sequences.clone(),
                 });
             }
         }
@@ -96,25 +103,35 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
                         return None;
                     }
                     path.push(p);
-                    visit(k, path, Side::Key, k.line, out)?;
-                    visit(v, path, Side::Value, k.line, out)?;
+                    visit(k, path, Side::Key, k.line, out, sequences)?;
+                    visit(v, path, Side::Value, k.line, out, sequences)?;
                     path.pop();
                 }
             }
             super::super::Kind::Sequence => {
+                fn identity(n: &Node) -> Value {
+                    json!([
+                        format!("{:?}", n.kind),
+                        n.short_tag(),
+                        n.value.as_str(),
+                        n.content.iter().map(identity).collect::<Vec<_>>()
+                    ])
+                }
+                sequences.push(identity(n));
                 for (i, v) in n.content.iter().enumerate() {
                     path.push(Part::Index(i));
-                    visit(v, path, Side::Item, 0, out)?;
+                    visit(v, path, Side::Item, 0, out, sequences)?;
                     path.pop();
                 }
+                sequences.pop();
             }
             _ => {}
         }
         Some(())
     }
     let mut out = vec![];
-    visit(&doc, &mut vec![], Side::Document, 0, &mut out)?;
-    visit(root, &mut vec![], Side::Root, 0, &mut out)?;
+    visit(&doc, &mut vec![], Side::Document, 0, &mut out, &mut vec![])?;
+    visit(root, &mut vec![], Side::Root, 0, &mut out, &mut vec![])?;
     Some(out)
 }
 fn counts(items: &[Occurrence]) -> BTreeMap<String, usize> {
@@ -151,7 +168,16 @@ fn first_unmatched<'a>(needle: &'a [String], haystack: &[String]) -> Option<&'a 
     None
 }
 fn owner_failure(s: &[Occurrence], g: &[Occurrence], r: &[Occurrence]) -> Option<Value> {
-    let (s, g, r) = (groups(s), groups(g), groups(r));
+    let stable: Vec<_> = s
+        .iter()
+        .filter(|source| {
+            r.iter()
+                .find(|target| target.owner == source.owner)
+                .is_none_or(|target| target.sequences == source.sequences)
+        })
+        .cloned()
+        .collect();
+    let (s, g, r) = (groups(&stable), groups(g), groups(r));
     for (owner, items) in &r {
         let source = s.get(owner).cloned().unwrap_or_default();
         let go = g.get(owner).cloned().unwrap_or_default();
@@ -192,6 +218,15 @@ fn owner_failure(s: &[Occurrence], g: &[Occurrence], r: &[Occurrence]) -> Option
                 .or_else(|| first_unmatched(&go_order, &go))
                 .or_else(|| first_unmatched(&go_with_shared, &go));
             return Some(json!({"reason":"owner_order","owner":owner.json(),"text":text}));
+        }
+    }
+    // A global text count cannot substitute an equal comment at another owner.
+    for (owner, kept) in &g {
+        let actual = r.get(owner).cloned().unwrap_or_default();
+        if !subsequence(kept, &actual) {
+            return Some(
+                json!({"reason":"go_owner_witness","owner":owner.json(),"text":first_unmatched(kept,&actual)}),
+            );
         }
     }
     None
@@ -278,6 +313,74 @@ fn promoted(s: &[Occurrence], moves: &[(Owner, Owner)]) -> Vec<Occurrence> {
     out
 }
 
+/// yaml.v3 splits a first root key's multipart head at its final blank
+/// paragraph. The identical bytes may therefore reload partly as document
+/// head. Preserve a real source document head verbatim; only the additional
+/// prefix of this key's exact, ordered paragraph block is equivalent.
+fn first_head_projection(
+    source: &str,
+    target: &str,
+    items: &[Occurrence],
+    version_value: bool,
+) -> Option<Vec<Occurrence>> {
+    let s = unmarshal(source.as_bytes()).ok()?;
+    let t = unmarshal(target.as_bytes()).ok()?;
+    let sr = s.content.first()?;
+    let tr = t.content.first()?;
+    if sr.kind != super::super::Kind::Mapping || tr.kind != sr.kind {
+        return None;
+    }
+    let key = tr.content.first()?;
+    let (sk, sv) = sr
+        .pairs()
+        .find(|(k, _)| k.tag == key.tag && k.value == key.value)?;
+    let mut expected = sk.head_comment.trim_start_matches('\n').to_owned();
+    if version_value
+        && key.value == "config-version"
+        && key.tag == super::super::STR_TAG
+        && !sv.head_comment.is_empty()
+    {
+        if !expected.is_empty() {
+            expected.push('\n');
+        }
+        expected.push_str(&sv.head_comment);
+    }
+    if !expected.contains("\n\n") {
+        return None;
+    }
+    let extra = if s.head_comment.is_empty() {
+        t.head_comment.as_str()
+    } else {
+        t.head_comment
+            .strip_prefix(&s.head_comment)?
+            .strip_prefix("\n\n")?
+    };
+    if extra.is_empty() || format!("{extra}\n\n{}", key.head_comment) != expected {
+        return None;
+    }
+    let owner = Owner {
+        path: vec![Part::Key(key.tag.clone(), key.value.clone())],
+        side: Side::Key,
+        slot: Slot::Head,
+    };
+    let mut source_document_lines = s
+        .head_comment
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let mut out = items.to_vec();
+    for c in &mut out {
+        if c.owner.side == Side::Document && c.owner.slot == Slot::Head {
+            if source_document_lines > 0 {
+                source_document_lines -= 1;
+            } else {
+                c.owner = owner.clone();
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Full check-3 evidence. `None` Go means an unloadable step: callers must
 /// independently bind the supplied trace bytes before using its counts.
 pub fn comment_ownership_analysis(
@@ -285,6 +388,22 @@ pub fn comment_ownership_analysis(
     go: Option<&str>,
     protected: &str,
     written: &[String],
+) -> CommentOwnership {
+    analyze_comments(source, go, protected, written, go.is_none())
+}
+
+/// No Go snapshot or independently bound rejected emission exists at this
+/// step. Source ownership still applies, but rule (a) has no witness.
+pub fn unobserved_comment_ownership(source: &str, protected: &str) -> CommentOwnership {
+    analyze_comments(source, None, protected, &[], false)
+}
+
+fn analyze_comments(
+    source: &str,
+    go: Option<&str>,
+    protected: &str,
+    written: &[String],
+    observed_unloadable: bool,
 ) -> CommentOwnership {
     let failed = |failure| CommentOwnership {
         failure: Some(failure),
@@ -323,9 +442,29 @@ pub fn comment_ownership_analysis(
     for (text, n) in gc {
         if n > rc.get(&text).copied().unwrap_or_default() {
             return failed(
-                json!({"reason":"go_budget","text":text,"go":n,"protected":rc.get(&text).copied().unwrap_or_default()}),
+                json!({"reason":"go_budget","text":text,"owner":g.as_deref().unwrap_or(&s).iter().find(|c| c.text==text).map(|c|c.owner.json()),"go":n,"protected":rc.get(&text).copied().unwrap_or_default()}),
             );
         }
+    }
+    // A step Go never executed has no observational licence for either a
+    // loss or a named owner change. Preserve every source occurrence exactly.
+    if go.is_none() && !observed_unloadable {
+        if let Some(failure) = owner_failure(&s, &[], &r) {
+            return failed(failure);
+        }
+        let actual = groups(&r);
+        for (owner, kept) in groups(&s) {
+            let at_owner = actual.get(&owner).cloned().unwrap_or_default();
+            if !subsequence(&kept, &at_owner) {
+                return failed(
+                    json!({"reason":"source_owner_witness","owner":owner.json(),"text":first_unmatched(&kept,&at_owner)}),
+                );
+            }
+        }
+        return CommentOwnership {
+            failure: None,
+            rules: vec![],
+        };
     }
     let empty = vec![];
     let gitems = g.as_deref().unwrap_or(&empty);
@@ -336,9 +475,27 @@ pub fn comment_ownership_analysis(
         };
     };
     let mut remaining_failure = original_failure;
-    let a = promotion(&s, g.as_deref(), &r, true);
-    let b = promotion(&s, g.as_deref(), &r, false);
-    for mask in [1, 2, 3] {
+    for mask in 1..8 {
+        let (mut rmodel, mut gmodel) = (r.clone(), g.clone());
+        if mask & 4 != 0 {
+            let rp = first_head_projection(source, protected, &r, mask & 2 != 0);
+            let gp = go.and_then(|text| first_head_projection(source, text, gitems, mask & 2 != 0));
+            if rp.is_none() && gp.is_none() {
+                continue;
+            }
+            if let Some(projected) = rp {
+                rmodel = projected;
+            }
+            if let Some(projected) = gp {
+                gmodel = Some(projected);
+            }
+        }
+        let a = if observed_unloadable {
+            promotion(&s, gmodel.as_deref(), &rmodel, true)
+        } else {
+            vec![]
+        };
+        let b = promotion(&s, gmodel.as_deref(), &rmodel, false);
         if (mask & 1 != 0 && a.is_empty()) || (mask & 2 != 0 && b.is_empty()) {
             continue;
         }
@@ -352,7 +509,14 @@ pub fn comment_ownership_analysis(
             moves.extend(b.clone());
             rules.push("canonical-version-value-head-to-key-head");
         }
-        if let Some(failure) = owner_failure(&promoted(&s, &moves), gitems, &r) {
+        if mask & 4 != 0 {
+            rules.push("first-root-key-head-document-split");
+        }
+        if let Some(failure) = owner_failure(
+            &promoted(&s, &moves),
+            gmodel.as_deref().unwrap_or(&empty),
+            &rmodel,
+        ) {
             // The last attempted model includes every locally eligible rule.
             // Name its remaining failure, rather than an already licensed move.
             remaining_failure = failure;
@@ -498,7 +662,37 @@ mod review_r10 {
                 "a:\n  x: 1\n  # h\nb: 2\n",
             ),
         ] {
-            assert!(!retained_comment_ownership(s, g, r), "{name}");
+            let failure = comment_ownership_analysis(s, Some(g), r, &[])
+                .failure
+                .expect(name);
+            eprintln!("{name}: {failure}");
+            assert_eq!(
+                failure["reason"],
+                if name == "N4" {
+                    "owner_order"
+                } else {
+                    "owner_budget"
+                },
+                "{name}"
+            );
+            let (keys, side, slot) = match name {
+                "N2" => (vec![], "document", "foot"),
+                "N3" => (vec!["a"], "value", "line"),
+                "N5" => (vec!["a", "x"], "key", "foot"),
+                _ => (vec!["a"], "key", "head"),
+            };
+            assert_eq!(
+                failure["owner"]["path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["key"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                keys,
+                "{name}"
+            );
+            assert_eq!(failure["owner"]["node"], side, "{name}");
+            assert_eq!(failure["owner"]["slot"], slot, "{name}");
             assert!(!retained_unloadable_comments(s, r, &[]), "{name}");
         }
     }

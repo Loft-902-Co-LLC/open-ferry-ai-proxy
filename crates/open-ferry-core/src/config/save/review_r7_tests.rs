@@ -295,13 +295,20 @@ fn review_r7_exact_canonical_comments_preserve_values_and_expose_unlicensed_slot
         // M0's nested update and saves follow Go's recipient. Other paths retain the
         // comment but normalization moves it to a child or neighbour; the
         // finer owner check deliberately refuses to certify that A2 placement.
+        // V4 save/migrate keeps # hv on config-version, but Go kept it on
+        // server.port. Rule (b) does not license discarding that Go owner.
+        let owns_every_kept_go_comment = if f["name"] == "M0" {
+            matches!(f["op"].as_str(), Some("nested" | "save" | "migrate"))
+        } else {
+            !matches!(f["op"].as_str(), Some("save" | "migrate"))
+        };
         assert_eq!(
             super::parity::retained_comment_ownership(
                 f["source"].as_str().unwrap(),
                 f["go"]["file"].as_str().unwrap(),
                 &out
             ),
-            f["name"] != "M0" || matches!(f["op"].as_str(), Some("nested" | "save" | "migrate")),
+            owns_every_kept_go_comment,
             "{} {}: {out}",
             f["name"],
             f["op"]

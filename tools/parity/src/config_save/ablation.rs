@@ -199,8 +199,10 @@ fn placement_right(case: &Case, protected: &Value, replay: &Replay) -> bool {
             .filter(|g| Config::load_bytes(g.as_bytes()).is_ok())
         {
             core::retained_comment_ownership(source, g, r)
-        } else {
+        } else if gfiles.get(i).is_some() || replay.traces.get(i).is_some() {
             core::retained_unloadable_comments(source, r, &[])
+        } else {
+            core::unobserved_comment_ownership(source, r).accepted()
         };
         if !good {
             return false;
@@ -221,6 +223,9 @@ fn nothing_else_changed(protected: &Value, replay: &Replay) -> bool {
         let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
             return false;
         };
+        if !core::single_document(g) || !core::single_document(r) {
+            return false;
+        }
         if Config::load_bytes(g.as_bytes()).is_err() {
             return true;
         }
@@ -265,6 +270,7 @@ struct Proof<'a> {
 }
 
 fn checks(proof: Proof<'_>) -> [bool; 5] {
+    let documents = documents_right(proof);
     let Proof {
         case,
         go,
@@ -277,11 +283,78 @@ fn checks(proof: Proof<'_>) -> [bool; 5] {
     } = proof;
     [
         reproduces(go, ablated, go_trace),
-        values_right(case, protected, expectation),
-        comments_right(case, protected, ablated),
-        nothing_else_changed(protected, ablated),
+        documents && values_right(case, protected, expectation),
+        documents && comments_right(case, protected, ablated),
+        documents && nothing_else_changed(protected, ablated),
         minimal(mask, matches),
     ]
+}
+
+/// Every YAML input and snapshot, including independently bound rejected Go
+/// emissions, must stay within the single-document witnesses' domain.
+fn documents_right(proof: Proof<'_>) -> bool {
+    let Some(source) = proof.case.options["file"].as_str() else {
+        return false;
+    };
+    let Some(steps) = proof.case.options["steps"].as_array() else {
+        return false;
+    };
+    if !core::single_document(source)
+        || steps
+            .iter()
+            .flat_map(|step| [step.get("body"), step.get("config")])
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|text| !core::single_document(text))
+    {
+        return false;
+    }
+    for output in [
+        proof.go,
+        proof.protected,
+        proof.expectation,
+        &proof.ablated.output,
+    ] {
+        let Some(files) = output["files"].as_array() else {
+            return false;
+        };
+        if files.iter().any(|file| {
+            file.as_str()
+                .is_none_or(|text| !core::single_document(text))
+        }) {
+            return false;
+        }
+    }
+    if proof
+        .ablated
+        .traces
+        .iter()
+        .flat_map(|t| &t.rejected)
+        .any(|r| {
+            std::str::from_utf8(&r.bytes)
+                .ok()
+                .is_none_or(|text| !core::single_document(text))
+        })
+    {
+        return false;
+    }
+    if let Some(trace) = proof.go_trace {
+        let Some(steps) = trace.as_array() else {
+            return false;
+        };
+        for step in steps {
+            let Some(rejected) = step.as_array() else {
+                return false;
+            };
+            if rejected
+                .iter()
+                .any(|r| r.as_str().is_none_or(|text| !core::single_document(text)))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn accepted(checks: [bool; 5]) -> bool {
@@ -357,10 +430,13 @@ pub fn certify(
         if oracle.is_none() {
             let Some(clean) = comment_free(case) else {
                 let failure = diagnostics::comment_free_failure(case);
-                let reason = if failure["reason"] == "unsupported_value_path" {
-                    "check 2: unsupported non-string-keyed values"
-                } else {
-                    "check 2: comment-free source changes values"
+                let reason = match failure["reason"].as_str() {
+                    Some("unsupported_value_path") => {
+                        "check 2: unsupported non-string-keyed values"
+                    }
+                    Some("unsupported_binary_values") => "check 2: unsupported binary values",
+                    Some("multiple_documents") => "check 2: multiple YAML documents",
+                    _ => "check 2: comment-free source changes values",
                 };
                 let mut result = refused(reason);
                 trials.push(json!({"mask":mask,"failures":[failure]}));
@@ -390,13 +466,16 @@ pub fn certify(
         };
         let checks = checks(proof);
         let failures = diagnostics::failures(proof, checks);
-        trials.push(json!({"mask":mask,"checks":checks,"failures":failures}));
+        let owner_rules =
+            checks[2].then(|| diagnostics::comments(case, protected, &ablated).unwrap());
+        trials.push(
+            json!({"mask":mask,"checks":checks,"failures":failures,"owner_rules":owner_rules}),
+        );
         let accepted = accepted(checks);
         let mut evidence = json!({"kind":if accepted {"certified-protection-ablation"} else {"uncertified-protection-ablation"},"case":case.name,"options":case.options,"original_go":go,"go_parse_trace":traced,"protected_rust":protected,"ablated_rust":ablated.output,"ablated_traces":ablated.traces,"comment_free_options":clean.options,"comment_free_go":expectation,"subset":ALL.iter().enumerate().filter(|(i,_)|mask&(1<<i)!=0).map(|(_,p)|format!("{p:?}")).collect::<Vec<_>>(),"subset_matches":matches,"nonminimal_supersets":dominated,"trials":trials,"checks":checks});
         evidence["failures"] = json!(failures);
         if accepted {
-            evidence["owner_rules"] =
-                json!(diagnostics::comments(case, protected, &ablated).unwrap());
+            evidence["owner_rules"] = json!(owner_rules.unwrap());
             return Ok(Attempt {
                 deviations: Some(deviations(mask)),
                 evidence,

@@ -270,17 +270,27 @@ pub(crate) fn protected_node(
 /// empty-value boundary, retain the item's flow form as well as its indentation.
 fn protect_pending_item_foot(node: &mut Node) {
     fn flow_footed_items(node: &mut Node) {
-        if node.kind == Kind::Sequence {
-            for item in &mut node.content {
-                if item.kind == Kind::Mapping && !item.foot_comment.is_empty() {
-                    item.style |= Style::FLOW;
+        // Only the trailing edge can leave a foot pending at this boundary.
+        // Earlier items discharged theirs before the last item was emitted.
+        match node.kind {
+            Kind::Mapping => {
+                if let Some(last) = node.content.last_mut() {
+                    flow_footed_items(last);
                 }
             }
-        }
-        for child in &mut node.content {
-            flow_footed_items(child);
+            Kind::Sequence => {
+                if let Some(last) = node.content.last_mut() {
+                    if last.kind == Kind::Mapping && !last.foot_comment.is_empty() {
+                        last.style |= Style::FLOW;
+                    } else {
+                        flow_footed_items(last);
+                    }
+                }
+            }
+            _ => {}
         }
     }
+
     if node.kind == Kind::Mapping {
         for index in (2..node.content.len()).step_by(2) {
             if node.content.get(index + 1).is_some_and(|value| {
@@ -442,39 +452,12 @@ impl Encoder {
             .map_err(|error| YamlError::fail(error.message()))
     }
 
-    /// Without a document marker, the first paragraph of a first key's
-    /// multipart head is parsed as a document comment. Keep a canonical
-    /// version head on its key, under the existing version protection.
-    fn implicit_config_start(&self, node: &Node) -> bool {
-        let protected = self.emitter.protect_config_comments;
-        #[cfg(feature = "parity")]
-        let protected = protected
-            && crate::config::save::parity::ablation::enabled(
-                crate::config::save::parity::ablation::Protection::CanonicalVersionComment,
-            );
-        let root = if node.kind == Kind::Document {
-            node.content.first().unwrap_or(node)
-        } else {
-            node
-        };
-        !(protected
-            && root.kind == Kind::Mapping
-            && root.content.first().is_some_and(|key| {
-                key.value == "config-version" && key.head_comment.contains("\n\n")
-            }))
-    }
-
-    /// `Encoder.Encode(node)` for a `*yaml.Node` (`marshalDoc`).
     pub(crate) fn encode_node(&mut self, node: &Node) -> Result<(), YamlError> {
         self.init()?;
         if node.kind == Kind::Document {
             return self.node(node, "", false, 0);
         }
-        self.emit(Event::document_start(
-            None,
-            Vec::new(),
-            self.implicit_config_start(node),
-        ))?;
+        self.emit(Event::document_start(None, Vec::new(), true))?;
         self.node(node, "", false, 0)?;
         self.emit(Event::document_end(true))
     }
@@ -695,8 +678,7 @@ impl Encoder {
 
         match node.kind {
             Kind::Document => {
-                let mut event =
-                    Event::document_start(None, Vec::new(), self.implicit_config_start(node));
+                let mut event = Event::document_start(None, Vec::new(), true);
                 event.head_comment = node.head_comment.as_bytes().to_vec();
                 self.emit(event)?;
                 for child in &node.content {

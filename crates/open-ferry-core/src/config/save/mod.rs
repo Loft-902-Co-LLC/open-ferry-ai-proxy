@@ -187,11 +187,28 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, SaveError> {
     let node = compose::unmarshal(data)?;
     if let Ok(text) = std::str::from_utf8(data)
         && text.contains(['\u{0085}', '\u{2028}', '\u{2029}'])
-        && let Some(loaded) = loader_root(data)?
     {
+        let loaded = loader_root(data)?;
+        let writer_present =
+            node.kind != Kind::Zero && (node.kind != Kind::Document || !node.content.is_empty());
         let written = loader_yaml::from_writer_node(&node)
             .map_err(|error| SaveError::new(SaveErrorKind::Yaml, error.message()))?;
-        if let Some(line) = unicode_scalar_disagrees(&loaded, &written) {
+        let mismatch = match (loaded.as_ref(), writer_present) {
+            (Some(loaded), true) => unicode_scalar_disagrees(loaded, &written),
+            (None, false) => None,
+            _ => Some(UnicodeDisagreement {
+                line: UnicodeSourceLine::Writer(first_key_line(&written)),
+                path: first_key_path(&written, "$"),
+                scalar: false,
+            }),
+        };
+        if let Some(mismatch) = mismatch {
+            let line = match mismatch.line {
+                UnicodeSourceLine::Loader(line) => line.max(1),
+                UnicodeSourceLine::Writer(line) => physical_writer_line(text, line),
+            };
+            let path = mismatch.path;
+            let kind = if mismatch.scalar { "scalar" } else { "value" };
             let separators = [
                 ('\u{2028}', "U+2028 (LINE SEPARATOR)"),
                 ('\u{2029}', "U+2029 (PARAGRAPH SEPARATOR)"),
@@ -204,7 +221,7 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, SaveError> {
             return Err(SaveError::new(
                 SaveErrorKind::Unwritable,
                 format!(
-                    "config scalar at line {line} is read differently by the saphyr loader and writer in input containing {separators}; write refused, file unchanged"
+                    "config {kind} at line {line}, path {path}, is read differently by the saphyr loader and writer in input containing {separators}; write refused, file unchanged"
                 ),
             ));
         }
@@ -214,14 +231,136 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, SaveError> {
 
 /// A separator can end a comment without occurring in either scalar value.
 /// Once triggered, compare every value and return its source line.
-fn unicode_scalar_disagrees(a: &loader_yaml::Node, b: &loader_yaml::Node) -> Option<usize> {
-    if a.kind != b.kind || a.content.len() != b.content.len() || a.value != b.value {
-        return Some(a.line.max(1));
+struct UnicodeDisagreement {
+    line: UnicodeSourceLine,
+    path: String,
+    scalar: bool,
+}
+enum UnicodeSourceLine {
+    Loader(usize),
+    Writer(usize),
+}
+fn first_key_line(n: &loader_yaml::Node) -> usize {
+    n.content
+        .first()
+        .filter(|_| n.kind == loader_yaml::Kind::Mapping)
+        .unwrap_or(n)
+        .line
+        .max(1)
+}
+/// yaml.v3 counts Unicode YAML breaks as lines; editors' physical source
+/// lines here count CR/LF only. Bind the diagnostic to the mismatching node,
+/// rather than an earlier, harmless separator elsewhere in the file.
+fn physical_writer_line(text: &str, wanted: usize) -> usize {
+    let (mut logical, mut physical, mut cr) = (1, 1, false);
+    for ch in text.chars() {
+        if logical >= wanted {
+            return physical;
+        }
+        match ch {
+            '\r' => {
+                logical += 1;
+                physical += 1;
+                cr = true;
+            }
+            '\n' => {
+                if !cr {
+                    logical += 1;
+                    physical += 1;
+                }
+                cr = false;
+            }
+            '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                logical += 1;
+                cr = false;
+            }
+            _ => cr = false,
+        }
     }
-    a.content
-        .iter()
-        .zip(&b.content)
-        .find_map(|(a, b)| unicode_scalar_disagrees(a, b))
+    physical
+}
+fn first_key_path(n: &loader_yaml::Node, path: &str) -> String {
+    n.content
+        .first()
+        .filter(|_| n.kind == loader_yaml::Kind::Mapping)
+        .map_or_else(|| path.into(), |key| format!("{path}.{}", key.value))
+}
+fn unicode_scalar_disagrees(
+    a: &loader_yaml::Node,
+    b: &loader_yaml::Node,
+) -> Option<UnicodeDisagreement> {
+    fn walk(
+        a: &loader_yaml::Node,
+        b: &loader_yaml::Node,
+        path: &str,
+    ) -> Option<UnicodeDisagreement> {
+        let structural = a.kind != b.kind || a.content.len() != b.content.len();
+        if structural
+            || a.value != b.value
+            || loader_yaml::short_tag(&a.tag) != loader_yaml::short_tag(&b.tag)
+        {
+            let (path, line) = if a.kind == loader_yaml::Kind::Mapping
+                && b.kind == a.kind
+                && a.content.len() != b.content.len()
+            {
+                for ((ak, av), (bk, bv)) in a.pairs().zip(b.pairs()) {
+                    if ak.value != bk.value
+                        || loader_yaml::short_tag(&ak.tag) != loader_yaml::short_tag(&bk.tag)
+                    {
+                        break;
+                    }
+                    if let Some(mismatch) = walk(av, bv, &format!("{path}.{}", ak.value)) {
+                        return Some(mismatch);
+                    }
+                }
+                let missing = |key: &loader_yaml::Node, other: &loader_yaml::Node| {
+                    !other.pairs().any(|(other, _)| {
+                        other.value == key.value
+                            && loader_yaml::short_tag(&other.tag)
+                                == loader_yaml::short_tag(&key.tag)
+                    })
+                };
+                if let Some((key, _)) = b.pairs().find(|(key, _)| missing(key, a)) {
+                    (
+                        format!("{path}.{}", key.value),
+                        UnicodeSourceLine::Writer(key.line),
+                    )
+                } else if let Some((key, _)) = a.pairs().find(|(key, _)| missing(key, b)) {
+                    (
+                        format!("{path}.{}", key.value),
+                        UnicodeSourceLine::Loader(key.line),
+                    )
+                } else {
+                    (path.into(), UnicodeSourceLine::Loader(a.line))
+                }
+            } else if structural {
+                (
+                    first_key_path(b, path),
+                    UnicodeSourceLine::Writer(first_key_line(b)),
+                )
+            } else {
+                (path.into(), UnicodeSourceLine::Loader(a.line))
+            };
+            return Some(UnicodeDisagreement {
+                line,
+                path,
+                scalar: !structural && a.kind == loader_yaml::Kind::Scalar,
+            });
+        }
+        if a.kind == loader_yaml::Kind::Mapping {
+            a.pairs().zip(b.pairs()).find_map(|((ak, av), (bk, bv))| {
+                let path = format!("{path}.{}", ak.value);
+                walk(ak, bk, &path).or_else(|| walk(av, bv, &path))
+            })
+        } else {
+            a.content
+                .iter()
+                .zip(&b.content)
+                .enumerate()
+                .find_map(|(i, (a, b))| walk(a, b, &format!("{path}[{i}]")))
+        }
+    }
+    walk(a, b, "$")
 }
 
 /// The loader's tree of `data`, or `None` when it holds no document.
@@ -2213,3 +2352,6 @@ mod review_r10_version_tests;
 
 #[cfg(test)]
 mod review_r10_steer_tests;
+
+#[cfg(test)]
+mod review_r11_tests;
