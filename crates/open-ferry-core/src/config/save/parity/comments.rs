@@ -335,6 +335,7 @@ pub fn comment_ownership_analysis(
             rules: vec![],
         };
     };
+    let mut remaining_failure = original_failure;
     let a = promotion(&s, g.as_deref(), &r, true);
     let b = promotion(&s, g.as_deref(), &r, false);
     for mask in [1, 2, 3] {
@@ -351,14 +352,18 @@ pub fn comment_ownership_analysis(
             moves.extend(b.clone());
             rules.push("canonical-version-value-head-to-key-head");
         }
-        if owner_failure(&promoted(&s, &moves), gitems, &r).is_none() {
+        if let Some(failure) = owner_failure(&promoted(&s, &moves), gitems, &r) {
+            // The last attempted model includes every locally eligible rule.
+            // Name its remaining failure, rather than an already licensed move.
+            remaining_failure = failure;
+        } else {
             return CommentOwnership {
                 failure: None,
                 rules,
             };
         }
     }
-    failed(original_failure)
+    failed(remaining_failure)
 }
 pub fn comment_occurrences(text: &str, comment: &str, expand: bool) -> Option<usize> {
     Some(
@@ -511,6 +516,20 @@ mod review_r10 {
         let wrong = "# moved\n# one\na: 1\nb: 2\n";
         assert!(retained_comment_ownership(source, go, go));
         assert!(!retained_comment_ownership(source, go, wrong));
+    }
+    #[test]
+    fn diagnostics_report_the_remaining_failure_after_a_licensed_move() {
+        let source = "a: 1 # valid\n# wrong\nb: 2\n";
+        let protected = "# valid\na: 1\nb: 2 # wrong\n";
+        let analysis = comment_ownership_analysis(source, None, protected, &[]);
+        assert!(!analysis.accepted());
+        assert!(
+            analysis.rules.is_empty(),
+            "failed proofs do not count rule use"
+        );
+        let failure = analysis.failure.unwrap();
+        assert_eq!(failure["text"], "# wrong");
+        assert_eq!(failure["owner"]["path"][0]["key"], "b");
     }
     #[test]
     fn unloadable_physical_entry_line_to_own_head_is_named_and_minimal() {
