@@ -483,9 +483,10 @@ keeps yaml.v3 bytes; a block-body or dropped recipient is protected. This also
 runs on isolated generated plugin intermediates. V8 edits keep the normalized
 tree until the edit is applied, so the emitter sees the actual final recipient
 instead of relocating comments before layout conversion. Canonicalizing
-config-version keeps its own comments on that key. Pending key comments that
-would land on the replacement version move to their source key’s head, rather than leaking
-onto the following unrelated key; upstream drops the version comments.
+config-version keeps its own comments on that key. Threatened pending key
+comments are transferred to heads in the emission tree;
+the later column-zero normalizer can still change their reloaded owners (A2),
+so this is not an end-to-end owner guarantee. Upstream drops the version comments.
 
 The proof records two named, minimal owner rules beside those protections.
 `unloadable-entry-line-to-own-head` applies only on an unloadable Go step:
@@ -520,7 +521,9 @@ steps, a nonoverlapping emitter trace supplies comment counts only, with exact
 bytes and offsets bound to that emission; every protected comment must retain
 its parsed source owner. `31-2887` currently fails that stricter owner check
 (the match key's comment reloads on its first list item), so it remains
-Different. Failed proofs are saved and counted; product builds contain none of
+Different. The value proof refuses non-string-keyed maps, whose contents the loader
+represents only as an opaque `AnyMap` marker; two such markers do not prove
+their values equal. Failed proofs are saved and counted; product builds contain none of
 the switches or traces and keep every protection. The Round 8 empty-collection foot-comment fix is outside this diagnostic switch set and remains enabled in every ablation; cases requiring its removal stay Different.
 
 Generated-comment identities are rebound at the parsed comment's own position,
@@ -541,8 +544,8 @@ SEPARATOR) or U+0085 (NEXT LINE), the writer compares every decoded scalar
 with the config loader's, including values exposed when a separator ends a
 comment. If any disagree, it refuses with the source line and character names
 and leaves the file unchanged. Agreeing literal sources remain writable.
-Request bodies use yaml.v3-compatible parsing, and generated intermediates and
-values are quoted before loader validation; these are not refused as ambiguous
+V8 edit request bodies use yaml.v3-compatible parsing. Generated intermediates
+and values are quoted before loader validation; these are not refused as ambiguous
 source text. Explicit escapes remain writable and safely quoted.
 The live loader and Go can already read these literal source forms differently;
 this write guard does not change loading. Matching the loader to yaml.v3,
