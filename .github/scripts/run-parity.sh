@@ -18,6 +18,7 @@ upstream=$(git -C reference/cliproxyapi rev-parse HEAD)
   echo "Seed: \`$PARITY_SEED\`; random count per generator: \`$PARITY_RANDOM\`."
   cat <<'NOTE'
 Accepted known differences: `Case::known_difference` in `tools/parity/src/cases.rs`, `tools/parity/src/cases/**` and `tools/parity/src/interactions/**/cases.rs`.
+Config-save certification-failure baseline: `tools/parity/baseline/config-save.json` (Different remains Different; other failures stay strict).
 Equivalence rules: `tools/parity/src/compare.rs` and `UPSTREAM.md`.
 NOTE
 } | tee target/parity/ci-metadata.md
@@ -31,6 +32,7 @@ started=$SECONDS
 set +e
 cargo run --locked -p open-ferry-parity -- \
   --upstream reference/cliproxyapi --seed "$PARITY_SEED" --random "$PARITY_RANDOM" \
+  --baseline tools/parity/baseline/config-save.json \
   --summary target/parity/ci-results.md 2>&1 | tee target/parity/ci.log
 statuses=("${PIPESTATUS[@]}")
 set -e

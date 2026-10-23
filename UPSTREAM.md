@@ -1390,6 +1390,21 @@ cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 
 With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 
+## Config-save parity baseline
+
+CI uses [`tools/parity/baseline/config-save.json`](tools/parity/baseline/config-save.json)
+as a run-level ratchet for **uncertified config-save Differences**. It changes
+neither certification nor product behavior; request suites stay strict. Rounds
+9–10 left source-identity relocations, archive comment binding, owner/slot
+tracking and LS/PS/NEL loader alignment unresolved. Copying Go's destructive
+writes is not the remedy. Known diagnostic kinds have a total rate budget;
+new kinds, new deterministic PR-case IDs, fingerprint changes and
+non-certification failures still fail. Follow-up fixes lower this baseline.
+
+Refresh with `open-ferry-parity --write-baseline ... --baseline-observation ...`
+as documented in [the parity README](tools/parity/README.md#config-save-baseline).
+Adding a kind or raising a bound requires an explanation in the changing PR.
+
 ## Deliberately not ported
 
 - **Client impersonation:** TLS fingerprinting (uTLS), synthetic user IDs, forged client build fingerprints, related "cloaking" code, and `cmd/fetch_codex_models`, which downloads the Codex client model catalog posing as the Codex CLI. We send each provider's documented OAuth headers and nothing that disguises the client. OpenAI-compatible upstreams get `User-Agent: open-ferry/<version>` rather than upstream's `cli-proxy-openai-compat`.

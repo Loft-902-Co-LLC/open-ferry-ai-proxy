@@ -3,6 +3,7 @@
 //! Runs the same input through upstream's Go translators and our Rust ports
 //! and compares the results. See README.md.
 
+mod baseline;
 mod cases;
 mod codex_models;
 mod compare;
@@ -57,7 +58,14 @@ options:
   --model <name> model for --live
   --summary <file>
                  also write a Markdown summary of the results to <file>,
-                 replacing the part between its parity-summary markers";
+                 replacing the part between its parity-summary markers
+  --baseline <file> apply the config-save certification-failure budget
+  --observation <file> write portable config-save baseline observations
+  --write-baseline <file> refresh deterministically from --baseline-observation files
+  --baseline-observation <file> repeat for refresh or --baseline replay (no Go run)
+  --import-config-failures <dir> import saved fixtures, with --import-proofs <dir>,
+                 --import-cases <n> and --observation <file> (no Go run)
+  --selected-failures mark imported selected failures as kind coverage only";
 
 /// Failing cases written to disk; the rest are only counted.
 const MAX_FAILURE_FILES: usize = 200;
@@ -75,6 +83,14 @@ struct Args {
     model: Option<String>,
     summary: Option<PathBuf>,
     suites: BTreeSet<String>,
+    baseline: Option<PathBuf>,
+    observation: Option<PathBuf>,
+    write_baseline: Option<PathBuf>,
+    baseline_observations: Vec<PathBuf>,
+    import_config_failures: Option<PathBuf>,
+    import_proofs: Option<PathBuf>,
+    import_cases: Option<usize>,
+    selected_failures: bool,
 }
 
 impl Args {
@@ -90,6 +106,14 @@ impl Args {
             model: None,
             summary: None,
             suites: BTreeSet::new(),
+            baseline: None,
+            observation: None,
+            write_baseline: None,
+            baseline_observations: Vec::new(),
+            import_config_failures: None,
+            import_proofs: None,
+            import_cases: None,
+            selected_failures: false,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -102,6 +126,14 @@ impl Args {
                 "--live" => parsed.live = Some(value()?),
                 "--model" => parsed.model = Some(value()?),
                 "--summary" => parsed.summary = Some(value()?.into()),
+                "--baseline" => parsed.baseline = Some(value()?.into()),
+                "--observation" => parsed.observation = Some(value()?.into()),
+                "--write-baseline" => parsed.write_baseline = Some(value()?.into()),
+                "--baseline-observation" => parsed.baseline_observations.push(value()?.into()),
+                "--import-config-failures" => parsed.import_config_failures = Some(value()?.into()),
+                "--import-proofs" => parsed.import_proofs = Some(value()?.into()),
+                "--import-cases" => parsed.import_cases = Some(parse_number(&flag, &value()?)?),
+                "--selected-failures" => parsed.selected_failures = true,
                 "--suite" => {
                     parsed.suites.insert(value()?);
                 }
@@ -109,12 +141,47 @@ impl Args {
                 _ => return Err(format!("unknown argument {flag}")),
             }
         }
-        parsed.upstream = upstream.ok_or("--upstream is required")?;
+        if parsed.write_baseline.is_some() && parsed.baseline.is_some() {
+            return Err("--write-baseline cannot be combined with --baseline".into());
+        }
+        let replay = !parsed.baseline_observations.is_empty();
+        if (parsed.write_baseline.is_some() && !replay)
+            || (replay && parsed.write_baseline.is_none() && parsed.baseline.is_none())
+        {
+            return Err("baseline refresh/replay needs --baseline-observation and --write-baseline or --baseline".into());
+        }
+        let import = parsed.import_config_failures.is_some();
+        if import
+            && (parsed.import_proofs.is_none()
+                || parsed.import_cases.is_none()
+                || parsed.observation.is_none()
+                || replay
+                || parsed.baseline.is_some())
+        {
+            return Err("import needs --import-proofs, --import-cases and --observation; cannot apply a baseline".into());
+        }
+        if !import
+            && (parsed.import_proofs.is_some()
+                || parsed.import_cases.is_some()
+                || parsed.selected_failures)
+        {
+            return Err("import options need --import-config-failures".into());
+        }
+        parsed.upstream = if replay || import {
+            upstream.unwrap_or_default()
+        } else {
+            upstream.ok_or("--upstream is required")?
+        };
         if parsed.live.is_some() && parsed.model.is_none() {
             return Err("--live needs --model".into());
         }
         if parsed.live.is_some() && !parsed.suites.is_empty() {
             return Err("--suite cannot be combined with --live".into());
+        }
+        if parsed.live.is_some()
+            && (parsed.baseline.is_some() || replay || import || parsed.observation.is_some())
+        {
+            return Err("baseline options cannot be combined with --live".into());
         }
         if !parsed.suites.is_empty() {
             // Validate without generating random cases or invoking Go.
@@ -658,6 +725,61 @@ fn filter_suites(suites: &mut Vec<Suite>, names: &BTreeSet<String>) -> Result<()
 
 /// Returns whether every case matched upstream, allowing documented deviations.
 fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
+    if let Some(failures) = &args.import_config_failures {
+        let observation = baseline::import(
+            failures,
+            args.import_proofs.as_ref().unwrap(),
+            baseline::Observation {
+                fingerprint: baseline::pinned_fingerprint()?,
+                seed: args.seed,
+                random: args.random,
+                cases: args.import_cases.unwrap(),
+                selected: args.selected_failures,
+                different: 0,
+                non_certification: 0,
+                case_kinds: BTreeMap::new(),
+            },
+        )?;
+        baseline::write(args.observation.as_ref().unwrap(), &observation)?;
+        return Ok(observation.non_certification == 0);
+    }
+    if !args.baseline_observations.is_empty() {
+        let fingerprint = baseline::pinned_fingerprint()?;
+        let observations = baseline::observations(&args.baseline_observations)?;
+        if let Some(path) = &args.write_baseline {
+            baseline::write(path, &baseline::refresh(&observations, &fingerprint)?)?;
+            println!(
+                "Baseline written to {}; raises/additional kinds require a PR explanation.",
+                path.display()
+            );
+            return Ok(true);
+        }
+        let path = args.baseline.as_ref().unwrap();
+        let baseline: baseline::Baseline = baseline::read(path)?;
+        baseline.validate(&fingerprint)?;
+        let mut passed = true;
+        for observation in &observations {
+            let assessment = baseline.assess(observation, path)?;
+            println!(
+                "Seed {}, random {}{}",
+                observation.seed,
+                observation.random,
+                if observation.selected {
+                    " (selected failures)"
+                } else {
+                    ""
+                }
+            );
+            println!("{}", assessment.markdown);
+            passed &= assessment.passed;
+        }
+        return Ok(passed);
+    }
+    let budget: Option<baseline::Baseline> =
+        args.baseline.as_deref().map(baseline::read).transpose()?;
+    if let Some(budget) = &budget {
+        budget.validate(&baseline::pinned_fingerprint()?)?;
+    }
     let work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -668,6 +790,10 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     // Even a failed upstream setup must not retain proofs from an older run.
     fresh_dir(&work_dir.join("counterfactual"))?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
+    let fingerprint = baseline::fingerprint(&upstream.commit)?;
+    if let Some(budget) = &budget {
+        budget.validate(&fingerprint)?;
+    }
     if let (Some(url), Some(model)) = (&args.live, &args.model) {
         return run_live(url, model, &upstream, &work_dir);
     }
@@ -684,6 +810,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     );
     let mut all_match = true;
     let mut results = Vec::with_capacity(suites.len());
+    let mut ratchet_summary = String::new();
     for (translator, mut cases, random) in suites {
         cases.extend(crate::cases::signature_relay::for_suite(translator.key()));
         let hand_written = cases.len();
@@ -700,7 +827,32 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             started.elapsed()
         );
         tally.print(args.show, &dir);
-        all_match &= tally.different == 0;
+        let mut matched = tally.different == 0;
+        if translator == Translator::ConfigSave {
+            let observation = baseline::Observation {
+                fingerprint: fingerprint.clone(),
+                seed: args.seed,
+                random: args.random,
+                cases: cases.len(),
+                selected: false,
+                different: tally.different,
+                non_certification: tally.different - tally.certification_failures.len(),
+                case_kinds: tally.certification_failures.clone(),
+            };
+            baseline::write(
+                args.observation
+                    .as_deref()
+                    .unwrap_or(&work_dir.join("config-save-observation.json")),
+                &observation,
+            )?;
+            if let (Some(budget), Some(path)) = (&budget, &args.baseline) {
+                let assessment = budget.assess(&observation, path)?;
+                matched = assessment.passed;
+                println!("{}", assessment.markdown);
+                ratchet_summary = assessment.markdown;
+            }
+        }
+        all_match &= matched;
         results.push(summary::SuiteResult {
             title: translator.title(),
             deviations: tally
@@ -750,7 +902,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             random: args.random,
             seed: args.seed,
         };
-        summary::write(path, &summary::render(&run, &results))?;
+        summary::write(path, &(summary::render(&run, &results) + &ratchet_summary))?;
         println!();
         println!("Summary written to {}", path.display());
     }
@@ -985,6 +1137,7 @@ struct Evaluated {
     /// Upstream's output as read for comparison.
     go_value: Option<Value>,
     rust_output: Result<Value, String>,
+    certification_failure: Option<BTreeSet<String>>,
 }
 
 fn evaluate_with_counterfactual(
@@ -1025,6 +1178,9 @@ fn evaluate_with_counterfactual(
         save_counterfactual(work_dir, case, &proof.evidence)?;
         if let Some(deviations) = proof.deviations {
             evaluated.outcome = Outcome::Equivalent(deviations);
+        } else {
+            evaluated.certification_failure =
+                baseline::difference_kinds(&case.options, &proof.evidence);
         }
     }
     Ok(evaluated)
@@ -1253,6 +1409,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
         go_output,
         go_value,
         rust_output,
+        certification_failure: None,
     }
 }
 
@@ -1268,6 +1425,7 @@ struct Tally {
     /// Cases marked as known differences that now match.
     resolved: Vec<String>,
     failure_files: usize,
+    certification_failures: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct Group {
@@ -1306,6 +1464,10 @@ impl Tally {
             (Some(_), Some(reason)) => self.known.push((case.name.clone(), reason)),
             (Some(differences), None) => {
                 self.different += 1;
+                if let Some(kinds) = &evaluated.certification_failure {
+                    self.certification_failures
+                        .insert(case.name.clone(), kinds.clone());
+                }
                 let first = &differences[0];
                 self.groups
                     .entry(first.shape())
@@ -1566,6 +1728,7 @@ mod tests {
             go_output: "{}".into(),
             go_value: Some(json!({})),
             rust_output: Ok(json!({})),
+            certification_failure: None,
         };
         let mut tally = Tally::default();
         tally
@@ -1647,6 +1810,7 @@ mod tests {
                         go_output: String::new(),
                         go_value: None,
                         rust_output: Ok(Value::Null),
+                        certification_failure: None,
                     },
                     &dir,
                 )
@@ -1678,6 +1842,7 @@ mod tests {
             go_output: "{\"side\":\"go\"}".into(),
             go_value: Some(json!({"side": "go"})),
             rust_output: Ok(json!({"side": "rust"})),
+            certification_failure: None,
         };
         let mut tally = Tally::default();
         tally.record(&case, evaluated(), &dir).unwrap();
