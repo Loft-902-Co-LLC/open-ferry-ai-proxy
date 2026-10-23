@@ -1632,7 +1632,7 @@ mod tests {
         let stream = manager.execute_stream(&providers, Request::default(), opts());
         let count = manager.count_tokens(&providers, Request::default(), opts());
         // Inspect the boxed futures' dynamic layouts, without polling or IO.
-        // They normally occupy about 6 KiB. 12 KiB allows layout/platform
+        // They normally occupy about 7.4 KiB. 12 KiB allows layout/platform
         // variation but catches an inline refresh transaction (about 65 KiB).
         // Raise this bound only after measuring the dispatch and refresh
         // layouts and checking that rare refresh work remains behind a box.
