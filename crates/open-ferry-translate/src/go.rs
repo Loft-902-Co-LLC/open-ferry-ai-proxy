@@ -21,6 +21,12 @@ pub fn to_lower(s: &str) -> String {
     s.chars().map(simple_lower).collect()
 }
 
+/// Compares Go's ToLower keys without allocating either key. This differs
+/// from EqualFold for characters such as final sigma and long s.
+pub fn equal_lower(a: &str, b: &str) -> bool {
+    a.chars().map(simple_lower).eq(b.chars().map(simple_lower))
+}
+
 /// Go's `strings.ToUpper`: maps each character on its own by its simple Unicode
 /// mapping. Rust's `str::to_uppercase` uses the full mapping, which turns `ß`
 /// into `SS`; Go leaves a character with no one-character upper case as it is.
@@ -356,6 +362,27 @@ fn frexp(x: f64) -> (f64, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_lower_matches_owned_go_keys() {
+        for a in [
+            "Claude", "İ", "i", "Σ", "σ", "ς", "ſ", "s", "K", "K", "ß", "SS", "",
+        ] {
+            for b in [
+                "claude", "İ", "i", "Σ", "σ", "ς", "ſ", "s", "K", "K", "ß", "SS", "",
+            ] {
+                assert_eq!(
+                    equal_lower(a, b),
+                    to_lower(a) == to_lower(b),
+                    "{a:?}, {b:?}"
+                );
+            }
+        }
+        assert!(!equal_lower("σ", "ς"));
+        assert!(equal_fold("σ", "ς"));
+        assert!(!equal_lower("s", "ſ"));
+        assert!(equal_fold("s", "ſ"));
+    }
 
     #[test]
     fn to_lower_matches_go() {

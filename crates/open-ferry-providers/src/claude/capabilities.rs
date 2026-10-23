@@ -12,7 +12,7 @@ use open_ferry_core::config::{ClaudeModel, Config};
 use open_ferry_core::manager::{ClaudeModelConfig, config_index, resolve_api_key_config};
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::resolve_model_info;
-use open_ferry_translate::go::equal_fold;
+use open_ferry_translate::go::{equal_fold, equal_lower};
 
 use super::thinking::parse_suffix;
 
@@ -55,40 +55,25 @@ pub(super) fn resolve(
     // Upstream compiles alias/name keys (each exact key, then its base).
     // Look up the attempt's exact route before its base, keeping the first
     // occurrence of an upstream name within each key.
-    let mut routes: Vec<&ClaudeModel> = Vec::new();
-    for candidate in lookup_candidates(requested) {
-        let key = open_ferry_translate::go::to_lower(candidate);
-        let mut by_key: Vec<&ClaudeModel> = Vec::new();
-        for model in models {
-            let name = model_name(model);
-            if name.is_empty() {
-                continue;
-            }
-            let alias = if model.alias.trim().is_empty() {
-                name
-            } else {
-                model.alias.trim()
-            };
-            let matches = [alias, name].into_iter().any(|route| {
-                lookup_candidates(route)
-                    .into_iter()
-                    .any(|value| open_ferry_translate::go::to_lower(value) == key)
-            });
-            if matches
-                && !by_key
-                    .iter()
-                    .any(|prior| equal_fold(model_name(prior), name))
-            {
-                by_key.push(model);
-            }
-        }
-        routes.extend(by_key);
-    }
+    // Walk the immutable attempt snapshot by reference. Keep exact/base key
+    // order and first-name precedence without temporary lookup vectors or
+    // owned lowercase strings. Lowercase-key equality must remain distinct
+    // from EqualFold name deduplication (notably for Unicode model aliases).
+    let mut routes = lookup_candidates(requested).flat_map(|candidate| {
+        models.iter().enumerate().filter_map(move |(index, model)| {
+            let matches = matches_route(model, candidate)
+                && !models[..index].iter().any(|prior| {
+                    equal_fold(model_name(prior), model_name(model))
+                        && matches_route(prior, candidate)
+                });
+            matches.then_some(model)
+        })
+    });
     let configured = routes
-        .iter()
+        .clone()
         .find(|model| equal_fold(model_name(model), upstream))
         .or_else(|| {
-            routes.iter().find(|model| {
+            routes.find(|model| {
                 let name = model_name(model);
                 parse_suffix(name).1.is_none() && equal_fold(name, parse_suffix(upstream).0.trim())
             })
@@ -108,12 +93,23 @@ fn model_name(model: &ClaudeModel) -> &str {
     }
 }
 
-fn lookup_candidates(model: &str) -> Vec<&str> {
+fn matches_route(model: &ClaudeModel, candidate: &str) -> bool {
+    let name = model_name(model);
+    if name.is_empty() {
+        return false;
+    }
+    let alias = if model.alias.trim().is_empty() {
+        name
+    } else {
+        model.alias.trim()
+    };
+    [alias, name]
+        .into_iter()
+        .any(|route| lookup_candidates(route).any(|value| equal_lower(value, candidate)))
+}
+
+fn lookup_candidates(model: &str) -> impl Iterator<Item = &str> + Clone {
     let model = model.trim();
     let base = parse_suffix(model).0.trim();
-    if base.is_empty() || base == model {
-        vec![model]
-    } else {
-        vec![model, base]
-    }
+    std::iter::once(model).chain((!base.is_empty() && base != model).then_some(base))
 }

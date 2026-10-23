@@ -46,6 +46,23 @@ pub(super) fn normalize(body: &mut Value) {
     let Some(messages) = body.get_mut("messages") else {
         return;
     };
+    // Most callers already use portable IDs. Avoid allocating/cloning the
+    // collision set unless there is an ID that normalization would change.
+    let needs_repair = items(messages).iter().any(|message| {
+        message
+            .get("content")
+            .into_iter()
+            .flat_map(items)
+            .any(|block| {
+                id_field(block)
+                    .and_then(|field| block.get(field))
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.is_empty() && !portable(id))
+            })
+    });
+    if !needs_repair {
+        return;
+    }
     let mut used = HashSet::new();
     for message in items(messages) {
         for block in message.get("content").into_iter().flat_map(items) {
@@ -90,6 +107,25 @@ pub(super) fn normalize(body: &mut Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn portable_and_ignored_ids_need_no_repair() {
+        for mut body in [
+            json!({"messages":[{"content":[
+                {"type":"tool_use", "id":"call_A-123"},
+                {"type":"tool_result", "tool_use_id":"call_A-123"},
+                {"type":"tool_use", "id":""},
+                {"type":"tool_use", "id":123},
+                {"type":"text", "id":"ignored:nonportable"}
+            ]}]}),
+            json!({"messages":{"content":{"type":"tool_use", "id":"portable"}}}),
+            json!({"messages":[{"content":"hello"}]}),
+        ] {
+            let before = serde_json::to_vec(&body).unwrap();
+            normalize(&mut body);
+            assert_eq!(serde_json::to_vec(&body).unwrap(), before);
+        }
+    }
 
     #[test]
     fn walks_single_message_and_content_objects() {
