@@ -662,39 +662,84 @@ mod tests {
 
     #[test]
     fn lazy_automata_match_the_eager_oracle_for_bodies_and_stream_lines() {
+        fn compare(values: &[String], body: &[u8], policy: Policy) {
+            // Derived Clone preserves initialized OnceLocks. Reconstruct from
+            // raw values for EVERY body, policy and line instead of cloning.
+            let secrets = Secrets::from_iter(values);
+            assert!(secrets.1.0.iter().all(|slot| slot.get().is_none()));
+            let expected = secrets.old_bytes(body, policy);
+            assert!(secrets.1.0.iter().all(|slot| slot.get().is_none()));
+            assert_eq!(
+                secrets.bytes(body, policy),
+                expected,
+                "policy={policy:?}, patterns={}, body={body:?}",
+                secrets.patterns(policy).len()
+            );
+        }
+
+        fn compare_body_and_lines(values: &[String], body: &[u8], policy: Policy) {
+            compare(values, body, policy);
+            for line in body.split_inclusive(|byte| *byte == b'\n') {
+                compare(values, line, policy);
+            }
+        }
+
+        // Isolate the last pattern at both sides of the precheck boundary,
+        // including exactly sixteen patterns under EACH policy.
+        for count in [1, 15, 16, 17] {
+            let values = (0..count)
+                .map(|n| format!("boundary-secret-{n:02}"))
+                .collect::<Vec<_>>();
+            let last_only = values.last().unwrap().as_bytes();
+            for policy in [Policy::Client, Policy::Disk] {
+                assert_eq!(Secrets::from_iter(&values).patterns(policy).len(), count);
+                compare_body_and_lines(&values, last_only, policy);
+                compare_body_and_lines(&values, b"clean stream\nnext line\n", policy);
+            }
+        }
+
+        const ESCAPED: &str = "quote\"slash\\line\nbreak";
         let mut seed = 0x39d1_a72b_0c64_f813_u64;
         for iteration in 0..96 {
-            let mut secrets = Secrets::from_iter([
-                "short",
-                "a",
-                "12345678",
-                "x12345678x",
-                "quote\"slash\\line\nbreak",
-                "λ-secret",
-            ]);
-            for n in 0..iteration % 20 {
+            let mut values = ["short", "!", "12345678", "x12345678x", ESCAPED, "λ-secret"]
+                .map(str::to_owned)
+                .to_vec();
+            // Three quarters stay at or below sixteen actual policy patterns;
+            // the other quarter still exercises direct automaton construction.
+            let bounded = iteration % 4 != 3;
+            let generated = if bounded {
+                iteration % 10
+            } else {
+                17 + iteration % 5
+            };
+            for n in 0..generated {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                secrets.add(&format!("generated-{n}-{seed:016x}"));
+                values.push(format!("generated-{n}-{seed:016x}"));
             }
-            let joined = secrets.iter().collect::<Vec<_>>().join(" / ");
+            let joined = values.join(" / ");
             let json = serde_json::to_vec(&json!({"text":joined})).unwrap();
+            let escaped_only = serde_json::to_vec(&json!({"text":ESCAPED})).unwrap();
+            assert!(
+                values.iter().all(|value| {
+                    memchr::memmem::find(&escaped_only, value.as_bytes()).is_none()
+                })
+            );
             let bodies = [
-                b"harmless stream data\nnext line\n".to_vec(),
+                b"clean stream\nnext line\n".to_vec(),
+                escaped_only,
+                b"short".to_vec(),
+                b"!".to_vec(),
+                values.last().unwrap().as_bytes().to_vec(),
                 joined.into_bytes(),
                 json,
                 b"x12345678x12345678\nshort\nquote\"slash\\line\nbreak".to_vec(),
-                vec![0xff, b'a', 0, b'\n'],
+                vec![0xff, b'!', 0, b'\n'],
             ];
             for policy in [Policy::Client, Policy::Disk] {
+                let patterns = Secrets::from_iter(&values).patterns(policy);
+                assert_eq!(patterns.len() <= PRECHECK_PATTERNS, bounded);
                 for body in &bodies {
-                    assert_eq!(
-                        secrets.bytes(body, policy),
-                        secrets.old_bytes(body, policy),
-                        "iteration={iteration}, policy={policy:?}"
-                    );
-                    for line in body.split_inclusive(|byte| *byte == b'\n') {
-                        assert_eq!(secrets.bytes(line, policy), secrets.old_bytes(line, policy));
-                    }
+                    compare_body_and_lines(&values, body, policy);
                 }
             }
         }
