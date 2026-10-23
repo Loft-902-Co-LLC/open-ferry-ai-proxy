@@ -185,34 +185,43 @@ fn invalid(message: impl Into<String>) -> SaveError {
 /// in `data`, with its comments, or an empty node when there is none.
 pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, SaveError> {
     let node = compose::unmarshal(data)?;
-    if std::str::from_utf8(data)
-        .is_ok_and(|text| text.contains(['\u{0085}', '\u{2028}', '\u{2029}']))
+    if let Ok(text) = std::str::from_utf8(data)
+        && text.contains(['\u{0085}', '\u{2028}', '\u{2029}'])
         && let Some(loaded) = loader_root(data)?
     {
         let written = loader_yaml::from_writer_node(&node)
             .map_err(|error| SaveError::new(SaveErrorKind::Yaml, error.message()))?;
-        if unicode_scalar_disagrees(&loaded, &written) {
+        if let Some(line) = unicode_scalar_disagrees(&loaded, &written) {
+            let separators = [
+                ('\u{2028}', "U+2028 (LINE SEPARATOR)"),
+                ('\u{2029}', "U+2029 (PARAGRAPH SEPARATOR)"),
+                ('\u{0085}', "U+0085 (NEXT LINE)"),
+            ]
+            .into_iter()
+            .filter_map(|(c, name)| text.contains(c).then_some(name))
+            .collect::<Vec<_>>()
+            .join(", ");
             return Err(SaveError::new(
                 SaveErrorKind::Unwritable,
-                "config scalar decodes differently between loader and writer at a Unicode line separator; write refused",
+                format!(
+                    "config scalar at line {line} is read differently by the saphyr loader and writer in input containing {separators}; write refused, file unchanged"
+                ),
             ));
         }
     }
     Ok(node)
 }
 
-/// A source value must not silently take the writer scanner's interpretation.
-/// Generated escaped scalars agree in both parsers and still use safe quoting.
-fn unicode_scalar_disagrees(a: &loader_yaml::Node, b: &loader_yaml::Node) -> bool {
-    a.kind != b.kind
-        || a.content.len() != b.content.len()
-        || ((a.value.contains(['\u{0085}', '\u{2028}', '\u{2029}'])
-            || b.value.contains(['\u{0085}', '\u{2028}', '\u{2029}']))
-            && a.value != b.value)
-        || a.content
-            .iter()
-            .zip(&b.content)
-            .any(|(a, b)| unicode_scalar_disagrees(a, b))
+/// A separator can end a comment without occurring in either scalar value.
+/// Once triggered, compare every value and return its source line.
+fn unicode_scalar_disagrees(a: &loader_yaml::Node, b: &loader_yaml::Node) -> Option<usize> {
+    if a.kind != b.kind || a.content.len() != b.content.len() || a.value != b.value {
+        return Some(a.line.max(1));
+    }
+    a.content
+        .iter()
+        .zip(&b.content)
+        .find_map(|(a, b)| unicode_scalar_disagrees(a, b))
 }
 
 /// The loader's tree of `data`, or `None` when it holds no document.
@@ -2198,3 +2207,9 @@ mod review_r10_unicode_tests;
 
 #[cfg(test)]
 mod review_r10_tests;
+
+#[cfg(test)]
+mod review_r10_version_tests;
+
+#[cfg(test)]
+mod review_r10_steer_tests;

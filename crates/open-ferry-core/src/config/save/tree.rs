@@ -345,61 +345,6 @@ fn expand(
 pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
     use super::super::yaml3::parser::Parser;
     use super::super::yaml3::types::{ScalarStyle, TokenType};
-    // The empty-collection foot protection emitted these adjacent footer/head
-    // blocks at their owners. Removing indentation here would undo that repair.
-    // Select source positions from the parsed tree, never equal comment text.
-    let lines: Vec<_> = data.split(|&byte| byte == b'\n').collect();
-    let mut logical_starts = Vec::with_capacity(lines.len());
-    let mut logical = 0usize;
-    for line in &lines {
-        logical_starts.push(logical + 1);
-        logical += 1 + String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line))
-            .chars()
-            .filter(|c| matches!(c, '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'))
-            .count();
-    }
-    let mut retained = std::collections::BTreeSet::new();
-    fn has_foot(node: &Node) -> bool {
-        !node.foot_comment.is_empty() || node.content.iter().any(has_foot)
-    }
-    fn retain_boundaries(
-        node: &Node,
-        lines: &[&[u8]],
-        logical_starts: &[usize],
-        retained: &mut std::collections::BTreeSet<usize>,
-    ) {
-        if node.kind == Kind::Mapping {
-            let entries: Vec<_> = node.pairs().collect();
-            for pair in entries.windows(2) {
-                let (previous_key, previous) = pair[0];
-                let (key, value) = pair[1];
-                if matches!(previous.kind, Kind::Mapping | Kind::Sequence)
-                    && !previous.style.has(super::super::yaml3::Style::FLOW)
-                    && (has_foot(previous) || !previous_key.foot_comment.is_empty())
-                    && matches!(value.kind, Kind::Mapping | Kind::Sequence)
-                    && value.content.is_empty()
-                {
-                    let Ok(mut at) = logical_starts.binary_search(&key.line) else {
-                        continue;
-                    };
-                    while at > 0 {
-                        let trimmed = lines[at - 1].trim_ascii_start();
-                        if !trimmed.is_empty() && !trimmed.starts_with(b"#") {
-                            break;
-                        }
-                        at -= 1;
-                        retained.insert(at);
-                    }
-                }
-            }
-        }
-        for child in &node.content {
-            retain_boundaries(child, lines, logical_starts, retained);
-        }
-    }
-    if let Ok(doc) = super::super::yaml3::compose::unmarshal(data) {
-        retain_boundaries(&doc, &lines, &logical_starts, &mut retained);
-    }
     let mut parser = Parser::new(data);
     let mut bodies = Vec::new();
     while let Ok(token) = parser.scan() {
@@ -435,9 +380,7 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
             .position(|&byte| byte != b' ' && byte != b'\t')
             .unwrap_or(line.len());
         let trimmed = line.get(start..).unwrap_or_default();
-        if trimmed.first() == Some(&b'#')
-            && !retained.contains(&index)
-            && !bodies.iter().any(|body| body.contains(&logical_line))
+        if trimmed.first() == Some(&b'#') && !bodies.iter().any(|body| body.contains(&logical_line))
         {
             out.extend_from_slice(trimmed);
         } else {

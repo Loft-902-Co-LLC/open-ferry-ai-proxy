@@ -460,7 +460,7 @@ Where it differs from upstream:
 - **Every write holds the file's lock.** Each writer of the config, the server's (the management API's saves, its v8 edits and its undo) and the `open-ferry config` commands' alike, takes an exclusive OS file lock on `<file name>.lock` beside the file before it reads the file, and holds it through the compare, the `.bak`, the replace and the hash record, so writes from two processes never interleave; a write that expected the bytes from before another's is refused as stale. A writer waits at most 5 seconds for the lock, then fails with `another write of <path> still held its lock, <lock path>, after 5s; nothing was written`. The lock file is empty and left in place, as removing it could let two writers lock two different files; on Unix it is created 0600. It is opened without following a symbolic link, in the one step that opens it (`O_NOFOLLOW`, and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows), and what is opened must be a regular file, so a link put there is refused, never followed to a file elsewhere. The lock coordinates the writers that share the file's directory: two containers that each bind-mount only the file have lock files of their own. Where the file system has no locks, the write goes ahead without one. Upstream takes no file lock.
 - **A symbolic link at the path is refused**, as is another reparse point on Windows; upstream writes through it.
 - **A file that isn't UTF-8 is refused** (`yaml: input is not valid UTF-8`); yaml.v3 also reads UTF-16.
-- **The settings open-ferry doesn't type keep the file's values**: `plugins` (`plugins.configs` included), `pprof`, `claude-code`, the credential tuning sections, `discovery`, the Antigravity and Devin sections, the Codex live relay, the client impersonation settings (the fingerprint fields of `claude-header-defaults`, such as `user-agent`, Claude's `cloak`, `fingerprint-profile`) and unknown keys. Upstream writes them from what it decoded, which holds the same values but can respell them (`yes` as `true`); writes `plugins.dir` as `ResolvePluginsDir` made it (cleaned with the system's separators, `~` expanded, `plugins` when empty); and replaces `plugins.configs` from the running config (`replacePluginConfigsSubtree`), with the plugin IDs sorted and plain, dropping it when empty. A management write's config comes from the file, so the two agree but for those changes (the parity suite's known differences `plugins-dir-cleaned` and `plugins-configs-rebuilt`). Upstream's `plugins.configs` subtree, re-encoded from each plugin's decoded node (`PluginInstanceConfig.MarshalYAML`), carries the plugin's comments, some on other nodes than in the file: a comment ending a plugin's settings that end the file goes on the last list item, not on the list's key. `preserveV8Comments`, at the end of `restoreV8Layout` on every save, then puts the file's comments back on their keys, so upstream writes such a comment twice in a row; open-ferry writes it once (counted as equivalent by the parity suite). Pending plugin line comments may also appear on a new generated `auth-dir` and a later original key: Go restores the plugin key's comment after replacement, so it also writes both copies; the saved-output neighbor tests compare them directly. Only `plugins.configs` is taken whole from the decoded config, and the other settings are generated without comments, so this can't happen elsewhere. Upstream's plugin re-encode can turn a folded scalar's value into a comment, or drop the file's plugin comments when the config is supplied separately; open-ferry keeps both, quotes block scalars on every config write path when their effective multiline line comment (including one pending from a key) would enter the scalar body, and preserves block-scalar body indentation in every section so Markdown headings remain data rather than becoming comments. Multiline key comments blocked by a value's own line comment stay with that key as head comments rather than reaching a later setting. When upstream's generated plugin nodes produce invalid YAML (such as a null plugin after a pending comment), open-ferry retries that intermediate without plugin comments, retaining every original plugin value and comment in the file. Before an empty-null or empty-mapping key would overwrite an older pending comment, that comment is emitted once before the key. Pending foot comments left by a preceding collection are flushed at their saved containing indentation before the next empty collection's key head and line comments, with a separating blank line, including flow mappings and sequences, so the delayed `{}` or `[]` emission cannot be stranded at column zero. At that boundary, a footed mapping item retains flow style (a block mapping's terminal foot would reload on its last child key), and comment normalization preserves the adjacent foot/head indentation by parsed source positions. An empty block-style mapping is actually emitted as `{}`; comments deferred from earlier nodes are kept before the key so they cannot force the braces onto a line at column zero and make a valid save be refused. A key upstream adds to these sections with its default is added here too.
+- **The settings open-ferry doesn't type keep the file's values**: `plugins` (`plugins.configs` included), `pprof`, `claude-code`, the credential tuning sections, `discovery`, the Antigravity and Devin sections, the Codex live relay, the client impersonation settings (the fingerprint fields of `claude-header-defaults`, such as `user-agent`, Claude's `cloak`, `fingerprint-profile`) and unknown keys. Upstream writes them from what it decoded, which holds the same values but can respell them (`yes` as `true`); writes `plugins.dir` as `ResolvePluginsDir` made it (cleaned with the system's separators, `~` expanded, `plugins` when empty); and replaces `plugins.configs` from the running config (`replacePluginConfigsSubtree`), with the plugin IDs sorted and plain, dropping it when empty. A management write's config comes from the file, so the two agree but for those changes (the parity suite's known differences `plugins-dir-cleaned` and `plugins-configs-rebuilt`). Upstream's `plugins.configs` subtree, re-encoded from each plugin's decoded node (`PluginInstanceConfig.MarshalYAML`), carries the plugin's comments, some on other nodes than in the file: a comment ending a plugin's settings that end the file goes on the last list item, not on the list's key. `preserveV8Comments`, at the end of `restoreV8Layout` on every save, then puts the file's comments back on their keys, so upstream writes such a comment twice in a row; open-ferry writes it once (counted as equivalent by the parity suite). Pending plugin line comments may also appear on a new generated `auth-dir` and a later original key: Go restores the plugin key's comment after replacement, so it also writes both copies; the saved-output neighbor tests compare them directly. Only `plugins.configs` is taken whole from the decoded config, and the other settings are generated without comments, so this can't happen elsewhere. Upstream's plugin re-encode can turn a folded scalar's value into a comment, or drop the file's plugin comments when the config is supplied separately; open-ferry keeps both, quotes block scalars on every config write path when their effective multiline line comment (including one pending from a key) would enter the scalar body, and preserves block-scalar body indentation in every section so Markdown headings remain data rather than becoming comments. Multiline key comments blocked by a value's own line comment stay with that key as head comments rather than reaching a later setting. When upstream's generated plugin nodes produce invalid YAML (such as a null plugin after a pending comment), open-ferry retries that intermediate without plugin comments, retaining every original plugin value and comment in the file. Before an empty-null or empty-mapping key would overwrite an older pending comment, that comment is emitted once before the key. Pending foot comments left by a preceding collection are flushed at their saved containing indentation before the next empty collection's key head and line comments, with a separating blank line, including flow mappings and sequences, so the delayed `{}` or `[]` emission cannot be stranded at column zero. At that boundary, a footed mapping item retains flow style (a block mapping's terminal foot would reload on its last child key). The later column-zero comment normalization still changes some owners (A2); that is deferred, not covered by the styled-emission repair. An empty block-style mapping is actually emitted as `{}`; comments deferred from earlier nodes are kept before the key so they cannot force the braces onto a line at column zero and make a valid save be refused. A key upstream adds to these sections with its default is added here too.
 - **The config passed in isn't changed.** After a save that moves the file to the v8 layout, upstream sets the config's `OAuthOnlyFields` (which settings the file gives under `oauth.providers`) from the file it wrote. The file written is the same; the caller reloads it, as upstream's watcher reloads it too.
 - **A migrated file is checked by the load check.** Upstream decodes a file it migrated once more and fails with `decode migrated config: ...`; here the load check refuses it, in the loader's wording.
 - **A payload value that is a mapping with a key that isn't a string, or a timestamp whose zone is 24 hours or more from UTC, can't be written**, and the save fails naming the rule; the loader keeps neither. Upstream writes them.
@@ -487,6 +487,23 @@ config-version keeps its own comments on that key. Pending key comments that
 would land on the replacement version move to their source key’s head, rather than leaking
 onto the following unrelated key; upstream drops the version comments.
 
+The proof records two named, minimal owner rules beside those protections.
+`unloadable-entry-line-to-own-head` applies only on an unloadable Go step:
+a source mapping entry's physical-line comment, either on the key or on its
+direct value starting on that same line, may move to that same key's head,
+appended after its existing head in the protection's order. Nested children,
+sequence items, later-line value comments and every other destination are
+excluded. `canonical-version-value-head-to-key-head` permits only the complete,
+ordered `config-version` value-head block to append to that key's head; on a
+loadable step it cannot move a comment Go retained in its value-head slot.
+These are not allowances for another key, node, slot or reversed order.
+All other parsed owners include the key path, key/value/item/document/root
+node and head/line/foot slot, with ordered occurrences per owner. A protected
+occurrence consumes its source (text, owner) budget when present; only an
+absent source (text, owner) can consume a shared Go slot. Source and Go counts
+are never added at a source owner. Global alias-expanded source multiplicity
+and ablated-to-protected multiset bounds still apply.
+
 The offline parity feature has six call-scoped diagnostic switches: the empty
 mapping flush (`RetainedUpstreamEmptyMappingComment`), canonical-version comment
 copying (`RetainedCanonicalVersionComment`), dropped single-key comment transfer
@@ -497,7 +514,8 @@ copying (`RetainedCanonicalVersionComment`), dropped single-key comment transfer
 invalid Go emission in `random-31-2887`. A minimal subset certifies a deviation
 only when every Go snapshot is byte-identical, comment-free Go proves all
 protected values, parsed source budgets and owners prove retained comments,
-and faithful comment-free re-emission proves no other changes. On unloadable
+and, on loadable Go steps, faithful comment-free re-emission proves no other
+changes (check 4 is skipped on unloadable Go steps). On unloadable
 steps, a nonoverlapping emitter trace supplies comment counts only, with exact
 bytes and offsets bound to that emission; every protected comment must retain
 its parsed source owner. `31-2887` currently fails that stricter owner check
@@ -506,18 +524,26 @@ Different. Failed proofs are saved and counted; product builds contain none of
 the switches or traces and keep every protection. The Round 8 empty-collection foot-comment fix is outside this diagnostic switch set and remains enabled in every ablation; cases requiring its removal stay Different.
 
 Generated-comment identities are rebound at the parsed comment's own position,
-including wrapped scalars. Canonical-version paragraph blocks are separated
-from the previous key before both intermediate and final emissions, so every
-paragraph reloads at the version owner. Config emission also escapes U+2028,
+including wrapped scalars. A canonical-version multipart head gets a separating
+blank line only when a faithful reparse would move its complete ordered block
+off the version key; a separator already supplied by a pending foot is not
+added twice. If normalization makes that key first, an explicit document start
+keeps its first paragraph on the key rather than the document. These operations
+remain under the canonical-version protection, before intermediate and final
+emissions. Config emission also escapes U+2028,
 U+2029 and U+0085 in generated and retained scalars. Go writes LS/PS strings
 single-quoted and reads its own emission back losslessly; NEL is already escaped.
 open-ferry's saphyr loader reads Go's LS/PS form differently, retaining the
 continuation indentation. The escaping is an interim deviation to preserve
 the value open-ferry loads, not a repair of yaml.v3's writer. Before editing
-source text containing literal U+2028, U+2029 or U+0085, the writer compares its
-decoded scalars with the config loader's. If they disagree, it refuses the write
-with a clear error and leaves the file unchanged. Explicit escapes and generated
-values that both parsers read identically remain writable and safely quoted.
+source text containing literal U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH
+SEPARATOR) or U+0085 (NEXT LINE), the writer compares every decoded scalar
+with the config loader's, including values exposed when a separator ends a
+comment. If any disagree, it refuses with the source line and character names
+and leaves the file unchanged. Agreeing literal sources remain writable.
+Request bodies use yaml.v3-compatible parsing, and generated intermediates and
+values are quoted before loader validation; these are not refused as ambiguous
+source text. Explicit escapes remain writable and safely quoted.
 The live loader and Go can already read these literal source forms differently;
 this write guard does not change loading. Matching the loader to yaml.v3,
 then removing the quoting and refusal, is deferred to a follow-up.

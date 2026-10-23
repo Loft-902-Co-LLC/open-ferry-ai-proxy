@@ -277,23 +277,22 @@ fn review_r8_archive_tag_table_survives_two_writes() {
         ("anchor", "x: &a !t 'a\u{2028}b'\ny: *a\n"),
         ("only-escapes", "x: \"a\\u2028b\\u2029c\\u0085d\"\n"),
     ];
+    let mut exercised = 0;
     for (name, shape) in cases {
-        let source = format!("config-version: 8\n{shape}auth-dir: /old\n");
+        let mut source = format!("config-version: 8\n{shape}auth-dir: /old\n");
+        let raw_original = compose::unmarshal(source.as_bytes()).unwrap();
         if let Err(error) = unmarshal(source.as_bytes()) {
             assert_eq!(error.kind(), SaveErrorKind::Unwritable, "{name}");
             for op in ["raw", "normalize", "put"] {
                 let fixture = serde_json::json!({"source":source,"op":op});
                 let error = super::review_r7_tests::exact_review_output(&fixture).unwrap_err();
-                assert!(
-                    error
-                        .to_string()
-                        .contains("Unicode line separator; write refused")
-                );
+                assert!(error.to_string().contains("write refused, file unchanged"));
             }
-            continue;
+            source = super::archive_tests::escaped_writer_source(&source);
         }
+        exercised += 1;
         let original = unmarshal(source.as_bytes()).unwrap();
-        let mut raw = original.content[0].clone();
+        let mut raw = raw_original.content[0].clone();
         if name == "non-specific" {
             // yaml.v3's composer resolves the non-specific `!` immediately.
             // Exercise that raw tag at the quoting boundary, before resolution.
@@ -303,6 +302,10 @@ fn review_r8_archive_tag_table_survives_two_writes() {
         v8::quote_archive_breaks(&mut raw);
         assert_eq!(presentation(&raw), expected_presentation, "{name}");
         let quoted = String::from_utf8(encode::faithful_node(&raw, 4).unwrap()).unwrap();
+        assert!(
+            !quoted.contains(['\u{0085}', '\u{2028}', '\u{2029}']),
+            "{name}: {quoted}"
+        );
         if name == "non-specific" {
             assert!(quoted.contains("! \""), "{quoted}");
         }
@@ -346,4 +349,8 @@ fn review_r8_archive_tag_table_survives_two_writes() {
             }
         }
     }
+    assert_eq!(
+        exercised, 9,
+        "every raw tag/anchor shape must reach archive emission"
+    );
 }

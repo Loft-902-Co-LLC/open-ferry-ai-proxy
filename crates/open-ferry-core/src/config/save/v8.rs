@@ -408,8 +408,26 @@ pub(super) fn retain_version_comment_owner(root: &mut Node) -> Result<(), SaveEr
             head.push_str(&comment);
         }
     }
-    if i > 0 && head.contains("\n\n") && !head.starts_with('\n') {
-        head.insert(0, '\n');
+    // Recheck a protective leading break after tree edits instead of
+    // accumulating separators on repeated saves. Keep Go's bytes when its
+    // faithful emission already retains the complete head on this key.
+    *head = head.trim_start_matches('\n').to_owned();
+    if i > 0 && head.contains("\n\n") {
+        let expected = head.clone();
+        let faithful = super::encode::faithful_node(root, 2)?;
+        let retained = unmarshal(&faithful).ok().and_then(|doc| {
+            let mapping = doc.content.first()?;
+            let at = super::find_map_key_index(mapping, "config-version")?;
+            Some(
+                mapping.content[at]
+                    .head_comment
+                    .trim_start_matches('\n')
+                    .ends_with(&expected),
+            )
+        });
+        if retained != Some(true) {
+            root.content[i].head_comment.insert(0, '\n');
+        }
     }
     Ok(())
 }
