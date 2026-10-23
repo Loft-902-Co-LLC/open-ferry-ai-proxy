@@ -439,3 +439,41 @@ fn review_r11_07_changed_sequences_cannot_reuse_index_source_budgets() {
         source
     ));
 }
+
+#[test]
+fn review_r13_hidden_documents_at_unicode_breaks_are_outside_witnesses() {
+    for sep in ['\u{2028}', '\u{2029}', '\u{0085}', '\n'] {
+        let source = format!("auth-dir: /x\n# c{sep}---{sep}tail: 1 # keep\n");
+        let protected = source.replace("1 # keep", "2 # invented");
+        let analysis = parity::comment_ownership_analysis(&source, Some(&source), &protected, &[]);
+        assert!(!analysis.accepted(), "{sep:?}");
+        assert_eq!(
+            analysis.failure.unwrap()["reason"],
+            "source_comments_unparseable"
+        );
+        assert!(!parity::single_document(&source));
+        assert!(!parity::single_document(&protected));
+        assert_eq!(parity::same_values(&source, &protected), None);
+        assert!(parity::faithful_without_comments(&source).is_none());
+        assert!(parity::single_document(&format!(
+            "auth-dir: /x\n# c{sep}tail: 1\n"
+        )));
+    }
+}
+
+#[test]
+fn review_r13_first_head_projection_cannot_start_on_a_later_key() {
+    let source = "other: 1\n\n# one\n\n# two\nfirst: 2\n";
+    let go = "other: 1\nfirst: 2\n";
+    let wrong = "# one\n\nother: 1\n# two\nfirst: 2\n";
+    let failure = parity::comment_ownership_analysis(source, Some(go), wrong, &[])
+        .failure
+        .unwrap();
+    assert_eq!(failure["reason"], "owner_budget");
+    assert_eq!(
+        failure["owner"],
+        serde_json::json!({"path":[],"node":"document","slot":"head"})
+    );
+    let positive = "# one\n\n# two\nfirst: 2\nother: 1\n";
+    assert!(parity::comment_ownership_analysis(source, Some(go), positive, &[]).accepted());
+}

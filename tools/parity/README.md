@@ -279,6 +279,20 @@ No paths, comment text or byte offsets enter kind signatures. A case with
 several failed checks contributes to several kind rows but only once to the
 total budget. No-reproducing-subset kinds include all failed trials.
 
+Classifier version 2 also compares the original Go failure boundary. If Rust
+refuses a step that Go completed or got past, an ordinary Rust refusal is fatal,
+not a baselined comment-placement kind. A failed wrapper's successful prefix is
+`files.len() - 1` for `unloadable` (the last file failed reload), or `files.len()`
+for `error`. Go must also have failed, with its successful prefix no longer than
+the protected wrapper's; the same definition applies to both sides.
+The Unicode write guard's own exact
+message has a separate `rust-refusal/unicode-guard/<op>` kind, deliberately
+absent from the baseline. The portable wrapper has no guard-specific typed
+error or trace event, so this matcher requires the complete message shape.
+Comment-free Go oracle replies must have a valid wrapper and one snapshot per
+successful step, or a consistent error/unloadable boundary; malformed replies
+remain fatal as `comment_free_go_malformed`.
+
 The committed budget is the maximum final-certifier observed total rate plus 20%,
 rounded up to the next multiple of five per 1,000. It uses ten random-5000
 config sweeps (30–39), full random-500 runs (11, 12, 38, 39), and the exact PR
@@ -286,6 +300,42 @@ profile. The 170/164 saved scheduled failures for seeds 11/12 add kind coverage
 only: selected failures are not unbiased rate samples. The file records that
 distinction. An observation below its recorded seed/profile count (or
 with fewer PR case IDs) prints “Baseline can be lowered” and the refresh command.
+
+There are 13 kinds and a shared bound of **75 Different per 1,000** config-save
+cases; the exact PR Different set is empty. The ten nightly-sized calibration
+seeds had 249–308 Different out of 5,109 cases each, with no bound breaches.
+The normal seed-count predictive model estimates a **0.019% rate-only** false
+alarm probability, conditional on independent representative seeds and unchanged
+variance. It does not estimate discovery of new kinds. Leaving out seed 37
+misses a singleton kind, giving a leave-one-out novelty estimate of **1 in 10**
+nightly seeds; the run-incidence Good–Turing estimate is about **1 in 16**.
+Expect roughly 6–10% novelty failures early on, falling as kinds accumulate;
+these small-sample estimates are not guarantees.
+
+### When the nightly fails
+
+1. Download the run's `config-save-observation.json` artifact and saved cases.
+2. Inspect each new kind's cases to distinguish a product regression from a
+   newly seen existing limitation. Fix regressions; don't baseline them away.
+3. Only for a reviewed existing limitation, refresh incrementally and open a PR
+   explaining the added kinds or higher bound:
+
+   ```sh
+   cargo run --locked -p open-ferry-parity -- \
+     --write-baseline tools/parity/baseline/config-save.json \
+     --baseline tools/parity/baseline/config-save.json \
+     --baseline-observation config-save-observation.json
+   ```
+
+Repeat `--baseline-observation` for additional runs. Incremental refresh unions
+kinds and deduplicates calibration rows. It keeps the higher of the existing
+bound and the new non-selected rows' bound, using the same margin and rounding.
+It never lowers the bound and does not require ten new seeds. Selected replays
+add kind coverage only. Fingerprints must match and non-certification failures
+are refused. The existing exact PR case set is preserved; a supplied seed-1/25
+observation must have exactly that set. Use a full refresh to lower the budget.
+
+### Full refresh
 
 Collect new observations with the unchanged verdict logic. This Bash example
 collects ten full config profiles and the exact PR profile:
@@ -322,9 +372,13 @@ recorded count, prints the lowering message.
 
 The writer sorts keys, kinds and calibration rows; input order does not affect
 the bytes. It rejects non-certification failures and mismatched fingerprints.
-The fingerprint hashes normalized generator/fixture sources, certifier and
-config/parser dependencies, Go harnesses and the upstream gitlink. Changed
-dependencies require new observations. **Adding a kind or raising a bound must
+The fingerprint contains only `classifier_version`, `upstream_pin` and
+`generator_sha256` (normalized paths listed in `GENERATOR_PATHS` in
+`src/baseline.rs`). Other case inputs are not fingerprinted yet. Product,
+certifier, harness, manifest and toolchain changes are judged by the verdict,
+rather than forcing recalibration. Changes to the hashed generator paths,
+upstream pin or classifier version require matching new observations.
+**Adding a kind or raising a bound must
 be explained in the PR**; follow-up fixes lower the baseline rather than weaken
 the certifier. The refresh command never silently updates a running CI budget.
 The kind classifier has an explicit `classifier_version` in the fingerprint;

@@ -1,6 +1,55 @@
 use super::*;
 use crate::translator::Translator;
 
+#[test]
+fn review_r13_comment_free_oracle_failure_boundaries_are_consistent() {
+    let decode = |value: Value, steps| {
+        oracle_output(GoResult::Output(serde_json::to_vec(&value).unwrap()), steps)
+    };
+    for (value, steps) in [
+        (json!({"files":["x: 1\n"]}), 1),
+        (json!({"files":[]}), 0),
+        (json!({"files":[],"error":"refused"}), 1),
+        (json!({"files":["x: 1\n"],"error":"refused"}), 2),
+        (json!({"files":["x: 1\n"],"unloadable":"refused"}), 1),
+    ] {
+        assert!(decode(value, steps).is_ok());
+    }
+    for (value, steps) in [
+        (json!({"files":[],"unexpected":true}), 1),
+        (json!({"files":["x: 1\n"],"unexpected":true}), 1),
+        (json!({"files":[],"error":"x","unloadable":"y"}), 1),
+        (json!({"files":[1]}), 1),
+        (json!({"files":[]}), 1),
+        (json!({"files":["x: 1\n","x: 2\n"]}), 1),
+        (json!({"files":["x: 1\n"],"error":"refused"}), 1),
+        (json!({"files":[],"unloadable":"refused"}), 1),
+        (
+            json!({"files":["x: 1\n","x: 2\n"],"unloadable":"refused"}),
+            1,
+        ),
+        (json!({"files":[],"error":""}), 1),
+        (json!({"files":["x: 1\n"],"unloadable":""}), 1),
+    ] {
+        assert_eq!(
+            decode(value, steps).unwrap_err(),
+            "comment_free_go_malformed"
+        );
+    }
+    assert_eq!(
+        oracle_output(GoResult::Output(br#"{"error":"x"}"#.to_vec()), 1).unwrap_err(),
+        "comment_free_go_malformed"
+    );
+    assert_eq!(
+        oracle_output(GoResult::Output(b"not JSON".to_vec()), 1).unwrap_err(),
+        "comment_free_go_malformed"
+    );
+    assert_eq!(
+        oracle_output(GoResult::Panic("panic".into()), 1).unwrap_err(),
+        "comment_free_go_panicked"
+    );
+}
+
 fn saved() -> Vec<Value> {
     let mut rows: Vec<Value> = serde_json::from_str(include_str!(
         "../../cases/testdata/config-save-ablation-replays.json"

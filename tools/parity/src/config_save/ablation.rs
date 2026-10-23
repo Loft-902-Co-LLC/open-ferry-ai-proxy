@@ -66,6 +66,27 @@ fn output(result: GoResult) -> Option<Value> {
     }
 }
 
+fn oracle_output(result: GoResult, steps: usize) -> Result<Value, &'static str> {
+    let bytes = match result {
+        GoResult::Output(bytes) => bytes,
+        GoResult::Panic(_) => return Err("comment_free_go_panicked"),
+    };
+    let malformed = "comment_free_go_malformed";
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| malformed)?;
+    if !crate::baseline::config_output(&value) {
+        return Err(malformed);
+    }
+    let count = value["files"].as_array().unwrap().len();
+    let consistent = if let Some(error) = value.get("error") {
+        count < steps && !error.as_str().unwrap().is_empty()
+    } else if let Some(error) = value.get("unloadable") {
+        count > 0 && count <= steps && !error.as_str().unwrap().is_empty()
+    } else {
+        count == steps
+    };
+    consistent.then_some(value).ok_or(malformed)
+}
+
 /// Independent Go trace must reproduce the entire uninstrumented result.
 fn trace_output<'a>(raw: &Value, traced: &'a Value) -> Option<&'a Value> {
     let mut comparable = traced.clone();
@@ -444,12 +465,22 @@ pub fn certify(
                 result.evidence["trials"] = json!(trials);
                 return Ok(result);
             };
-            let Some(expectation) = output(run_go(&clean)?) else {
-                let mut result = refused("check 2: Go oracle panicked");
-                result.evidence["failures"] =
-                    json!([{"check":2,"step":0,"file":0,"reason":"comment_free_go_panicked"}]);
-                result.evidence["trials"] = json!(trials);
-                return Ok(result);
+            let expectation = match oracle_output(
+                run_go(&clean)?,
+                clean.options["steps"].as_array().unwrap().len(),
+            ) {
+                Ok(expectation) => expectation,
+                Err(reason) => {
+                    let mut result = refused(if reason == "comment_free_go_panicked" {
+                        "check 2: Go oracle panicked"
+                    } else {
+                        "check 2: Go oracle malformed"
+                    });
+                    result.evidence["failures"] =
+                        json!([{"check":2,"step":0,"file":0,"reason":reason}]);
+                    result.evidence["trials"] = json!(trials);
+                    return Ok(result);
+                }
             };
             oracle = Some((clean, expectation));
         }
