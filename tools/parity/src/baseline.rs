@@ -57,13 +57,13 @@ const GENERATOR_PATHS: &[&str] = &[
     "tools/parity/src/generate.rs",
     "tools/parity/src/generate/config_save.rs",
     "tools/parity/src/generate/config_diff.rs",
-    "tools/parity/src/cases/config_save.rs",
-    "tools/parity/src/cases/testdata",
+    "tools/parity/src/cases.rs",
 ];
 
-/// Hash only the generator paths listed in `GENERATOR_PATHS`; other case inputs
-/// are not fingerprinted yet. Product, certifier, harness and toolchain changes
-/// are judged by the resulting verdict instead.
+/// Hash the source closure of random config-save generation to invalidate rate
+/// calibration when its distribution changes. Every hand-written case runs in
+/// both profiles; a new Different ID fails the exact PR case-set gate instead.
+/// Product, certifier, harness and toolchain changes are judged by the verdict.
 fn fingerprint_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
     fn collect(root: &Path, path: PathBuf, files: &mut BTreeSet<PathBuf>) -> Result<()> {
         if path.is_dir() {
@@ -153,14 +153,12 @@ pub fn config_output(value: &Value) -> bool {
 
 /// `unloadable` includes the rejected file; `error` contains only successful
 /// snapshots. Compare the same successful-prefix boundary on both sides.
-fn successful_prefix(value: &Value) -> Option<usize> {
+pub(crate) fn successful_prefix(value: &Value) -> Option<usize> {
     let count = value["files"].as_array()?.len();
     if value.get("unloadable").is_some() {
         count.checked_sub(1)
-    } else if value.get("error").is_some() {
-        Some(count)
     } else {
-        None
+        Some(count)
     }
 }
 

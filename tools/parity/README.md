@@ -374,9 +374,14 @@ The writer sorts keys, kinds and calibration rows; input order does not affect
 the bytes. It rejects non-certification failures and mismatched fingerprints.
 The fingerprint contains only `classifier_version`, `upstream_pin` and
 `generator_sha256` (normalized paths listed in `GENERATOR_PATHS` in
-`src/baseline.rs`). Other case inputs are not fingerprinted yet. Product,
-certifier, harness, manifest and toolchain changes are judged by the verdict,
-rather than forcing recalibration. Changes to the hashed generator paths,
+`src/baseline.rs`). The generator hash covers exactly the source closure of
+random config-save case generation, including shared case construction. It
+invalidates rate calibration when the random distribution changes. Hand-written
+config-save case inputs are not fingerprinted: every PR and nightly profile runs
+all of them, and the exact PR case set rejects any that becomes Different (the
+committed `pr_different_cases` set is currently empty). Product, certifier,
+harness, manifest and toolchain changes are judged by the verdict. Changes to
+the random generator source closure,
 upstream pin or classifier version require matching new observations.
 **Adding a kind or raising a bound must
 be explained in the PR**; follow-up fixes lower the baseline rather than weaken

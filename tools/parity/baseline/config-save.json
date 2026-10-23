@@ -122,7 +122,7 @@
   ],
   "fingerprint": {
     "classifier_version": "2",
-    "generator_sha256": "dc42bc7f377847c017828f2e835be07ad5b91dc2a1044081e761e2b6b2a7fee2",
+    "generator_sha256": "b60703f808d12349bcb65771191b1cd6c89b4da29b8efd249160376502b02cfc",
     "upstream_pin": "0db19025571684b198a2ef508f99b41c717337e8"
   },
   "kinds": [
