@@ -12,7 +12,6 @@
 //! always gives the same IDs.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -159,11 +158,9 @@ fn with_hash_suffix(id: &str, attempt: u32) -> String {
     if attempt > 0 {
         hasher.update(format!("\0{attempt}").as_bytes());
     }
-    let mut suffix = String::from("_");
-    for byte in hasher.finalize().iter().take(8) {
-        let _ = write!(suffix, "{byte:02x}");
-    }
-    let mut out: String = id.chars().take(ID_LIMIT - suffix.len()).collect();
+    let suffix = open_ferry_core::hex::lower(&hasher.finalize()[..8]);
+    let mut out: String = id.chars().take(ID_LIMIT - 1 - suffix.len()).collect();
+    out.push('_');
     out.push_str(&suffix);
     out
 }

@@ -22,6 +22,7 @@ pub mod config;
 pub mod exec;
 pub mod executor;
 pub mod gate;
+pub mod hex;
 pub mod manager;
 pub mod models;
 pub mod multipart;

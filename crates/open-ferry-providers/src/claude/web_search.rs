@@ -123,10 +123,7 @@ pub(crate) fn scope(
 }
 
 fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    open_ferry_core::hex::lower(&Sha256::digest(bytes))
 }
 
 /// Apply the authoritative service config at startup and on reload. Dropping

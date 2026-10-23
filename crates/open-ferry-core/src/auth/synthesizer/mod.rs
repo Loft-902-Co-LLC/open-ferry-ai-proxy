@@ -269,7 +269,7 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hex::lower(bytes)
 }
 
 #[cfg(test)]

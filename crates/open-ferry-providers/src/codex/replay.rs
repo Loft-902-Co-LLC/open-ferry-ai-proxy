@@ -833,7 +833,7 @@ pub(crate) fn trimmed(value: &Value, path: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    open_ferry_core::hex::lower(bytes)
 }
 
 #[cfg(test)]

@@ -519,10 +519,7 @@ pub(crate) fn access_token_sha256(auth: &Auth) -> String {
     let Some(token) = token else {
         return String::new();
     };
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hex::lower(&Sha256::digest(token.as_bytes()))
 }
 
 /// Go's `textproto.CanonicalMIMEHeaderKey`: each word's first letter in
