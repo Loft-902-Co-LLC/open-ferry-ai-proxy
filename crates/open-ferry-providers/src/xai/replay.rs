@@ -201,11 +201,7 @@ pub(crate) fn isolate_session_key(options: &Options, session_key: &str) -> Strin
         return String::new();
     }
     let digest = Sha256::digest(api_key.as_bytes());
-    let caller: String = digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let caller = open_ferry_core::hex::lower(&digest[..8]);
     format!("caller:{caller}:{session_key}")
 }
 
