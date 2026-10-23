@@ -16,7 +16,6 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use url::{Host, Url};
@@ -184,28 +183,12 @@ impl std::error::Error for RefusedRedirect {}
 /// Downloads over HTTP with `reqwest`.
 #[derive(Clone, Debug)]
 pub struct HttpFetch {
-    client: Arc<OnceLock<Result<reqwest::Client, FetchError>>>,
-    proxy: Option<reqwest::Proxy>,
+    client: reqwest::Client,
 }
 
 impl HttpFetch {
-    /// A downloader through `proxy_url`, the config's setting. Validate the
-    /// proxy now, but build HTTP/TLS state only on the first actual download.
+    /// A client through `proxy_url`, the config's setting.
     pub fn new(proxy_url: &str) -> Result<Self, FetchError> {
-        Ok(Self {
-            client: Arc::new(OnceLock::new()),
-            proxy: proxy_for(proxy_url)?,
-        })
-    }
-
-    fn client(&self) -> Result<&reqwest::Client, FetchError> {
-        self.client
-            .get_or_init(|| self.build_client())
-            .as_ref()
-            .map_err(Clone::clone)
-    }
-
-    fn build_client(&self) -> Result<reqwest::Client, FetchError> {
         let policy = reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() > MAX_REDIRECTS {
                 let error = RefusedRedirect(format!("more than {MAX_REDIRECTS} redirects"));
@@ -220,22 +203,18 @@ impl HttpFetch {
             .redirect(policy)
             .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT);
-        let builder = match self.proxy.clone() {
+        let builder = match proxy_for(proxy_url)? {
             Some(proxy) => builder.proxy(proxy),
             None => builder.no_proxy(),
         };
-        builder
+        let client = builder
             .build()
-            .map_err(|error| FetchError::Network(format!("the HTTP client: {error}")))
+            .map_err(|error| FetchError::Network(format!("the HTTP client: {error}")))?;
+        Ok(Self { client })
     }
 
-    async fn download(
-        &self,
-        client: &reqwest::Client,
-        url: &Url,
-        limit: u64,
-    ) -> Result<Vec<u8>, FetchError> {
-        let mut response = client.get(url.clone()).send().await.map_err(network)?;
+    async fn download(&self, url: &Url, limit: u64) -> Result<Vec<u8>, FetchError> {
+        let mut response = self.client.get(url.clone()).send().await.map_err(network)?;
         if response.status() != reqwest::StatusCode::OK {
             return Err(FetchError::Status(response.status().as_u16()));
         }
@@ -267,10 +246,7 @@ impl Fetch for HttpFetch {
     ) -> BoxFuture<'a, Result<Vec<u8>, FetchError>> {
         Box::pin(async move {
             check_url(url)?;
-            // Client construction stays outside the download deadline, just
-            // as when it happened in new(). Clones share the initialized pool.
-            let client = self.client()?;
-            match tokio::time::timeout(timeout, self.download(client, url, limit)).await {
+            match tokio::time::timeout(timeout, self.download(url, limit)).await {
                 Ok(result) => result,
                 Err(_) => Err(FetchError::TimedOut),
             }
@@ -299,25 +275,4 @@ fn network(error: reqwest::Error) -> FetchError {
         source = inner.source();
     }
     FetchError::Network(message)
-}
-
-#[cfg(test)]
-mod lazy_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn downloader_defers_client_and_refused_urls_do_not_initialize_it() {
-        let fetch = HttpFetch::new("").unwrap();
-        let cloned = fetch.clone();
-        assert!(fetch.client.get().is_none());
-        assert!(cloned.client.get().is_none());
-        let url = Url::parse("http://open-ferry.invalid/releases").unwrap();
-        assert!(matches!(
-            fetch.get(&url, 1024, Duration::from_secs(1)).await,
-            Err(FetchError::InsecureUrl(_))
-        ));
-        assert!(fetch.client.get().is_none());
-        let client = fetch.client().unwrap();
-        assert!(std::ptr::eq(client, cloned.client().unwrap()));
-    }
 }
