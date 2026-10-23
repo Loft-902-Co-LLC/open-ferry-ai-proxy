@@ -166,89 +166,7 @@ fn values_right(case: &Case, protected: &Value, expectation: &Value) -> bool {
 /// Check 3: parsed owners on loadable output; strict source owners plus an
 /// exact, non-overlapping write_comment trace on an unloadable attempted file.
 fn comments_right(case: &Case, protected: &Value, replay: &Replay) -> bool {
-    let Some(mut source) = case.options["file"].as_str() else {
-        return false;
-    };
-    let (Some(steps), Some(rfiles), Some(gfiles)) = (
-        case.options["steps"].as_array(),
-        protected["files"].as_array(),
-        replay.output["files"].as_array(),
-    ) else {
-        return false;
-    };
-    for (i, (step, r)) in steps.iter().zip(rfiles).enumerate() {
-        if step["op"] == "write" {
-            let Some(body) = step["body"].as_str() else {
-                return false;
-            };
-            source = body;
-        }
-        let Some(r) = r.as_str() else {
-            return false;
-        };
-        if let Some(g) = gfiles.get(i).and_then(Value::as_str) {
-            if Config::load_bytes(g.as_bytes()).is_ok() {
-                if !core::retained_comment_ownership(source, g, r) {
-                    return false;
-                }
-            } else {
-                let Some(trace) = replay.traces.get(i) else {
-                    return false;
-                };
-                let Some(written) = trace
-                    .emissions
-                    .iter()
-                    .rev()
-                    .find_map(|e| core::ablation::bind_comments(e, g.as_bytes()))
-                else {
-                    return false;
-                };
-                let Some(comments) = written
-                    .iter()
-                    .map(|c| String::from_utf8(c.bytes.clone()).ok())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return false;
-                };
-                if !core::retained_unloadable_comments(source, r, &comments) {
-                    return false;
-                }
-            }
-        } else {
-            // Go failed before writing this step. Its last rejected emission
-            // supplies multiplicity only, and never a placement allowance.
-            let Some(trace) = replay.traces.get(i) else {
-                if !core::retained_unloadable_comments(source, r, &[]) {
-                    return false;
-                }
-                source = r;
-                continue;
-            };
-            let Some(rejected) = trace.rejected.last() else {
-                return false;
-            };
-            let Some(written) = trace
-                .emissions
-                .iter()
-                .rev()
-                .find_map(|e| core::ablation::bind_comments(e, &rejected.bytes))
-            else {
-                return false;
-            };
-            let Some(comments) = written
-                .iter()
-                .map(|c| String::from_utf8(c.bytes.clone()).ok())
-                .collect::<Option<Vec<_>>>()
-            else {
-                return false;
-            };
-            if !core::retained_unloadable_comments(source, r, &comments) {
-                return false;
-            }
-        }
-        source = r;
-    }
-    true
+    diagnostics::comments(case, protected, replay).is_ok()
 }
 
 /// These owner/budget checks depend only on the fixed source, protected
@@ -334,6 +252,7 @@ fn deviations(mask: u8) -> BTreeSet<Deviation> {
     .collect()
 }
 
+#[derive(Clone, Copy)]
 struct Proof<'a> {
     case: &'a Case,
     go: &'a Value,
@@ -385,8 +304,19 @@ pub fn certify(
         deviations: None,
         evidence: json!({"kind":"uncertified-protection-ablation","case":case.name,"reason":reason}),
     };
-    if replay(case, 0).is_none_or(|r| r.output != *protected) {
-        return Ok(refused("protected replay mismatch"));
+    let protected_replay = replay(case, 0);
+    if protected_replay
+        .as_ref()
+        .is_none_or(|r| r.output != *protected)
+    {
+        let mut result = refused("protected replay mismatch");
+        if let Some(replayed) = protected_replay {
+            let mut failure = diagnostics::no_reproduction(protected, &replayed, None);
+            failure.as_object_mut().unwrap().remove("check");
+            failure["stage"] = "protected_replay".into();
+            result.evidence["failures"] = json!([failure]);
+        }
+        return Ok(result);
     }
     let traced = if go.get("error").is_some() {
         let mut c = case.clone();
@@ -415,24 +345,35 @@ pub fn certify(
         }
         let Some(ablated) = replay(case, mask) else {
             matches.push((mask, false));
+            trials.push(json!({"mask":mask,"failures":[{"check":1,"step":0,"file":0,"reason":"replay_unavailable"}]}));
             continue;
         };
         let yes = reproduces(go, &ablated, go_trace);
         matches.push((mask, yes));
         if !yes {
+            trials.push(json!({"mask":mask,"failures":[diagnostics::no_reproduction(go,&ablated,go_trace)]}));
             continue;
         }
         if oracle.is_none() {
             let Some(clean) = comment_free(case) else {
-                return Ok(refused("check 2: comment-free source changes values"));
+                let mut result = refused("check 2: comment-free source changes values");
+                let failure = diagnostics::comment_free_failure(case);
+                trials.push(json!({"mask":mask,"failures":[failure]}));
+                result.evidence["failures"] = json!([failure]);
+                result.evidence["trials"] = json!(trials);
+                return Ok(result);
             };
             let Some(expectation) = output(run_go(&clean)?) else {
-                return Ok(refused("check 2: Go oracle panicked"));
+                let mut result = refused("check 2: Go oracle panicked");
+                result.evidence["failures"] =
+                    json!([{"check":2,"step":0,"file":0,"reason":"comment_free_go_panicked"}]);
+                result.evidence["trials"] = json!(trials);
+                return Ok(result);
             };
             oracle = Some((clean, expectation));
         }
         let (clean, expectation) = oracle.as_ref().unwrap();
-        let checks = checks(Proof {
+        let proof = Proof {
             case,
             go,
             protected,
@@ -441,11 +382,16 @@ pub fn certify(
             expectation,
             mask,
             matches: &matches,
-        });
-        trials.push(json!({"mask":mask,"checks":checks}));
+        };
+        let checks = checks(proof);
+        let failures = diagnostics::failures(proof, checks);
+        trials.push(json!({"mask":mask,"checks":checks,"failures":failures}));
         let accepted = accepted(checks);
-        let evidence = json!({"kind":if accepted {"certified-protection-ablation"} else {"uncertified-protection-ablation"},"case":case.name,"options":case.options,"original_go":go,"go_parse_trace":traced,"protected_rust":protected,"ablated_rust":ablated.output,"ablated_traces":ablated.traces,"comment_free_options":clean.options,"comment_free_go":expectation,"subset":ALL.iter().enumerate().filter(|(i,_)|mask&(1<<i)!=0).map(|(_,p)|format!("{p:?}")).collect::<Vec<_>>(),"subset_matches":matches,"nonminimal_supersets":dominated,"trials":trials,"checks":checks});
+        let mut evidence = json!({"kind":if accepted {"certified-protection-ablation"} else {"uncertified-protection-ablation"},"case":case.name,"options":case.options,"original_go":go,"go_parse_trace":traced,"protected_rust":protected,"ablated_rust":ablated.output,"ablated_traces":ablated.traces,"comment_free_options":clean.options,"comment_free_go":expectation,"subset":ALL.iter().enumerate().filter(|(i,_)|mask&(1<<i)!=0).map(|(_,p)|format!("{p:?}")).collect::<Vec<_>>(),"subset_matches":matches,"nonminimal_supersets":dominated,"trials":trials,"checks":checks});
+        evidence["failures"] = json!(failures);
         if accepted {
+            evidence["owner_rules"] =
+                json!(diagnostics::comments(case, protected, &ablated).unwrap());
             return Ok(Attempt {
                 deviations: Some(deviations(mask)),
                 evidence,
@@ -462,7 +408,10 @@ pub fn certify(
         }
     }
     let Some(mut evidence) = last else {
-        return Ok(refused("check 1: no reproducing subset"));
+        let mut result = refused("check 1: no reproducing subset");
+        result.evidence["trials"] = json!(trials);
+        result.evidence["subset_matches"] = json!(matches);
+        return Ok(result);
     };
     evidence["subset_matches"] = json!(matches);
     evidence["nonminimal_supersets"] = json!(dominated);
@@ -472,6 +421,8 @@ pub fn certify(
         evidence,
     })
 }
+
+mod diagnostics;
 
 #[cfg(test)]
 mod tests;
