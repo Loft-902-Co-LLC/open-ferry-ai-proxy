@@ -1968,6 +1968,7 @@ dependencies = [
  "httparse",
  "hyper",
  "hyper-util",
+ "memchr",
  "open-ferry-core",
  "open-ferry-translate",
  "percent-encoding",
