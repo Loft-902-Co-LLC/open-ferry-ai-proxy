@@ -102,6 +102,20 @@ observability:
     )
 }
 
+/// Captured output paths relative to each isolated run directory.
+pub const STDOUT_LOG: &str = "logs/stdout.log";
+pub const STDERR_LOG: &str = "logs/stderr.log";
+
+fn capture_logs(dir: &Path) -> std::io::Result<(File, File)> {
+    // Open these before startup so neither proxy's nonrecursive config
+    // watcher sees root-level log writes during the measured workload.
+    fs::create_dir_all(dir.join("logs"))?;
+    Ok((
+        File::create(dir.join(STDOUT_LOG))?,
+        File::create(dir.join(STDERR_LOG))?,
+    ))
+}
+
 /// A proxy binary to benchmark.
 pub struct Target {
     /// `open-ferry` or `CLIProxyAPI`.
@@ -151,6 +165,7 @@ impl Running {
         }
         let config_path = dir.join("config.yaml");
         fs::write(&config_path, config(setup.port, setup.upstream, &auth_dir))?;
+        let (stdout, stderr) = capture_logs(&dir)?;
 
         let mut command = Command::new(&target.binary);
         command
@@ -159,8 +174,8 @@ impl Running {
             .arg("-local-model")
             .current_dir(&dir)
             .stdin(Stdio::null())
-            .stdout(File::create(dir.join("stdout.log"))?)
-            .stderr(File::create(dir.join("stderr.log"))?);
+            .stdout(stdout)
+            .stderr(stderr);
         isolate_env(&mut command, &home, &tmp, setup.dead_proxy);
         let started = Instant::now();
         let child = command
@@ -465,6 +480,50 @@ impl MemorySampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Previous capture code, retained as a byte-output oracle.
+    fn old_capture_logs(dir: &Path) -> (File, File) {
+        fs::create_dir_all(dir).unwrap();
+        (
+            File::create(dir.join("stdout.log")).unwrap(),
+            File::create(dir.join("stderr.log")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn nested_logs_preserve_capture_bytes_without_root_log_files() {
+        use std::io::Write;
+        let scratch = tempfile::tempdir().unwrap();
+        let old = scratch.path().join("old");
+        let new = scratch.path().join("new");
+        let (mut old_out, mut old_err) = old_capture_logs(&old);
+        let (mut new_out, mut new_err) = capture_logs(&new).unwrap();
+        for (writer, body) in [
+            (&mut old_out, b"stdout\n\0\xff".as_slice()),
+            (&mut new_out, b"stdout\n\0\xff".as_slice()),
+            (&mut old_err, b"stderr\r\n".as_slice()),
+            (&mut new_err, b"stderr\r\n".as_slice()),
+        ] {
+            writer.write_all(body).unwrap();
+            writer.flush().unwrap();
+        }
+        drop((old_out, old_err, new_out, new_err));
+        assert_eq!(
+            fs::read(old.join("stdout.log")).unwrap(),
+            fs::read(new.join(STDOUT_LOG)).unwrap()
+        );
+        assert_eq!(
+            fs::read(old.join("stderr.log")).unwrap(),
+            fs::read(new.join(STDERR_LOG)).unwrap()
+        );
+        fs::write(new.join("config.yaml"), "port: 19327\n").unwrap();
+        let mut names = fs::read_dir(&new)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["config.yaml", "logs"]);
+    }
 
     // Not upstream's: the bench config keeps both proxies on loopback and
     // points both providers at the fake upstream.

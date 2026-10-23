@@ -64,6 +64,8 @@ It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
 
 **Fairness.** The load generator and the fake upstream run on the same machine as the proxy and share its CPUs; the two proxies never run at the same time. open-ferry is the workspace's release build (`cargo build --release -p open-ferry`). CLIProxyAPI is built from a checkout with the flags of its release builds, but without cgo, which only its plugin loader needs. Go's and Tokio's worker threads both default to the number of logical CPUs. With the default 20 ms delay, 64 clients can make at most 3,200 requests a second.
 
+The current harness keeps `config.yaml` in each run's root and captures process output in `logs/stdout.log` and `logs/stderr.log`. The harness creates this subdirectory before starting either proxy. Appending log lines therefore stays outside the nonrecursive config-directory watch; the proxy watcher is unchanged. Use the same harness version and log layout for both binaries in a comparison. Comparisons with earlier harness versions must account for their root-level log files waking the config watcher.
+
 **Connections to the upstream.** CLIProxyAPI sends these requests through Go's default HTTP transport, which keeps at most two idle connections per host. With more requests at once than that, it closes many connections after their answer and opens new ones (in the run below, about one for every two to four requests), which shows in its upstream connections and CPU time, and can stop its levels early. Against a real provider, each new connection costs a TLS handshake too, which the fake upstream, on plain HTTP, doesn't measure.
 
 ## Running it
