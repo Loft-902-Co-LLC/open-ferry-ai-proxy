@@ -45,6 +45,7 @@ impl UpdateClient {
         // installs neither a logger nor a tracing bridge. No span is lost.
         // If spawning fails, finish() builds synchronously at the old point.
         let task = std::thread::Builder::new()
+            .name("update-client".into())
             .spawn(move || build(&proxy_url).or_else(|_| build("")))
             .ok()?;
         Some(Self {
@@ -70,6 +71,8 @@ impl Drop for UpdateClient {
     fn drop(&mut self) {
         // Boot never reached the synchronous build point. Join, but discard
         // the unused result, including a panic, to preserve boot's own outcome.
+        // Only a panic has a visible difference: its hook has already reported
+        // from update-client, even when the unused result is discarded.
         if let Some(task) = self.task.take() {
             let _ = task.join();
         }
@@ -77,13 +80,21 @@ impl Drop for UpdateClient {
 }
 
 pub(super) fn finish(client: Option<UpdateClient>, config: &Config) -> (MakeFetch, BuiltFetch) {
+    finish_with(client, config, background::http_fetch)
+}
+
+fn finish_with(
+    client: Option<UpdateClient>,
+    config: &Config,
+    make_fetch: impl FnOnce() -> MakeFetch,
+) -> (MakeFetch, BuiltFetch) {
     match client {
         Some(mut client) => {
             let fetch = client.join();
             (Arc::clone(&client.make_fetch), fetch)
         }
         None => {
-            let make_fetch = background::http_fetch();
+            let make_fetch = make_fetch();
             let fetch = make_fetch(&config.proxy_url).or_else(|_| make_fetch(""));
             (make_fetch, fetch)
         }
@@ -94,6 +105,7 @@ pub(super) fn finish(client: Option<UpdateClient>, config: &Config) -> (MakeFetc
 mod tests {
     use std::fmt::Debug;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::ThreadId;
     use std::time::Duration;
 
@@ -120,10 +132,9 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct Logged {
         lines: Arc<Mutex<Vec<(Level, String)>>>,
-        thread: ThreadId,
     }
 
     struct Message(String);
@@ -138,7 +149,6 @@ mod tests {
 
     impl<S: Subscriber> Layer<S> for Logged {
         fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-            assert_eq!(std::thread::current().id(), self.thread);
             let mut message = Message(String::new());
             event.record(&mut message);
             self.lines
@@ -174,11 +184,9 @@ mod tests {
         probe.account = Ok(dir.path().to_str().unwrap().to_owned());
         let thread = std::thread::current().id();
         let mut runs = Vec::new();
-        for concurrent in [false, true] {
-            let logged = Logged {
-                lines: Arc::default(),
-                thread,
-            };
+        // Compare the independent reference with both shipped finish paths.
+        for (reference, concurrent) in [(true, false), (false, false), (false, true)] {
+            let logged = Logged::default();
             let subscriber = tracing_subscriber::registry().with(logged.clone());
             crate::test_tracing::keep_every_callsite_open();
             tracing::subscriber::with_default(subscriber, || {
@@ -194,15 +202,13 @@ mod tests {
                 tracing::info!("service prepared");
                 let updates =
                     super::super::prepare_update_checks(&probe, &config, installation, || {
-                        match client {
-                            Some(client) => finish(Some(client), &config),
-                            None => {
-                                // The original synchronous expression, independent of
-                                // the threaded implementation under test.
-                                let fetch =
-                                    make_fetch(&config.proxy_url).or_else(|_| make_fetch(""));
-                                (make_fetch, fetch)
-                            }
+                        if reference {
+                            // The original synchronous expression, independent of
+                            // the threaded implementation under test.
+                            let fetch = make_fetch(&config.proxy_url).or_else(|_| make_fetch(""));
+                            (make_fetch, fetch)
+                        } else {
+                            finish_with(client, &config, || make_fetch)
                         }
                     });
                 tracing::info!("updater attached");
@@ -223,7 +229,8 @@ mod tests {
             });
         }
         assert_eq!(runs[0], runs[1]);
-        let lines = &runs[1].1;
+        assert_eq!(runs[0], runs[2]);
+        let lines = &runs[2].1;
         assert_eq!(
             lines[0],
             (Level::INFO, "boot before service preparation".into())
@@ -279,7 +286,10 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel();
         let released = Mutex::new(released);
         let make_fetch: MakeFetch = Arc::new(move |_| {
-            entered.send(std::thread::current().id()).unwrap();
+            let thread = std::thread::current();
+            entered
+                .send((thread.id(), thread.name().map(str::to_owned)))
+                .unwrap();
             released.lock().unwrap().recv().unwrap();
             Ok(Arc::new(NoRequests))
         });
@@ -290,7 +300,9 @@ mod tests {
         // Release before asserting so a failed assertion cannot strand Drop.
         release.send(()).unwrap();
         assert!(finish(Some(client), &config).1.is_ok());
-        assert_ne!(built_on.unwrap(), std::thread::current().id());
+        let (built_on, name) = built_on.unwrap();
+        assert_ne!(built_on, std::thread::current().id());
+        assert_eq!(name.as_deref(), Some("update-client"));
     }
 
     #[test]
@@ -319,6 +331,26 @@ mod tests {
         let client =
             UpdateClient::start_with(&Config::default(), true, || None, || make_fetch).unwrap();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(client))).is_ok());
+    }
+
+    #[test]
+    fn unused_client_is_joined_before_drop_returns() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&finished);
+        let (release, released) = std::sync::mpsc::channel();
+        let released = Mutex::new(released);
+        let make_fetch: MakeFetch = Arc::new(move |_| {
+            released.lock().unwrap().recv().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            completed.store(true, Ordering::Release);
+            Ok(Arc::new(NoRequests))
+        });
+        let client =
+            UpdateClient::start_with(&Config::default(), true, || None, || make_fetch).unwrap();
+        assert!(!finished.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        drop(client);
+        assert!(finished.load(Ordering::Acquire));
     }
 
     #[test]
@@ -351,21 +383,27 @@ mod tests {
 
     #[test]
     fn real_http_client_builds_without_a_runtime_or_tracing_events() {
-        let logged = Logged {
-            lines: Arc::default(),
-            thread: std::thread::current().id(),
-        };
         crate::test_tracing::keep_every_callsite_open();
-        let subscriber = tracing_subscriber::registry().with(logged.clone());
-        tracing::subscriber::with_default(subscriber, || {
-            let make_fetch = background::http_fetch();
-            assert!(make_fetch("").is_ok());
-            assert!(make_fetch("socks5://configured.invalid:1080").is_err());
-            let client =
-                UpdateClient::start_with(&Config::default(), true, || None, background::http_fetch)
-                    .unwrap();
-            assert!(finish(Some(client), &Config::default()).1.is_ok());
-        });
-        assert!(logged.lines.lock().unwrap().is_empty());
+        for (proxy, succeeds) in [
+            ("", true),
+            ("http://proxy.invalid:3128", true),
+            ("socks5://proxy.invalid:1080", false),
+        ] {
+            let logged = Logged::default();
+            let subscriber = tracing_subscriber::registry().with(logged.clone());
+            // Call the real constructor on the recording subscriber's thread.
+            // A thread-local subscriber cannot capture a child thread's events.
+            tracing::subscriber::with_default(subscriber, || {
+                let make_fetch = background::http_fetch();
+                assert_eq!(make_fetch(proxy).is_ok(), succeeds, "{proxy}");
+            });
+            assert!(logged.lines.lock().unwrap().is_empty(), "{proxy}");
+        }
+        // Separately check real construction on a plain thread without a
+        // runtime. Its logging is checked by the direct calls above.
+        let client =
+            UpdateClient::start_with(&Config::default(), true, || None, background::http_fetch)
+                .unwrap();
+        assert!(finish(Some(client), &Config::default()).1.is_ok());
     }
 }
