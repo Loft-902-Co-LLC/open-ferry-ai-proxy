@@ -2480,26 +2480,112 @@ impl Manager {
         result: &CallResult,
         session: Option<&Session>,
     ) {
-        let result = result.clone();
-        let session = session.cloned();
-        if let Err(error) = self
-            .run_persistence(move |manager| manager.mark_call_result(&result, session.as_ref()))
-            .await
-        {
-            tracing::warn!("record call result failed: {error}");
-        }
+        self.record_result_async(result, session, false).await;
     }
 
     // Like mark_call_result_async, an unscoped draining caller may skip the
     // result count/generation, error event and snapshot save, never a rotation.
     pub(crate) async fn record_availability_neutral_result_async(&self, result: &CallResult) {
-        let result = result.clone();
-        if let Err(error) = self
-            .run_persistence(move |manager| manager.record_availability_neutral_result(&result))
-            .await
-        {
-            tracing::warn!("record neutral call result failed: {error}");
+        self.record_result_async(result, None, true).await;
+    }
+
+    async fn record_result_async(
+        &self,
+        result: &CallResult,
+        session: Option<&Session>,
+        neutral: bool,
+    ) {
+        let record = || {
+            if neutral {
+                self.record_availability_neutral_result(result);
+            } else {
+                self.mark_call_result(result, session);
+            }
+        };
+        // Preserve run_persistence's no-runtime behavior, including synchronous
+        // callers' existing admission rules.
+        if tokio::runtime::Handle::try_current().is_err() {
+            record();
+            return;
         }
+        let operation = crate::gate::Operation::current()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.gate()
+                    .begin_operation()
+                    .map_err(ManagerError::NotActive)
+            });
+        let outcome = match operation {
+            Ok(operation) => {
+                operation
+                    .scope(async {
+                        if self.try_record_result(result, session, neutral) {
+                            return Ok(());
+                        }
+                        let result = result.clone();
+                        let session = session.cloned();
+                        self.run_persistence(move |manager| {
+                            if neutral {
+                                manager.record_availability_neutral_result(&result);
+                            } else {
+                                manager.mark_call_result(&result, session.as_ref());
+                            }
+                        })
+                        .await
+                    })
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = outcome {
+            if neutral {
+                tracing::warn!("record neutral call result failed: {error}");
+            } else {
+                tracing::warn!("record call result failed: {error}");
+            }
+        }
+    }
+
+    /// Only immutable, permanently ineligible snapshots may finish inline.
+    /// Check eligibility and mutate under the SAME state lock so a concurrent
+    /// credential edit cannot turn this into runtime-worker disk IO. Reuse the
+    /// reload permit through publication and the (ineligible) persistence tail,
+    /// retaining pending-save counts and sequence watermarks even without IO.
+    /// A queued/active reload or contended admission falls back before mutation.
+    /// The surrounding operation scope retains the usual drain admission on
+    /// both paths; no await/cancellation point separates admission and mutation.
+    fn try_record_result(
+        &self,
+        result: &CallResult,
+        session: Option<&Session>,
+        neutral: bool,
+    ) -> bool {
+        let Some(gate) = self.shared.load_gate.try_acquire_shared() else {
+            return false;
+        };
+        let now = self.now();
+        let model_key = if neutral {
+            String::new()
+        } else {
+            canonical_model_key(&result.model)
+        };
+        let Some(state) = super::try_lock(&self.shared.state) else {
+            return false;
+        };
+        if state
+            .auths
+            .get(&result.auth_id)
+            .is_some_and(|entry| !self.permanently_ineligible(&entry.auth))
+        {
+            return false;
+        }
+        let operation = crate::gate::Operation::current();
+        if neutral {
+            self.record_neutral_result_admitted(result, gate, operation, state, now);
+        } else if self.record_result_admitted(result, gate, operation, state, now, model_key) {
+            self.update_result_affinity(result, session);
+        }
+        true
     }
 
     /// The guard of an unleased save. Runs inside the store, under the write
@@ -2784,8 +2870,8 @@ impl Manager {
         gate: super::ReloadGuard,
         operation: Option<crate::gate::Operation>,
     ) {
-        let detach =
-            self.shared.store.is_some() && crate::auth::codex_refresh::is_codex_auth(&snapshot);
+        let detach = !self.permanently_ineligible(&snapshot)
+            && crate::auth::codex_refresh::is_codex_auth(&snapshot);
         let manager = self.clone();
         let work = move || {
             let mut deferred = false;
@@ -2847,6 +2933,10 @@ impl Manager {
         if !self.record_result(result) {
             return;
         }
+        self.update_result_affinity(result, session);
+    }
+
+    fn update_result_affinity(&self, result: &CallResult, session: Option<&Session>) {
         if let Some(session) = session
             && !result.auth_id.is_empty()
         {
@@ -2868,10 +2958,24 @@ impl Manager {
             crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
-        let mut model_key = canonical_model_key(&result.model);
+        let model_key = canonical_model_key(&result.model);
+        self.record_result_admitted(result, gate, operation, self.lock(), now, model_key)
+    }
+
+    fn record_result_admitted(
+        &self,
+        result: &CallResult,
+        gate: super::ReloadGuard,
+        operation: Option<crate::gate::Operation>,
+        mut guard: MutexGuard<'_, State>,
+        now: Timestamp,
+        mut model_key: String,
+    ) -> bool {
+        if result.auth_id.is_empty() {
+            return true;
+        }
         let schedule_unauthorized_refresh;
         let (snapshot, _epoch, generation, discard_epoch, pending) = {
-            let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
                 return true;
@@ -2939,6 +3043,7 @@ impl Manager {
             let pending = self.pending_save(state, &result.auth_id, Save::Yes);
             (committed.0, committed.1, committed.2, committed.3, pending)
         };
+        drop(guard);
         self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
@@ -2961,8 +3066,21 @@ impl Manager {
             crate::gate::Operation::current().or_else(|| self.gate().begin_operation().ok());
         let gate = self.mutation_gate();
         let now = self.now();
+        self.record_neutral_result_admitted(result, gate, operation, self.lock(), now);
+    }
+
+    fn record_neutral_result_admitted(
+        &self,
+        result: &CallResult,
+        gate: super::ReloadGuard,
+        operation: Option<crate::gate::Operation>,
+        mut guard: MutexGuard<'_, State>,
+        now: Timestamp,
+    ) {
+        if result.auth_id.is_empty() {
+            return;
+        }
         let (snapshot, _epoch, _generation, discard_epoch, pending) = {
-            let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
                 return;
@@ -2983,6 +3101,7 @@ impl Manager {
             let pending = self.pending_save(state, &result.auth_id, Save::Yes);
             (committed.0, committed.1, committed.2, committed.3, pending)
         };
+        drop(guard);
         self.persist_detached(snapshot.clone(), discard_epoch, pending, gate, operation);
         self.publish_error_event(result, &snapshot);
     }

@@ -91,6 +91,7 @@ mod quota_routing;
 mod quota_signals;
 mod response_model_rewriter;
 mod response_model_rewriter_antigravity_sim;
+mod result_recording;
 mod retry_deadline;
 mod scheduler;
 mod selector;
