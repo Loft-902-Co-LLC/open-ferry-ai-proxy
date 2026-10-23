@@ -387,6 +387,18 @@ The fingerprint contains only `classifier_version`, `upstream_pin` and
 of random config-save generation, including shared case construction. Unrelated
 code in those files also changes the hash. It invalidates rate calibration when
 the random distribution changes, with the probe-verified relabel exception below.
+The closure test reviews imports, modules, includes, macro paths, external crate
+paths and file/process/environment access. It also scans the crate for unhashed
+implementations of hashed types. Existing shared `Generator` implementations in
+other suites have private methods, apart from four reviewed signature helpers.
+Random config generation uses only `Generator::new` and its RNG; a separate check
+keeps those signature helpers out of the config generators, RNG and shared
+constructors. A new visible method or trait implementation needs closure review.
+Local types with the same name are separate types. This is a syntax check, not a Rust call graph; it
+cannot fully resolve trait methods through generic bounds, deref coercions, or
+arbitrary macro expansion. The source hash and committed case probes catch the
+first edit that wires such a route into the random generator. Review that edit's
+transitive inputs before permitting a relabel or refresh.
 Hand-written
 config-save case inputs are not fingerprinted: every PR and nightly profile runs
 all of them, and the exact PR case set rejects any that becomes Different (the
@@ -432,6 +444,12 @@ match the recorded probes. It changes only `generator_sha256`, preserving the
 probes, kinds, bound, calibration rows, PR set, pin and classifier version. A
 changed probe is named in the error and requires full refresh with matching
 observations. The command refuses classifier-version or upstream-pin changes.
+It also compares the generator sources embedded at build time with the current
+on-disk sources, using the same LF-normalized hash. A stale binary refuses without
+writing; rebuild with the `cargo run` command above. Relabel accepts no run flags:
+its two probe profiles are fixed. A real-tree test independently compares the
+committed probe digests with the compiled generator and requires a full refresh
+if its case lists changed.
 Legacy baselines without `random_case_probes` remain readable and valid for
 ordinary assessment when their fingerprints match, but cannot be relabeled; a
 full refresh must first record the probes. Incremental refresh preserves existing probes, including their

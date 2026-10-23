@@ -105,6 +105,7 @@ struct Args {
 impl Args {
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut upstream = None;
+        let mut run_flags = BTreeSet::new();
         let mut parsed = Self {
             upstream: PathBuf::new(),
             random: 5000,
@@ -128,6 +129,9 @@ impl Args {
             relabel_baseline: None,
         };
         while let Some(flag) = args.next() {
+            if matches!(flag.as_str(), "--seed" | "--random" | "--show" | "--go") {
+                run_flags.insert(flag.clone());
+            }
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
             match flag.as_str() {
                 "--upstream" => upstream = Some(PathBuf::from(value()?)),
@@ -159,6 +163,19 @@ impl Args {
         let replay = !parsed.baseline_observations.is_empty();
         let maintenance = parsed.export_config_cases.is_some() || parsed.relabel_baseline.is_some();
         if maintenance {
+            if parsed.relabel_baseline.is_some() && !run_flags.is_empty() {
+                return Err(format!(
+                    "--relabel-baseline cannot use run flags: {}; its probe profiles are fixed",
+                    run_flags.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            if parsed.export_config_cases.is_some()
+                && run_flags
+                    .iter()
+                    .any(|flag| !matches!(flag.as_str(), "--seed" | "--random"))
+            {
+                return Err("--export-config-cases accepts only --seed and --random".into());
+            }
             if (parsed.export_config_cases.is_some() && parsed.relabel_baseline.is_some())
                 || replay
                 || parsed.baseline.is_some()

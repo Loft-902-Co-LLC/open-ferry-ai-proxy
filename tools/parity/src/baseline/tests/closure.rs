@@ -6,6 +6,9 @@ use syn::{
     visit::{self, Visit},
 };
 
+mod impls;
+pub(super) use impls::check_unhashed_impls;
+
 fn allowed(file: &str) -> BTreeSet<String> {
     let (imports, modules, paths): (&[&str], &str, &[&str]) = match file {
         "tools/parity/src/generate/config_save.rs" => (
@@ -95,6 +98,7 @@ struct Dependencies<'a> {
     hashed: &'a BTreeSet<PathBuf>,
     allowed: BTreeSet<String>,
     modules: BTreeSet<String>,
+    roots: BTreeSet<String>,
     errors: BTreeSet<String>,
 }
 
@@ -107,6 +111,9 @@ impl Dependencies<'_> {
 
     fn path(&mut self, path: &str) {
         let first = path.split("::").next().unwrap_or("");
+        if !self.roots.contains(first) {
+            self.require(format!("path {path}"));
+        }
         if path.contains("::")
             && (matches!(first, "crate" | "super") || self.modules.contains(first))
         {
@@ -118,6 +125,33 @@ impl Dependencies<'_> {
             || path.starts_with("File::")
         {
             self.require(format!("file access {path}"));
+        }
+        if matches!(path, "std::process" | "std::env")
+            || path.starts_with("std::process::")
+            || path.starts_with("std::env::")
+        {
+            self.require(format!("external input {path}"));
+        }
+    }
+
+    fn macro_path(&mut self, path: &str) {
+        if !matches!(
+            path,
+            "json"
+                | "serde_json::json"
+                | "format"
+                | "matches"
+                | "vec"
+                | "std::format"
+                | "std::matches"
+                | "std::vec"
+                | "core::format"
+                | "core::matches"
+                | "include"
+                | "include_str"
+                | "include_bytes"
+        ) {
+            self.require(format!("macro {path}!"));
         }
     }
 
@@ -147,7 +181,12 @@ impl Dependencies<'_> {
                         path.push_str(&next.to_string());
                         tokens = rest;
                     }
-                    self.path(&path);
+                    if path.contains("::") {
+                        self.path(&path);
+                    }
+                    if matches!(tokens.peek(), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                        self.macro_path(&path);
+                    }
                     if matches!(path.as_str(), "include" | "include_str" | "include_bytes") {
                         self.require(format!("macro dependency {path}!"));
                     }
@@ -172,6 +211,7 @@ impl<'ast> Visit<'ast> for Dependencies<'_> {
             Item::Type(i) => &i.attrs,
             Item::Trait(i) => &i.attrs,
             Item::Macro(i) => &i.attrs,
+            Item::ExternCrate(i) => &i.attrs,
             _ => {
                 visit::visit_item(self, item);
                 return;
@@ -199,6 +239,10 @@ impl<'ast> Visit<'ast> for Dependencies<'_> {
         }
     }
 
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        self.require(format!("extern crate {}", item.ident));
+    }
+
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         self.require(format!("mod {}", item.ident));
         visit::visit_item_mod(self, item);
@@ -224,6 +268,14 @@ impl<'ast> Visit<'ast> for Dependencies<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let path = mac
+            .path
+            .segments
+            .iter()
+            .map(|part| part.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        self.macro_path(&path);
         let name = mac.path.segments.last().unwrap().ident.to_string();
         if matches!(name.as_str(), "include" | "include_str" | "include_bytes") {
             if name == "include" {
@@ -265,6 +317,62 @@ impl<'ast> Visit<'ast> for Dependencies<'_> {
     }
 }
 
+// Local bindings and prelude types are roots too; an arbitrary external crate
+// is not. This is deliberately syntax-based, not Rust name resolution.
+#[derive(Default)]
+struct Names(BTreeSet<String>);
+
+impl<'ast> Visit<'ast> for Names {
+    fn visit_item(&mut self, item: &'ast Item) {
+        let attrs = match item {
+            Item::Fn(i) => &i.attrs,
+            Item::Const(i) => &i.attrs,
+            Item::Static(i) => &i.attrs,
+            Item::Struct(i) => &i.attrs,
+            Item::Enum(i) => &i.attrs,
+            Item::Union(i) => &i.attrs,
+            Item::Type(i) => &i.attrs,
+            Item::Trait(i) => &i.attrs,
+            Item::Mod(i) => &i.attrs,
+            Item::Impl(i) => &i.attrs,
+            _ => &[][..],
+        };
+        if test_only(attrs) {
+            return;
+        }
+        let name = match item {
+            Item::Fn(i) => Some(&i.sig.ident),
+            Item::Const(i) => Some(&i.ident),
+            Item::Static(i) => Some(&i.ident),
+            Item::Struct(i) => Some(&i.ident),
+            Item::Enum(i) => Some(&i.ident),
+            Item::Union(i) => Some(&i.ident),
+            Item::Type(i) => Some(&i.ident),
+            Item::Trait(i) => Some(&i.ident),
+            _ => None,
+        };
+        if let Some(name) = name {
+            self.0.insert(name.to_string());
+        }
+        visit::visit_item(self, item);
+    }
+
+    fn visit_pat_ident(&mut self, name: &'ast syn::PatIdent) {
+        self.0.insert(name.ident.to_string());
+        visit::visit_pat_ident(self, name);
+    }
+
+    fn visit_type_param(&mut self, name: &'ast syn::TypeParam) {
+        self.0.insert(name.ident.to_string());
+        visit::visit_type_param(self, name);
+    }
+
+    fn visit_const_param(&mut self, name: &'ast syn::ConstParam) {
+        self.0.insert(name.ident.to_string());
+        visit::visit_const_param(self, name);
+    }
+}
+
 pub(super) fn check(
     root: &Path,
     file: &str,
@@ -274,16 +382,28 @@ pub(super) fn check(
     let syntax =
         syn::parse_file(source).map_err(|error| format!("source closure: {file}: {error}"))?;
     let allowed = allowed(file);
-    let modules = allowed
+    let modules: BTreeSet<_> = allowed
         .iter()
         .filter_map(|item| item.strip_prefix("mod ").map(str::to_owned))
         .collect();
+    let mut names = Names::default();
+    names.visit_file(&syntax);
+    let mut roots = names.0;
+    roots.extend(modules.iter().cloned());
+    roots.extend("std core alloc crate super self Self bool char str u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize f32 f64 String Vec Option Some None Result Ok Err Clone Copy Default Into From Iterator Fn FnMut FnOnce PartialEq Eq Ord PartialOrd Debug derive allow cfg doc".split_whitespace().map(str::to_owned));
+    for item in &allowed {
+        if let Some(import) = item.strip_prefix("use ") {
+            roots.insert(import.split("::").next().unwrap().to_owned());
+            roots.insert(import.rsplit("::").next().unwrap().to_owned());
+        }
+    }
     let mut dependencies = Dependencies {
         root,
         file,
         hashed,
         allowed,
         modules,
+        roots,
         errors: BTreeSet::new(),
     };
     dependencies.visit_file(&syntax);
@@ -321,6 +441,33 @@ fn new_runtime_dependencies_fail_with_a_closure_message() {
             "fn input() { json!({\"file\": std::fs::read(\"fresh.yaml\")}); }",
             "file access std::fs::read",
         ),
+        ("fn input() { crate::fresh!(); }", "macro crate::fresh!"),
+        (
+            "fn input() { json!([super::fresh!()]); }",
+            "macro super::fresh!",
+        ),
+        (
+            "fn input() { open_ferry_core::fresh(); }",
+            "path open_ferry_core::fresh",
+        ),
+        ("fn input() { env!(\"INPUT\"); }", "macro env!"),
+        (
+            "fn input() { option_env!(\"INPUT\"); }",
+            "macro option_env!",
+        ),
+        (
+            "fn input() { std::process::id(); }",
+            "external input std::process::id",
+        ),
+        (
+            "fn input() { std::env::vars(); }",
+            "external input std::env::vars",
+        ),
+        (
+            "extern crate open_ferry_core as hidden;",
+            "extern crate open_ferry_core",
+        ),
+        ("macro_rules! hidden { () => {} }", "macro macro_rules!"),
     ] {
         let error = check(root, file, source, &BTreeSet::new()).unwrap_err();
         assert!(

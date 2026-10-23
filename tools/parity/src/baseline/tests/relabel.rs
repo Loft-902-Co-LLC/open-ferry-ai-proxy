@@ -33,6 +33,47 @@ fn relabel_changes_only_generator_sha256_when_both_probes_match() {
 }
 
 #[test]
+fn relabel_refuses_stale_binary_sources_without_writing() {
+    let (baseline, current) = labeled();
+    let path = file("stale-binary");
+    write(&path, &baseline).unwrap();
+    let before = fs::read(&path).unwrap();
+    let mut on_disk: BTreeMap<_, _> = sources::EMBEDDED
+        .iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+    on_disk
+        .get_mut(GENERATOR_PATHS[1])
+        .unwrap()
+        .push_str("\n// newer source\n");
+    let error = relabel_with_sources(&path, &current, &on_disk)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("binary is older") && error.contains(RELABEL),
+        "{error}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    // Checkout line endings do not make the embedded binary stale.
+    let crlf = sources::EMBEDDED
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.replace('/', "\\"),
+                source.replace("\r\n", "\n").replace('\n', "\r\n"),
+            )
+        })
+        .collect();
+    relabel_with_sources(&path, &current, &crlf).unwrap();
+    assert_eq!(
+        generator_hash(sources::EMBEDDED.iter().copied()),
+        current["generator_sha256"]
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn relabel_changed_probe_refuses_without_writing() {
     let (baseline, current) = labeled();
     let path = file("changed");
@@ -154,5 +195,39 @@ fn export_and_relabel_cli_are_offline_and_cannot_mix_with_runs() {
             .map(str::to_owned)
         )
         .is_err()
+    );
+    for extra in [
+        ["--seed", "1"],
+        ["--random", "5000"],
+        ["--show", "10"],
+        ["--go", "go"],
+    ] {
+        let error = crate::Args::parse(
+            ["--relabel-baseline", "out.json"]
+                .into_iter()
+                .chain(extra)
+                .map(str::to_owned),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.contains(extra[0]) && error.contains("fixed"),
+            "{error}"
+        );
+    }
+    assert!(
+        crate::Args::parse(
+            [
+                "--export-config-cases",
+                "out.json",
+                "--seed",
+                "1",
+                "--random",
+                "25"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+        )
+        .is_ok()
     );
 }
