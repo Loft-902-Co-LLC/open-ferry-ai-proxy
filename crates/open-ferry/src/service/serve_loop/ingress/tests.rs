@@ -1,5 +1,68 @@
 use super::*;
 
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(expected = "pending delivery bytes must have a progress timestamp")]
+async fn pending_delivery_without_progress_names_the_invariant() {
+    let config = IngressConfig::default();
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), Instant::now());
+    let flight = Flight::new(traffic.clone());
+    traffic
+        .state()
+        .deliveries
+        .get_mut(&flight.id)
+        .unwrap()
+        .pending = 1;
+    traffic.due();
+}
+
+#[cfg(not(debug_assertions))]
+#[tokio::test(start_paused = true)]
+async fn missing_delivery_progress_preserves_other_deadlines() {
+    let config = IngressConfig {
+        write_stall_timeout: Some(Duration::from_secs(2)),
+        body_total_timeout: Some(Duration::from_secs(4)),
+        ..IngressConfig::default()
+    };
+    let started = Instant::now();
+    let traffic = Traffic::new(config.clone(), Ingress::new(config, 64), started);
+    traffic.received(b"GET / HTTP/1.1\r\n\r\n");
+    let broken = Flight::new(traffic.clone());
+    traffic
+        .state()
+        .deliveries
+        .get_mut(&broken.id)
+        .unwrap()
+        .pending = 1;
+    let healthy = Flight::new(traffic.clone());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let queued = Delivery::new(Bytes::from_static(b"healthy"), healthy.clone());
+    assert_eq!(
+        traffic.due(),
+        Some((
+            started + Duration::from_secs(3),
+            "response write progress",
+            None
+        ))
+    );
+    traffic.pending_write(true);
+    let socket_deadline = Instant::now() + Duration::from_secs(2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(traffic.due().unwrap().0, socket_deadline);
+    drop((queued, healthy));
+    assert_eq!(traffic.due().unwrap().0, socket_deadline);
+    traffic.pending_write(false);
+    broken.close_after_response();
+    assert_eq!(
+        traffic.due(),
+        Some((
+            Instant::now() + Duration::from_secs(9),
+            "drain deadline",
+            None
+        ))
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn http1_delivery_progress_and_idle_deadlines_rearm_a_sleeping_watcher() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
