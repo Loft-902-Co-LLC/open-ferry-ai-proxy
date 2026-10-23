@@ -469,7 +469,8 @@ fn prepare_update_checks(
     let make_fetch = update_checks::http_fetch();
     // Each check makes its own downloader from the config in force, so a
     // `proxy-url` that can't be used yet only fails the checks it is
-    // in force for.
+    // in force for. HttpFetch validates that setting here but defers its
+    // HTTP client until a check actually downloads; boot starts no client.
     let fetch = match make_fetch(&config.proxy_url).or_else(|_| make_fetch("")) {
         Ok(fetch) => fetch,
         Err(error) => {
