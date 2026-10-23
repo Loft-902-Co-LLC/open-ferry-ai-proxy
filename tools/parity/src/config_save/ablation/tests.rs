@@ -253,10 +253,9 @@ fn saved_certifier_cases_use_independent_go_expectations() {
     for (name, yes, reason, checks) in &results {
         assert_eq!(
             *yes,
-            matches!(
-                name.as_str(),
-                "random-30-0" | "canonical-paragraph-positive"
-            ),
+            // The former 30-0 positive has a placement on a loadable
+            // step that the two narrow owner rules do not license.
+            name == "canonical-paragraph-positive",
             "{results:?}"
         );
         assert!(
@@ -329,4 +328,59 @@ fn unloadable_empty_mapping_bytes_require_bound_counts_and_source_owners() {
     );
     assert_eq!(c, [true, true, false, true, true]);
     assert!(!accepted(c));
+}
+
+#[test]
+fn proof_failures_locate_the_first_snapshot_byte_and_nested_value() {
+    let go = json!({"files":["auth-dir: /ok\n","auth-dir: /éx\n"]});
+    let replay = Replay {
+        output: json!({"files":["auth-dir: /ok\n","auth-dir: /éy\n"]}),
+        traces: vec![],
+    };
+    assert_eq!(
+        diagnostics::no_reproduction(&go, &replay, None),
+        json!({"check":1,"step":1,"file":1,"reason":"snapshot_bytes","offset":"auth-dir: /éx\n".find('x').unwrap()})
+    );
+    let case = Case::new("diagnostic", "", "")
+        .with_options(json!({"file":"auth-dir: /old\n","steps":[{},{}]}));
+    let expected =
+        json!({"files":["auth-dir: /ok\n","plugins:\n  configs:\n    demo:\n      text: old\n"]});
+    let protected =
+        json!({"files":["auth-dir: /ok\n","plugins:\n  configs:\n    demo:\n      text: new\n"]});
+    let p = Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &expected,
+        mask: 1,
+        matches: &[(1, true)],
+    };
+    assert_eq!(
+        diagnostics::failures(p, [true, false, true, true, true]),
+        vec![
+            json!({"check":2,"step":1,"file":1,"reason":"value_path","path":["plugins","configs","demo","text"]})
+        ]
+    );
+}
+
+#[test]
+fn proof_comment_failure_names_the_text_node_and_slot() {
+    let source = "# own\na: 1\nb: 2\n";
+    let case = Case::new("diagnostic", "", "").with_options(json!({"file":source,"steps":[{},{}]}));
+    let protected = json!({"files":[source,"a: 1 # own\nb: 2\n"]});
+    let replay = Replay {
+        output: json!({"files":[source,source]}),
+        traces: vec![],
+    };
+    let failure = diagnostics::comments(&case, &protected, &replay).unwrap_err();
+    assert_eq!(failure["check"], 3);
+    assert_eq!(failure["step"], 1);
+    assert_eq!(failure["file"], 1);
+    assert_eq!(failure["reason"], "owner_budget");
+    assert_eq!(failure["text"], "# own");
+    assert_eq!(failure["owner"]["node"], "value");
+    assert_eq!(failure["owner"]["slot"], "line");
+    assert_eq!(failure["owner"]["path"][0]["key"], "a");
 }
