@@ -553,6 +553,9 @@ encode/reparse. Every line has a source-key/entry binding and one parsed owner
 slot established by an independent layout. Existing equal-text comments cannot
 consume that new budget. Archive text in the actual Go output is insufficient
 evidence; altered text, duplicates or another owner still fail the proof.
+The archive must decode to the original source values, and the computed owner
+is required even when Go places equal text elsewhere. A lossy re-encode gets
+no generated-comment budget.
 
 Generated-comment identities are rebound at the parsed comment's own position,
 including wrapped scalars. A canonical-version multipart head gets a separating
