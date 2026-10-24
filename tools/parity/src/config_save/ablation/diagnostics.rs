@@ -173,7 +173,7 @@ pub(super) fn comments(
             .ok_or_else(|| at(3, i, json!({"reason":"protected_snapshot_shape"})))?;
         let g = gfiles.get(i).and_then(Value::as_str);
         let analysis = if let Some(g) = g.filter(|g| Config::load_bytes(g.as_bytes()).is_ok()) {
-            core::comment_ownership_analysis(source, Some(g), r, &[])
+            ownership::analyze(case, i, source, Some(g), r, &[], true)
         } else if let Some(trace) = replay.traces.get(i) {
             let bytes = if let Some(g) = g {
                 g.as_bytes()
@@ -195,9 +195,9 @@ pub(super) fn comments(
                 .map(|c| String::from_utf8(c.bytes))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| at(3, i, json!({"reason":"comment_trace_utf8"})))?;
-            core::comment_ownership_analysis(source, None, r, &written)
+            ownership::analyze(case, i, source, None, r, &written, true)
         } else if g.is_none() {
-            core::unobserved_comment_ownership(source, r)
+            ownership::analyze(case, i, source, None, r, &[], false)
         } else {
             return Err(at(3, i, json!({"reason":"missing_comment_trace"})));
         };

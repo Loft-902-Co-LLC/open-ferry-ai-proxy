@@ -219,11 +219,11 @@ fn placement_right(case: &Case, protected: &Value, replay: &Replay) -> bool {
             .and_then(Value::as_str)
             .filter(|g| Config::load_bytes(g.as_bytes()).is_ok())
         {
-            core::retained_comment_ownership(source, g, r)
+            ownership::analyze(case, i, source, Some(g), r, &[], true).accepted()
         } else if gfiles.get(i).is_some() || replay.traces.get(i).is_some() {
-            core::retained_unloadable_comments(source, r, &[])
+            ownership::analyze(case, i, source, None, r, &[], true).accepted()
         } else {
-            core::unobserved_comment_ownership(source, r).accepted()
+            ownership::analyze(case, i, source, None, r, &[], false).accepted()
         };
         if !good {
             return false;
@@ -430,6 +430,7 @@ pub fn certify(
     let mut trials = Vec::new();
     let mut oracle = None;
     let mut last = None;
+    let mut bound_case = None;
     for mask in masks {
         // A proper reproducing subset makes this superset non-minimal,
         // regardless of its bytes. Record that exclusion explicitly.
@@ -498,8 +499,12 @@ pub fn certify(
             oracle = Some((clean, expectation));
         }
         let (clean, expectation) = oracle.as_ref().unwrap();
+        if bound_case.is_none() && diagnostics::comments(case, protected, &ablated).is_err() {
+            bound_case = Some(ownership::bind(case, protected, &mut run_go)?);
+        }
+        let proof_case = bound_case.as_ref().unwrap_or(case);
         let proof = Proof {
-            case,
+            case: proof_case,
             go,
             protected,
             ablated: &ablated,
@@ -511,13 +516,14 @@ pub fn certify(
         let checks = checks(proof);
         let failures = diagnostics::failures(proof, checks);
         let owner_rules =
-            checks[2].then(|| diagnostics::comments(case, protected, &ablated).unwrap());
+            checks[2].then(|| diagnostics::comments(proof_case, protected, &ablated).unwrap());
         trials.push(
             json!({"mask":mask,"checks":checks,"failures":failures,"owner_rules":owner_rules}),
         );
         let accepted = accepted(checks);
         let mut evidence = json!({"kind":if accepted {"certified-protection-ablation"} else {"uncertified-protection-ablation"},"case":case.name,"options":case.options,"original_go":go,"go_parse_trace":traced,"protected_rust":protected,"ablated_rust":ablated.output,"ablated_traces":ablated.traces,"comment_free_options":clean.options,"comment_free_go":expectation,"subset":ALL.iter().enumerate().filter(|(i,_)|mask&(1<<i)!=0).map(|(_,p)|format!("{p:?}")).collect::<Vec<_>>(),"subset_matches":matches,"nonminimal_supersets":dominated,"trials":trials,"checks":checks});
         evidence["failures"] = json!(failures);
+        evidence["source_identities"] = proof_case.options["_ownership_evidence"].clone();
         if accepted {
             evidence["owner_rules"] = json!(owner_rules.unwrap());
             return Ok(Attempt {
@@ -526,7 +532,7 @@ pub fn certify(
             });
         }
         let invariant_failure =
-            !checks[1] || !checks[3] || !placement_right(case, protected, &ablated);
+            !checks[1] || !checks[3] || !placement_right(proof_case, protected, &ablated);
         last = Some(evidence);
         if invariant_failure {
             // Every reproducing subset has identical Go snapshots; checks 2,
@@ -551,6 +557,10 @@ pub fn certify(
 }
 
 mod diagnostics;
+mod ownership;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ownership_tests;

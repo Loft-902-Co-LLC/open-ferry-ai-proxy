@@ -269,6 +269,19 @@ The replies are real Codex event streams, so each one is then run through every 
 
 ## Config-save baseline
 
+The comment-ownership certifier can also use a per-step source-identity replay.
+The Go harness extracts the pinned save/normalization tree edits and runs them
+on an isolated parsed source, carrying opaque occurrence IDs through the real
+merge, list reorder and layout operations. Generated nodes have no source IDs.
+The proof binds the complete source bytes and operation, and replaces a source
+slot only with its unique surviving destination (path, key/value/item side,
+and head/line/foot slot). Equal comment text never establishes a destination.
+Deleted identities receive no relocation slot; an unmoved path keeps the strict
+sequence-identity rule. Counts, ordering, value proofs, complete byte binding,
+minimality, and the comparison outside protected comments still apply. The
+oracle never reads the protected output. Its evidence is saved with the proof;
+an unavailable oracle supplies no allowance.
+
 The CI script passes `--baseline tools/parity/baseline/config-save.json`.
 Without that option the tool keeps its strict exit verdict. The baseline
 applies only after config-save certification fails: those cases remain

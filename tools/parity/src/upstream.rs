@@ -118,6 +118,31 @@ impl Upstream {
                 copy.to_string_lossy().into_owned().into(),
             );
         }
+        // The ownership oracle calls the pin's tree edits before emission.
+        // Extract operation bodies rather than maintaining a second migration
+        // algorithm. Exact anchors deliberately fail closed on upstream drift.
+        let tree_file = std::path::absolute(work_dir.join("ownership-tree.go"))?;
+        fs::write(&tree_file, ownership_tree(&dir)?)?;
+        replace.insert(
+            dir.join("internal/config/zz_parity_ownership_tree.go")
+                .to_string_lossy()
+                .into_owned(),
+            tree_file.to_string_lossy().into_owned().into(),
+        );
+        for name in ["ownership.go", "ownership_test.go"] {
+            replace.insert(
+                dir.join("internal/config")
+                    .join(format!("zz_parity_{name}"))
+                    .to_string_lossy()
+                    .into_owned(),
+                source
+                    .join("config")
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned()
+                    .into(),
+            );
+        }
         let trace_file = std::path::absolute(work_dir.join("trace-unmarshal.go"))?;
         fs::write(&trace_file, include_str!("../go/config/trace.go"))?;
         replace.insert(
@@ -257,6 +282,52 @@ impl Upstream {
         }
         Ok(results)
     }
+}
+
+fn ownership_tree(dir: &Path) -> Result<String, Box<dyn Error>> {
+    fn between<'a>(text: &'a str, start: &str, end: &str) -> Result<&'a str, Box<dyn Error>> {
+        if text.matches(start).count() != 1 || text.matches(end).count() != 1 {
+            return Err("ownership oracle: pinned tree-edit anchors changed".into());
+        }
+        let tail = text.split_once(start).unwrap().1;
+        Ok(tail
+            .split_once(end)
+            .ok_or("ownership oracle: reversed anchors")?
+            .0)
+    }
+    let yaml =
+        fs::read_to_string(dir.join("internal/config/config_yaml.go"))?.replace("\r\n", "\n");
+    let v8 = fs::read_to_string(dir.join("internal/config/config_v8.go"))?.replace("\r\n", "\n");
+    let save = between(
+        &yaml,
+        "\tlayout := deepCopyNode(original.Content[0])",
+        "\tNormalizeCollectionNodeStyles(original.Content[0])",
+    )?;
+    let save = format!("\tlayout := deepCopyNode(root){save}")
+        .replace("original.Content[0]", "root")
+        .replace("(*legacyConfig)(persistCfg)", "(*legacyConfig)(cfg)")
+        .replace("return err", "return nil, err")
+        .replace("return fmt.Errorf", "return nil, fmt.Errorf")
+        .replace(
+            "\t// Keep obsolete roots",
+            "\tparityClearGenerated(&generated)\n\t// Keep obsolete roots",
+        );
+    let normalize = between(
+        &v8,
+        "\tif _, err := flattenV8(root); err != nil {",
+        "// IsV8ConfigLayout identifies",
+    )?;
+    let normalize = format!("\tif _, err := flattenV8(root); err != nil {{{normalize}")
+        .replace("\tdoc.Content[0] = root\n", "")
+        .replace("return nil, false, err", "return nil, err")
+        .replace("return data, false, nil", "return root, nil")
+        .replace(
+            "\tout, err := yaml.Marshal(&doc)\n\treturn out, true, err",
+            "\treturn root, nil",
+        );
+    Ok(format!(
+        "package config\nimport (\"fmt\"; \"gopkg.in/yaml.v3\")\nfunc paritySaveTree(root *yaml.Node, cfg *Config, data []byte, migrating bool)(*yaml.Node,error){{\n{save}\nif migrating {{ return parityNormalizeTree(root,true) }}\nreturn root,nil\n}}\nfunc parityNormalizeTree(root *yaml.Node,migrate bool)(*yaml.Node,error){{\n{normalize}"
+    ))
 }
 
 /// Whether `translator` is an Interactions harness key: one whose package or

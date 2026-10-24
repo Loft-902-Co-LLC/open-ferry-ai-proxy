@@ -40,6 +40,8 @@ struct Occurrence {
     entry_line: bool,
     /// An index is a source witness only while its enclosing sequences agree.
     sequences: Vec<Value>,
+    /// Exact source identity destinations bypass only sequence-index stability.
+    relocated: bool,
 }
 fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
     if !super::single_document(text) {
@@ -88,6 +90,7 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
                         && n.line == key_line
                         && n.line_comment_line == key_line,
                     sequences: sequences.clone(),
+                    relocated: false,
                 });
             }
         }
@@ -171,9 +174,10 @@ fn owner_failure(s: &[Occurrence], g: &[Occurrence], r: &[Occurrence]) -> Option
     let stable: Vec<_> = s
         .iter()
         .filter(|source| {
-            r.iter()
-                .find(|target| target.owner == source.owner)
-                .is_none_or(|target| target.sequences == source.sequences)
+            source.relocated
+                || r.iter()
+                    .find(|target| target.owner == source.owner)
+                    .is_none_or(|target| target.sequences == source.sequences)
         })
         .cloned()
         .collect();
@@ -389,13 +393,13 @@ pub fn comment_ownership_analysis(
     protected: &str,
     written: &[String],
 ) -> CommentOwnership {
-    analyze_comments(source, go, protected, written, go.is_none())
+    analyze_comments(source, go, protected, written, go.is_none(), None)
 }
 
 /// No Go snapshot or independently bound rejected emission exists at this
 /// step. Source ownership still applies, but rule (a) has no witness.
 pub fn unobserved_comment_ownership(source: &str, protected: &str) -> CommentOwnership {
-    analyze_comments(source, None, protected, &[], false)
+    analyze_comments(source, None, protected, &[], false, None)
 }
 
 fn analyze_comments(
@@ -404,14 +408,23 @@ fn analyze_comments(
     protected: &str,
     written: &[String],
     observed_unloadable: bool,
+    provenance: Option<(&Value, &Value)>,
 ) -> CommentOwnership {
     let failed = |failure| CommentOwnership {
         failure: Some(failure),
         rules: vec![],
     };
-    let Some(s) = inventory(source, true) else {
+    let Some(mut s) = inventory(source, true) else {
         return failed(json!({"reason":"source_comments_unparseable"}));
     };
+    let mut relocated = false;
+    if let Some((operation, evidence)) = provenance {
+        let Some(mapped) = relocated_source(source, operation, evidence, &s) else {
+            return failed(json!({"reason":"source_identity_binding"}));
+        };
+        relocated = mapped.iter().any(|c| c.relocated);
+        s = mapped;
+    }
     let Some(r) = inventory(protected, false) else {
         return failed(json!({"reason":"protected_comments_unparseable"}));
     };
@@ -463,7 +476,11 @@ fn analyze_comments(
         }
         return CommentOwnership {
             failure: None,
-            rules: vec![],
+            rules: if relocated {
+                vec!["upstream-source-identity-relocation"]
+            } else {
+                vec![]
+            },
         };
     }
     let empty = vec![];
@@ -471,7 +488,11 @@ fn analyze_comments(
     let Some(original_failure) = owner_failure(&s, gitems, &r) else {
         return CommentOwnership {
             failure: None,
-            rules: vec![],
+            rules: if relocated {
+                vec!["upstream-source-identity-relocation"]
+            } else {
+                vec![]
+            },
         };
     };
     let mut remaining_failure = original_failure;
@@ -501,6 +522,9 @@ fn analyze_comments(
         }
         let mut moves = vec![];
         let mut rules = vec![];
+        if relocated {
+            rules.push("upstream-source-identity-relocation");
+        }
         if mask & 1 != 0 {
             moves.extend(a.clone());
             rules.push("unloadable-entry-line-to-own-head");
@@ -529,6 +553,118 @@ fn analyze_comments(
     }
     failed(remaining_failure)
 }
+
+// Evidence comes from a separate Go source-tree replay. The full source and
+// operation bind it to this step. Slots name a parsed source owner and its
+// occurrence ordinal, never an equal comment found elsewhere. Only a unique
+// surviving destination can replace a slot; deleted/unmoved identities get no
+// new budget. All count, order, Go-owner and existing promotion checks remain.
+fn relocated_source(
+    source: &str,
+    operation: &Value,
+    evidence: &Value,
+    items: &[Occurrence],
+) -> Option<Vec<Occurrence>> {
+    if evidence["source"] != source
+        || evidence["operation"] != *operation
+        || evidence.get("unavailable").is_some()
+    {
+        return None;
+    }
+    let moves = evidence["moves"].as_array()?;
+    let mut ordinals = BTreeMap::<Owner, usize>::new();
+    let mut result = items.to_vec();
+    for c in &mut result {
+        let ordinal = ordinals.entry(c.owner.clone()).or_default();
+        let destinations: BTreeSet<_> = moves
+            .iter()
+            .filter(|m| {
+                m["source"] == c.owner.json() && m["ordinal"].as_u64() == Some(*ordinal as u64)
+            })
+            .map(|m| m["destination"].to_string())
+            .collect();
+        *ordinal += 1;
+        if destinations.len() != 1 {
+            continue;
+        }
+        let destination: Value = serde_json::from_str(destinations.first()?).ok()?;
+        let owner = parse_owner(&destination)?;
+        if owner.path != c.owner.path {
+            c.owner = owner;
+            c.relocated = true;
+        }
+    }
+    Some(result)
+}
+
+fn parse_owner(value: &Value) -> Option<Owner> {
+    Some(Owner {
+        path: value["path"]
+            .as_array()?
+            .iter()
+            .map(|p| {
+                if let Some(i) = p["index"].as_u64() {
+                    Some(Part::Index(usize::try_from(i).ok()?))
+                } else {
+                    Some(Part::Key(
+                        p["tag"].as_str()?.into(),
+                        p["key"].as_str()?.into(),
+                    ))
+                }
+            })
+            .collect::<Option<_>>()?,
+        side: match value["node"].as_str()? {
+            "document" => Side::Document,
+            "root" => Side::Root,
+            "key" => Side::Key,
+            "value" => Side::Value,
+            "item" => Side::Item,
+            _ => return None,
+        },
+        slot: match value["slot"].as_str()? {
+            "head" => Slot::Head,
+            "line" => Slot::Line,
+            "foot" => Slot::Foot,
+            _ => return None,
+        },
+    })
+}
+
+/// Supplement strict ownership only with independently replayed upstream node
+/// destinations. An unobserved Go step still requires every source occurrence.
+pub fn comment_ownership_with_provenance(
+    source: &str,
+    go: Option<&str>,
+    protected: &str,
+    written: &[String],
+    operation: &Value,
+    evidence: &Value,
+    observed: bool,
+) -> CommentOwnership {
+    let strict = analyze_comments(source, go, protected, written, observed, None);
+    if strict.accepted() {
+        return strict;
+    }
+    if evidence["source"] != source
+        || evidence["operation"] != *operation
+        || evidence.get("unavailable").is_some()
+        || !evidence["moves"].is_array()
+    {
+        return strict;
+    }
+    let refined = analyze_comments(
+        source,
+        go,
+        protected,
+        written,
+        observed,
+        Some((operation, evidence)),
+    );
+    // A failed supplementary proof retains the original diagnostic kind. Only
+    // a complete proof changes a verdict; partial provenance never reclassifies
+    // a still-unproved case or obscures its original failure.
+    if refined.accepted() { refined } else { strict }
+}
 pub fn comment_occurrences(text: &str, comment: &str, expand: bool) -> Option<usize> {
     Some(
         inventory(text, expand)?
@@ -547,6 +683,45 @@ pub fn retained_unloadable_comments(source: &str, protected: &str, ablated: &[St
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn owner(keys: &[&str], node: &str, slot: &str) -> Value {
+        json!({"path":keys.iter().map(|k|json!({"key":k,"tag":"!!str"})).collect::<Vec<_>>(),"node":node,"slot":slot})
+    }
+    #[test]
+    fn upstream_relocations_require_exact_source_operation_destination_and_multiplicity() {
+        let source = "disable-cooling: false # own\ndebug: false # stay\n";
+        let operation = json!({"op":"save","migrate":true});
+        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["disable-cooling"],"value","line"),"ordinal":0,"destination":owner(&["routing","cooldown","disable-cooling"],"value","line")}]});
+        let protected =
+            "routing:\n  cooldown:\n    disable-cooling: false # own\ndebug: false # stay\n";
+        let proves = |s: &str, r: &str, op: &Value, proof: &Value| {
+            comment_ownership_with_provenance(s, None, r, &[], op, proof, true).accepted()
+        };
+        assert!(proves(source, protected, &operation, &evidence));
+        for wrong in [
+            "routing:\n  cooldown:\n    disable-cooling: false\ndebug: false # own\n# stay\n",
+            "routing:\n  cooldown:\n    disable-cooling: false # own\n    # own\ndebug: false # stay\n",
+            "routing:\n  cooldown:\n    disable-cooling: false # stay\ndebug: false # own\n",
+        ] {
+            assert!(!proves(source, wrong, &operation, &evidence));
+        }
+        assert!(!proves(
+            &source.replace("false # own", "true # own"),
+            protected,
+            &operation,
+            &evidence
+        ));
+        assert!(!proves(source, protected, &json!({"op":"save"}), &evidence));
+        // No destination for a deleted identity, including equal-text donors.
+        let deleted = "disable-cooling: false # own\ngone: x # own\n";
+        let mut proof = evidence.clone();
+        proof["source"] = deleted.into();
+        let duplicated = "routing:\n  cooldown:\n    disable-cooling: false # own\n    # own\n";
+        assert!(!proves(deleted, duplicated, &operation, &proof));
+        // A slot-only change on an unmoved source keeps the strict rule.
+        let unchanged = "# own\nx: 1\n";
+        let proof = json!({"source":unchanged,"operation":operation,"moves":[{"source":owner(&["x"],"key","head"),"ordinal":0,"destination":owner(&["x"],"value","line")}]});
+        assert!(!proves(unchanged, "x: 1 # own\n", &operation, &proof));
+    }
     #[test]
     fn unloadable_output_never_supplies_a_comment_owner() {
         let source = "auth-dir: /old # own\ndebug: false\n";

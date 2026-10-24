@@ -540,6 +540,13 @@ represents only as an opaque `AnyMap` marker; two such markers do not prove
 their values equal. Failed proofs are saved and counted; product builds contain none of
 the switches or traces and keep every protection. The Round 8 empty-collection foot-comment fix is outside this diagnostic switch set and remains enabled in every ablation; cases requiring its removal stay Different.
 
+For the upstream relocation root class (B1), the offline certifier independently
+replays the pinned tree edits on source-node identities. Each allowance is
+bound to the exact source, operation, surviving destination and comment slot.
+Generated or deleted identities supply no relocation slot, and equal comment
+text cannot prove a move. Unmoved owners retain the strict sequence filter;
+all value, multiplicity, ordering, byte-binding and minimality checks remain.
+
 Generated-comment identities are rebound at the parsed comment's own position,
 including wrapped scalars. A canonical-version multipart head gets a separating
 blank line only when a faithful reparse would move its complete ordered block

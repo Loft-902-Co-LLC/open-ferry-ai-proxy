@@ -17,8 +17,9 @@ pub use clean::{
 
 mod comments;
 pub use comments::{
-    CommentOwnership, comment_occurrences, comment_ownership_analysis, retained_comment_ownership,
-    retained_unloadable_comments, unobserved_comment_ownership,
+    CommentOwnership, comment_occurrences, comment_ownership_analysis,
+    comment_ownership_with_provenance, retained_comment_ownership, retained_unloadable_comments,
+    unobserved_comment_ownership,
 };
 
 mod folded;
