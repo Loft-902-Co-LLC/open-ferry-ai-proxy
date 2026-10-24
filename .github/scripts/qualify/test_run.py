@@ -586,6 +586,25 @@ class PublishedPreconditions(unittest.TestCase):
                 self.assertTrue(json.loads((self.work / "diagnostics/attestation.json").read_text())["verified"])
                 self.assertTrue(qualification.yaml.safe_load(q.config.read_text())["observability"]["logs"]["debug"])
 
+    def test_windows_machine_install_leaves_the_auth_directory_to_the_service(self):
+        def run(args, **kwargs):
+            if args[0] == "powershell.exe":
+                return Mock(stdout="Checking the build provenance attestation with gh", returncode=0)
+            return Mock(stdout="open-ferry 1.2.3" if args[-1] == "--version"
+                        else "LocalSystem -supervise -data-dir", returncode=0)
+        q = self.install_fixture("Windows", "machine")
+        auth = q.data / "auth"
+        with patch.object(qualification, "command", side_effect=run):
+            q.install(None)
+        self.assertFalse(auth.exists())
+        self.assertEqual(qualification.yaml.safe_load(q.config.read_text())["oauth"]["auth-dir"], str(auth))
+        q = self.install_fixture("Windows", "machine")
+        auth.mkdir()
+        (auth / "stale.json").write_text("{}\n", newline="\n")
+        with patch.object(qualification, "command", side_effect=run), \
+                self.assertRaisesRegex(RuntimeError, "must be missing or empty"):
+            q.install(None)
+
     def test_successful_installer_without_attestation_is_red_before_service_start(self):
         for output in ("installed successfully", "Checking the build provenance attestation with gh; wasn't checked"):
             q = self.install_fixture()
