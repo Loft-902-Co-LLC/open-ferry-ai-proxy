@@ -27,6 +27,7 @@ use super::{gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, openai_body, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
+#[cfg(test)]
 use crate::json;
 use crate::state::AppState;
 use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
@@ -174,7 +175,7 @@ async fn stream_chat(
     let keepalive = settings.config.streaming.keepalive;
     let pre_ft = crate::stream::pre_first_token_interval(&settings.config.streaming);
     drop(settings);
-    let commit_headers = crate::stream::CommitHeaders::default();
+    let commit_headers = crate::stream::CommitHeaders::new(pre_ft);
     let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = start.await;
@@ -222,10 +223,11 @@ struct ChatWriter {
 
 impl StreamWriter for ChatWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
-        if let Some(error) = chunk_terminal_error(&chunk) {
+        let classification = classify_chunk(&chunk);
+        if let Some(error) = classification.terminal_error {
             self.terminal_chunk_error = Some(error);
             self.saw_finish_reason = true;
-        } else if !self.saw_finish_reason && chunk_has_finish_reason(&chunk) {
+        } else if classification.finish_reason {
             self.saw_finish_reason = true;
         }
         out.extend_from_slice(b"data: ");
@@ -261,6 +263,49 @@ impl StreamWriter for ChatWriter {
     }
 }
 
+/// Everything the Chat writer needs from one payload classification.
+struct ChunkClassification {
+    terminal_error: Option<ErrorMessage>,
+    finish_reason: bool,
+}
+
+fn classify_chunk(chunk: &[u8]) -> ChunkClassification {
+    let chunk = go::trim_space(chunk);
+    let chunk = chunk
+        .strip_prefix(b"data:")
+        .map(go::trim_space)
+        .unwrap_or(chunk);
+    let [choices, error] = crate::sse_check::fields(chunk, ["choices", "error"]);
+    let terminal_error = if choices.is_none() && error.is_some_and(|error| error.is_object()) {
+        let message = error
+            .and_then(|error| error.get("message"))
+            .map(|value| value.str())
+            .unwrap_or_default();
+        let message = if message.is_empty() {
+            String::from_utf8_lossy(chunk).into_owned()
+        } else {
+            message
+        };
+        Some(ErrorMessage::new(400, message))
+    } else {
+        None
+    };
+    let finish_reason = terminal_error.is_some()
+        || choices.is_some_and(|choices| {
+            crate::sse_check::any_choice(choices, |choice| {
+                choice
+                    .get("finish_reason")
+                    .is_some_and(|reason| !reason.is_null() && !reason.str().is_empty())
+            })
+        });
+    ChunkClassification {
+        terminal_error,
+        finish_reason,
+    }
+}
+
+// The original lookups remain independent references for equivalence tests.
+#[cfg(test)]
 fn chunk_terminal_error(chunk: &[u8]) -> Option<ErrorMessage> {
     let mut chunk = go::trim_space(chunk);
     if let Some(rest) = chunk.strip_prefix(b"data:") {
@@ -285,6 +330,7 @@ fn chunk_terminal_error(chunk: &[u8]) -> Option<ErrorMessage> {
 /// Whether a chunk, with or without its `data:` prefix, has a choice whose
 /// `finish_reason` is there and neither `null` nor empty
 /// (`chunkHasFinishReason`).
+#[cfg(test)]
 fn chunk_has_finish_reason(chunk: &[u8]) -> bool {
     if chunk_terminal_error(chunk).is_some() {
         return true;
@@ -388,3 +434,6 @@ mod stop_reason_tests {
         assert!(chunk_terminal_error(br#"{"choices":[],"error":{"message":"context"}}"#).is_none());
     }
 }
+
+#[cfg(test)]
+pub(crate) mod classification_tests;

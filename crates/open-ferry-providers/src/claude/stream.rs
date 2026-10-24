@@ -145,6 +145,47 @@ pub(crate) struct StreamSetup {
     pub(crate) web_search: Option<super::web_search::Scope>,
 }
 
+const OBSERVATION_REUSE_LIMIT: usize = 8 << 10;
+
+/// Joins nonempty data lines inside the observation's own storage. Writes
+/// always trail reads, so no temporary line list, payload, or bare copy is
+/// needed. These bytes are observation-only; forwarded bytes are untouched.
+fn event_payload(raw: &mut [u8]) -> (&[u8], bool) {
+    let mut start = 0;
+    let mut written = 0;
+    let mut found = false;
+    while start < raw.len() {
+        let end = raw[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(raw.len(), |n| start + n);
+        let range = trim_space(&raw[start..end])
+            .strip_prefix(b"data:")
+            .map(trim_space)
+            .filter(|data| !data.is_empty())
+            .map(|data| {
+                let offset = data.as_ptr() as usize - raw.as_ptr() as usize;
+                offset..offset + data.len()
+            });
+        if let Some(range) = range {
+            if found {
+                raw[written] = b'\n';
+                written += 1;
+            }
+            let len = range.len();
+            raw.copy_within(range, written);
+            written += len;
+            found = true;
+        }
+        start = end + 1;
+    }
+    if found {
+        (&raw[..written], false)
+    } else {
+        (raw, true)
+    }
+}
+
 /// The state of one stream.
 struct State {
     reader: LineReader,
@@ -218,19 +259,20 @@ impl State {
     }
 
     fn observe_event(&mut self) {
-        let raw = std::mem::take(&mut self.observation);
-        if std::mem::take(&mut self.observation_overflow) {
-            return;
+        let mut raw = std::mem::take(&mut self.observation);
+        if !std::mem::take(&mut self.observation_overflow) {
+            self.observe_raw(&mut raw);
         }
-        let data: Vec<_> = raw
-            .split(|b| *b == b'\n')
-            .filter_map(|line| trim_space(line).strip_prefix(b"data:"))
-            .map(trim_space)
-            .filter(|data| !data.is_empty())
-            .collect();
-        let bare = data.is_empty();
-        let payload = if bare { raw.clone() } else { data.join(&b'\n') };
-        let Ok(event) = serde_json::from_slice::<Value>(trim_space(&payload)) else {
+        raw.clear();
+        // Reuse ordinary events, but don't retain a large event's peak.
+        if raw.capacity() <= OBSERVATION_REUSE_LIMIT {
+            self.observation = raw;
+        }
+    }
+
+    fn observe_raw(&mut self, raw: &mut [u8]) {
+        let (payload, bare) = event_payload(raw);
+        let Ok(event) = serde_json::from_slice::<Value>(trim_space(payload)) else {
             return;
         };
         match str_at(&event, "type").as_str() {
@@ -239,8 +281,7 @@ impl State {
                 self.completed = true
             }
             "error" if !bare && self.stream_error.is_none() => {
-                self.stream_error =
-                    Some(String::from_utf8_lossy(trim_space(&payload)).into_owned());
+                self.stream_error = Some(String::from_utf8_lossy(trim_space(payload)).into_owned());
             }
             _ => {}
         }
@@ -347,6 +388,76 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The original event extraction, kept independent of the in-place pass.
+    fn reference_payload(raw: &[u8]) -> (Vec<u8>, bool) {
+        let data: Vec<_> = raw
+            .split(|b| *b == b'\n')
+            .filter_map(|line| trim_space(line).strip_prefix(b"data:"))
+            .map(trim_space)
+            .filter(|data| !data.is_empty())
+            .collect();
+        let bare = data.is_empty();
+        (
+            if bare {
+                raw.to_vec()
+            } else {
+                data.join(&b'\n')
+            },
+            bare,
+        )
+    }
+
+    #[test]
+    fn in_place_observation_matches_original_event_payloads() {
+        let mut corpus = vec![
+            "".to_owned(),
+            "data:".to_owned(),
+            "data: \r\n\n".to_owned(),
+            "data:{\"type\":\"message_stop\"}\r\n\r\n".to_owned(),
+            "event: message_stop\ndata: {\"type\":\ndata: \"message_stop\"}\n\n".to_owned(),
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"busy\"}}\n\n"
+                .to_owned(),
+            "event: ping\ndata: {\"type\":\"ping\"}\n\n".to_owned(),
+            "{\"type\":\"message\",\"stop_reason\":\"end_turn\"}\n".to_owned(),
+            "data: {truncated\n\ndata: \n".to_owned(),
+            "\u{3000}data: {}\u{a0}\r\ndata:\ndata: []\n".to_owned(),
+            format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"text\":\"{}\"}}\n\n",
+                "x".repeat(2 << 20)
+            ),
+        ];
+        let tokens = [
+            "data:",
+            "data: ",
+            "event: ping",
+            "{}",
+            "\n",
+            "\r\n",
+            " ",
+            "null",
+            "data: []",
+            "\u{a0}",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..2000 {
+            let mut event = String::new();
+            for _ in 0..20 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                event.push_str(tokens[seed as usize % tokens.len()]);
+            }
+            corpus.push(event);
+        }
+        for event in corpus {
+            let (want, bare) = reference_payload(event.as_bytes());
+            let mut raw = event.into_bytes();
+            let (got, got_bare) = event_payload(&mut raw);
+            assert_eq!(got_bare, bare);
+            assert_eq!(got, want);
+        }
+    }
 
     // TestValidateClaudeStreamingResponse*.
     #[test]

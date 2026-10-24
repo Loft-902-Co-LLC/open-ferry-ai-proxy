@@ -19,7 +19,11 @@
 //!   from [`SseCheck::take_overflow`], rather than with the next chunk as a
 //!   bad event's error is.
 
+#[path = "sse_check_classify.rs"]
+mod classify;
 mod scan;
+
+pub(crate) use classify::{any_choice, fields};
 
 pub(crate) use self::scan::EventScan;
 
