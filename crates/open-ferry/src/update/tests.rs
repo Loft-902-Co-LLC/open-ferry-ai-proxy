@@ -1518,3 +1518,71 @@ fn config_trust_platform() -> crate::os_service::Platform {
         Platform::Linux
     }
 }
+
+thread_local! {
+    static MODE_WRITE_FAILURE: RefCell<Option<(open_ferry_core::config::save::SaveErrorKind, String)>> = const { RefCell::new(None) };
+}
+
+pub(super) fn mode_write(
+    write: impl FnOnce() -> Result<(), open_ferry_core::config::save::SaveError>,
+) -> Result<(), (open_ferry_core::config::save::SaveErrorKind, String)> {
+    match MODE_WRITE_FAILURE.with_borrow_mut(Option::take) {
+        Some(error) => Err(error),
+        None => write().map_err(|error| (error.kind(), error.to_string())),
+    }
+}
+
+#[test]
+fn mode_refusals_use_safe_messages_in_text_and_json() {
+    use open_ferry_core::config::save::SaveErrorKind;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let before = b"port: 18000\n";
+    std::fs::write(&path, before).unwrap();
+    let reason = "payload.default[0]: a mapping with a key that isn't a string can't be written";
+    for (kind, raw, expected) in [
+        (
+            SaveErrorKind::Unwritable,
+            "credential-canary",
+            open_ferry_core::config::v8_edit::safe_unwritable_message("credential-canary"),
+        ),
+        (SaveErrorKind::Unwritable, reason, reason.to_owned()),
+        (
+            SaveErrorKind::Io,
+            "I/O write refused",
+            "I/O write refused".to_owned(),
+        ),
+    ] {
+        for json in [false, true] {
+            MODE_WRITE_FAILURE.with_borrow_mut(|slot| *slot = Some((kind, raw.to_owned())));
+            struct Reset;
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    MODE_WRITE_FAILURE.with_borrow_mut(|slot| *slot = None);
+                }
+            }
+            let _reset = Reset;
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let mut console = Console::new(json, &mut out, &mut err);
+            let probe = scope_probe::Fake::new(crate::os_service::Platform::HOST.unwrap(), false);
+            let outcome = set_mode(&probe, &path, SelfUpdateMode::Off, None, &mut console);
+            assert_eq!(outcome.code, 1);
+            let wanted = format!("couldn't write {}: {expected}", path.display());
+            assert_eq!(outcome.error.as_deref(), Some(wanted.as_str()));
+            console.finish(outcome);
+            assert!(MODE_WRITE_FAILURE.with_borrow(|slot| slot.is_none()));
+            if json {
+                let answer: Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(answer["error"], wanted);
+                assert!(answer["message"].as_str().unwrap().contains(&expected));
+                assert!(err.is_empty());
+            } else {
+                assert_eq!(String::from_utf8_lossy(&err), format!("update: {wanted}\n"));
+                assert!(out.is_empty());
+            }
+            assert!(!String::from_utf8_lossy(&out).contains("credential-canary"));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!open_ferry_core::config::save::backup_path(&path).exists());
+        }
+    }
+}

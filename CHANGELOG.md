@@ -71,7 +71,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Changed
 
 - **Fewer streaming allocations** per event for Chat Completions and Claude Messages, and no commit-header allocation when pre-first-token keepalive is disabled. Shared-host measurements did not establish an end-to-end speedup.
-- Config writes deliberately refused by the preservation writer now answer `409 config_unwritable` with a safe reason. The CLI shows that reason, says nothing was changed, and distinguishes the refusal from an I/O failure in JSON output.
+- **Config writer refusals** now answer `409 config_unwritable` with a safe reason. The CLI shows that reason, says nothing was changed, and distinguishes the refusal from an I/O failure in JSON output.
 - **Smaller, faster release binaries**, built with fat link-time optimization and one codegen unit: about 11% less CPU per request and 31% smaller in the measured Linux build.
 - **Ported from CLIProxyAPI v8.0.38**, up from v8.0.36. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8036-to-v8038-left-out).
 - **Dynamically registered Vertex OpenAPI models** advertise publisher ownership and default reasoning levels when explicit/static support is absent.

@@ -22,3 +22,13 @@ it("names a local refusal before any save was sent and lists changed fields", ()
   expect(screen.getByRole("status")).toHaveTextContent("Changed fields: Retries, Client API keys.");
   expect(screen.getByRole("status")).not.toHaveTextContent("The server refused");
 });
+
+it("shows a preservation refusal title and the writer's message", () => {
+  const reason = "payload.default[0]: a mapping with a key that isn't a string can't be written";
+  render(<ProblemNotice problem={callProblem(new ApiError(409, "config_unwritable", reason, null))} live />);
+  const notice = screen.getByRole("status");
+  expect(notice).toHaveTextContent("The config can't be written this way");
+  expect(notice).toHaveTextContent(reason);
+  expect(notice).not.toHaveTextContent("Unexpected answer");
+  expect(screen.queryByRole("button", { name: "Reload latest config" })).not.toBeInTheDocument();
+});

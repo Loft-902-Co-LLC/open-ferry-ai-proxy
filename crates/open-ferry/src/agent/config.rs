@@ -709,6 +709,13 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
                         Some("no_backup") => no_backup(&backup),
                         Some("changed_since") => changed_since(ctx, None),
                         Some("config_changed") => config_changed(),
+                        Some("config_unwritable") => {
+                            let body: Value =
+                                serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+                            super::change::unwritable_undo_failure(
+                                body["message"].as_str().unwrap_or(""),
+                            )
+                        }
                         _ => answer_failure(409, &reply.body),
                     });
                 }
@@ -777,7 +784,7 @@ fn undo_failure(ctx: &Context, backup: &Path, kind: SaveErrorKind, message: &str
         SaveErrorKind::NoBackup => no_backup(backup),
         SaveErrorKind::ChangedSince => changed_since(ctx, None),
         SaveErrorKind::Stale => config_changed(),
-        SaveErrorKind::Unwritable => super::change::unwritable_failure(message),
+        SaveErrorKind::Unwritable => super::change::unwritable_undo_failure(message),
         SaveErrorKind::Io | SaveErrorKind::Symlink => Failure::new(
             "failed",
             format!("the config file couldn't be written, so nothing was undone: {message}"),
@@ -841,11 +848,11 @@ mod refusal_tests {
             "payload.default[0]: a mapping with a key that isn't a string can't be written";
         let backup = Path::new("config.yaml.bak");
         let failure = undo_failure(&ctx, backup, SaveErrorKind::Unwritable, reason);
-        assert_eq!(failure.text(), format!("{reason}; nothing was changed\n"));
+        assert_eq!(failure.text(), format!("{reason}; nothing was undone\n"));
         assert_eq!(
             serde_json::to_value(&failure).unwrap(),
             serde_json::json!({
-                "error":"config_unwritable", "message":format!("{reason}; nothing was changed")
+                "error":"config_unwritable", "message":format!("{reason}; nothing was undone")
             })
         );
         assert_eq!(
