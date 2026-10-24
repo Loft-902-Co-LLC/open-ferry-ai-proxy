@@ -518,7 +518,7 @@ fn analyze_comments(
         };
     };
     let mut remaining_failure = original_failure;
-    for mask in 1..8 {
+    for mask in 1..16 {
         let (mut rmodel, mut gmodel) = (r.clone(), g.clone());
         if mask & 4 != 0 {
             let rp = first_head_projection(source, protected, &r, mask & 2 != 0);
@@ -539,7 +539,27 @@ fn analyze_comments(
             vec![]
         };
         let b = promotion(&s, gmodel.as_deref(), &rmodel, false);
-        if (mask & 1 != 0 && a.is_empty()) || (mask & 2 != 0 && b.is_empty()) {
+        // The dropped-key protection places an explicit key-line block at
+        // its relocated key's head. The logical destination is independently
+        // fixed by Go's surviving value identity; the complete ordered block
+        // must match. An unmoved key receives no loadable-step promotion.
+        let relocated_heads: Vec<_> = if gmodel.is_some() {
+            promotion(&s, None, &rmodel, true)
+                .into_iter()
+                .filter(|(from, _)| {
+                    from.side == Side::Key
+                        && s.iter()
+                            .filter(|c| c.owner == *from)
+                            .all(|c| c.relocated && c.entry_line)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        if (mask & 1 != 0 && a.is_empty())
+            || (mask & 2 != 0 && b.is_empty())
+            || (mask & 8 != 0 && relocated_heads.is_empty())
+        {
             continue;
         }
         let mut moves = vec![];
@@ -554,6 +574,10 @@ fn analyze_comments(
         }
         if mask & 4 != 0 {
             rules.push("first-root-key-head-document-split");
+        }
+        if mask & 8 != 0 {
+            moves.extend(relocated_heads);
+            rules.push("relocated-entry-key-line-to-own-head");
         }
         if let Some(failure) = owner_failure(
             &promoted(&s, &moves),
@@ -940,6 +964,52 @@ mod tests {
         let unchanged = "# own\nx: 1\n";
         let proof = json!({"source":unchanged,"operation":operation,"moves":[{"source":owner(&["x"],"key","head"),"ordinal":0,"destination":owner(&["x"],"value","line")}]});
         assert!(!proves(unchanged, "x: 1 # own\n", &operation, &proof));
+    }
+
+    #[test]
+    fn relocated_explicit_key_lines_use_only_the_same_surviving_key_head() {
+        let source = "? old # own\n: 1\n";
+        let operation = json!({"op":"save","migrate":true});
+        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["old"],"key","line"),"ordinal":0,"destination":owner(&["section","old"],"key","line")}]});
+        let go = "section:\n  old: 1\n";
+        let protected = "section:\n  # own\n  old: 1\n";
+        let result = comment_ownership_with_provenance(
+            source,
+            Some(go),
+            protected,
+            &[],
+            &operation,
+            &evidence,
+            true,
+        );
+        assert!(result.accepted());
+        assert!(
+            result
+                .rules
+                .contains(&"relocated-entry-key-line-to-own-head")
+        );
+        for wrong in [
+            "section:\n  old: 1\n  # own\n  other: 2\n",
+            "section:\n  # own\n  # own\n  old: 1\n",
+        ] {
+            assert!(
+                !comment_ownership_with_provenance(
+                    source,
+                    Some(go),
+                    wrong,
+                    &[],
+                    &operation,
+                    &evidence,
+                    true
+                )
+                .accepted()
+            );
+        }
+        assert!(!retained_comment_ownership(
+            source,
+            "old: 1\n",
+            "# own\nold: 1\n"
+        ));
     }
     #[test]
     fn unloadable_output_never_supplies_a_comment_owner() {
