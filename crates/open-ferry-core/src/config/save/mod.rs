@@ -2179,3 +2179,6 @@ mod review_r10_steer_tests;
 
 #[cfg(test)]
 mod review_r11_tests;
+
+#[cfg(test)]
+mod review_r12_unicode_value_tests;

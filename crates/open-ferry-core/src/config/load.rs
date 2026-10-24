@@ -120,6 +120,9 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
             post_process(&mut config)?;
             return Ok(config);
         }
+        Err(error @ YamlError::Fatal(_)) => {
+            return Err(ConfigError::new(ConfigErrorKind::Decode, error.message()));
+        }
         Err(error) => {
             let message = format!("{prefix}{}", error.message());
             return Err(ConfigError::new(ConfigErrorKind::Syntax, message));
@@ -242,6 +245,57 @@ mod tests {
             super::super::save::sha256_hex(&bytes),
             "e2a850a08a0a6d9b5d7e11fe92057df7230344e16b3271f879f1c0b95a8398b7"
         );
+    }
+
+    #[test]
+    fn composed_alias_limits_match_saphyr_decode_errors() {
+        fn refused(result: Result<Config, ConfigError>) -> ConfigError {
+            match result {
+                Err(error) => error,
+                Ok(_) => panic!("alias fixture must be refused"),
+            }
+        }
+        type Reader = fn(&[u8]) -> Result<Config, ConfigError>;
+
+        let mut ratio = String::from("a0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+        for level in 1..9 {
+            ratio.push_str(&format!(
+                "a{level}: &a{level} [{}]\n",
+                vec![format!("*a{}", level - 1); 10].join(", ")
+            ));
+        }
+        let expected = refused(Config::parse(&ratio));
+        assert_eq!(expected.kind(), Decode);
+        let unicode_ratio = refused(Config::parse(format!("# c\u{2028}{ratio}")));
+        assert_eq!(unicode_ratio.kind(), expected.kind());
+        assert_eq!(
+            unicode_ratio.to_string().lines().next(),
+            expected.to_string().lines().next()
+        );
+
+        let mut copied = String::from("# c\u{2028}a: ");
+        for i in 0..8 {
+            copied.push_str(&format!("&a{i} ["));
+        }
+        copied.push_str(&"x".repeat(4096));
+        copied.push_str(&"]".repeat(8));
+        copied.push_str("\nrefs: [*a0, *a1, *a2, *a3, *a4, *a5, *a6, *a7]\n");
+        let readers: [Reader; 3] = [
+            |bytes| Config::parse(bytes),
+            Config::load_bytes,
+            Config::load_bytes_quietly,
+        ];
+        for reader in readers {
+            let actual = refused(super::super::yaml3::compose::with_copy_text_limit_for_test(
+                16 << 10,
+                || reader(copied.as_bytes()),
+            ));
+            assert_eq!(actual.kind(), expected.kind());
+            assert_eq!(
+                actual.to_string().lines().next(),
+                expected.to_string().lines().next()
+            );
+        }
     }
 
     #[test]
