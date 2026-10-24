@@ -235,31 +235,35 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
 // yaml.v3 can consume a leading break as the missing block-header break,
 // or write a tab-leading block without the indentation indicator it needs.
 // Test the decoded text: an escaped source can produce the same value.
-fn leading_unicode_block_break(value: &str, retained_block: bool) -> bool {
+fn leading_unicode_block_break(value: &str, retained_block: bool, seq_item: bool) -> bool {
     value.starts_with(['\n', '\u{2028}', '\u{2029}'])
-        || (!retained_block && value.trim_start_matches(' ').starts_with('\t'))
+        || (!retained_block && (value.starts_with('\t') || (seq_item && value.starts_with(' '))))
 }
 
 /// Quote live block scalars whose leading break or tab would not round-trip.
 /// Archive emission keeps its separate all-break quoting protection.
 pub(crate) fn quote_config_unicode(node: &mut Node) {
-    let retained_block = node.style.has(Style::LITERAL) || node.style.has(Style::FOLDED);
-    let block = !node.style.has(Style::DOUBLE_QUOTED)
-        && !node.style.has(Style::SINGLE_QUOTED)
-        && (retained_block || node.value.contains('\n'));
-    if node.kind == Kind::Scalar
-        && block
-        && leading_unicode_block_break(&node.value, retained_block)
-    {
-        node.style = if node.tag != STR_TAG || node.style.has(Style::TAGGED) {
-            Style::DOUBLE_QUOTED | Style::TAGGED
-        } else {
-            Style::DOUBLE_QUOTED
-        };
+    fn visit(node: &mut Node, seq_item: bool) {
+        let retained_block = node.style.has(Style::LITERAL) || node.style.has(Style::FOLDED);
+        let block = !node.style.has(Style::DOUBLE_QUOTED)
+            && !node.style.has(Style::SINGLE_QUOTED)
+            && (retained_block || node.value.contains('\n'));
+        if node.kind == Kind::Scalar
+            && block
+            && leading_unicode_block_break(&node.value, retained_block, seq_item)
+        {
+            node.style = if node.tag != STR_TAG || node.style.has(Style::TAGGED) {
+                Style::DOUBLE_QUOTED | Style::TAGGED
+            } else {
+                Style::DOUBLE_QUOTED
+            };
+        }
+        let seq_item = node.kind == Kind::Sequence;
+        for child in &mut node.content {
+            visit(child, seq_item);
+        }
     }
-    for child in &mut node.content {
-        quote_config_unicode(child);
-    }
+    visit(node, false);
 }
 
 /// Config writer protection, also exposing exactly which source scalars the
@@ -405,6 +409,7 @@ pub(crate) fn protect_conflicting_key_comments(
 /// yaml.v3's `encoder`, as a `yaml.Encoder` writing to memory.
 pub(crate) struct Encoder {
     protect_generated_unicode: bool,
+    seq_item: bool,
     emitter: Emitter,
     /// The next collection is written in flow style.
     flow: bool,
@@ -423,6 +428,7 @@ impl Encoder {
         emitter.set_unicode(true);
         Self {
             protect_generated_unicode: false,
+            seq_item: false,
             emitter,
             flow: false,
             indent: 0,
@@ -511,17 +517,23 @@ impl Encoder {
             Value::Float(value) => self.plain(&float_string(*value)),
             Value::Seq(items) => {
                 self.sequence_start()?;
+                let seq_item = self.seq_item;
                 for item in items {
+                    self.seq_item =
+                        matches!(item, Value::Str(_) | Value::Duration(_) | Value::Node(_));
                     self.marshal(item, depth)?;
                 }
+                self.seq_item = seq_item;
                 self.emit(Event::sequence_end())
             }
             Value::Map(entries) => {
                 self.mapping_start()?;
+                let seq_item = std::mem::replace(&mut self.seq_item, false);
                 for (key, value) in sorted_entries(entries) {
                     self.marshal(key, depth)?;
                     self.marshal(value, depth)?;
                 }
+                self.seq_item = seq_item;
                 self.emit(Event::mapping_end())
             }
             Value::Struct(fields) => {
@@ -564,7 +576,7 @@ impl Encoder {
             super::resolve_tag(text) == STR_TAG && !(is_base60_float(text) || is_old_bool(text));
         let style = if self.protect_generated_unicode
             && !self.flow
-            && leading_unicode_block_break(text, false)
+            && leading_unicode_block_break(text, false, self.seq_item)
             && text.contains('\n')
         {
             ScalarStyle::DoubleQuoted
@@ -719,9 +731,12 @@ impl Encoder {
                 );
                 event.head_comment = node.head_comment.as_bytes().to_vec();
                 self.emit(event)?;
+                let seq_item = self.seq_item;
                 for child in &node.content {
+                    self.seq_item = true;
                     self.node(child, "", false, depth)?;
                 }
+                self.seq_item = seq_item;
                 let mut event = Event::sequence_end();
                 event.line_comment = node.line_comment.as_bytes().to_vec();
                 event.line_comment_id = node.line_comment_id.clone();
@@ -750,6 +765,7 @@ impl Encoder {
                 // the entirety of the value is streamed. The last tail is
                 // processed with the mapping end event.
                 let mut tail = "";
+                let seq_item = std::mem::replace(&mut self.seq_item, false);
                 for [key, value] in node.content.as_chunks::<2>().0 {
                     let key_foot = key.foot_comment.as_str();
                     self.empty_block_mapping_value = key.kind == Kind::Scalar
@@ -768,6 +784,7 @@ impl Encoder {
                     tail = key_foot;
                     self.node(value, "", false, depth)?;
                 }
+                self.seq_item = seq_item;
 
                 let mut event = Event::mapping_end();
                 event.tail_comment = tail.as_bytes().to_vec();
@@ -792,10 +809,8 @@ impl Encoder {
                     || (self.protect_generated_unicode
                         && !node.style.has(Style::SINGLE_QUOTED)
                         && block
-                        && leading_unicode_block_break(
-                            &node.value,
-                            node.style.has(Style::LITERAL) || node.style.has(Style::FOLDED),
-                        )) {
+                        && leading_unicode_block_break(&node.value, false, self.seq_item))
+                {
                     ScalarStyle::DoubleQuoted
                 } else if node.style.has(Style::SINGLE_QUOTED) {
                     ScalarStyle::SingleQuoted

@@ -558,23 +558,18 @@ below apply only to saphyr. Two byte order marks at the start are read as Go
 reads them: a following `port` key becomes `ort`, and saves write `ort`.
 
 Values that would be written across several lines are written in double
-quotes if they start with a line feed (LF), LS or PS. A tab-leading value
-(with optional spaces before the tab) is quoted when it is newly generated
-or was not already a block in the source. Retained source blocks keep their
-indentation indicator and block style when they preserve the value.
-CLIProxyAPI's writer can lose those
-leading line breaks or produce a file it cannot read. This includes escaped
-input, settings values, sequence items and plugin settings. Other values use
-Go's bytes when those bytes preserve the value. The block styles described
-below are kept for values outside this double-quoting rule. Text saved as comments keeps
+quotes if they start with a line feed (LF), LS or PS. Fresh values starting
+with a tab are also quoted, as are generated list items starting with spaces:
+CLIProxyAPI can omit the needed indentation hint or write it at the wrong
+offset, making the file unreadable or changing the value. A mapping value
+with spaces before its tab keeps Go's block representation when that reads
+back correctly. Retained tab-leading source blocks keep their indentation
+indicator and style. This includes escaped input, settings values, sequence
+items and plugin settings. Other values use Go's bytes when those bytes
+preserve the value. The block styles described below are kept for values
+outside this double-quoting rule. Text saved as comments keeps
 its separate Unicode quoting protection described below. Files with a real
 second YAML document are still refused, including after leading directives.
-
-Generated list items starting with ordinary spaces remain a save-time gap:
-some fail to save or lose indentation. The quoting rule above does not cover
-that unresolved sequence-indentation case. Fresh mapping values with spaces
-before a tab can also be quoted even though Go keeps their values. Restricting
-that choice needs list-versus-mapping context and remains unresolved.
 
 Aliases reuse their anchors' values and tags. The loader limits the text it
 expands into settings to 64 MiB. When yaml.v3 reads a file, copying anchors
