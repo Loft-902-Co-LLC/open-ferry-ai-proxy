@@ -98,3 +98,13 @@ func TestParityArchiveDoesNotTreatSourceCommentOrKnownKeyAsGenerated(t *testing.
 		t.Fatal("wrong operation received an archive slot")
 	}
 }
+
+func TestParityArchiveDoesNotFundAnUpstreamValueChangingReencode(t *testing.T) {
+	proof := ParityOwnership("x-note: >+\n  fixture\n\nconfig-version: 8\n", map[string]any{"op": "save", "migrate": true})
+	if proof["unavailable"] != nil {
+		t.Fatal("tree replay unavailable")
+	}
+	if len(proof["archives"].([]any)) != 0 {
+		t.Fatal("value-changing archive received a budget")
+	}
+}

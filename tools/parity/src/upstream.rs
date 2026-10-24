@@ -116,7 +116,7 @@ impl Upstream {
                 if traced.matches(needle).count() != 1 {
                     return Err("ownership oracle: pinned archive construction changed".into());
                 }
-                traced = traced.replace(needle, &format!("{needle}\n\t\tparityArchiveEntry(node.Content[i], section, comments[len(comments)-1])"));
+                traced = traced.replace(needle, &format!("{needle}\n\t\tparityArchiveEntry(node.Content[i], node.Content[i+1], section, comments[len(comments)-1])"));
                 let footer = "archive.FootComment = strings.TrimSpace(archive.FootComment + \"\\n\" + strings.Join(comments, \"\\n\"))";
                 if traced.matches(footer).count() != 1 {
                     return Err("ownership oracle: pinned archive append changed".into());
