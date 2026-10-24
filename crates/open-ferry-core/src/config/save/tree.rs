@@ -439,109 +439,192 @@ pub(crate) fn normalize_comment_indentation(data: &[u8]) -> Vec<u8> {
 /// item. Only actual foot paragraphs, bounded by their parsed sibling nodes,
 /// retain indentation; matching comment text elsewhere is not a witness.
 fn flow_item_foot_lines(data: &[u8]) -> std::collections::BTreeSet<usize> {
-    use super::super::yaml3::Style;
+    use super::super::yaml3::{parser::Parser, types::TokenType};
     let mut lines = std::collections::BTreeSet::new();
-    #[cfg(feature = "parity")]
-    if !super::parity::ablation::enabled(
-        super::parity::ablation::Protection::EmptyMappingPendingComment,
-    ) {
+    if !flow_item_feet_enabled() {
+        return lines;
+    }
+    let Ok(text) = std::str::from_utf8(data) else {
+        return lines;
+    };
+    // Node marks count YAML breaks; physical LF indices cannot witness a
+    // paragraph in a document containing other YAML line separators.
+    if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        || text
+            .as_bytes()
+            .iter()
+            .enumerate()
+            .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
+    {
         return lines;
     }
     let Ok(doc) = super::super::yaml3::compose::unmarshal(data) else {
         return lines;
     };
-    let text = String::from_utf8_lossy(data);
-    let source: Vec<_> = text.lines().collect();
-    fn last_line(n: &Node) -> usize {
-        n.content
-            .iter()
-            .map(last_line)
-            .max()
-            .unwrap_or(n.line)
-            .max(n.line)
+    if !has_multiple_flow_item_feet(&doc) {
+        return lines;
     }
-    fn visit(n: &Node, end: usize, source: &[&str], lines: &mut std::collections::BTreeSet<usize>) {
-        let consecutive_feet = n.kind == Kind::Sequence
-            && n.content
-                .iter()
-                .filter(|item| {
-                    item.kind == Kind::Mapping
-                        && item.style.has(Style::FLOW)
-                        && !item.foot_comment.is_empty()
-                })
-                .count()
-                > 1;
-        let mut feet = Vec::new();
-        for (i, child) in n.content.iter().enumerate() {
-            let next = n.content[i + 1..]
-                .iter()
-                .find(|next| next.line > child.line)
-                .map_or(end, |next| next.line.saturating_sub(1));
-            if consecutive_feet && child.kind == Kind::Mapping && child.style.has(Style::FLOW) {
-                let item_indent = source
-                    .get(child.line.saturating_sub(1))
-                    .filter(|line| line.trim_start_matches([' ', '\t']).starts_with('-'))
-                    .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len());
-                let mut foot = child
-                    .foot_comment
-                    .lines()
-                    .filter(|line| !line.is_empty())
-                    .peekable();
-                let mut paragraph = Vec::new();
-                for (index, line) in source.iter().enumerate().take(next).skip(last_line(child)) {
-                    // A deferred parent key's foot may parse on this item
-                    // in the raw emission too. Its shallower indentation
-                    // belongs to that parent and must still be normalized.
-                    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-                    if item_indent.is_some_and(|item_indent| indent >= item_indent)
-                        && foot.peek().is_some_and(|expected| {
-                            line.trim_start_matches([' ', '\t']) == *expected
-                        })
-                    {
-                        paragraph.push(index);
-                        foot.next();
-                    }
-                }
-                if foot.peek().is_none() && !paragraph.is_empty() {
-                    feet.push(paragraph);
+    let source: Vec<_> = text.lines().collect();
+    // A matched collection end is beyond all its scalar tokens, including
+    // quoted values containing comment-looking lines or closing braces.
+    let mut parser = Parser::new(data);
+    let (mut stack, mut ends) = (Vec::new(), Vec::new());
+    while let Ok(token) = parser.scan() {
+        match token.typ {
+            TokenType::No | TokenType::StreamEnd => break,
+            TokenType::FlowMappingStart | TokenType::FlowSequenceStart => {
+                stack.push((token.typ, token.start_mark))
+            }
+            TokenType::FlowMappingEnd | TokenType::FlowSequenceEnd => {
+                if let Some((kind, start)) = stack.pop()
+                    && kind == TokenType::FlowMappingStart
+                {
+                    ends.push(((start.line + 1, start.column + 1), token.end_mark.line + 1));
                 }
             }
-            visit(child, next, source, lines);
-        }
-        // Re-reading may attach a shallower parent foot to the final item.
-        // It cannot supply the second item-foot witness for this repair.
-        if feet.len() > 1 {
-            lines.extend(feet.into_iter().flatten());
+            _ => {}
         }
     }
-    visit(&doc, source.len(), &source, &mut lines);
+    fn visit(
+        n: &Node,
+        source: &[&str],
+        ends: &[((usize, usize), usize)],
+        lines: &mut std::collections::BTreeSet<usize>,
+    ) {
+        if n.kind == Kind::Mapping {
+            for index in (2..n.content.len()).step_by(2) {
+                let key = &n.content[index];
+                let Some(seq) = flow_item_boundary(n, index) else {
+                    continue;
+                };
+                let mut feet = Vec::new();
+                for (i, item) in seq.content.iter().enumerate() {
+                    let next = seq
+                        .content
+                        .get(i + 1)
+                        .map_or(key.line.saturating_sub(1), |s| s.line.saturating_sub(1));
+                    let Some(start) = ends
+                        .iter()
+                        .filter(|(s, _)| *s >= (item.line, item.column))
+                        .min_by_key(|(s, _)| *s)
+                        .map(|(_, e)| *e)
+                    else {
+                        continue;
+                    };
+                    let Some(indent) = source
+                        .get(item.line.saturating_sub(1))
+                        .filter(|s| s.trim_start().starts_with('-'))
+                        .map(|s| s.len() - s.trim_start_matches([' ', '\t']).len())
+                    else {
+                        continue;
+                    };
+                    let mut foot = item
+                        .foot_comment
+                        .lines()
+                        .filter(|s| !s.is_empty())
+                        .peekable();
+                    let mut paragraph = Vec::new();
+                    for (at, line) in source.iter().enumerate().take(next).skip(start) {
+                        let trimmed = line.trim_start_matches([' ', '\t']);
+                        if line.len() - trimmed.len() >= indent
+                            && foot.peek().is_some_and(|s| trimmed == *s)
+                        {
+                            paragraph.push(at);
+                            foot.next();
+                        }
+                    }
+                    if foot.peek().is_none() && !paragraph.is_empty() {
+                        feet.push(paragraph);
+                    }
+                }
+                if feet.len() <= 1 {
+                    continue;
+                }
+                let head_start = feet.iter().flatten().max().map_or(0, |i| i + 1);
+                lines.extend(feet.into_iter().flatten());
+                let mut head = key
+                    .head_comment
+                    .lines()
+                    .filter(|s| !s.is_empty())
+                    .peekable();
+                let mut paragraph = Vec::new();
+                for (at, line) in source
+                    .iter()
+                    .enumerate()
+                    .take(key.line.saturating_sub(1))
+                    .skip(head_start)
+                {
+                    if head
+                        .peek()
+                        .is_some_and(|s| line.trim_start_matches([' ', '\t']) == *s)
+                    {
+                        paragraph.push(at);
+                        head.next();
+                    }
+                }
+                if head.peek().is_none() {
+                    lines.extend(paragraph);
+                }
+            }
+        }
+        for child in &n.content {
+            visit(child, source, ends, lines);
+        }
+    }
+    visit(&doc, &source, &ends, &mut lines);
     lines
 }
 
 /// A repaired sequence whose sibling mapping feet need flow endings.
 pub(super) fn has_multiple_flow_item_feet(node: &Node) -> bool {
-    fn trailing_feet(node: &Node) -> bool {
-        match node.kind {
-            Kind::Mapping => node.content.last().is_some_and(trailing_feet),
-            Kind::Sequence => {
-                let footed = |item: &&Node| {
-                    item.kind == Kind::Mapping
-                        && item.style.has(super::super::yaml3::Style::FLOW)
-                        && !item.foot_comment.is_empty()
-                };
-                node.content.last().is_some_and(|last| footed(&last))
-                    && node.content.iter().filter(footed).count() > 1
-            }
-            _ => false,
-        }
-    }
     (node.kind == Kind::Mapping
-        && (2..node.content.len()).step_by(2).any(|i| {
-            node.content.get(i + 1).is_some_and(|value| {
-                matches!(value.kind, Kind::Mapping | Kind::Sequence) && value.content.is_empty()
-            }) && trailing_feet(&node.content[i - 1])
-        }))
+        && (2..node.content.len())
+            .step_by(2)
+            .any(|i| flow_item_boundary(node, i).is_some()))
         || node.content.iter().any(has_multiple_flow_item_feet)
+}
+
+/// Compatibility gate for the bounded flow-foot repair. The older switch's
+/// standalone diagnostic outputs remain identical to main.
+fn flow_item_feet_enabled() -> bool {
+    #[cfg(feature = "parity")]
+    {
+        use crate::config::save::parity::ablation::{Protection, enabled};
+        enabled(Protection::MultipleFlowItemFeet) && enabled(Protection::EmptyMappingPendingComment)
+    }
+    #[cfg(not(feature = "parity"))]
+    {
+        true
+    }
+}
+
+/// A trailing sequence with multiple flow-item foot comments.
+fn pending_flow_item_feet(node: &Node) -> Option<&Node> {
+    match node.kind {
+        Kind::Mapping => node.content.last().and_then(pending_flow_item_feet),
+        Kind::Sequence => {
+            let footed = |item: &&Node| {
+                item.kind == Kind::Mapping
+                    && item.style.has(super::super::yaml3::Style::FLOW)
+                    && !item.foot_comment.is_empty()
+            };
+            (node.content.last().is_some_and(|last| footed(&last))
+                && node.content.iter().filter(footed).count() > 1)
+                .then_some(node)
+        }
+        _ => None,
+    }
+}
+
+/// Both the preflight and paragraph search use this emitted-tree boundary.
+fn flow_item_boundary(node: &Node, index: usize) -> Option<&Node> {
+    let value = node.content.get(index + 1)?;
+    let previous = node.content.get(index.checked_sub(1)?)?;
+    if matches!(value.kind, Kind::Mapping | Kind::Sequence) && value.content.is_empty() {
+        pending_flow_item_feet(previous)
+    } else {
+        None
+    }
 }
 
 /// `yaml.Marshal(node)`: the tree written out with yaml.v3's emitter,
@@ -694,3 +777,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "writer_r2_tree_tests.rs"]
+mod writer_r2_tree_tests;
