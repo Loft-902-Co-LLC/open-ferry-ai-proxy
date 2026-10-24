@@ -24,3 +24,20 @@ fn oracle_requests_bind_each_protected_source_and_complete_operation() {
     }
     assert!(case.options.get("_ownership_evidence").is_none());
 }
+
+#[test]
+fn unavailable_identity_oracle_preserves_the_strict_failure() {
+    let source = "disable-cooling: false # own\n";
+    let protected = "routing:\n  cooldown:\n    disable-cooling: false # own\n";
+    let case = Case::new("unavailable", "", "")
+        .with_options(json!({"file":source,"steps":[{"op":"save","migrate":true}]}));
+    let bound = ownership::bind(&case, &json!({"files":[protected]}), &mut |_| {
+        Ok(GoResult::Panic("unavailable".into()))
+    })
+    .unwrap();
+    let strict = core::comment_ownership_analysis(source, None, protected, &[]);
+    let analyzed = ownership::analyze(&bound, 0, source, None, protected, &[], true);
+    assert!(!analyzed.accepted());
+    assert_eq!(analyzed.failure, strict.failure);
+    assert!(analyzed.rules.is_empty());
+}
