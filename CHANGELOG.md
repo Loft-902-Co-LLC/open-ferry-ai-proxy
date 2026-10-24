@@ -115,7 +115,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
-- **Recognize raw JSON string escapes in parity comparisons** only at declared translator paths with a matching request-source witness and the exact compact Rust spelling.
+- **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
 - **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
 - **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.
