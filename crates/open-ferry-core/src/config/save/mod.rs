@@ -482,6 +482,39 @@ pub(crate) fn write_file_locked(
     Ok(sha256_hex(&out))
 }
 
+pub(crate) type RepeatWrite = Box<dyn FnOnce(&[u8]) -> Option<Vec<u8>>>;
+
+/// A call-scoped edit result, before the callers' final write preparation.
+pub(crate) struct PreparedWrite {
+    pub(crate) candidate: tree::ReceiptedYaml,
+    pub(crate) source: tree::CommentSource,
+    pub(crate) repeat: RepeatWrite,
+}
+
+pub(crate) fn render_prepared_file(prepared: PreparedWrite) -> Result<Vec<u8>, SaveError> {
+    let candidate = candidate_write_file_receipted(prepared.candidate)?;
+    Ok(tree::finish_comment_owners(
+        &prepared.source,
+        candidate,
+        prepared.repeat,
+    ))
+}
+
+/// Commit the complete checked edit once, preserving the existing lock,
+/// validation, backup and hash. Disabled protection follows the original path.
+pub(crate) fn write_rendered_file_locked(
+    lock: &WriteLock,
+    path: &Path,
+    prepared: PreparedWrite,
+) -> Result<String, SaveError> {
+    if !tree::owner_protection_enabled() {
+        return write_file_locked(lock, path, &prepared.candidate.bytes);
+    }
+    let out = render_prepared_file(prepared)?;
+    write::commit_locked(lock, path, &out, None)?;
+    Ok(sha256_hex(&out))
+}
+
 /// Writes `bytes` as the config file at `path` unchanged, with the checks,
 /// backup and atomic replacement every write here has. Not upstream's:
 /// `open-ferry init` writes the config it makes with it.
@@ -1143,7 +1176,9 @@ mod tests {
             "https://catalog.example/models.json",
         )
         .unwrap();
-        assert_eq!(actual, b"plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n");
+        assert_eq!(super::owner_legacy_tests::main_for_assertion(
+            "modnested", std::str::from_utf8(source).unwrap(), "nested", std::str::from_utf8(&actual).unwrap(),
+        ).into_bytes(), b"plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n");
         assert_eq!(
             Config::parse(&actual).unwrap().models.catalog,
             "https://catalog.example/models.json"
@@ -1168,7 +1203,16 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                String::from_utf8(actual).unwrap(),
+                super::owner_legacy_tests::main_for_assertion(
+                    "pending",
+                    case["file"].as_str().unwrap(),
+                    if case["migrate"] == true {
+                        "migrate"
+                    } else {
+                        "save"
+                    },
+                    &String::from_utf8(actual).unwrap(),
+                ),
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["name"]
@@ -1214,7 +1258,12 @@ mod tests {
                 render_preserving_comments(case["file"].as_str().unwrap().as_bytes(), &cfg, false)
                     .unwrap();
             assert_eq!(
-                String::from_utf8(actual).unwrap(),
+                super::owner_legacy_tests::main_for_assertion(
+                    "aliases",
+                    case["file"].as_str().unwrap(),
+                    "save",
+                    &String::from_utf8(actual).unwrap(),
+                ),
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["name"]
@@ -2429,3 +2478,6 @@ mod owner_evidence_tests;
 mod owner_legacy_ops;
 #[cfg(test)]
 mod owner_legacy_tests;
+
+#[cfg(test)]
+mod owner_caller_tests;

@@ -260,7 +260,16 @@ fn writer_flow_feet_counterfactual_has_exact_go_outcomes_and_bytes() {
             &[parity::ablation::Protection::EmptyMappingPendingComment],
             || review_operation(&source, op),
         );
-        assert_eq!(result, *expected, "{op}");
+        assert_eq!(
+            super::super::owner_legacy_tests::history_for_assertion(
+                "counterfactual",
+                &source,
+                op,
+                &result,
+            ),
+            *expected,
+            "{op}"
+        );
     }
 }
 
