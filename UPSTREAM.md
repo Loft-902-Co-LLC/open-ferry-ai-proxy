@@ -549,32 +549,50 @@ equivalence permits the identical ordered paragraphs of the output’s first roo
 to reload partly as document head, while retaining every real source document
 comment at the document. It applies to no nested or later key. These operations
 remain under the canonical-version protection, before intermediate and final
-emissions. Config inputs containing literal U+0085 (NEXT LINE), U+2028
-(LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR), or repeated leading byte
-order marks, now use the yaml.v3 parser already used by the writer, with the
-original bytes. This aligns values, keys, comments and document boundaries
-with CLIProxyAPI. Other inputs retain the existing saphyr parser. Syntax
-errors on the new path use yaml.v3 wording; the tab and compact-alias syntax differences
-below apply only to the saphyr path.
-Alias expansions share their anchor values and normalized tags, as the
-saphyr path does; tags therefore need no per-expansion owned-value charge.
-They retain the alias-ratio and 64 MiB owned-value budgets, the 256-level depth limit, the null-key cycle
-check and the full-input NUL/control-character check. The writer parser's
-copied-target node cap and invalid UTF-8 tag-byte replacement apply on this
-path too. In both writer and loader use, cumulative alias-target copies are
-also limited to 64 MiB of owned text, checked before cloning and excluding
-already shared target content; exceeding it reports excessive aliasing.
-The reader-disagreement write refusal has been removed. Live emission follows
-Go's bytes when they preserve the value. A block scalar that begins with LF,
-LS or PS and contains LS or PS is double-quoted instead: yaml.v3 can consume
-its leading break as the block header's missing break, changing the value or
-making a block sequence unreadable. This protection uses decoded values,
-including escaped input, in generated settings and all config emission paths.
-Other live Unicode scalars keep Go's quoting. Alias-copy budget refusals retain
-the loader's decode-error kind and excessive-aliasing first line on both paths.
-The single-document witness uses the matching parser for loadable input;
-its conservative rejected-emission scan treats leading directives as a
-preamble and still refuses a real second document.
+emissions. Config files containing literal U+0085 (NEXT LINE, NEL), U+2028
+(LINE SEPARATOR, LS) or U+2029 (PARAGRAPH SEPARATOR, PS), or starting with repeated
+byte order marks, read as CLIProxyAPI reads them: values, keys, comments and
+document boundaries follow yaml.v3. Other files use saphyr. Syntax errors
+follow the selected parser's wording; the tab and compact-alias differences
+below apply only to saphyr. Two byte order marks at the start are read as Go
+reads them: a following `port` key becomes `ort`, and saves write `ort`.
+
+Values that would be written across several lines are written in double
+quotes if they start with a line feed (LF), LS or PS. A tab-leading value
+(with optional spaces before the tab) is quoted when it is newly generated
+or was not already a block in the source. Retained source blocks keep their
+indentation indicator and block style when they preserve the value.
+CLIProxyAPI's writer can lose those
+leading line breaks or produce a file it cannot read. This includes escaped
+input, settings values, sequence items and plugin settings. Other values use
+Go's bytes when those bytes preserve the value. The block styles described
+below are kept for values outside this double-quoting rule. Text saved as comments keeps
+its separate Unicode quoting protection described below. Files with a real
+second YAML document are still refused, including after leading directives.
+
+Generated list items starting with ordinary spaces remain a save-time gap:
+some fail to save or lose indentation. The quoting rule above does not cover
+that unresolved sequence-indentation case. Fresh mapping values with spaces
+before a tab can also be quoted even though Go keeps their values. Restricting
+that choice needs list-versus-mapping context and remains unresolved.
+
+Aliases reuse their anchors' values and tags. The loader limits the text it
+expands into settings to 64 MiB. When yaml.v3 reads a file, copying anchors
+is also limited to about a million nodes or 64 MiB of text, checked before
+each copy; Go reads some files beyond these limits. Settings saves and nested
+updates refuse expansions beyond these copy limits on either parser path,
+including files without NEL, LS or PS. Such files may load but fail to save.
+The error is `yaml: document contains excessive aliasing`. When loading a
+file or payload, anchor-copy refusals have its normal error prefix;
+the older alias-ratio refusal keeps its unprefixed wording. These copy limits
+and the repeated-byte-order-mark parser choice are exceptions to otherwise
+unchanged handling of files without the three characters.
+
+Both reader paths retain the 256-level depth limit, the null-key cycle check
+and the full-input NUL/control-character check. The depth limits agree, but
+saphyr says `recursion limit exceeded` and yaml.v3 says `exceeded max depth of
+256`; Go allows deeper nesting. Invalid UTF-8 bytes in tag escapes use Go's
+replacement character on the yaml.v3 path.
 
 - Archived config scalars containing U+2028, U+2029 or U+0085 are quoted
   before their YAML is commented out, including custom-tagged scalars. Their
@@ -1425,7 +1443,7 @@ CI uses [`tools/parity/baseline/config-save.json`](tools/parity/baseline/config-
 as a run-level ratchet for **uncertified config-save Differences**. It changes
 neither certification nor product behavior; request suites stay strict. Rounds
 9–10 left source-identity relocations, archive comment binding, owner/slot
-tracking unresolved; LS/PS/NEL loader alignment is now complete. Copying Go's destructive
+tracking unresolved; LS/PS/NEL reading is aligned, except the alias-copy and depth limits above. Copying Go's destructive
 writes is not the remedy. Known diagnostic kinds have a total rate budget;
 new kinds, new deterministic PR-case IDs, fingerprint changes and
 non-certification failures still fail. Follow-up fixes lower this baseline.
