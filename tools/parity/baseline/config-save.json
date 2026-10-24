@@ -16,77 +16,77 @@
     },
     {
       "cases": 609,
-      "different": 30,
+      "different": 28,
       "random": 500,
       "seed": 12,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 267,
+      "different": 259,
       "random": 5000,
       "seed": 30,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 293,
+      "different": 282,
       "random": 5000,
       "seed": 31,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 266,
+      "different": 257,
       "random": 5000,
       "seed": 32,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 285,
+      "different": 280,
       "random": 5000,
       "seed": 33,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 278,
+      "different": 270,
       "random": 5000,
       "seed": 34,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 280,
+      "different": 270,
       "random": 5000,
       "seed": 35,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 303,
+      "different": 291,
       "random": 5000,
       "seed": 36,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 308,
+      "different": 304,
       "random": 5000,
       "seed": 37,
       "selected": false
     },
     {
       "cases": 609,
-      "different": 28,
+      "different": 27,
       "random": 500,
       "seed": 38,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 249,
+      "different": 243,
       "random": 5000,
       "seed": 38,
       "selected": false
@@ -100,28 +100,28 @@
     },
     {
       "cases": 5109,
-      "different": 274,
+      "different": 266,
       "random": 5000,
       "seed": 39,
       "selected": false
     },
     {
       "cases": 170,
-      "different": 170,
+      "different": 161,
       "random": 5000,
       "seed": 11,
       "selected": true
     },
     {
       "cases": 164,
-      "different": 164,
+      "different": 154,
       "random": 5000,
       "seed": 12,
       "selected": true
     }
   ],
   "fingerprint": {
-    "classifier_version": "3",
+    "classifier_version": "4",
     "generator_sha256": "39a87f7383f8811c93097c072567e2a3691683c94d5e50ab7d72a8f4ec404e74",
     "upstream_pin": "0db19025571684b198a2ef508f99b41c717337e8"
   },
