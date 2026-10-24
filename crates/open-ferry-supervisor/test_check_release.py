@@ -7,6 +7,15 @@ import tempfile
 import unittest
 
 
+def archive(*members):
+    result = b"!<arch>\n"
+    for name, data in members:
+        result += (name.ljust(16) + b"0".ljust(12) + b"0".ljust(6) + b"0".ljust(6)
+                   + b"100644".ljust(8) + str(len(data)).encode("ascii").ljust(10) + b"`\n")
+        result += data + (b"\n" if len(data) % 2 else b"")
+    return result
+
+
 class PositiveControl(unittest.TestCase):
     REQUIRED = (
         b"startup.before_install", b"install.between_renames",
@@ -14,11 +23,11 @@ class PositiveControl(unittest.TestCase):
         b"test_endpoint_location",
     )
 
-    def check_artifact(self, content, feature=True, *, artifact_feature=None, test=False, opt_level="3", artifacts=True):
+    def check_artifact(self, content, feature=True, *, artifact_feature=None, test=False, opt_level="3", artifacts=True, raw_archive=False):
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
             artifact = root / "test-artifact.rlib"
-            artifact.write_bytes(content)
+            artifact.write_bytes(content if raw_archive else archive((b"code.o/", b"\x64\x86" + content)))
             events = root / "cargo.json"
             events.write_text("\n".join(json.dumps(event) for event in (
                 {"reason": "compiler-artifact", "target": {"name": "open_ferry_supervisor", "kind": ["lib"]},
@@ -77,6 +86,68 @@ class PositiveControl(unittest.TestCase):
         result = self.check_artifact(b"\n".join(self.REQUIRED), artifacts=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no release library", result.stderr)
+
+    def test_machine_code_objects_with_short_and_long_names_pass(self):
+        long_name = b"open_ferry_supervisor.long_name.rcgu.o"
+        bsd_name = long_name + b"\0" * 3
+        archives = (
+            archive((b"code.o/", b"\x64\x86machine code")),
+            archive((b"//", b"other-name/\n" + long_name + b"/\n"), (b"/12", b"\x7fELFmachine code")),
+            archive((b"//", long_name + b"\0"), (b"/0", b"\x64\x86machine code")),
+            archive((b"#1/" + str(len(bsd_name)).encode("ascii"), bsd_name + b"\xcf\xfa\xed\xfemachine code")),
+            archive((b"bitcode.o/", b"BC\xc0\xdebitcode"), (b"code.o/", b"\x64\x86machine code")),
+        )
+        for content in archives:
+            with self.subTest(content=content):
+                result = self.check_artifact(content, feature=False, raw_archive=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bitcode_only_is_rejected_before_either_string_scan(self):
+        content = archive((b"code.o/", b"BC\xc0\xde" + b"\n".join(self.REQUIRED)),
+                          (b"other.o/", b"BC\xc0\xdemore bitcode"))
+        for feature in (False, True):
+            with self.subTest(feature=feature):
+                result = self.check_artifact(content, feature=feature, raw_archive=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("build it with CARGO_PROFILE_RELEASE_LTO=off", result.stderr)
+
+    def test_wrapped_bitcode_is_rejected_for_bsd_and_gnu_names(self):
+        long_name = b"open_ferry_supervisor.long_name.rcgu.o"
+        data = b"\xde\xc0\x17\x0b" + b"\n".join(self.REQUIRED)
+        archives = (
+            archive((b"//", long_name + b"/\n"), (b"/0", data)),
+            archive((b"#1/" + str(len(long_name)).encode("ascii"), long_name + data)),
+        )
+        for content in archives:
+            for feature in (False, True):
+                with self.subTest(content=content, feature=feature):
+                    result = self.check_artifact(content, feature=feature, raw_archive=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("build it with CARGO_PROFILE_RELEASE_LTO=off", result.stderr)
+
+    def test_metadata_and_symbols_do_not_count_as_machine_code(self):
+        archives = (
+            archive((b"lib.rmeta/", b"metadata"), (b"/", b"symbols")),
+            archive((b"lib.rmeta/", b"metadata"), (b"code.o/", b"BC\xc0\xdebitcode")),
+        )
+        for content in archives:
+            with self.subTest(content=content):
+                result = self.check_artifact(content, feature=False, raw_archive=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no object members" if b"code.o" not in content else "LLVM bitcode", result.stderr)
+
+    def test_invalid_or_truncated_archives_are_rejected(self):
+        valid = archive((b"code.o/", b"\x64\x86machine code"))
+        archives = (
+            b"not an archive", valid[:-2], valid[:8] + valid[8:67] + b"?" + valid[68:],
+            archive((b"/0", b"\x64\x86machine code")),
+            archive((b"#1/99", b"short")),
+        )
+        for content in archives:
+            with self.subTest(content=content):
+                result = self.check_artifact(content, feature=False, raw_archive=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":
