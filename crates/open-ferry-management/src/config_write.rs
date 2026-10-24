@@ -16,8 +16,9 @@
 //! becomes the config the handlers read. The service is then asked to load
 //! the file again, so the change takes effect without waiting for the file
 //! watcher, and the handler answers once it has. A save the writer refuses
-//! answers 500 `{"error":"failed to save config: ..."}` and changes
-//! nothing. The work runs on its own task, so a client that goes away
+//! answers 409 `config_unwritable` with a safe reason when it can't preserve
+//! the config, or 500 `{"error":"failed to save config: ..."}` for a real
+//! failure, and changes nothing. The work runs on its own task, so a client that goes away
 //! doesn't stop it halfway.
 //!
 //! Only the management routes write the config, and only through the
@@ -204,6 +205,7 @@ pub struct WriteError {
     message: String,
     config_changed: bool,
     switching: bool,
+    unwritable: bool,
 }
 
 impl WriteError {
@@ -213,6 +215,7 @@ impl WriteError {
             message: message.into(),
             config_changed: false,
             switching: false,
+            unwritable: false,
         }
     }
 
@@ -223,6 +226,7 @@ impl WriteError {
             message: SWITCHING.to_owned(),
             config_changed: false,
             switching: true,
+            unwritable: false,
         }
     }
 
@@ -239,12 +243,38 @@ impl WriteError {
             message: "the config file changed since it was loaded".to_owned(),
             config_changed: true,
             switching: false,
+            unwritable: false,
         }
     }
 
     /// Whether this is [`WriteError::config_changed`].
     pub fn is_config_changed(&self) -> bool {
         self.config_changed
+    }
+
+    /// The writer can't preserve the config, and changed nothing: 409
+    /// `config_unwritable`. Only safe schema paths and reasons are retained.
+    pub fn unwritable(message: impl AsRef<str>) -> Self {
+        Self {
+            message: v8_edit::safe_unwritable_message(message.as_ref()),
+            config_changed: false,
+            switching: false,
+            unwritable: true,
+        }
+    }
+
+    /// Whether this is a deliberate writer refusal, rather than an I/O fault.
+    pub fn is_unwritable(&self) -> bool {
+        self.unwritable
+    }
+}
+
+impl From<save::SaveError> for WriteError {
+    fn from(error: save::SaveError) -> Self {
+        match error.kind() {
+            SaveErrorKind::Unwritable => Self::unwritable(error.to_string()),
+            _ => Self::new(error.to_string()),
+        }
     }
 }
 
@@ -308,7 +338,7 @@ impl ConfigWriter for FileConfigWriter {
             .map(Some)
             .map_err(|error| match error.kind() {
                 SaveErrorKind::Stale => WriteError::config_changed(),
-                _ => WriteError::new(error.to_string()),
+                _ => WriteError::from(error),
             })
     }
 
@@ -319,7 +349,7 @@ impl ConfigWriter for FileConfigWriter {
             .map_err(|_| WriteError::switching())?;
         save::write_file_with_sha256(&self.path, data)
             .map(Some)
-            .map_err(|error| WriteError::new(error.to_string()))
+            .map_err(WriteError::from)
     }
 
     fn edit_v8(
@@ -403,6 +433,7 @@ impl ConfigWriter for CheckedConfigWriter {
 pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
     use V8EditError as E;
     let (status, error, detail) = match error {
+        E::Unwritable(message) => return unwritable_response(message),
         E::ReadFailed => (StatusCode::INTERNAL_SERVER_ERROR, "read_failed", None),
         E::StoredInvalid(message) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -450,6 +481,20 @@ pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
         ]),
     };
     json::response(status, &body)
+}
+
+/// A deliberate writer refusal, with a reason safe for public output.
+pub(crate) fn unwritable_response(message: &str) -> Response {
+    json::response(
+        StatusCode::CONFLICT,
+        &Json::map([
+            ("error", Json::Str("config_unwritable".into())),
+            (
+                "message",
+                Json::Str(v8_edit::safe_unwritable_message(message)),
+            ),
+        ]),
+    )
 }
 
 /// The future a [`ConfigReload`] call returns: ready once the service has
@@ -590,6 +635,7 @@ where
             Err(error) if error.is_switching() => {
                 Err(json::error(StatusCode::SERVICE_UNAVAILABLE, SWITCHING))
             }
+            Err(error) if error.is_unwritable() => Err(unwritable_response(&error.to_string())),
             Err(error) => Err(json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to save config: {error}"),

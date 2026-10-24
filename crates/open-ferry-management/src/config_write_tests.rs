@@ -15,6 +15,32 @@ fn state(path: &Path, writer: Arc<dyn ConfigWriter>) -> ManagementState {
 
 struct NeverCalled;
 
+#[tokio::test]
+async fn unwritable_responses_never_expose_arbitrary_writer_paths() {
+    let error = WriteError::unwritable("credential-canary");
+    assert!(error.is_unwritable());
+    assert!(!error.to_string().contains("credential-canary"));
+    let response = v8_error_response(&V8EditError::Unwritable("credential-canary".into()));
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "config_unwritable");
+    assert!(
+        !body["message"]
+            .as_str()
+            .unwrap()
+            .contains("credential-canary")
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("values and comments")
+    );
+}
+
 impl ConfigWriter for NeverCalled {
     fn save_preserving_comments(
         &self,

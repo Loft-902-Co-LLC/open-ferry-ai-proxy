@@ -596,12 +596,14 @@ A file is read only for a secret, which is never shown: `config set` refuses a f
 | Code | When |
 |---|---|
 | 0 | Done, or nothing needed changing. Also for `--help` |
-| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), a file a value comes from is in the auth directory or is a credential file (`unsafe_file`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), an undo would lose a change made since the last backup and wasn't confirmed (`changed_since`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
+| 1 | It failed or was refused: the change is invalid (`invalid_value`), the writer can't preserve it (`config_unwritable`), a file a value comes from is in the auth directory or is a credential file (`unsafe_file`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), an undo would lose a change made since the last backup and wasn't confirmed (`changed_since`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
 | 2 | Bad usage (`usage`): an unknown command or flag, or an unknown setting (`unknown_path`, with the nearest known one), or a secret given as an argument (`secret_in_argument`) |
 | 3 | It needs `--yes` and didn't get it (`needs_confirmation`), or you answered no (`declined`). Nothing was changed |
 | 4 | It needs the server, which isn't running (`not_running`); `status` exits with 4 when no server runs |
 
 A failure prints its message and a hint on standard error; with `--json`, `{"error": <code>, "message": ..., "hint": ...}` on standard output.
+
+A config writer that deliberately refuses a change because it can't preserve the config answers `config_unwritable` (exit 1), for local changes and server writes alike. The text and JSON message give the writer's safe reason and say that nothing was changed. This is distinct from an I/O failure (`failed`). Reasons that could include user-chosen keys use a fixed explanation instead. This applies to `config set`, `config unset`, `config replace`, `config undo`, `keys add` and `keys remove`, and their MCP tools.
 
 ### `open-ferry status`
 

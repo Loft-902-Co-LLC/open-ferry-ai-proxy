@@ -1411,6 +1411,10 @@ cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 
 With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 
+## Config writer refusals
+
+When open-ferry's config writer deliberately refuses a write because it cannot preserve the config, management writes answer `409 {"error":"config_unwritable","message":"..."}` and change nothing. This includes a refusal while preparing an edit from the stored file, raw YAML replacements, and settings, list and config API-key status saves. CLIProxyAPI v8.0.38 has no matching preservation refusal: its normal write failures answer 500 (`config_v8.go`, `config_basic.go` and `handler.go`). Open-ferry keeps those 500 answers for real failures. Reasons containing only fixed schema paths and numeric indexes are shown; a reason that could contain arbitrary YAML keys uses a fixed explanation. The CLI uses the same safe reason and a distinct `config_unwritable` failure code (exit 1).
+
 ## Config-save parity baseline
 
 CI uses [`tools/parity/baseline/config-save.json`](tools/parity/baseline/config-save.json)

@@ -58,6 +58,7 @@ Every error is a status and a body:
 | 409 | `no_backup` | `POST /config/undo`: there is no backup of the config file to undo to. |
 | 409 | `changed_since` | `POST /config/undo`: the config file was changed since the last write that kept a backup (as by a hand edit), so the undo would lose that change too, and the body didn't send `force`. |
 | 409 | `config_changed` | `POST /config/undo`: the config file or its backup isn't the one the body's `config_sha256` or `backup_sha256` names. |
+| 409 | `config_unwritable` | A management config write was deliberately refused because the writer can't preserve the config. `message` gives a safe reason. The file and running config are unchanged. |
 | 409 | `updates_off` | `POST /update/check` while updates are off. |
 | 409 | `already_preparing` | An install or rollback preparation is already running in this worker. |
 | 409 | `switch_uncertain` | A previous request may have been accepted; read fresh supervisor status before explicitly retrying. |
@@ -76,9 +77,15 @@ Every error is a status and a body:
 | 503 | `updates_unavailable` | The server runs no update checks, as the server `open-ferry -tui` starts doesn't. |
 | 504 | `claude_cli_timeout` | A `claude-cli` entry's Claude Code didn't answer within 30 seconds. |
 
-The management API's own errors keep upstream's shape, `{"error": "<text>"}`, but for one of open-ferry's: a save through `/v0/management` (a setting, a list, or a config API key's status) made after the config file changed on disk since the server loaded it, as by `open-ferry config` or a hand edit, answers 409 `{"error": "config_changed", "message": "..."}` and writes nothing. The server loads the file again, so the same save made again keeps that change. A file it can't load, such as an empty one or one with a YAML error, is left out, so the server and the management API keep the config they had, and each such save answers 409, its message saying to fix the file, until it is fixed.
+The management API's own errors keep upstream's shape, `{"error": "<text>"}`, except for open-ferry's config conflicts. A save through `/v0/management` (a setting, a list, or a config API key's status) made after the config file changed on disk since the server loaded it, as by `open-ferry config` or a hand edit, answers 409 `{"error": "config_changed", "message": "..."}` and writes nothing. The server loads the file again, so the same save made again keeps that change. A file it can't load, such as an empty one or one with a YAML error, is left out, so the server and the management API keep the config they had, and each such save answers 409, its message saying to fix the file, until it is fixed.
 
 ---
+
+## Management config writes
+
+`PUT` and `PATCH /v8/management/config` (or `config/`), `PUT`, `PATCH` and `DELETE /v8/management/config/*path`, `PUT /v8/management/config.yaml`, `PUT /v0/management/config.yaml`, and settings, list and config API-key status saves can answer `409 {"error":"config_unwritable","message":"..."}`. This also covers a writer refusal while reading the stored file to prepare an edit. The writer's reason is shown when it contains only schema paths and indexes; messages that could contain user-chosen keys use a fixed explanation. Nothing was changed. Edit the config to remove the unsupported shape before trying again.
+
+This differs from CLIProxyAPI, whose writer has no matching preservation refusal. It is a conflict with what the writer can preserve, even when the config loads correctly; it isn't a validation error. Real I/O errors keep their 500 answers, and a stored file that isn't a valid config keeps `500 invalid_config`. Switching keeps 503, and failed `If-Match` keeps `412 precondition_failed`. GETs do not use the writer, and undo restores the backup's bytes without re-encoding them.
 
 ## Usage
 
