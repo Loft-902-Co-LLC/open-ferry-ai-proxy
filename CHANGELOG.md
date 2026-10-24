@@ -124,6 +124,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
 - **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.
 - **Match CPU-specific token-counter overflow** and wrapping arithmetic in translator and provider usage accounting.
+- **Config writer flow-item foot comments** stay on their source items when multiple footed mappings precede an empty collection; these writes now succeed and settle in one write. CRLF version-comment paragraphs avoid an unnecessary separator.
 - **Preserve config comments during merges and v8 edits**, including canonical version comments, while retaining the file's plugin subtree and keeping one copy of plugin foot comments that upstream duplicates.
 - **Preserve multiline config values on every write path**, including Markdown headings, folded line breaks and trailing blank lines, tab-leading block values and archived Unicode line separators. Keep block styles where possible, quote scalars whose multiline header comments would damage their values, and transfer conflicting key comments only when their deferred recipient would damage or lose data.
 - **Make v8 config previews match written bytes**, including final comment normalization.
