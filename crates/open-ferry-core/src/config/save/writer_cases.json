@@ -1,0 +1,106 @@
+[
+  {
+    "case": "C8",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "V17",
+    "source": "models: {}\n\n# k1\n\n# k2\n\n# k3\nconfig-version: 8\n"
+  },
+  {
+    "case": "C5",
+    "source": "request-retry: 3\n\n# k1\n\n# k2\nconfig-version: 8\nmodels: {}\n"
+  },
+  {
+    "case": "first_value_paras",
+    "source": "config-version:\n  # v1\n\n  # v2\n  8\nmodels: {}\n"
+  },
+  {
+    "case": "first_value_paras_dochead",
+    "source": "# doc\n\nconfig-version:\n  # v1\n\n  # v2\n  8\nmodels: {}\n"
+  },
+  {
+    "case": "first_dashes_value_paras",
+    "source": "---\nconfig-version:\n  # v1\n\n  # v2\n  8\nmodels: {}\n"
+  },
+  {
+    "case": "first_key_paras",
+    "source": "# a\n\n# b\nconfig-version: 8\nmodels: {}\n"
+  },
+  {
+    "case": "flow_first_foot",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "block_mid_foot",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n      - name: c\n        alias: d\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "block_last_foot_item",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "block_last_foot_deep",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n        # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "block_first_foot_item",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n      - name: c\n        alias: d\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "empty_seq_after",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n  spare: []\nconfig-version: 8\n"
+  },
+  {
+    "case": "no_empty_after",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n  spare:\n    enabled: true\nconfig-version: 8\n"
+  },
+  {
+    "case": "two_lists",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - name: a\n        alias: b\n      # f1\n\n    other:\n      - name: c\n        alias: d\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "C8_dashes_comment",
+    "source": "--- # d\nmodels: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8_crlf",
+    "source": "models: {}\r\n\r\n# k1\r\n\r\n# k2\r\nconfig-version: 8\r\nplugins: {}\r\n"
+  },
+  {
+    "case": "C2",
+    "source": "models: {}\nplugins: {}\n\n# k1\n\n# k2\nconfig-version: 8\n"
+  },
+  {
+    "case": "C4",
+    "source": "models: {}\nplugins: {}\n\n# k1\n\n# k2\nconfig-version:\n  # v1\n  8\n"
+  },
+  {
+    "case": "V11",
+    "source": "models:\n  a: 1\n  # mfoot\nconfig-version:\n  # v1\n\n  # v2\n  8\n"
+  },
+  {
+    "case": "flow_two_feet",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f0\n\n      - {name: c, alias: d}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "flow_last_foot",
+    "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n"
+  },
+  {
+    "case": "V12",
+    "source": "models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8_bom",
+    "source": "\ufeffmodels: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8_dashes",
+    "source": "---\nmodels: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  },
+  {
+    "case": "C8_dochead",
+    "source": "# doc\n\nmodels: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+  }
+]
