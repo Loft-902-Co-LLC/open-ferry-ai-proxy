@@ -141,7 +141,11 @@ fn review_r10_styled_item_foot_and_empty_key_head_keep_their_owners() {
             for out in outputs(&source, op).unwrap() {
                 Config::load_bytes(out.as_bytes()).unwrap();
                 assert!(
-                    !parity::retained_unloadable_comments(&source, &out, &[]),
+                    !parity::retained_unloadable_comments(
+                        &source,
+                        &super::owner_legacy_tests::main_for_assertion("r10", &source, op, &out),
+                        &[],
+                    ),
                     "{op}: {out}"
                 );
                 for comment in ["# item foot", "# rse head"] {

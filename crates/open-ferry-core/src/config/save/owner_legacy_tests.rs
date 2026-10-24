@@ -170,3 +170,193 @@ fn owner_validate_legacy_recipes() {
     )
     .unwrap();
 }
+
+fn repaired_rows() -> Vec<Value> {
+    serde_json::from_str(include_str!("owner_legacy.json")).unwrap()
+}
+fn verify_repaired_row(row: &Value) {
+    let result = audit(&row["recipe"]);
+    let id = row["recipe"]["id"].as_str().unwrap();
+    assert!(result["off"] == row["main"], "{id}: frozen main outcome");
+    assert!(result["on"] == row["on"], "{id}: repaired bytes/outcome");
+    assert!(
+        result["proofs"] == row["proofs"],
+        "{id}: occurrence owner map"
+    );
+    for proof in result["proofs"].as_array().unwrap() {
+        assert!(proof["faithful_main"] == false, "{id}: main did not drift");
+        for check in [
+            "complete",
+            "new_holds",
+            "new_equals_actual",
+            "same_values",
+            "stable",
+        ] {
+            assert!(proof[check] == true, "{id}: {check}");
+        }
+    }
+}
+/// Only these frozen, independently audited rows move their old assertions
+/// to OFF. The actual ON bytes still pass all the original value checks.
+pub(super) fn main_for_assertion(group: &str, source: &str, op: &str, actual: &str) -> String {
+    for row in repaired_rows() {
+        let recipe = &row["recipe"];
+        if recipe["group"] != group || recipe["source"] != source || recipe["op"] != op {
+            continue;
+        }
+        if let Some(pass) = row["on"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|v| v.as_str() == Some(actual))
+        {
+            verify_repaired_row(&row);
+            return row["main"]["files"][pass].as_str().unwrap().to_owned();
+        }
+    }
+    actual.to_owned()
+}
+#[cfg(feature = "parity")]
+pub(super) fn history_for_assertion(group: &str, source: &str, op: &str, actual: &Value) -> Value {
+    for row in repaired_rows() {
+        let recipe = &row["recipe"];
+        if recipe["group"] == group
+            && recipe["source"] == source
+            && recipe["op"] == op
+            && row["on"] == *actual
+        {
+            verify_repaired_row(&row);
+            return row["main"].clone();
+        }
+    }
+    actual.clone()
+}
+#[test]
+fn owner_legacy_repairs_have_frozen_main_bytes_and_complete_source_owners() {
+    let mut count = 0;
+    for row in repaired_rows() {
+        if !cfg!(feature = "parity") && row["recipe"]["disable_empty"] == true {
+            continue;
+        }
+        verify_repaired_row(&row);
+        count += 1;
+    }
+    assert_eq!(count, if cfg!(feature = "parity") { 33 } else { 29 });
+}
+#[cfg(feature = "parity")]
+fn sweep_operation(data: &[u8], step: &Value) -> Result<Operation, String> {
+    match step["op"].as_str().unwrap() {
+        "save" => {
+            let text = step["config"]
+                .as_str()
+                .unwrap_or(std::str::from_utf8(data).unwrap());
+            let config = Config::parse(text).map_err(|e| format!("config: {e}"))?;
+            Ok(Operation::Save(
+                Box::new(config),
+                step["migrate"].as_bool().unwrap_or(false),
+            ))
+        }
+        "nested" => Ok(Operation::Nested(
+            step["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap().to_owned())
+                .collect(),
+            step["value"].as_str().unwrap().to_owned(),
+        )),
+        "write" => Ok(Operation::Write),
+        _ => panic!("unsupported sweep operation"),
+    }
+}
+#[cfg(feature = "parity")]
+#[test]
+#[ignore = "offline persisted output, value and occurrence-owner audit"]
+fn owner_audit_persisted_sweeps() {
+    let rows: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FU_OWNERS_OUTPUT_INPUT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut results = Vec::new();
+    let mut mismatches = 0;
+    for row in rows {
+        let options = &row["options"];
+        let off =
+            tree::without_owner_protection(|| super::owner_evidence_tests::replay_steps(options));
+        let on = super::owner_evidence_tests::replay_steps(options);
+        let off_matches = row.get("before").is_none_or(|expected| *expected == off);
+        let on_matches = row.get("after").is_none_or(|expected| *expected == on);
+        mismatches += usize::from(!off_matches || !on_matches);
+        let mut data = options["file"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec();
+        let mut steps = Vec::new();
+        for (index, (step, actual)) in options["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(on["files"].as_array().unwrap())
+            .enumerate()
+        {
+            let input = if step["op"] == "write" {
+                step["body"].as_str().unwrap().as_bytes()
+            } else {
+                &data
+            };
+            let actual = actual.as_str().unwrap();
+            let operation = sweep_operation(input, step).unwrap();
+            let candidate = operation.candidate(input).unwrap();
+            let call_changed = candidate.0.bytes != actual.as_bytes();
+            let proof = prove_step(input, &operation, actual.as_bytes())
+                .unwrap_or_else(|error| json!({"audit_error":error}));
+            let good = !call_changed
+                || (proof["faithful_main"] == false
+                    && [
+                        "complete",
+                        "new_holds",
+                        "new_equals_actual",
+                        "same_values",
+                        "stable",
+                    ]
+                    .iter()
+                    .all(|key| proof[*key] == true));
+            mismatches += usize::from(!good);
+            let go = row["go"]["files"].get(index).and_then(Value::as_str);
+            let go_loadable = go.is_some_and(|g| {
+                Config::load_bytes(g.as_bytes()).is_ok() && parity::single_document(g)
+            });
+            let main_inventory = super::owner_evidence_tests::inventory(
+                std::str::from_utf8(&candidate.0.bytes).unwrap(),
+                false,
+            );
+            let config_inventory = step["config"]
+                .as_str()
+                .map(|config| super::owner_evidence_tests::inventory(config, true));
+            let certifier = if go_loadable {
+                let analysis = parity::comment_ownership_analysis(
+                    std::str::from_utf8(input).unwrap(),
+                    go,
+                    actual,
+                    &[],
+                );
+                json!({"accepted":analysis.accepted(),"failure":analysis.failure,"rules":analysis.rules})
+            } else {
+                Value::Null
+            };
+            steps.push(json!({"step":index,"op":step,"main_inventory":main_inventory,"config_inventory":config_inventory,"certifier":certifier,"input":String::from_utf8_lossy(input),"main_candidate":String::from_utf8(candidate.0.bytes).unwrap(),"actual":actual,"call_changed":call_changed,"proved":good,"proof":proof,"go_loadable":go_loadable,"source_inventory":super::owner_evidence_tests::inventory(std::str::from_utf8(input).unwrap(),true),"go_inventory":if go_loadable {go.map(|g|super::owner_evidence_tests::inventory(g,false))}else{None},"rust_inventory":super::owner_evidence_tests::inventory(actual,false)}));
+            data = actual.as_bytes().to_vec();
+        }
+        results.push(json!({"run":row["run"],"case":row["case"],"off_matches":off_matches,"on_matches":on_matches,"changed":off!=on,"off":off,"on":on,"go":row["go"],"steps":steps}));
+    }
+    std::fs::write(
+        std::env::var_os("FU_OWNERS_OUTPUT_OUTPUT").unwrap(),
+        serde_json::to_vec(&results).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        mismatches, 0,
+        "persisted outputs or changed-call owner/value/stability proofs"
+    );
+}

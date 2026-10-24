@@ -184,3 +184,77 @@ fn owner_capture_main_legacy_cases() {
     )
     .unwrap();
 }
+/// Both public callers, including their exact refusal, backup and hash behavior.
+pub(crate) fn caller_history(row: &Value) -> Value {
+    use crate::config::v8_edit::{edit_v8_if, preview_v8};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let dir = crate::config::testing::TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, row["source"].as_str().unwrap()).unwrap();
+    let mut steps = Vec::new();
+    for pass in 0..if row["op"].as_str().unwrap().ends_with('2') {
+        2
+    } else {
+        1
+    } {
+        let before = std::fs::read(&path).unwrap();
+        let Operation::Edit(edit) = operation(&before, row, pass).unwrap() else {
+            panic!("caller recipe")
+        };
+        let preview = preview_v8(&before, &edit);
+        let expected = sha256_hex(&before);
+        let checked = Arc::new(AtomicBool::new(false));
+        let check = checked.clone();
+        let condition = move |hash: &str| {
+            check.store(true, Ordering::Relaxed);
+            hash == expected
+        };
+        let written = edit_v8_if(&path, &edit, Some(&condition));
+        assert!(checked.load(Ordering::Relaxed));
+        let actual = std::fs::read(&path).unwrap();
+        let preview = match preview {
+            Ok(bytes) => json!({"file":String::from_utf8(bytes).unwrap()}),
+            Err(error) => json!({"error":error.to_string()}),
+        };
+        let write = match written {
+            Ok((_, hash)) => {
+                assert!(hash == sha256_hex(&actual));
+                assert!(std::fs::read(backup_path(&path)).unwrap() == before);
+                if let Some(bytes) = preview["file"].as_str() {
+                    assert!(bytes.as_bytes() == actual);
+                }
+                json!({"file":String::from_utf8(actual).unwrap(),"sha256":hash,"backup":true})
+            }
+            Err(error) => {
+                assert!(actual == before);
+                json!({"error":error.to_string(),"unchanged":true})
+            }
+        };
+        let refused = write.get("error").is_some();
+        steps.push(json!({"preview":preview,"write":write,"precondition":true}));
+        if refused {
+            break;
+        }
+    }
+    json!({"steps":steps})
+}
+#[test]
+#[ignore = "offline frozen-main capture for both edit callers"]
+fn owner_capture_main_callers() {
+    let rows: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FU_OWNERS_CALLER_INPUT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let result: Vec<_> = rows
+        .iter()
+        .map(|row| json!({"recipe":row,"main":caller_history(row)}))
+        .collect();
+    std::fs::write(
+        std::env::var_os("FU_OWNERS_CALLER_OUTPUT").unwrap(),
+        serde_json::to_vec_pretty(&result).unwrap(),
+    )
+    .unwrap();
+}

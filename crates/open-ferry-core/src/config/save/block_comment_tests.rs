@@ -78,7 +78,7 @@ fn check(op: &str) {
         let file = std::fs::read_to_string(&path).unwrap();
         if !(case["name"] == "m1-escape" && matches!(op, "raw-v8" | "put" | "patch" | "delete")) {
             assert_eq!(
-                file,
+                super::owner_legacy_tests::main_for_assertion("block", source, op, &file),
                 case["file"].as_str().unwrap(),
                 "{} {op}",
                 case["name"]

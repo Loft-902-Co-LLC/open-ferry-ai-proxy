@@ -4,7 +4,7 @@ use std::fs;
 
 // This diagnostic inventory is independent of receipt bookkeeping. It is used
 // only by explicitly invoked offline measurements, never to license a repair.
-fn inventory(text: &str, expand: bool) -> Value {
+pub(super) fn inventory(text: &str, expand: bool) -> Value {
     let Ok(mut doc) = unmarshal(text.as_bytes()) else {
         return Value::Null;
     };
@@ -186,7 +186,7 @@ fn owner_diagnose_sweeps() {
     }
 }
 
-fn replay_steps(options: &Value) -> Value {
+pub(super) fn replay_steps(options: &Value) -> Value {
     let dir = crate::config::testing::TempDir::new();
     let path = dir.join("config.yaml");
     fs::write(&path, options["file"].as_str().unwrap_or_default()).unwrap();
