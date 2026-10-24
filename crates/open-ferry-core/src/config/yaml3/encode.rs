@@ -290,6 +290,12 @@ pub(crate) fn protected_node(
 /// attaches a block mapping's terminal foot to its last key. At the protected
 /// empty-value boundary, retain the item's flow form as well as its indentation.
 fn protect_pending_item_foot(node: &mut Node) {
+    #[cfg(feature = "parity")]
+    if !crate::config::save::parity::ablation::enabled(
+        crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
+    ) {
+        return;
+    }
     fn flow_footed_items(node: &mut Node) {
         // Only the trailing edge can leave a foot pending at this boundary.
         // Earlier items discharged theirs before the last item was emitted.
@@ -303,6 +309,15 @@ fn protect_pending_item_foot(node: &mut Node) {
                 if let Some(last) = node.content.last_mut() {
                     if last.kind == Kind::Mapping && !last.foot_comment.is_empty() {
                         last.style |= Style::FLOW;
+                        // A preceding block item's foot is still pending
+                        // when the next flow item starts. It would split
+                        // that item's dash from its opening brace. Flush
+                        // those sibling feet with their own flow endings.
+                        for item in &mut node.content {
+                            if item.kind == Kind::Mapping && !item.foot_comment.is_empty() {
+                                item.style |= Style::FLOW;
+                            }
+                        }
                     } else {
                         flow_footed_items(last);
                     }
