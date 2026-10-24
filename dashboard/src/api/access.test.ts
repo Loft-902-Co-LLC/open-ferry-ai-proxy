@@ -116,3 +116,13 @@ describe("signInProblem", () => {
     expect(signInProblem(management(404, null))).toEqual({ kind: "management-off" });
   });
 });
+
+it("distinguishes an unwritable config without changing config_changed handling", () => {
+  const error = dashboard(409, "config_unwritable", "safe writer reason");
+  expect(callProblem(error)).toEqual({ kind: "config-unwritable", message: "safe writer reason" });
+  expect(saveProblem(error)).toEqual({ kind: "config-unwritable", message: "safe writer reason" });
+  expect(cantSaveConfig(error)).toBe(false);
+  expect(callProblem(dashboard(409, "config_changed", "reload it"))).toEqual({
+    kind: "unexpected", status: 409, message: "reload it",
+  });
+});

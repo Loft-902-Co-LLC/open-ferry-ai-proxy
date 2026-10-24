@@ -22,6 +22,7 @@ export type CallProblem =
   | AccessProblem
   | { kind: "ledger-unavailable" }
   | { kind: "config-not-saved" }
+  | { kind: "config-unwritable"; message: string | null }
   | { kind: "broken-config"; message: string | null }
   | { kind: "config-conflict"; fields?: readonly string[]; local?: boolean }
   | { kind: "unsupported" }
@@ -89,6 +90,9 @@ function problemOf(error: ApiError): CallProblem {
     return access;
   }
   const message = error.detail ?? error.code;
+  if (error.status === 409 && error.code === "config_unwritable") {
+    return { kind: "config-unwritable", message: error.detail };
+  }
   if (error.status === 503 && error.code === "ledger_unavailable") {
     return { kind: "ledger-unavailable" };
   }

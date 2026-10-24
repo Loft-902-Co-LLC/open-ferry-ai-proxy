@@ -731,13 +731,19 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
 
 /// A writer refusal is safe to show and guarantees the file is unchanged.
 pub(super) fn unwritable_failure(message: &str) -> Failure {
-    Failure::new(
-        "config_unwritable",
-        format!(
-            "{}; nothing was changed",
-            open_ferry_core::config::v8_edit::safe_unwritable_message(message)
-        ),
-    )
+    unwritable_failure_with(message, "nothing was changed")
+}
+
+pub(super) fn unwritable_undo_failure(message: &str) -> Failure {
+    unwritable_failure_with(message, "nothing was undone")
+}
+
+fn unwritable_failure_with(message: &str, unchanged: &str) -> Failure {
+    let safe = open_ferry_core::config::v8_edit::safe_unwritable_message(message);
+    // The fixed public fallback already ends with this guarantee. Keep the
+    // reason, and let this command state its own unchanged/undone outcome once.
+    let reason = safe.strip_suffix(", file unchanged").unwrap_or(&safe);
+    Failure::new("config_unwritable", format!("{reason}; {unchanged}"))
 }
 
 fn write_failure(kind: SaveErrorKind, message: &str) -> Failure {
@@ -762,7 +768,11 @@ pub(super) fn write_in_file(
     data: &[u8],
 ) -> Result<Option<Vec<u8>>, Failure> {
     super::files::config_write(probe, path)?;
-    match save::write_file_expecting(path, planned, data) {
+    #[cfg(not(test))]
+    let written = save::write_file_expecting(path, planned, data);
+    #[cfg(test)]
+    let written = refusal_tests::write_file_expecting(path, planned, data);
+    match written {
         Ok(()) => Ok(None),
         Err(error) => match error.kind() {
             SaveErrorKind::Stale => crate::settings::read(probe, path)
@@ -781,6 +791,79 @@ pub(super) fn write_in_file(
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
+
+    thread_local! {
+        static WRITE_REFUSAL: std::cell::RefCell<Option<save::SaveError>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn write_file_expecting(
+        path: &Path,
+        planned: &[u8],
+        data: &[u8],
+    ) -> Result<(), save::SaveError> {
+        match WRITE_REFUSAL.with_borrow_mut(Option::take) {
+            Some(error) => Err(error),
+            None => save::write_file_expecting(path, planned, data),
+        }
+    }
+
+    #[test]
+    fn write_in_file_itself_reports_a_real_refusal_without_changing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let before = b"port: 1\n";
+        std::fs::write(&path, before).unwrap();
+        let config = open_ferry_core::config::Config::load_bytes(
+            b"payload:\n  default:\n  - params:\n      field: {1: placeholder}\n",
+        )
+        .unwrap();
+        let error = save::save_preserving_comments(&path, &config, false).unwrap_err();
+        assert_eq!(error.kind(), SaveErrorKind::Unwritable);
+        WRITE_REFUSAL.with_borrow_mut(|slot| *slot = Some(error));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WRITE_REFUSAL.with_borrow_mut(|slot| *slot = None);
+            }
+        }
+        let _reset = Reset;
+        let probe = crate::update::scope_probe::Fake::new(
+            crate::os_service::Platform::HOST.unwrap(),
+            false,
+        );
+        let failure = write_in_file(&probe, &path, b"port: 2\n", before).unwrap_err();
+        assert!(WRITE_REFUSAL.with_borrow(|slot| slot.is_none()));
+        assert_eq!(failure.error, "config_unwritable");
+        assert_eq!(failure.text(), format!("{REASON}; nothing was changed\n"));
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap()["message"],
+            format!("{REASON}; nothing was changed")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!save::backup_path(&path).exists());
+    }
+
+    #[test]
+    fn fallback_says_unchanged_or_undone_only_once() {
+        for (failure, outcome) in [
+            (
+                unwritable_failure("credential-canary"),
+                "nothing was changed",
+            ),
+            (
+                unwritable_undo_failure("credential-canary"),
+                "nothing was undone",
+            ),
+        ] {
+            assert!(!failure.message.contains("file unchanged"));
+            assert_eq!(failure.message.matches(outcome).count(), 1);
+            assert!(!failure.message.contains("credential-canary"));
+            assert_eq!(
+                serde_json::to_value(&failure).unwrap()["message"],
+                failure.message
+            );
+        }
+    }
 
     const REASON: &str =
         "payload.default[0]: a mapping with a key that isn't a string can't be written";

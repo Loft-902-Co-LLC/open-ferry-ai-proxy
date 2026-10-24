@@ -135,6 +135,12 @@ export function explainProblem(problem: CallProblem): Explanation {
             copy them first if you want to keep them.</p>
         </>,
       };
+    case "config-unwritable":
+      return {
+        tone: "warn",
+        title: "The config can't be written this way",
+        body: <p>{problem.message ?? "The config writer couldn't preserve the config."}</p>,
+      };
     case "config-not-saved":
       return {
         tone: "warn",

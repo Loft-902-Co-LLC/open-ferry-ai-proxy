@@ -1862,8 +1862,19 @@ fn set_mode(
             ),
         );
     }
-    if let Err(error) = update_nested_scalar(path, &["self-update", "mode"], mode.as_str()) {
-        return outcome.failed(console, format!("couldn't write {shown}: {error}"));
+    #[cfg(not(test))]
+    let written = update_nested_scalar(path, &["self-update", "mode"], mode.as_str())
+        .map_err(|error| (error.kind(), error.to_string()));
+    #[cfg(test)]
+    let written =
+        tests::mode_write(|| update_nested_scalar(path, &["self-update", "mode"], mode.as_str()));
+    if let Err((kind, message)) = written {
+        let message = if kind == open_ferry_core::config::save::SaveErrorKind::Unwritable {
+            open_ferry_core::config::v8_edit::safe_unwritable_message(&message)
+        } else {
+            message
+        };
+        return outcome.failed(console, format!("couldn't write {shown}: {message}"));
     }
     let settings = match Config::load(path) {
         Ok(config) => Settings::resolve(&config.self_update, env),
