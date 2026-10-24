@@ -75,11 +75,12 @@
 //!   management key as the file holds it.
 //! - A read error's message is the operating system's, as Rust words it.
 //! - A file that doesn't load is `invalid_config` with the message
-//!   open-ferry's config loader gives: a syntax error is worded as the
-//!   saphyr parser words it (`yaml: line 2: while parsing a node, did not
-//!   find expected node content`, where upstream has `yaml: line 1: did
-//!   not find expected node content`), and a type error doesn't quote the
-//!   value (`cannot decode !!str as a !!int`).
+//!   open-ferry's config loader gives. Syntax errors use yaml.v3's wording
+//!   when the file contains a literal NEL, LS or PS, or starts with repeated
+//!   byte order marks. Otherwise they use saphyr's wording (`yaml: line 2:
+//!   while parsing a node, did not find expected node content`, where upstream
+//!   has `yaml: line 1: did not find expected node content`). Type errors still
+//!   don't quote the value (`cannot decode !!str as a !!int`).
 //! - A v8 value Go's JSON encoder can't write (a mapping with a key that
 //!   isn't a string, an infinite or NaN float, or a time in a zone a day or
 //!   more from UTC) is a 500 `{"error":"encode_failed"}`; upstream answers
