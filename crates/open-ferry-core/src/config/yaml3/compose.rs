@@ -19,7 +19,9 @@
 //!   it ([`AliasTarget::Node`]), where yaml.v3's points to the node itself;
 //!   an alias inside its anchor's node holds [`AliasTarget::Cycle`]. The
 //!   copies of anchors that later aliases name may add up to at most
-//!   [`MAX_ALIAS_COPIES`] nodes; past that the document is refused with
+//!   [`MAX_ALIAS_COPIES`] nodes and [`MAX_ALIAS_COPY_TEXT`] bytes of owned
+//!   text. Both budgets are checked before cloning; shared alias targets
+//!   are not copied or charged again. Past either limit the document is refused with
 //!   `yaml: document contains excessive aliasing`, the error yaml.v3 gives
 //!   when it decodes such a document.
 //! - Nesting deeper than [`MAX_DEPTH`] is refused (`yaml: line N: exceeded
@@ -37,6 +39,9 @@ use super::{AliasTarget, Kind, MAP_TAG, MAX_DEPTH, MERGE_TAG, Node, SEQ_TAG, STR
 
 /// The most nodes the copies of aliased anchors may add up to.
 pub(crate) const MAX_ALIAS_COPIES: usize = 1 << 20;
+
+/// The most owned text bytes the copies of aliased anchors may add up to.
+const MAX_ALIAS_COPY_TEXT: usize = 64 << 20;
 
 /// A YAML error, worded as yaml.v3 words it (`yaml: ...`).
 #[derive(Clone, PartialEq, Eq)]
@@ -87,6 +92,10 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, YamlError> {
     result
 }
 fn unmarshal_inner(data: &[u8]) -> Result<Node, YamlError> {
+    unmarshal_with_copy_text_limit(data, MAX_ALIAS_COPY_TEXT)
+}
+
+fn unmarshal_with_copy_text_limit(data: &[u8], copy_text_limit: usize) -> Result<Node, YamlError> {
     // newParser: an empty input reads as a line break.
     let input: &[u8] = if data.is_empty() { b"\n" } else { data };
     let mut composer = Composer {
@@ -113,7 +122,7 @@ fn unmarshal_inner(data: &[u8]) -> Result<Node, YamlError> {
         }
     }
     identify(&mut root);
-    resolve_aliases(&mut root, &composer.aliases)?;
+    resolve_aliases(&mut root, &composer.aliases, copy_text_limit)?;
     Ok(root)
 }
 
@@ -521,12 +530,17 @@ fn text(bytes: &[u8]) -> String {
 
 /// Gives each alias in `root` its target: a copy of its anchor's node in
 /// the finished tree, as yaml.v3's pointer would show it.
-fn resolve_aliases(root: &mut Node, aliases: &[PendingAlias]) -> Result<(), YamlError> {
+fn resolve_aliases(
+    root: &mut Node,
+    aliases: &[PendingAlias],
+    copy_text_limit: usize,
+) -> Result<(), YamlError> {
     // An alias only names an anchor whose node ended before it, so every
     // alias inside that node is earlier and already resolved when a copy
     // is taken.
     let mut copies: HashMap<&[usize], Arc<Node>> = HashMap::new();
     let mut budget = MAX_ALIAS_COPIES;
+    let mut text_budget = copy_text_limit;
     for alias in aliases {
         let target = match &alias.target {
             None => AliasTarget::Cycle,
@@ -534,12 +548,16 @@ fn resolve_aliases(root: &mut Node, aliases: &[PendingAlias]) -> Result<(), Yaml
                 let copy = match copies.get(path.as_slice()) {
                     Some(copy) => Arc::clone(copy),
                     None => {
-                        let node = node_at(root, path).cloned().unwrap_or_default();
-                        let size = count_nodes(&node);
+                        let empty = Node::default();
+                        let node = node_at(root, path).unwrap_or(&empty);
+                        let (size, text_size) = copy_cost(node);
                         budget = budget.checked_sub(size).ok_or_else(|| {
                             YamlError::fail("document contains excessive aliasing")
                         })?;
-                        let copy = Arc::new(node);
+                        text_budget = text_budget.checked_sub(text_size).ok_or_else(|| {
+                            YamlError::fail("document contains excessive aliasing")
+                        })?;
+                        let copy = Arc::new(node.clone());
                         copies.insert(path.as_slice(), Arc::clone(&copy));
                         copy
                     }
@@ -566,12 +584,29 @@ fn node_at_mut<'a>(root: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
         .try_fold(root, |node, &index| node.content.get_mut(index))
 }
 
-/// The number of nodes in a tree, not counting what aliases refer to.
-fn count_nodes(node: &Node) -> usize {
-    node.content
-        .iter()
-        .map(count_nodes)
-        .fold(1, usize::saturating_add)
+/// The nodes and owned text a deep clone copies. Alias targets, comment
+/// identities and scopes are behind Arcs and only their pointers are cloned.
+fn copy_cost(node: &Node) -> (usize, usize) {
+    let text = [
+        &node.tag,
+        &node.value,
+        &node.anchor,
+        &node.head_comment,
+        &node.line_comment,
+        &node.foot_comment,
+    ]
+    .into_iter()
+    .map(|text| text.len())
+    .fold(0, usize::saturating_add);
+    node.content.iter().map(copy_cost).fold(
+        (1, text),
+        |(nodes, text), (child_nodes, child_text)| {
+            (
+                nodes.saturating_add(child_nodes),
+                text.saturating_add(child_text),
+            )
+        },
+    )
 }
 
 #[cfg(test)]
@@ -600,6 +635,86 @@ mod tests {
     use super::super::encode::Encoder;
     use super::super::{Kind, Node};
     use super::unmarshal;
+
+    #[test]
+    fn alias_copy_text_budget_precedes_nested_anchor_clones() {
+        fn source(bytes: usize) -> String {
+            let mut source = String::from("# c\u{2028}a: ");
+            for i in 0..8 {
+                source.push_str(&format!("&a{i} ["));
+            }
+            source.push_str(&"x".repeat(bytes));
+            source.push_str(&"]".repeat(8));
+            source.push_str("\nrefs: [");
+            source.push_str(
+                &(0..8)
+                    .map(|i| format!("*a{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            source.push_str("]\n");
+            source
+        }
+        let read =
+            |bytes| super::unmarshal_with_copy_text_limit(source(bytes).as_bytes(), 16 << 10);
+        assert!(read(64).is_ok());
+        assert_eq!(
+            read(4 << 10).unwrap_err().message(),
+            "yaml: document contains excessive aliasing"
+        );
+    }
+
+    #[test]
+    fn alias_copy_text_budget_counts_every_owned_string() {
+        for field in 0..6 {
+            let mut anchor = Node::default();
+            let text = "x".repeat(129);
+            match field {
+                0 => anchor.value = text,
+                1 => anchor.tag = text,
+                2 => anchor.anchor = text,
+                3 => anchor.head_comment = text,
+                4 => anchor.line_comment = text,
+                _ => anchor.foot_comment = text,
+            }
+            let mut root = Node {
+                content: vec![anchor, Node::default()],
+                ..Node::default()
+            };
+            let alias = super::PendingAlias {
+                at: vec![1],
+                target: Some(vec![0]),
+            };
+            assert_eq!(
+                super::resolve_aliases(&mut root, &[alias], 128)
+                    .unwrap_err()
+                    .message(),
+                "yaml: document contains excessive aliasing"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_copy_budget_does_not_charge_shared_targets_twice() {
+        let source = format!(
+            "# c\u{2028}a: &a {}\nb: &b [*a]\nrefs: [{}]\n",
+            "x".repeat(4096),
+            vec!["*b"; 64].join(", ")
+        );
+        let root = super::unmarshal_with_copy_text_limit(source.as_bytes(), 8192).unwrap();
+        let mapping = &root.content[0];
+        let refs = &mapping.content[5];
+        let first = refs.content[0].alias.as_ref().unwrap();
+        let super::AliasTarget::Node(first) = first else {
+            panic!("expected target")
+        };
+        for alias in &refs.content {
+            let Some(super::AliasTarget::Node(target)) = &alias.alias else {
+                panic!("expected target")
+            };
+            assert!(std::sync::Arc::ptr_eq(first, target));
+        }
+    }
 
     /// The recorded trees and round trips.
     const NODES: &str = include_str!("../testdata/yaml3/compose_nodes.json");
