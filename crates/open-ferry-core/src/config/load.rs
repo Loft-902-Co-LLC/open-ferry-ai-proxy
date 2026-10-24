@@ -195,6 +195,56 @@ mod tests {
     }
 
     #[test]
+    fn repeated_bom_nested_update_preserves_the_loaded_key_and_go_bytes() {
+        for separator in ['\u{2028}', '\u{0085}', '\u{2029}', '\n'] {
+            for marks in 0..=2 {
+                let source = format!("{}# c{separator}debug: true\n", "\u{feff}".repeat(marks));
+                assert_eq!(Config::parse(&source).unwrap().debug, marks != 2);
+                let root = parse_document(&source).unwrap().unwrap();
+                let key = root.content[0].value.to_string();
+                let dir = TempDir::new();
+                let path = dir.join("config.yaml");
+                std::fs::write(&path, &source).unwrap();
+                super::super::save::update_nested_scalar(&path, &["auth-dir"], "/proof").unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                // Pinned Go handler outputs, not a second Rust rendering.
+                let hash = if marks == 2 {
+                    "f05e7e448572fad60f139ee0d9cefa94ab640f6b90203048f9787cb77c0898e0"
+                } else {
+                    "d78401f6e112a5756dc6978e52c6a3b1737c5dc80fce3c6c3d277e112fa80e0d"
+                };
+                assert_eq!(super::super::save::sha256_hex(&bytes), hash);
+                let after = parse_document(std::str::from_utf8(&bytes).unwrap())
+                    .unwrap()
+                    .unwrap();
+                assert!(super::super::yaml::yaml_path(&after, &key).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_aliased_save_keeps_the_pinned_go_bytes() {
+        let source = "# c\u{2028}auth-dir: &home /base\nanother: *home\n";
+        let config = Config::parse(source).unwrap();
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        super::super::save::save_preserving_comments(&path, &config, false).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            super::super::save::sha256_hex(&bytes),
+            "ef73951803750cc7cf460ec54a4a6ece211f37ecf1f5a269632d52c18c34612f"
+        );
+        std::fs::write(&path, source).unwrap();
+        super::super::save::update_nested_scalar(&path, &["auth-dir"], "/proof").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            super::super::save::sha256_hex(&bytes),
+            "e2a850a08a0a6d9b5d7e11fe92057df7230344e16b3271f879f1c0b95a8398b7"
+        );
+    }
+
+    #[test]
     fn unicode_value_reader_keeps_existing_merge_behavior() {
         // The CLI value reader's existing merge handling is separate from
         // scanning line breaks. Keep it the same on both scanner paths.
