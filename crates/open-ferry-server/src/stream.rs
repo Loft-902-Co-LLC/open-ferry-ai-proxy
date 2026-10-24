@@ -269,10 +269,13 @@ where
             }
         }
     });
-    let headers = headers
-        .0
-        .expect("pre-first-token ticker has commit headers");
-    sse_response(&headers.lock().unwrap(), Body::from_stream(body))
+    let body = Body::from_stream(body);
+    match headers.0 {
+        Some(shared) => sse_response(&shared.lock().unwrap(), body),
+        // A mismatched caller must still commit the empty headers that were
+        // available before bootstrap, rather than panic on the request path.
+        None => sse_response(&HeaderMap::new(), body),
+    }
 }
 
 /// A 200 event stream: the SSE headers, then the provider's headers that
@@ -413,25 +416,81 @@ pub(crate) mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn disabled_pre_first_token_preserves_upstream_headers_without_shared_state() {
-        for interval in [None, Some(Duration::ZERO)] {
-            let shared = CommitHeaders::new(interval);
-            assert!(shared.0.is_none());
+        use crate::config::ServerConfig;
+        use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
+        use tower::ServiceExt;
+
+        let payload = br#"{"choices":[{"delta":{"content":"upstream"},"finish_reason":"stop"}]}"#;
+        for (interval, before_first) in [
+            (None, true),
+            (Some(Duration::ZERO), true),
+            (Some(Duration::from_secs(1)), false),
+        ] {
             let mut upstream = HeaderMap::new();
-            upstream.insert("x-request-id", HeaderValue::from_static("upstream"));
-            shared.set(&upstream);
-            let response = pre_first_token(
-                interval,
-                shared,
-                async move { upstream },
-                |headers, committed| {
-                    assert!(!committed);
-                    sse_response(&headers, Body::from("data: upstream\n\n"))
+            upstream.insert("x-upstream-result", HeaderValue::from_static("upstream"));
+            let dispatcher = FakeDispatcher::new([Outcome::Stream(
+                upstream,
+                vec![Ok(Bytes::from_static(payload))],
+            )]);
+            let state = crate::testing::state(
+                ServerConfig {
+                    passthrough_headers: true,
+                    streaming: StreamingConfig {
+                        keepalive: interval,
+                        keepalive_before_first_token: before_first,
+                        ..StreamingConfig::default()
+                    },
+                    ..ServerConfig::default()
                 },
-            )
-            .await;
-            assert_eq!(response.headers()["x-request-id"], "upstream");
-            assert_eq!(collect(response.into_body()).await, "data: upstream\n\n");
+                FakeCatalog::new().serve("m", &["openai"]),
+                &dispatcher,
+            );
+            let request = http::Request::post("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"m","messages":[],"stream":true}"#))
+                .unwrap();
+            let response = crate::router(state).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-upstream-result"], "upstream");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            assert_eq!(
+                collect(response.into_body()).await,
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    std::str::from_utf8(payload).unwrap()
+                )
+            );
+            assert_eq!(dispatcher.calls().len(), 1);
+            assert_eq!(dispatcher.calls()[0].method, "execute_stream");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_first_token_without_cached_state_commits_empty_headers() {
+        let response = pre_first_token(
+            Some(Duration::from_secs(1)),
+            CommitHeaders::new(None),
+            async {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+            },
+            |(), committed| {
+                assert!(committed);
+                sse_response(&HeaderMap::new(), Body::from("data: upstream\n\n"))
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(
+            collect(response.into_body()).await,
+            ": keep-alive\n\ndata: upstream\n\n"
+        );
     }
 
     #[tokio::test(start_paused = true)]
