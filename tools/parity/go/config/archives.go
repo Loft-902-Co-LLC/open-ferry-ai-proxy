@@ -211,6 +211,13 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 		return nil, err
 	}
 	a, m := parityBlocks(actual), parityBlocks(tagged)
+	for _, block := range a {
+		for _, line := range block.Lines {
+			if _, collision := markerIDs[line]; collision {
+				return nil, fmt.Errorf("archive identity collision")
+			}
+		}
+	}
 	if len(a) != len(m) {
 		return nil, fmt.Errorf("archive layout shape")
 	}
