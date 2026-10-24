@@ -8,7 +8,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 > and of the work of its 260+ contributors. Its request translation, routing, and
 > management API are modelled on CLIProxyAPI's, and it reads CLIProxyAPI's config and
 > auth files. This project is **not affiliated with or endorsed by** CLIProxyAPI,
-> Router-For.ME, OpenAI, or Anthropic. See [UPSTREAM.md](UPSTREAM.md) for exactly what
+> Router-For.ME, OpenAI, Anthropic, or Google. See [UPSTREAM.md](UPSTREAM.md) for exactly what
 > was ported from where.
 
 ## Status
@@ -215,7 +215,7 @@ cargo build --release --locked -p open-ferry
 
 The binary is `target/release/open-ferry`. `rust-toolchain.toml` picks the toolchain. The example config, [`config.example.yaml`](config.example.yaml), is at the root of the repository; set it up as [above](#download-a-release).
 
-To build the [dashboard](#dashboard) in, build its app first, with [Node.js](https://nodejs.org/) 22.22.2 or newer, then Open Ferry:
+To build the [dashboard](#dashboard) in, build its app first, with [Node.js](https://nodejs.org/) 22.22.2 or newer. Then build Open Ferry:
 
 ```sh
 cd dashboard
