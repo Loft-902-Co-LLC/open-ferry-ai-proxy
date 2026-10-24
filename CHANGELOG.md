@@ -118,6 +118,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
+- **Load Unicode YAML line breaks as CLIProxyAPI does**: config files containing U+0085, U+2028 or U+2029 now use the same parsing rules for values, keys, comments and document boundaries, and saving them is no longer refused because the readers disagree. Live scalar quoting follows Go; archive quoting and alias safety limits remain in place.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
 - **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
 - **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.

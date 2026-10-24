@@ -410,9 +410,7 @@ pub(crate) fn marshal(node: &Node) -> Result<Vec<u8>, YamlError> {
 /// `yaml.Encoder` with `SetIndent(2)`. Upstream then runs
 /// [`normalize_comment_indentation`] on the result.
 pub(crate) fn marshal_config(node: &Node) -> Result<Vec<u8>, YamlError> {
-    let mut node = node.clone();
-    super::encode::quote_config_unicode(&mut node);
-    marshal_node(&node, CONFIG_INDENT)
+    marshal_node(node, CONFIG_INDENT)
 }
 
 #[cfg(test)]
