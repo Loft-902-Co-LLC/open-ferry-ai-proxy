@@ -60,3 +60,25 @@ func TestParityOwnershipDeletedAncestorHasNoSlot(t *testing.T) {
 		}
 	}
 }
+
+func TestParityOwnershipTracksDroppedKeyCommentsBySurvivingValueIdentity(t *testing.T) {
+	proof := ParityOwnership("openai-compatibility:\n  - name: fixture\n    base-url: https://example.invalid/v1\n    # head\n    api-key-entries:\n      - api-key: fixture\n", map[string]any{"op": "save", "migrate": true})
+	if proof["unavailable"] != nil {
+		t.Fatal("identity replay unavailable")
+	}
+	found := false
+	for _, raw := range proof["moves"].([]any) {
+		move := raw.(map[string]any)
+		from := move["source"].(ParityOwner)
+		to := move["destination"].(ParityOwner)
+		if len(from.Path) == 3 && from.Path[2].(map[string]any)["key"] == "api-key-entries" && from.Node == "key" && from.Slot == "head" {
+			if len(to.Path) != 4 || to.Path[3].(map[string]any)["key"] != "keys" || to.Node != "key" || to.Slot != "head" {
+				t.Fatal("wrong surviving destination")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("lost key comment received no surviving logical-entry destination")
+	}
+}

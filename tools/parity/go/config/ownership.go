@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -61,7 +62,12 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 		return fail()
 	}
 	surviving := map[int]bool{}
-	parityWalk(root, []any{}, "root", func(n *yaml.Node, _ []any, _ string, _ *yaml.Node) { surviving[n.Line] = true })
+	destinations := map[int][]ParityOwner{}
+	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
+		surviving[n.Line] = true
+		destinations[n.Line] = append(destinations[n.Line], ParityOwner{path, side, ""})
+	})
+	observed := map[string]bool{}
 	moves := []any{}
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
 		for slot, text := range map[string]string{"head": n.HeadComment, "line": n.LineComment, "foot": n.FootComment} {
@@ -70,10 +76,39 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 				if !ok || !surviving[origin.Identity] {
 					continue
 				}
+				bound := false
+				for _, target := range destinations[origin.Identity] {
+					if reflect.DeepEqual(target.Path, path) {
+						bound = true
+					}
+				}
+				if !bound {
+					continue
+				}
+				observed[strings.TrimSpace(line)] = true
 				moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "destination": ParityOwner{path, side, slot}})
 			}
 		}
 	})
+	// A source key comment may be lost by upstream while its associated
+	// value identity survives (for example api-key-entries becomes keys).
+	// Its original side/slot can use only that surviving logical entry path.
+	// Actual comment transfers above take precedence; no equal text is read.
+	for id, origin := range origins {
+		if observed[id] {
+			continue
+		}
+		for _, target := range destinations[origin.Identity] {
+			if origin.Owner.Node == "key" {
+				if target.Node != "value" {
+					continue
+				}
+			} else if origin.Owner.Node != target.Node {
+				continue
+			}
+			moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "destination": ParityOwner{target.Path, origin.Owner.Node, origin.Owner.Slot}})
+		}
+	}
 	result["moves"] = moves
 	archives, archiveErr := parityArchives(source, operation, raw)
 	if archiveErr != nil {
