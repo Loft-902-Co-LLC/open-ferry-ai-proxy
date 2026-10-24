@@ -47,9 +47,13 @@ impl Fake {
     }
 
     async fn recv(&mut self) -> Message {
+        self.recv_for("waiting for a supervisor message").await
+    }
+
+    async fn recv_for(&mut self, step: &str) -> Message {
         tokio::time::timeout(WAIT, self.channel.receive::<Message>())
             .await
-            .expect("the worker sent nothing in time")
+            .unwrap_or_else(|error| panic!("{step}: the worker sent nothing in time: {error}"))
             .unwrap()
             .expect("the worker closed the channel")
             .message
@@ -72,17 +76,25 @@ impl Fake {
     /// What a worker started active sends first: `loaded`, then its first
     /// status, in the `active` phase.
     async fn recv_active_start(&mut self) {
-        assert!(matches!(self.recv().await, Message::Loaded { .. }));
         assert!(matches!(
-            self.recv().await,
+            self.recv_for("active start: loaded").await,
+            Message::Loaded { .. }
+        ));
+        assert!(matches!(
+            self.recv_for("active start: active status").await,
             Message::Status { phase, .. } if phase == "active"
         ));
     }
 
     /// The next message that isn't a `status`.
     async fn recv_other(&mut self) -> Message {
+        self.recv_other_for("waiting for a non-status message")
+            .await
+    }
+
+    async fn recv_other_for(&mut self, step: &str) -> Message {
         loop {
-            match self.recv().await {
+            match self.recv_for(step).await {
                 Message::Status { .. } => {}
                 other => return other,
             }
