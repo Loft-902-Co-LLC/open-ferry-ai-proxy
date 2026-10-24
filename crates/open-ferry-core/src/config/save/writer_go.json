@@ -1,0 +1,389 @@
+[
+  {
+    "case": "C8_dashes_comment",
+    "op": "save",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "save2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "migrate",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "migrate2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "nested",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "nested2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /x\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /y\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "raw",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "raw2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "normalize",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "normalize2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "patch",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "patch2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "put",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_dashes_comment",
+    "op": "put2",
+    "result": {
+      "files": [
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n",
+        "# d\nmodels: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "save",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "save2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "migrate",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "migrate2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /x\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\ncredentials:\n    concurrency:\n        cpa-heartbeat-timeout: 3s\n        cpa-cancel-bound: 5s\n        reclaim-grace: 5s\n        cleanup-interval: 5s\n        release-flush-interval: 250ms\n        release-max-backoff: 2s\n        busy-retry-min: 250ms\n        busy-retry-max: 1s\n        max-limit: 1000000\n    in-flight:\n        snapshot-interval: 2s\n        stale-after: 10s\n        max-part-bytes: 262144\n        max-part-count: 64\n        max-revision-bytes: 16777216\n        max-aggregate-groups: 100000\n        max-details: 10000\n        max-string-bytes: 256\n        staging-retention: 1m\noauth:\n    auth-dir: /y\n    providers:\n        aistudio:\n            ws-auth: true\nserver:\n    discovery:\n        service-type: _ai-gateway._tcp\n        subtypes:\n            - _chat-completions\n            - _responses\n            - _messages\n            - _generate-content\n            - _interactions\nobservability:\n    usage:\n        redis-usage-queue-retention-seconds: 60\nrouting:\n    cooldown:\n        disable-cooling: false\n    retry:\n        request-retry: 0\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "nested",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "nested2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /x\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\nauth-dir: /y\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "raw",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "raw2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "normalize",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "normalize2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "patch",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "patch2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "put",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "C8_crlf",
+    "op": "put2",
+    "result": {
+      "files": [
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n",
+        "models: {}\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "save",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "save2",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "migrate",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "migrate2",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "nested",
+    "result": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "nested2",
+    "result": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n",
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "raw",
+    "result": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "raw2",
+    "result": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n",
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b}\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "normalize",
+    "result": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n            # f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "normalize2",
+    "result": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n            # f1\n    request-scoped-errors: {}\nconfig-version: 8\n",
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n            # f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "patch",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "patch2",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "put",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  },
+  {
+    "case": "flow_two_feet",
+    "op": "put2",
+    "result": {
+      "files": [],
+      "refused": true
+    }
+  }
+]
