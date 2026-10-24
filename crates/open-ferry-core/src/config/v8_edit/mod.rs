@@ -34,6 +34,9 @@
 //! replaces the whole config (a JSON body has none).
 //!
 //! Deviations from upstream:
+//! - A typed preservation refusal, while reading or writing, is
+//!   `Unwritable`: 409 `config_unwritable` with a safe reason. Upstream has
+//!   no corresponding refusal. Nothing was changed.
 //! - The file is written atomically and refused when it is a symbolic link
 //!   (see [`super::save`]); a refused write answers 500 `write_failed` with
 //!   the reason. It is read through a link, as upstream reads it.
@@ -57,6 +60,7 @@
 #[cfg(test)]
 mod deferred_tests;
 mod known;
+mod refusal;
 mod schema;
 mod validate;
 
@@ -66,6 +70,7 @@ use std::path::Path;
 use open_ferry_translate::go::json_valid;
 
 pub use known::{KnownKind, KnownPath, is_known_v8_path, known_v8_paths};
+pub use refusal::safe_unwritable_message;
 pub use validate::validate_v8_config;
 
 use super::AnyValue;
@@ -180,6 +185,9 @@ pub enum V8EditError {
     Unprocessable(String),
     /// The file couldn't be written: 500 `write_failed` with the message.
     WriteFailed(String),
+    /// The writer can't preserve the config: 409 `config_unwritable`.
+    /// Nothing was changed. The message contains no config values.
+    Unwritable(String),
     /// The writer is not the active one, as while open-ferry switches
     /// versions, and nothing was written: 503. Never made here; a writer
     /// that holds a gate answers it.
@@ -216,6 +224,9 @@ impl fmt::Display for V8EditError {
             }
             Self::ReadOnlyField(field) => write!(f, "read_only_field: {field}"),
             Self::WriteFailed(message) => write!(f, "write_failed: {message}"),
+            Self::Unwritable(message) => {
+                write!(f, "config_unwritable: {}", safe_unwritable_message(message))
+            }
             Self::Switching => f.write_str("open-ferry is switching versions"),
             Self::PreconditionFailed { .. } => f.write_str("precondition_failed"),
         }
@@ -251,8 +262,7 @@ pub fn edit_v8_if(
     edit: &V8Edit,
     condition: Option<&V8Precondition>,
 ) -> Result<(Config, String), V8EditError> {
-    let failed = |error: save::SaveError| V8EditError::WriteFailed(error.to_string());
-    let lock = save::WriteLock::acquire(path).map_err(failed)?;
+    let lock = save::WriteLock::acquire(path).map_err(write_error)?;
     let data = std::fs::read(path).map_err(|_| V8EditError::ReadFailed)?;
     if let Some(condition) = condition {
         let current_sha256 = save::sha256_hex(&data);
@@ -261,7 +271,7 @@ pub fn edit_v8_if(
         }
     }
     let (out, config) = render(&data, edit)?;
-    let sha256 = save::write_file_locked(&lock, path, &out).map_err(failed)?;
+    let sha256 = save::write_file_locked(&lock, path, &out).map_err(write_error)?;
     Ok((config, sha256))
 }
 
@@ -270,14 +280,37 @@ pub fn edit_v8_if(
 /// what a change would make before it makes it.
 pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
     let (data, _) = render(data, edit)?;
-    save::render_write_file(&data).map_err(|error| V8EditError::WriteFailed(error.to_string()))
+    save::render_write_file(&data).map_err(write_error)
+}
+
+fn write_error(error: save::SaveError) -> V8EditError {
+    if error.kind() == save::SaveErrorKind::Unwritable {
+        V8EditError::Unwritable(safe_unwritable_message(&error.to_string()))
+    } else {
+        V8EditError::WriteFailed(error.to_string())
+    }
+}
+
+fn stored_error(error: save::SaveError) -> V8EditError {
+    if error.kind() == save::SaveErrorKind::Unwritable {
+        V8EditError::Unwritable(safe_unwritable_message(&error.to_string()))
+    } else {
+        V8EditError::StoredInvalid(error.to_string())
+    }
+}
+
+fn rendered_error(error: save::SaveError) -> V8EditError {
+    if error.kind() == save::SaveErrorKind::Unwritable {
+        V8EditError::Unwritable(safe_unwritable_message(&error.to_string()))
+    } else {
+        V8EditError::InvalidConfig(error.to_string())
+    }
 }
 
 /// The bytes [`edit_v8`] writes for the file `data`, and the config they
 /// load as.
 pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8EditError> {
-    let stored = |error: save::SaveError| V8EditError::StoredInvalid(error.to_string());
-    let (mut doc, _) = normalize_config_layout_doc(data, true).map_err(stored)?;
+    let (mut doc, _) = normalize_config_layout_doc(data, true).map_err(stored_error)?;
     let Some(root) = doc.content.first_mut() else {
         return Err(V8EditError::StoredInvalid("empty config".to_owned()));
     };
@@ -323,8 +356,7 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
     validate_v8_config(&data).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
-    let (data, _) = normalize_config_layout(&data, true)
-        .map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
+    let (data, _) = normalize_config_layout(&data, true).map_err(rendered_error)?;
     Ok((data, config))
 }
 

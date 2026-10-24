@@ -769,19 +769,24 @@ pub(super) fn undo_in_file_with_probe(
     super::files::config_write(probe, &ctx.path)?;
     save::undo(&ctx.path, check)
         .map(|_| ())
-        .map_err(|error| match error.kind() {
-            SaveErrorKind::NoBackup => no_backup(backup),
-            SaveErrorKind::ChangedSince => changed_since(ctx, None),
-            SaveErrorKind::Stale => config_changed(),
-            SaveErrorKind::Io | SaveErrorKind::Symlink | SaveErrorKind::Unwritable => Failure::new(
-                "failed",
-                format!("the config file couldn't be written, so nothing was undone: {error}"),
-            ),
-            _ => Failure::new(
-                "failed",
-                "the backup doesn't load as a config, so nothing was undone",
-            ),
-        })
+        .map_err(|error| undo_failure(ctx, backup, error.kind(), &error.to_string()))
+}
+
+fn undo_failure(ctx: &Context, backup: &Path, kind: SaveErrorKind, message: &str) -> Failure {
+    match kind {
+        SaveErrorKind::NoBackup => no_backup(backup),
+        SaveErrorKind::ChangedSince => changed_since(ctx, None),
+        SaveErrorKind::Stale => config_changed(),
+        SaveErrorKind::Unwritable => super::change::unwritable_failure(message),
+        SaveErrorKind::Io | SaveErrorKind::Symlink => Failure::new(
+            "failed",
+            format!("the config file couldn't be written, so nothing was undone: {message}"),
+        ),
+        _ => Failure::new(
+            "failed",
+            "the backup doesn't load as a config, so nothing was undone",
+        ),
+    }
 }
 
 /// `config replace`.
@@ -813,4 +818,39 @@ pub(crate) async fn replace(ctx: &Context, input: ReplaceInput) -> Result<Outcom
     )
     .await?;
     Ok(Outcome::of(&changed))
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn undo_refusal_text_and_json_differ_from_io_errors() {
+        let ctx = Context {
+            path: "config.yaml".into(),
+            env: super::super::Env::default(),
+            key_file: None,
+            yes: true,
+            expect_sha256: None,
+            expect_backup_sha256: None,
+            ask: None,
+            say: None,
+            caller: super::super::Caller::Cli,
+        };
+        let reason =
+            "payload.default[0]: a mapping with a key that isn't a string can't be written";
+        let backup = Path::new("config.yaml.bak");
+        let failure = undo_failure(&ctx, backup, SaveErrorKind::Unwritable, reason);
+        assert_eq!(failure.text(), format!("{reason}; nothing was changed\n"));
+        assert_eq!(
+            serde_json::to_value(&failure).unwrap(),
+            serde_json::json!({
+                "error":"config_unwritable", "message":format!("{reason}; nothing was changed")
+            })
+        );
+        assert_eq!(
+            undo_failure(&ctx, backup, SaveErrorKind::Io, "write refused").error,
+            "failed"
+        );
+    }
 }

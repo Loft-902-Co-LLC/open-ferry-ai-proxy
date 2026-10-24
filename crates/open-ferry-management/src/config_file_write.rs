@@ -14,6 +14,8 @@
 //!   file that can't be written answers 500 `{"error":"write_failed",
 //!   "message":"failed to write config"}`. Else it answers
 //!   `{"changed":["config"],"ok":true}`.
+//!   A deliberate preservation refusal instead answers 409
+//!   `config_unwritable` with a safe reason and changes nothing.
 //! - `PUT` and `PATCH /v8/management/config` (or `config/`) replace or
 //!   merge into the whole config, `PUT`, `PATCH` and `DELETE
 //!   /v8/management/config/*path` the value at the path, one mapping key
@@ -384,6 +386,9 @@ async fn put_config_yaml(State(state): State<ManagementState>, body: Body) -> Re
                 Ok(sha256) => sha256,
                 Err(error) if error.is_switching() => {
                     return json::error(StatusCode::SERVICE_UNAVAILABLE, config_write::SWITCHING);
+                }
+                Err(error) if error.is_unwritable() => {
+                    return config_write::unwritable_response(&error.to_string());
                 }
                 Err(_) => {
                     return json::response(

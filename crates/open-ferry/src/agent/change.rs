@@ -689,6 +689,7 @@ fn key_list_changed(gone: &[Value]) -> Failure {
 /// The failure for a change the config writer refused.
 pub(crate) fn edit_failure(error: V8EditError) -> Failure {
     match error {
+        V8EditError::Unwritable(message) => unwritable_failure(&message),
         V8EditError::ReadFailed => Failure::new("failed", "the config file can't be read"),
         V8EditError::StoredInvalid(message) => Failure::new(
             "invalid_config",
@@ -728,6 +729,31 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
     }
 }
 
+/// A writer refusal is safe to show and guarantees the file is unchanged.
+pub(super) fn unwritable_failure(message: &str) -> Failure {
+    Failure::new(
+        "config_unwritable",
+        format!(
+            "{}; nothing was changed",
+            open_ferry_core::config::v8_edit::safe_unwritable_message(message)
+        ),
+    )
+}
+
+fn write_failure(kind: SaveErrorKind, message: &str) -> Failure {
+    match kind {
+        SaveErrorKind::Unwritable => unwritable_failure(message),
+        SaveErrorKind::Io | SaveErrorKind::Symlink => Failure::new(
+            "failed",
+            format!("the config file couldn't be written, so nothing was changed: {message}"),
+        ),
+        _ => Failure::new(
+            "failed",
+            "the change can't be written as a config file, so nothing was changed",
+        ),
+    }
+}
+
 /// Writes a local change only after every file the writer uses passes its check.
 pub(super) fn write_in_file(
     probe: &dyn crate::scope::Probe,
@@ -747,14 +773,67 @@ pub(super) fn write_in_file(
                         format!("can't read {}: {error}", path.display()),
                     )
                 }),
-            SaveErrorKind::Io | SaveErrorKind::Symlink => Err(Failure::new(
-                "failed",
-                format!("the config file couldn't be written, so nothing was changed: {error}"),
-            )),
-            _ => Err(Failure::new(
-                "failed",
-                "the change can't be written as a config file, so nothing was changed",
-            )),
+            kind => Err(write_failure(kind, &error.to_string())),
         },
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    const REASON: &str =
+        "payload.default[0]: a mapping with a key that isn't a string can't be written";
+
+    #[test]
+    fn refusal_text_and_json_keep_the_reason_and_nothing_changed() {
+        let remote = super::super::api::answer_failure(
+            409,
+            &serde_json::to_vec(
+                &serde_json::json!({"error":"config_unwritable", "message":REASON}),
+            )
+            .unwrap(),
+        );
+        for failure in [
+            edit_failure(V8EditError::Unwritable(REASON.into())),
+            write_failure(SaveErrorKind::Unwritable, REASON),
+            remote,
+        ] {
+            assert_eq!(failure.code, super::super::exit::FAILED);
+            assert_eq!(failure.text(), format!("{REASON}; nothing was changed\n"));
+            assert_eq!(
+                serde_json::to_value(&failure).unwrap(),
+                serde_json::json!({
+                    "error":"config_unwritable", "message":format!("{REASON}; nothing was changed")
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn io_is_not_a_refusal_even_when_the_message_says_refused() {
+        assert_eq!(
+            write_failure(SaveErrorKind::Io, "write refused").error,
+            "failed"
+        );
+        assert_eq!(
+            edit_failure(V8EditError::WriteFailed("write refused".into())).error,
+            "failed"
+        );
+        assert_eq!(
+            super::super::api::answer_failure(
+                500,
+                br#"{"error":"write_failed","message":"write refused"}"#
+            )
+            .error,
+            "failed"
+        );
+        let failure = edit_failure(V8EditError::Unwritable("credential-canary".into()));
+        assert!(!failure.text().contains("credential-canary"));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("credential-canary")
+        );
     }
 }

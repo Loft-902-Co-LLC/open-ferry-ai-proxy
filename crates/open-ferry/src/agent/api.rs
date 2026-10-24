@@ -147,6 +147,10 @@ fn error_code(body: &[u8]) -> Option<String> {
 pub(crate) fn answer_failure(status: u16, body: &[u8]) -> Failure {
     let what = error_text(body).unwrap_or_else(|| format!("status {status}"));
     match status {
+        409 if error_code(body).as_deref() == Some("config_unwritable") => {
+            let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            super::change::unwritable_failure(parsed["message"].as_str().unwrap_or(""))
+        }
         401 => Failure::new(
             "unauthorized",
             format!("the server refused the management key: {what}"),

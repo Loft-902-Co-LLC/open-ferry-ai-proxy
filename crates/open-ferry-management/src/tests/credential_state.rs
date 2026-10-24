@@ -877,6 +877,39 @@ async fn refresh_all_and_specific() {
     );
 }
 
+// Config-backed status changes use the same typed refusal as other settings.
+#[tokio::test]
+async fn config_api_key_status_preservation_refusal_changes_nothing() {
+    let dir = AuthDir::new();
+    let mut api = Api::over_config_file(
+        &dir,
+        "codex-api-key:\n- api-key: sk-test\n  base-url: https://example.com/v1\n",
+    );
+    let id = config_key_auth(&api);
+    let before = std::fs::read(dir.config_path()).unwrap();
+    let config = api.state.config();
+    let credential = current(&api, &id);
+    api.state = api
+        .state
+        .clone()
+        .with_config_writer(Arc::new(super::config_refusal::RefusingWriter));
+    api.router = crate::router(api.state.clone());
+    for path in [STATUS, "/v8/management/credentials/status"] {
+        let answer = patch(&api, path, &json!({"name":id,"disabled":true}).to_string()).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT);
+        assert_eq!(
+            serde_json::from_str::<Value>(&answer.body).unwrap(),
+            json!({
+                "error":"config_unwritable",
+                "message":"payload.default[0]: a mapping with a key that isn't a string can't be written"
+            })
+        );
+        assert_eq!(std::fs::read(dir.config_path()).unwrap(), before);
+        assert!(*api.state.config() == *config);
+        assert!(Arc::ptr_eq(&current(&api, &id), &credential));
+    }
+}
+
 /// A config API key's credential: the first Codex key of [`config_key`].
 fn config_key_auth(api: &Api) -> String {
     let parts = ["sk-test", "https://example.com/v1", "", "", ""];
