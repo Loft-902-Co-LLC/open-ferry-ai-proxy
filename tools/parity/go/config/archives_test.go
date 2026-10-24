@@ -15,6 +15,7 @@ func TestParityArchiveBudgetsAreComputedFromSourceKeys(t *testing.T) {
 		"x-note: |\n  fixture\nconfig-version: 8\n",
 		"x-note: {nested: [fixture]}\nconfig-version: 8\n",
 		"? x-note # own key\n: fixture # own value\nconfig-version: 8\n",
+		"debug: false # parity-archive-0\nx-note: fixture\nconfig-version: 8\n",
 	} {
 		proof := ParityOwnership(source, map[string]any{"op": "save", "migrate": true})
 		if proof["unavailable"] != nil || proof["archive_unavailable"] != nil {
