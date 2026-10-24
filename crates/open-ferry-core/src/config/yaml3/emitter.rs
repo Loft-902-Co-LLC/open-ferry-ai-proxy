@@ -282,6 +282,10 @@ pub(crate) struct Emitter {
     pub(crate) protect_config_comments: bool,
     /// Indentation at the owner of a deferred collection foot comment.
     pending_foot_indent: Option<i64>,
+    /// Offline ablation distinguishes item feet from the older mapping-foot
+    /// repair, which remains enabled independently of this diagnostic family.
+    #[cfg(feature = "parity")]
+    pending_item_foot: bool,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
 }
 
@@ -369,6 +373,8 @@ impl Emitter {
             emitted_comments: Vec::new(),
             protect_config_comments: false,
             pending_foot_indent: None,
+            #[cfg(feature = "parity")]
+            pending_item_foot: false,
             protected_scalars: Vec::new(),
         }
     }
@@ -1034,6 +1040,12 @@ impl Emitter {
         let pending_collection_foot = self.protect_config_comments
             && event.empty_collection_value
             && !self.foot_comment.is_empty();
+        #[cfg(feature = "parity")]
+        let pending_collection_foot = pending_collection_foot
+            && (!self.pending_item_foot
+                || crate::config::save::parity::ablation::enabled(
+                    crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
+                ));
         if pending_collection_foot {
             let indent = self.indent;
             if let Some(owner_indent) = self.pending_foot_indent.take() {
@@ -1057,8 +1069,8 @@ impl Emitter {
             && crate::config::save::parity::ablation::enabled(
                 crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
             );
-        // This newly fixed foot-comment hazard also affects flow mappings and
-        // sequences. It is outside the Round 7 diagnostic switch set.
+        // Item feet and the following empty collection's braces are one
+        // diagnostic family; ordinary mapping feet keep their older repair.
         if (protect_empty_mapping
             && event.empty_block_mapping_value
             && (!self.key_line_comment.is_empty()
@@ -1479,6 +1491,10 @@ impl Emitter {
         self.write_indent()?;
         let foot_comment = mem::take(&mut self.foot_comment);
         self.pending_foot_indent = None;
+        #[cfg(feature = "parity")]
+        {
+            self.pending_item_foot = false;
+        }
         self.write_comment(&foot_comment)?;
         self.foot_indent = self.indent;
         if self.foot_indent < 0 {
@@ -1722,6 +1738,18 @@ impl Emitter {
         }
         if !event.foot_comment.is_empty() {
             self.foot_comment = mem::take(&mut event.foot_comment);
+            #[cfg(feature = "parity")]
+            {
+                self.pending_item_foot = event.typ == EventType::MappingEnd
+                    && matches!(
+                        self.states.last(),
+                        Some(
+                            EmitterState::BlockSequenceItem
+                                | EmitterState::FlowSequenceItem
+                                | EmitterState::FlowSequenceTrailItem
+                        )
+                    );
+            }
             self.pending_foot_indent =
                 matches!(event.typ, EventType::MappingEnd | EventType::SequenceEnd).then(|| {
                     if self.flow_level > 0 {
