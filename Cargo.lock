@@ -1771,7 +1771,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "open-ferry"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-bench"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "bytes",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-dashboard"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-fake-claude-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bytes",
  "chrono",
@@ -1904,7 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-management"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-parity"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-providers"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-server"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "bytes",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-supervisor"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-translate"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "base64 0.23.1",
  "serde_json",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-tui"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "open-ferry-update"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "chrono",
