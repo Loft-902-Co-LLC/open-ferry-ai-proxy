@@ -596,7 +596,14 @@ copied-target node cap and invalid UTF-8 tag-byte replacement apply on this
 path too. In both writer and loader use, cumulative alias-target copies are
 also limited to 64 MiB of owned text, checked before cloning and excluding
 already shared target content; exceeding it reports excessive aliasing.
-The old reader-disagreement write refusal and forced live-scalar quoting have been removed: lossless live emission follows Go's bytes.
+The reader-disagreement write refusal has been removed. Live emission follows
+Go's bytes when they preserve the value. A block scalar that begins with LF,
+LS or PS and contains LS or PS is double-quoted instead: yaml.v3 can consume
+its leading break as the block header's missing break, changing the value or
+making a block sequence unreadable. This protection uses decoded values,
+including escaped input, in generated settings and all config emission paths.
+Other live Unicode scalars keep Go's quoting. Alias-copy budget refusals retain
+the loader's decode-error kind and excessive-aliasing first line on both paths.
 The single-document witness uses the matching parser for loadable input;
 its conservative rejected-emission scan treats leading directives as a
 preamble and still refuses a real second document.
@@ -823,9 +830,9 @@ Deviations, each also noted in its module:
 
 - **The v8 reads show a plain management key as a bcrypt hash**, as upstream does once it has hashed the key into the file. Since the file keeps the plain key here, the hash is made when it is read (once per key while the process runs) and differs from one run to the next.
 
-- **Config errors are worded as open-ferry's loader words them.** A file that doesn't load is `invalid_config`, but a syntax error is worded as the saphyr parser words it, and a type error doesn't quote the value. A read error's message is the operating system's. saphyr also reads a few files yaml.v3 refuses, such as one with a tab before a top-level key, and refuses a few it reads, such as one with a tab right after a key's `:`.
+- **Config errors are worded as open-ferry's loader words them.** A file that doesn't load is `invalid_config`. Without literal NEL, LS or PS or repeated leading BOMs, syntax errors use saphyr's wording; on the yaml.v3 parser path they use yaml.v3's wording. Type errors don't quote the value. A read error's message is the operating system's. The saphyr path also reads a few files yaml.v3 refuses, such as one with a tab before a top-level key, and refuses a few it reads, such as one with a tab right after a key's `:`.
 
-- **An alias used as a mapping key needs a space, a line break or the end of the file after its `:`** when the `:` follows its name directly (`*k: v`). Otherwise saphyr takes the `:` as part of the name, so `{*k:1}` and `[*k:]` are an `unknown anchor` error where yaml.v3 reads them.
+- **On the saphyr path, an alias used as a mapping key needs a space, a line break or the end of the file after its `:`** when the `:` follows its name directly (`*k: v`). Otherwise saphyr takes the `:` as part of the name, so `{*k:1}` and `[*k:]` are an `unknown anchor` error where yaml.v3 reads them. Inputs with literal NEL, LS or PS or repeated leading BOMs use the yaml.v3 path.
 
 - **Aliases may expand to at most 64 MiB of text.** A file whose settings take more than 64 MiB of text through aliases doesn't load (`yaml: document contains excessive aliasing`), and a v8 read of a value that does is a 500 `decode_failed`. yaml.v3 shares one Go string among an alias's copies, so upstream reads them; its limit on the ratio of aliases to nodes applies here too.
 
