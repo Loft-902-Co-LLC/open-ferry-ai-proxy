@@ -11,12 +11,20 @@ import (
 )
 
 var parityArchiveObserver func(*yaml.Node, string, string)
+var parityArchiveAppendObserver func(string)
+var parityArchiveDocumentObserver func(*yaml.Node)
 
 // Inserted immediately after the pin computes an archive block, before it
 // deletes the source entry. The ordinary harness has no observer installed.
 func parityArchiveEntry(key *yaml.Node, section, text string) {
 	if parityArchiveObserver != nil {
 		parityArchiveObserver(key, section, text)
+	}
+}
+
+func parityArchiveAppended(previous string) {
+	if parityArchiveAppendObserver != nil {
+		parityArchiveAppendObserver(previous)
 	}
 }
 
@@ -66,6 +74,9 @@ func parityRoundTrip(root *yaml.Node, source []byte) (*yaml.Node, error) {
 		b, _ := json.Marshal([]any{p, side, n.Kind, n.ShortTag(), n.Value})
 		n.Line = ids[string(b)]
 	})
+	if parityArchiveDocumentObserver != nil {
+		parityArchiveDocumentObserver(&doc)
+	}
 	return root, nil
 }
 
@@ -110,6 +121,19 @@ func parityBlocks(root *yaml.Node) map[string]parityCommentBlock {
 }
 
 func parityArchives(source string, operation map[string]any, root *yaml.Node) ([]any, error) {
+	var template yaml.Node
+	if err := yaml.Unmarshal([]byte(source), &template); err != nil {
+		return nil, err
+	}
+	allText := source
+	parityWalk(root, []any{}, "root", func(n *yaml.Node, _ []any, _ string, _ *yaml.Node) {
+		allText += n.Value + n.HeadComment + n.LineComment + n.FootComment
+	})
+	allText += template.HeadComment + template.LineComment + template.FootComment
+	prefix := "# parity-archive-"
+	for strings.Contains(allText, prefix) {
+		prefix += "-"
+	}
 	bindings := map[int]map[string]any{}
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, value *yaml.Node) {
 		if side == "key" {
@@ -117,12 +141,33 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 		}
 	})
 	lines := []parityArchiveLine{}
+	markers := []string{}
+	markerIDs := map[string]int{}
+	footer := ""
+	footerBound := false
+	batchStart := 0
 	parityArchiveObserver = func(key *yaml.Node, section, text string) {
 		for i, line := range strings.Split(text, "\n") {
+			marker := fmt.Sprintf("%s%d", prefix, len(lines))
+			markerIDs[marker] = len(lines)
+			markers = append(markers, marker)
 			lines = append(lines, parityArchiveLine{bindings[key.Line], i, line, section})
 		}
 	}
-	defer func() { parityArchiveObserver = nil }()
+	parityArchiveAppendObserver = func(previous string) {
+		if !footerBound {
+			footer = previous
+			footerBound = true
+		}
+		footer = strings.TrimSpace(footer + "\n" + strings.Join(markers[batchStart:], "\n"))
+		batchStart = len(markers)
+	}
+	parityArchiveDocumentObserver = func(doc *yaml.Node) { template = *deepCopyNode(doc) }
+	defer func() {
+		parityArchiveObserver = nil
+		parityArchiveAppendObserver = nil
+		parityArchiveDocumentObserver = nil
+	}()
 	var err error
 	root, err = parityRunTree(source, operation, root, true)
 	if err != nil {
@@ -131,23 +176,22 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 	if len(lines) == 0 {
 		return []any{}, nil
 	}
+	if !footerBound || batchStart != len(lines) {
+		return nil, fmt.Errorf("archive footer binding")
+	}
 	// Two independently emitted layouts bind each computed line by ordinal.
 	// Opaque markers establish owners; actual archive text supplies bytes only.
 	// Neither layout reads a Go/protected output or matches equal comments.
-	parityClearGenerated(root)
-	texts, markers := []string{}, []string{}
-	markerIDs := map[string]int{}
-	for i, line := range lines {
-		marker := fmt.Sprintf("# parity-archive-%d", i)
-		markers = append(markers, marker)
-		markerIDs[marker] = i
-		texts = append(texts, line.Text)
-	}
-	emit := func(comments []string) (*yaml.Node, error) {
-		root.FootComment = strings.TrimSpace(strings.Join(comments, "\n"))
-		data, e := yaml.Marshal(root)
+	template.Content = []*yaml.Node{root}
+	taggedTemplate := deepCopyNode(&template)
+	taggedTemplate.Content[0].FootComment = footer
+	emit := func(model *yaml.Node) (*yaml.Node, error) {
+		data, e := yaml.Marshal(model)
 		if e != nil {
 			return nil, e
+		}
+		if operation["op"] == "write" {
+			data = NormalizeCommentIndentation(data)
 		}
 		var doc yaml.Node
 		if e = yaml.Unmarshal(data, &doc); e != nil {
@@ -158,11 +202,11 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 		}
 		return &doc, nil
 	}
-	actual, err := emit(texts)
+	actual, err := emit(&template)
 	if err != nil {
 		return nil, err
 	}
-	tagged, err := emit(markers)
+	tagged, err := emit(taggedTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +223,13 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 		}
 		for i, marker := range block.Lines {
 			id, ok := markerIDs[marker]
-			if !ok || seen[id] {
+			if !ok {
+				if marker != other.Lines[i] {
+					return nil, fmt.Errorf("archive layout changed source comment")
+				}
+				continue
+			}
+			if seen[id] {
 				return nil, fmt.Errorf("archive layout identity")
 			}
 			seen[id] = true

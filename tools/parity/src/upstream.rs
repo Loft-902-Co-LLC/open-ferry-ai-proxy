@@ -117,6 +117,14 @@ impl Upstream {
                     return Err("ownership oracle: pinned archive construction changed".into());
                 }
                 traced = traced.replace(needle, &format!("{needle}\n\t\tparityArchiveEntry(node.Content[i], section, comments[len(comments)-1])"));
+                let footer = "archive.FootComment = strings.TrimSpace(archive.FootComment + \"\\n\" + strings.Join(comments, \"\\n\"))";
+                if traced.matches(footer).count() != 1 {
+                    return Err("ownership oracle: pinned archive append changed".into());
+                }
+                traced = traced.replace(
+                    footer,
+                    &format!("parityArchiveAppended(archive.FootComment)\n\t\t{footer}"),
+                );
             }
             let copy = std::path::absolute(work_dir.join(format!("trace-{name}")))?;
             fs::write(&copy, traced)?;
