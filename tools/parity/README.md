@@ -282,6 +282,17 @@ minimality, and the comparison outside protected comments still apply. The
 oracle never reads the protected output. Its evidence is saved with the proof;
 an unavailable oracle supplies no allowance.
 
+Generated archive comments have a separate budget. An observer at the pin's
+`commentUnknownV8Fields` archive construction binds each generated line to the
+exact parsed source key and entry. Save replays include the real intermediate
+encode/reparse before normalization. Independent archive layouts use opaque
+line IDs to establish parsed owners and occurrence ordinals; comment text
+supplies only the computed bytes. Each line receives one slot at that owner.
+The complete computed multiplicity is required in addition to existing source
+occurrences of equal text, so an old comment cannot masquerade as a new archive.
+Changed text, extra copies, another owner, unarchived keys and mismatched source
+bindings receive no allowance. Every other proof check remains active.
+
 The CI script passes `--baseline tools/parity/baseline/config-save.json`.
 Without that option the tool keeps its strict exit verdict. The baseline
 applies only after config-save certification fails: those cases remain

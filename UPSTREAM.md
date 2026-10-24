@@ -547,6 +547,13 @@ Generated or deleted identities supply no relocation slot, and equal comment
 text cannot prove a move. Unmoved owners retain the strict sequence filter;
 all value, multiplicity, ordering, byte-binding and minimality checks remain.
 
+For generated archive comments (D1), the certifier observes upstream's archive
+construction from the source and operation, including the save's intermediate
+encode/reparse. Every line has a source-key/entry binding and one parsed owner
+slot established by an independent layout. Existing equal-text comments cannot
+consume that new budget. Archive text in the actual Go output is insufficient
+evidence; altered text, duplicates or another owner still fail the proof.
+
 Generated-comment identities are rebound at the parsed comment's own position,
 including wrapped scalars. A canonical-version multipart head gets a separating
 blank line only when a faithful reparse would move its complete ordered block

@@ -110,7 +110,14 @@ impl Upstream {
         for name in ["config_yaml.go", "config_v8.go"] {
             let original_path = dir.join("internal/config").join(name);
             let original = fs::read_to_string(&original_path)?;
-            let traced = original.replace("yaml.Unmarshal(", "parityUnmarshal(");
+            let mut traced = original.replace("yaml.Unmarshal(", "parityUnmarshal(");
+            if name == "config_v8.go" {
+                let needle = "comments = append(comments, \"# \"+strings.ReplaceAll(text, \"\\n\", \"\\n# \"))";
+                if traced.matches(needle).count() != 1 {
+                    return Err("ownership oracle: pinned archive construction changed".into());
+                }
+                traced = traced.replace(needle, &format!("{needle}\n\t\tparityArchiveEntry(node.Content[i], section, comments[len(comments)-1])"));
+            }
             let copy = std::path::absolute(work_dir.join(format!("trace-{name}")))?;
             fs::write(&copy, traced)?;
             replace.insert(
@@ -129,7 +136,12 @@ impl Upstream {
                 .into_owned(),
             tree_file.to_string_lossy().into_owned().into(),
         );
-        for name in ["ownership.go", "ownership_test.go"] {
+        for name in [
+            "ownership.go",
+            "ownership_test.go",
+            "archives.go",
+            "archives_test.go",
+        ] {
             replace.insert(
                 dir.join("internal/config")
                     .join(format!("zz_parity_{name}"))
@@ -310,7 +322,7 @@ fn ownership_tree(dir: &Path) -> Result<String, Box<dyn Error>> {
         .replace("return fmt.Errorf", "return nil, fmt.Errorf")
         .replace(
             "\t// Keep obsolete roots",
-            "\tparityClearGenerated(&generated)\n\t// Keep obsolete roots",
+            "\tif roundtrip { parityClearIdentities(&generated) } else { parityClearGenerated(&generated) }\n\t// Keep obsolete roots",
         );
     let normalize = between(
         &v8,
@@ -326,7 +338,7 @@ fn ownership_tree(dir: &Path) -> Result<String, Box<dyn Error>> {
             "\treturn root, nil",
         );
     Ok(format!(
-        "package config\nimport (\"fmt\"; \"gopkg.in/yaml.v3\")\nfunc paritySaveTree(root *yaml.Node, cfg *Config, data []byte, migrating bool)(*yaml.Node,error){{\n{save}\nif migrating {{ return parityNormalizeTree(root,true) }}\nreturn root,nil\n}}\nfunc parityNormalizeTree(root *yaml.Node,migrate bool)(*yaml.Node,error){{\n{normalize}"
+        "package config\nimport (\"fmt\"; \"gopkg.in/yaml.v3\")\nfunc paritySaveTree(root *yaml.Node, cfg *Config, data []byte, migrating bool, roundtrip bool)(*yaml.Node,error){{\n{save}\nNormalizeCollectionNodeStyles(root)\nif migrating {{ if roundtrip {{ root,err = parityRoundTrip(root,data); if err != nil {{return nil,err}} }}; return parityNormalizeTree(root,true) }}\nreturn root,nil\n}}\nfunc parityNormalizeTree(root *yaml.Node,migrate bool)(*yaml.Node,error){{\n{normalize}"
     ))
 }
 
