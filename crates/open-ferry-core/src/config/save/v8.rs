@@ -278,28 +278,68 @@ pub(crate) fn normalize_config_layout(
     data: &[u8],
     migrate: bool,
 ) -> Result<(Vec<u8>, bool), SaveError> {
-    let (doc, changed) = normalize_config_layout_doc(data, migrate)?;
-    Ok((
-        if changed {
-            let emitted = marshal(&doc)?;
-            // Keep the established normalization of other YAML line breaks.
-            // The source-aware physical-line repair has the same scope.
-            let text = String::from_utf8_lossy(data);
-            if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
-                || data
-                    .iter()
-                    .enumerate()
-                    .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
-            {
-                emitted
-            } else {
-                super::tree::source_flow_item_heads(&doc, emitted)
-            }
-        } else {
-            data.to_vec()
-        },
-        changed,
-    ))
+    let (candidate, source, changed) = layout_candidate(data, migrate)?;
+    let bytes = super::tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source, _) = layout_candidate(data, migrate).ok()?;
+        Some(super::tree::finish_comment_owners_replay(
+            &source, candidate,
+        ))
+    });
+    Ok((bytes, changed))
+}
+
+fn layout_candidate(
+    data: &[u8],
+    migrate: bool,
+) -> Result<(super::tree::ReceiptedYaml, super::tree::CommentSource, bool), SaveError> {
+    let (doc, mut source) = super::tree::read_comment_source(data)?;
+    let input = super::tree::source_yaml(data, &doc);
+    let (doc, changed) = normalize_layout_tree(doc, data, migrate)?;
+    source.include_copies(&doc);
+    let rendered = if changed {
+        layout_emitted(&doc, data)?
+    } else {
+        input
+    };
+    Ok((rendered, source, changed))
+}
+
+fn layout_emitted(doc: &Node, data: &[u8]) -> Result<super::tree::ReceiptedYaml, SaveError> {
+    let emitted = super::tree::marshal_receipted(doc, 4)?;
+    let text = String::from_utf8_lossy(data);
+    if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        || data
+            .iter()
+            .enumerate()
+            .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
+    {
+        Ok(emitted)
+    } else {
+        Ok(super::tree::source_flow_item_heads_receipted(doc, emitted))
+    }
+}
+
+pub(crate) fn normalize_config_layout_receipted(
+    input: super::tree::ReceiptedYaml,
+    migrate: bool,
+) -> Result<super::tree::ReceiptedYaml, SaveError> {
+    let doc = super::tree::read_receipted(&input)?;
+    let (doc, changed) = normalize_layout_tree(doc, &input.bytes, migrate)?;
+    if changed {
+        layout_emitted(&doc, &input.bytes)
+    } else {
+        Ok(input)
+    }
+}
+
+pub(crate) fn normalize_config_layout_source(
+    data: &[u8],
+    migrate: bool,
+) -> Result<(Node, bool, super::tree::CommentSource), SaveError> {
+    let (doc, mut source) = super::tree::read_comment_source(data)?;
+    let (doc, changed) = normalize_layout_tree(doc, data, migrate)?;
+    source.include_copies(&doc);
+    Ok((doc, changed, source))
 }
 
 /// The normalized tree, so edits keep source comment ownership until emission.
@@ -307,7 +347,15 @@ pub(crate) fn normalize_config_layout_doc(
     data: &[u8],
     migrate: bool,
 ) -> Result<(Node, bool), SaveError> {
-    let mut doc = unmarshal(data)?;
+    let (doc, changed, _) = normalize_config_layout_source(data, migrate)?;
+    Ok((doc, changed))
+}
+
+fn normalize_layout_tree(
+    mut doc: Node,
+    data: &[u8],
+    migrate: bool,
+) -> Result<(Node, bool), SaveError> {
     let Some(first) = doc.content.first() else {
         if !migrate {
             return Ok((doc, false));
@@ -384,6 +432,8 @@ pub(crate) fn normalize_config_layout_doc(
             if !previous.line_comment.is_empty() {
                 super::encode::protect_pending_version_comments(&mut root)?;
             }
+            version.comment_receipts.owner = previous.comment_receipts.owner;
+            version.comment_receipts.line = previous.comment_receipts.line;
             version.line_comment = previous.line_comment;
             version.line_comment_id = previous.line_comment_id;
         }
@@ -417,21 +467,36 @@ pub(super) fn retain_version_comment_owner(root: &mut Node) -> Result<(), SaveEr
         super::encode::protect_pending_version_comments(root)?;
     }
     let comments = [
-        std::mem::take(&mut root.content[i + 1].head_comment),
-        std::mem::take(&mut root.content[i + 1].foot_comment),
+        (
+            std::mem::take(&mut root.content[i + 1].head_comment),
+            std::mem::take(&mut root.content[i + 1].comment_receipts.head),
+        ),
+        (
+            std::mem::take(&mut root.content[i + 1].foot_comment),
+            std::mem::take(&mut root.content[i + 1].comment_receipts.foot),
+        ),
     ];
-    let head = &mut root.content[i].head_comment;
-    for comment in comments {
+    let key = &mut root.content[i];
+    let head = &mut key.head_comment;
+    for (comment, mut receipts) in comments {
         if !comment.is_empty() {
             if !head.is_empty() {
                 head.push('\n');
             }
+            for span in &mut receipts {
+                span.at += head.len();
+            }
+            key.comment_receipts.head.extend(receipts);
             head.push_str(&comment);
         }
     }
     // Recheck a protective leading break after tree edits instead of
     // accumulating separators on repeated saves. Keep Go's bytes when its
     // faithful emission already retains the complete head on this key.
+    let removed = head.len() - head.trim_start_matches('\n').len();
+    for span in &mut key.comment_receipts.head {
+        span.at = span.at.saturating_sub(removed);
+    }
     *head = head.trim_start_matches('\n').to_owned();
     if i > 0 && head.contains("\n\n") {
         // The scanner may retain a terminating break on a CRLF paragraph.
@@ -451,6 +516,9 @@ pub(super) fn retain_version_comment_owner(root: &mut Node) -> Result<(), SaveEr
         });
         if retained != Some(true) {
             root.content[i].head_comment.insert(0, '\n');
+            for span in &mut root.content[i].comment_receipts.head {
+                span.at += 1;
+            }
         }
     }
     Ok(())
@@ -703,6 +771,8 @@ pub(crate) fn restore_v8_layout(
 /// `preserveV8Comments`: the comments of `src` put on `dst`, and those of
 /// each key of a mapping and its value on the same key of `dst`.
 fn preserve_v8_comments(dst: &mut Node, src: &Node) {
+    dst.comment_receipts.clone_from(&src.comment_receipts);
+    dst.comment_key_owner.clone_from(&src.comment_key_owner);
     src.head_comment.clone_into(&mut dst.head_comment);
     src.line_comment.clone_into(&mut dst.line_comment);
     src.line_comment_id.clone_into(&mut dst.line_comment_id);
@@ -754,6 +824,14 @@ pub(crate) fn project_v8_config_aliases(root: &mut Node, path: &str) {
             delete_yaml_path(root, current);
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn owner_audit_candidate(
+    data: &[u8],
+    migrate: bool,
+) -> Result<(super::tree::ReceiptedYaml, super::tree::CommentSource), SaveError> {
+    layout_candidate(data, migrate).map(|(candidate, source, _)| (candidate, source))
 }
 
 #[cfg(test)]

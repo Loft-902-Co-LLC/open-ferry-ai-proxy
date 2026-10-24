@@ -210,6 +210,13 @@ pub(crate) struct Emitter {
 
     /// The event queue, from `events_head` on.
     events: VecDeque<Event>,
+    receipt_events: VecDeque<super::CommentReceipts>,
+    owner_stack: Vec<(Vec<usize>, usize)>,
+    node_owners: Vec<super::NodeOwnerEmission>,
+    pending_receipts: super::CommentReceipts,
+    key_receipts: Vec<super::ReceiptSpan>,
+    pub(crate) overwritten_receipts: Vec<super::ReceiptSpan>,
+    pub(crate) receipt_emissions: Vec<super::ReceiptEmission>,
 
     /// The stack of indentation levels.
     indents: Vec<i64>,
@@ -335,6 +342,13 @@ impl Emitter {
             state: EmitterState::StreamStart,
             states: Vec::with_capacity(INITIAL_STACK_SIZE),
             events: VecDeque::with_capacity(INITIAL_QUEUE_SIZE),
+            receipt_events: VecDeque::with_capacity(INITIAL_QUEUE_SIZE),
+            owner_stack: Vec::new(),
+            node_owners: Vec::new(),
+            pending_receipts: super::CommentReceipts::default(),
+            key_receipts: Vec::new(),
+            overwritten_receipts: Vec::new(),
+            receipt_emissions: Vec::new(),
             indents: Vec::new(),
             tag_directives: Vec::new(),
             indent: 0,
@@ -437,14 +451,63 @@ impl Emitter {
 
     /// yaml_emitter_emit.
     pub(crate) fn emit(&mut self, event: Event) -> Result<(), EmitterError> {
+        self.emit_receipted(event, super::CommentReceipts::default())
+    }
+
+    pub(crate) fn emit_receipted(
+        &mut self,
+        event: Event,
+        receipts: super::CommentReceipts,
+    ) -> Result<(), EmitterError> {
         if let Some(err) = &self.error {
             return Err(err.clone());
         }
-        let result = self.emit_queued(event);
+        let result = self.emit_queued(event, receipts);
         if let Err(err) = &result {
             self.error = Some(err.clone());
         }
         result
+    }
+
+    pub(crate) fn take_receipts(&mut self) -> super::EmissionReceipts {
+        super::EmissionReceipts {
+            comments: mem::take(&mut self.receipt_emissions),
+            owners: mem::take(&mut self.node_owners),
+            overwritten: mem::take(&mut self.overwritten_receipts),
+        }
+    }
+
+    fn record_node_owner(&mut self, event: &Event, owner: Option<super::CommentId>) {
+        match event.typ {
+            EventType::DocumentStart
+            | EventType::MappingStart
+            | EventType::SequenceStart
+            | EventType::Scalar
+            | EventType::Alias => {
+                let mut path = Vec::new();
+                if let Some((parent, next)) = self.owner_stack.last_mut() {
+                    path.clone_from(parent);
+                    path.push(*next);
+                    *next += 1;
+                }
+                if let Some(owner) = owner {
+                    self.node_owners.push(super::NodeOwnerEmission {
+                        path: path.clone(),
+                        owner,
+                    });
+                }
+                if matches!(
+                    event.typ,
+                    EventType::DocumentStart | EventType::MappingStart | EventType::SequenceStart
+                ) {
+                    self.owner_stack.push((path, 0));
+                }
+            }
+            EventType::DocumentEnd | EventType::MappingEnd | EventType::SequenceEnd => {
+                self.owner_stack.pop();
+            }
+            _ => {}
+        }
     }
 
     /// yaml_emitter_flush.
@@ -576,13 +639,19 @@ impl Emitter {
 
     /// yaml_emitter_emit, after the error check: queue the event and
     /// process every event that has enough look-ahead.
-    fn emit_queued(&mut self, event: Event) -> Result<(), EmitterError> {
+    fn emit_queued(
+        &mut self,
+        event: Event,
+        receipts: super::CommentReceipts,
+    ) -> Result<(), EmitterError> {
         self.events.push_back(event);
+        self.receipt_events.push_back(receipts);
         while !self.need_more_events() {
             let Some(mut event) = self.events.pop_front() else {
                 break;
             };
-            self.analyze_event(&mut event)?;
+            let receipts = self.receipt_events.pop_front().unwrap_or_default();
+            self.analyze_event(&mut event, receipts)?;
             self.state_machine(&event)?;
         }
         Ok(())
@@ -1079,12 +1148,15 @@ impl Emitter {
             // Keep pending and current key comments before this key instead.
             let current = mem::take(&mut self.line_comment);
             let current_id = self.line_comment_id.take();
+            let current_receipts = mem::take(&mut self.pending_receipts.line);
             self.line_comment = mem::take(&mut self.key_line_comment);
             self.line_comment_id = self.key_comment_id.take();
+            self.pending_receipts.line = mem::take(&mut self.key_receipts);
             self.line_comment_origin = self.key_comment_origin.take();
             self.process_line_comment()?;
             self.line_comment = current;
             self.line_comment_id = current_id;
+            self.pending_receipts.line = current_receipts;
             self.process_line_comment()?;
             self.write_indent()?;
         }
@@ -1104,13 +1176,16 @@ impl Emitter {
                 // it as a standalone comment before writing the new key.
                 let current = mem::take(&mut self.line_comment);
                 let current_id = self.line_comment_id.take();
+                let current_receipts = mem::take(&mut self.pending_receipts.line);
                 self.line_comment = mem::take(&mut self.key_line_comment);
                 self.line_comment_id = self.key_comment_id.take();
+                self.pending_receipts.line = mem::take(&mut self.key_receipts);
                 self.line_comment_origin = self.key_comment_origin.take();
                 self.process_line_comment()?;
                 self.write_indent()?;
                 self.line_comment = current;
                 self.line_comment_id = current_id;
+                self.pending_receipts.line = current_receipts;
             }
             if let Some(origin) = self.key_comment_origin.take() {
                 self.hazardous_key_comments.push(origin);
@@ -1121,6 +1196,8 @@ impl Emitter {
                 .or(Some(event.source_node_id));
             self.key_line_comment = mem::take(&mut self.line_comment);
             self.key_comment_id = self.line_comment_id.take();
+            self.overwritten_receipts.append(&mut self.key_receipts);
+            self.key_receipts = mem::take(&mut self.pending_receipts.line);
         }
         if self.check_simple_key(event) {
             self.states.push(EmitterState::BlockMappingSimpleValue);
@@ -1155,6 +1232,7 @@ impl Emitter {
                     // the one from the key is lost.
                     self.line_comment = mem::take(&mut self.key_line_comment);
                     self.line_comment_id = self.key_comment_id.take();
+                    self.pending_receipts.line = mem::take(&mut self.key_receipts);
                     self.line_comment_origin = self.key_comment_origin.take();
                 }
             } else if event.collection_style != CollectionStyle::Flow
@@ -1164,10 +1242,12 @@ impl Emitter {
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
                 mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
                 mem::swap(&mut self.line_comment_id, &mut self.key_comment_id);
+                mem::swap(&mut self.pending_receipts.line, &mut self.key_receipts);
                 self.process_line_comment()?;
                 mem::swap(&mut self.line_comment, &mut self.key_line_comment);
                 mem::swap(&mut self.line_comment_origin, &mut self.key_comment_origin);
                 mem::swap(&mut self.line_comment_id, &mut self.key_comment_id);
+                mem::swap(&mut self.pending_receipts.line, &mut self.key_receipts);
             }
         }
         self.states.push(EmitterState::BlockMappingKey);
@@ -1438,7 +1518,8 @@ impl Emitter {
         if !self.tail_comment.is_empty() {
             self.write_indent()?;
             let tail_comment = mem::take(&mut self.tail_comment);
-            self.write_comment(&tail_comment)?;
+            let tail_receipts = mem::take(&mut self.pending_receipts.tail);
+            self.write_comment(&tail_comment, &tail_receipts)?;
             self.foot_indent = self.indent;
             if self.foot_indent < 0 {
                 self.foot_indent = 0;
@@ -1450,7 +1531,8 @@ impl Emitter {
         }
         self.write_indent()?;
         let head_comment = mem::take(&mut self.head_comment);
-        self.write_comment(&head_comment)
+        let head_receipts = mem::take(&mut self.pending_receipts.head);
+        self.write_comment(&head_comment, &head_receipts)
     }
 
     /// yaml_emitter_process_line_comment: write a line comment.
@@ -1477,7 +1559,8 @@ impl Emitter {
         }
         self.line_comment_id = None;
         let line_comment = mem::take(&mut self.line_comment);
-        self.write_comment(&line_comment)
+        let line_receipts = mem::take(&mut self.pending_receipts.line);
+        self.write_comment(&line_comment, &line_receipts)
     }
 
     /// yaml_emitter_process_foot_comment: write a foot comment.
@@ -1487,8 +1570,9 @@ impl Emitter {
         }
         self.write_indent()?;
         let foot_comment = mem::take(&mut self.foot_comment);
+        let foot_receipts = mem::take(&mut self.pending_receipts.foot);
         self.pending_foot_indent = None;
-        self.write_comment(&foot_comment)?;
+        self.write_comment(&foot_comment, &foot_receipts)?;
         self.foot_indent = self.indent;
         if self.foot_indent < 0 {
             self.foot_indent = 0;
@@ -1711,7 +1795,12 @@ impl Emitter {
 
     /// yaml_emitter_analyze_event: check if the event data is valid. The
     /// comments, anchor and value move from the event into the emitter.
-    fn analyze_event(&mut self, event: &mut Event) -> Result<(), EmitterError> {
+    fn analyze_event(
+        &mut self,
+        event: &mut Event,
+        mut receipts: super::CommentReceipts,
+    ) -> Result<(), EmitterError> {
+        self.record_node_owner(event, receipts.owner.take());
         self.current_node_id = event.source_node_id;
         self.anchor_data.anchor = Vec::new();
         self.tag_data.handle = Vec::new();
@@ -1720,16 +1809,25 @@ impl Emitter {
 
         self.event_has_line_comment = !event.line_comment.is_empty();
         if !event.head_comment.is_empty() {
+            self.overwritten_receipts
+                .append(&mut self.pending_receipts.head);
+            self.pending_receipts.head = mem::take(&mut receipts.head);
             self.head_comment = mem::take(&mut event.head_comment);
         }
         if !event.line_comment.is_empty() {
             if let Some(origin) = self.line_comment_origin.take() {
                 self.hazardous_key_comments.push(origin);
             }
+            self.overwritten_receipts
+                .append(&mut self.pending_receipts.line);
+            self.pending_receipts.line = mem::take(&mut receipts.line);
             self.line_comment = mem::take(&mut event.line_comment);
             self.line_comment_id = event.line_comment_id.take();
         }
         if !event.foot_comment.is_empty() {
+            self.overwritten_receipts
+                .append(&mut self.pending_receipts.foot);
+            self.pending_receipts.foot = mem::take(&mut receipts.foot);
             self.foot_comment = mem::take(&mut event.foot_comment);
             self.pending_foot_indent =
                 matches!(event.typ, EventType::MappingEnd | EventType::SequenceEnd).then(|| {
@@ -1741,6 +1839,9 @@ impl Emitter {
                 });
         }
         if !event.tail_comment.is_empty() {
+            self.overwritten_receipts
+                .append(&mut self.pending_receipts.tail);
+            self.pending_receipts.tail = mem::take(&mut receipts.tail);
             self.tail_comment = mem::take(&mut event.tail_comment);
         }
 
@@ -2231,7 +2332,22 @@ impl Emitter {
         }
     }
 
-    fn write_comment(&mut self, comment: &[u8]) -> Result<(), EmitterError> {
+    fn receipt_comment_end(&mut self, start: &mut Option<(usize, super::CommentReceipt)>) {
+        if let Some((offset, receipt)) = start.take() {
+            self.receipt_emissions.push(super::ReceiptEmission {
+                offset,
+                length: self.output.len() + self.buffer.len() - offset,
+                receipt,
+            });
+        }
+    }
+
+    fn write_comment(
+        &mut self,
+        comment: &[u8],
+        receipts: &[super::ReceiptSpan],
+    ) -> Result<(), EmitterError> {
+        let mut receipt_start = None;
         #[cfg(feature = "parity")]
         let mut trace_start = None;
         let mut breaks = false;
@@ -2239,6 +2355,7 @@ impl Emitter {
         let mut i = 0;
         while i < comment.len() {
             if is_break(comment, i) {
+                self.receipt_comment_end(&mut receipt_start);
                 #[cfg(feature = "parity")]
                 self.trace_comment_end(&mut trace_start);
                 self.write_break(comment, &mut i)?;
@@ -2250,6 +2367,10 @@ impl Emitter {
                     self.write_indent()?;
                 }
                 if !pound {
+                    if let Some(span) = receipts.iter().find(|span| span.at == i) {
+                        receipt_start =
+                            Some((self.output.len() + self.buffer.len(), span.receipt.clone()));
+                    }
                     #[cfg(feature = "parity")]
                     if crate::config::save::parity::ablation::tracing() {
                         trace_start = Some(self.output.len() + self.buffer.len());
@@ -2267,6 +2388,7 @@ impl Emitter {
         }
         #[cfg(feature = "parity")]
         self.trace_comment_end(&mut trace_start);
+        self.receipt_comment_end(&mut receipt_start);
         if !breaks {
             self.put_break()?;
         }

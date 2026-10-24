@@ -211,6 +211,15 @@ pub(crate) struct Parser<'a> {
     /// The mark of the current position.
     pub(super) mark: Mark,
 
+    // Parallel source positions are opt-in and never affect parser decisions.
+    track_comment_positions: bool,
+    pending_positions: CommentPositions,
+    stem_positions: Vec<CommentPosition>,
+    tail_positions: Vec<CommentPosition>,
+    pub(crate) event_positions: CommentPositions,
+    source_lines: Vec<usize>,
+    source_offsets: Vec<usize>,
+
     // Comments
     /// The current head comments.
     pub(super) head_comment: Vec<u8>,
@@ -269,6 +278,138 @@ pub(crate) struct Parser<'a> {
 /// yaml.v3's default_tag_directives, as (handle, prefix).
 const DEFAULT_TAG_DIRECTIVES: [(&[u8], &[u8]); 2] = [(b"!", b"!"), (b"!!", b"tag:yaml.org,2002:")];
 
+/// A physical occurrence's byte offset, retained as comment buffers split.
+#[derive(Clone, Debug)]
+pub(crate) struct CommentPosition {
+    pub(crate) at: usize,
+    pub(crate) offset: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommentPositions {
+    pub(crate) head: Vec<CommentPosition>,
+    pub(crate) line: Vec<CommentPosition>,
+    pub(crate) foot: Vec<CommentPosition>,
+}
+
+fn split_positions(
+    positions: Vec<CommentPosition>,
+    end: usize,
+    rest: usize,
+) -> (Vec<CommentPosition>, Vec<CommentPosition>) {
+    let (head, mut tail): (Vec<_>, Vec<_>) = positions.into_iter().partition(|p| p.at < end);
+    for p in &mut tail {
+        p.at = p.at.saturating_sub(rest);
+    }
+    (head, tail)
+}
+
+/// Position-only composition follows decode.go's comment moves. It never
+/// decodes values, resolves aliases, or supplies a separate YAML interpretation.
+pub(crate) struct CommentNode {
+    pub(crate) kind: super::Kind,
+    pub(crate) positions: CommentPositions,
+    pub(crate) content: Vec<CommentNode>,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    flow: bool,
+}
+
+pub(crate) fn comment_positions(input: &[u8]) -> Result<CommentNode, ParserError> {
+    struct Cursor<'a> {
+        parser: Parser<'a>,
+        event: Event,
+        positions: CommentPositions,
+    }
+    impl Cursor<'_> {
+        fn next(&mut self) -> Result<(), ParserError> {
+            self.event = self.parser.parse()?;
+            self.positions = mem::take(&mut self.parser.event_positions);
+            Ok(())
+        }
+        fn node(&mut self) -> Result<CommentNode, ParserError> {
+            use super::Kind;
+            let kind = match self.event.typ {
+                EventType::DocumentStart => Kind::Document,
+                EventType::MappingStart => Kind::Mapping,
+                EventType::SequenceStart => Kind::Sequence,
+                EventType::Alias => Kind::Alias,
+                _ => Kind::Scalar,
+            };
+            let mut node = CommentNode {
+                kind,
+                start: self.parser.mark_offset(self.event.start_mark),
+                end: self.parser.mark_offset(self.event.end_mark),
+                flow: self.event.collection_style == CollectionStyle::Flow,
+                positions: mem::take(&mut self.positions),
+                content: Vec::new(),
+            };
+            self.next()?;
+            if !matches!(kind, Kind::Document | Kind::Mapping | Kind::Sequence) {
+                return Ok(node);
+            }
+            while !matches!(
+                self.event.typ,
+                EventType::DocumentEnd
+                    | EventType::MappingEnd
+                    | EventType::SequenceEnd
+                    | EventType::StreamEnd
+                    | EventType::No
+            ) {
+                let child = self.node()?;
+                node.content.push(child);
+                if kind != Kind::Mapping {
+                    continue;
+                }
+                let len = node.content.len();
+                if len % 2 == 1 {
+                    if !node.flow && len > 2 {
+                        let foot = mem::take(&mut node.content[len - 1].positions.foot);
+                        if !foot.is_empty() {
+                            node.content[len - 3].positions.foot = foot;
+                        }
+                    }
+                } else {
+                    if node.content[len - 2].positions.foot.is_empty() {
+                        node.content[len - 2].positions.foot =
+                            mem::take(&mut node.content[len - 1].positions.foot);
+                    }
+                    if self.event.typ == EventType::TailComment {
+                        if node.content[len - 2].positions.foot.is_empty() {
+                            node.content[len - 2].positions.foot =
+                                mem::take(&mut self.positions.foot);
+                        }
+                        self.next()?;
+                    }
+                }
+            }
+            node.end = self.parser.mark_offset(self.event.end_mark);
+            if kind != Kind::Document {
+                node.positions.line = mem::take(&mut self.positions.line);
+            }
+            node.positions.foot = mem::take(&mut self.positions.foot);
+            if kind == Kind::Mapping
+                && !node.flow
+                && node.content.len() > 1
+                && !node.positions.foot.is_empty()
+            {
+                let at = node.content.len() - 2;
+                node.content[at].positions.foot = mem::take(&mut node.positions.foot);
+            }
+            self.next()?;
+            Ok(node)
+        }
+    }
+    let mut cursor = Cursor {
+        parser: Parser::with_comment_positions(input),
+        event: Event::default(),
+        positions: CommentPositions::default(),
+    };
+    cursor.next()?;
+    cursor.next()?;
+    cursor.node()
+}
+
 impl<'a> Parser<'a> {
     /// yaml_parser_initialize followed by yaml_parser_set_input_string:
     /// a parser reading `input`. Empty input stays empty (decode.go's
@@ -285,6 +426,39 @@ impl<'a> Parser<'a> {
 }
 
 impl Parser<'_> {
+    fn mark_offset(&self, mark: Mark) -> usize {
+        self.source_offsets
+            .get(mark.index)
+            .copied()
+            .unwrap_or(self.input.len())
+    }
+
+    /// Track source byte positions through the same pending queues as text.
+    pub(crate) fn with_comment_positions(input: &[u8]) -> Parser<'_> {
+        let mut parser = Parser::new(input);
+        parser.track_comment_positions = true;
+        parser.source_lines.push(0);
+        if let Ok(text) = std::str::from_utf8(input) {
+            parser.source_offsets = text
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(input.len()))
+                .collect();
+            let mut cr = false;
+            for (at, c) in text.char_indices() {
+                if c == '\n' && cr {
+                    if let Some(last) = parser.source_lines.last_mut() {
+                        *last = at + 1;
+                    }
+                } else if matches!(c, '\r' | '\n' | '\u{0085}' | '\u{2028}' | '\u{2029}') {
+                    parser.source_lines.push(at + c.len_utf8());
+                }
+                cr = c == '\r';
+            }
+        }
+        parser
+    }
+
     /// yaml_parser_parse: get the next event. After STREAM-END, or in the
     /// END state, it returns an event of type `EventType::No`; after an
     /// error it returns the same error again.
@@ -298,6 +472,7 @@ impl Parser<'_> {
         }
 
         // Generate the next event.
+        self.event_positions = CommentPositions::default();
         let mut event = Event::default();
         let ok = self.state_machine(&mut event);
         if !ok || self.error != ErrorType::No {
@@ -349,6 +524,63 @@ impl Parser<'_> {
         while let Some(comment) = self.comments.get_mut(self.comments_head)
             && token.start_mark.index >= comment.token_mark.index
         {
+            if self.track_comment_positions
+                && !(token.typ == TokenType::BlockEnd && !comment.head.is_empty())
+            {
+                for (text, pending, base) in [
+                    (
+                        &comment.head,
+                        &mut self.pending_positions.head,
+                        self.head_comment.len(),
+                    ),
+                    (
+                        &comment.line,
+                        &mut self.pending_positions.line,
+                        self.line_comment.len(),
+                    ),
+                    (
+                        &comment.foot,
+                        &mut self.pending_positions.foot,
+                        self.foot_comment.len(),
+                    ),
+                ] {
+                    let mut relative = 0;
+                    for (line, part) in text.split(|b| *b == b'\n').enumerate() {
+                        if !part.is_empty() {
+                            let source_line = comment.start_mark.line + line;
+                            if let Some(&start) = self.source_lines.get(source_line) {
+                                let column = if line == 0 {
+                                    comment.start_mark.column
+                                } else {
+                                    self.input[start..]
+                                        .iter()
+                                        .take_while(|b| matches!(b, b' ' | b'\t'))
+                                        .count()
+                                };
+                                // Parser marks count characters, not UTF-8 bytes.
+                                let column_bytes = std::str::from_utf8(&self.input[start..])
+                                    .ok()
+                                    .map(|s| {
+                                        s.chars().take(column).map(char::len_utf8).sum::<usize>()
+                                    })
+                                    .unwrap_or(column);
+                                pending.push(CommentPosition {
+                                    at: base + usize::from(base > 0) + relative,
+                                    offset: if line == 0 {
+                                        self.source_offsets
+                                            .get(comment.start_mark.index)
+                                            .copied()
+                                            .unwrap_or(start + column_bytes)
+                                    } else {
+                                        start + column_bytes
+                                    },
+                                });
+                            }
+                        }
+                        relative += part.len() + 1;
+                    }
+                }
+            }
             if !comment.head.is_empty() {
                 if token.typ == TokenType::BlockEnd {
                     // No heads on ends, so keep comment.head for a follow
@@ -578,6 +810,13 @@ impl Parser<'_> {
                             None
                         };
                         if let Some(end) = split {
+                            let (head, rest) = split_positions(
+                                std::mem::take(&mut self.pending_positions.head),
+                                end,
+                                i + 1,
+                            );
+                            self.event_positions.head = head;
+                            self.pending_positions.head = rest;
                             head_comment =
                                 self.head_comment.get(..end).unwrap_or_default().to_vec();
                             self.head_comment =
@@ -700,6 +939,7 @@ impl Parser<'_> {
         self.set_event_comments(event);
         if !event.head_comment.is_empty() && event.foot_comment.is_empty() {
             event.foot_comment = mem::take(&mut event.head_comment);
+            self.event_positions.foot = mem::take(&mut self.event_positions.head);
         }
         true
     }
@@ -707,6 +947,9 @@ impl Parser<'_> {
     /// yaml_parser_set_event_comments: move the parser's pending comments
     /// to the event.
     fn set_event_comments(&mut self, event: &mut Event) {
+        self.event_positions = mem::take(&mut self.pending_positions);
+        self.tail_positions.clear();
+        self.stem_positions.clear();
         event.head_comment = mem::take(&mut self.head_comment);
         event.line_comment = mem::take(&mut self.line_comment);
         event.line_comment_line = mem::take(&mut self.line_comment_line);
@@ -933,6 +1176,7 @@ impl Parser<'_> {
             };
             if !self.stem_comment.is_empty() {
                 event.head_comment = mem::take(&mut self.stem_comment);
+                self.event_positions.head = mem::take(&mut self.stem_positions);
             }
             return true;
         }
@@ -951,6 +1195,7 @@ impl Parser<'_> {
             };
             if !self.stem_comment.is_empty() {
                 event.head_comment = mem::take(&mut self.stem_comment);
+                self.event_positions.head = mem::take(&mut self.stem_positions);
             }
             return true;
         }
@@ -1111,6 +1356,13 @@ impl Parser<'_> {
             return;
         }
 
+        let (stem, rest) = split_positions(
+            mem::take(&mut self.pending_positions.head),
+            stem_len,
+            stem_len + 1,
+        );
+        self.stem_positions = stem;
+        self.pending_positions.head = rest;
         self.stem_comment = self
             .head_comment
             .get(..stem_len)
@@ -1156,6 +1408,7 @@ impl Parser<'_> {
         //      processed. Emit an event as it needs to be processed with that
         //      value and not the following key.
         if !self.tail_comment.is_empty() {
+            self.event_positions.foot = mem::take(&mut self.tail_positions);
             *event = Event {
                 typ: EventType::TailComment,
                 start_mark: token.start_mark,

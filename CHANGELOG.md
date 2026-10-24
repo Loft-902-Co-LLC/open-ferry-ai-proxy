@@ -126,6 +126,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Fixed
 
 - **Reduce repeated schema walks when cleaning Gemini tool arguments**, with cycle-aware caching for object analysis, placeholder-declaration checks, and array-item lookup.
+- Keep config comments on their original settings and list items when a save would otherwise move them.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Request-log file names can't point outside the log directory.** A `..` in the request path becomes `-`, dots are trimmed from the ends, and a name that isn't a plain file name is refused, following CLIProxyAPI v8.0.42 ahead of the v8.0.38 pin.

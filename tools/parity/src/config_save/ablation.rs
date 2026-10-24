@@ -6,7 +6,7 @@ use open_ferry_core::config::{Config, save::parity as core};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, error::Error, fs};
 
-pub const ALL: [Protection; 7] = [
+pub const ALL: [Protection; 8] = [
     Protection::EmptyMappingPendingComment,
     Protection::CanonicalVersionComment,
     Protection::DroppedSingleKeyComment,
@@ -14,6 +14,7 @@ pub const ALL: [Protection; 7] = [
     Protection::EffectiveBlockScalarComment,
     Protection::BlockScalarCommentIndentation,
     Protection::MultipleFlowItemFeet,
+    Protection::DeferredCommentOwners,
 ];
 const _: () = assert!(ALL.len() <= 8);
 
@@ -274,6 +275,7 @@ fn deviations(mask: u8) -> BTreeSet<Deviation> {
         Deviation::RetainedEffectiveBlockScalarComment,
         Deviation::RetainedBlockScalarCommentIndentation,
         Deviation::RetainedMultipleFlowItemFeet,
+        Deviation::RetainedDeferredCommentOwners,
     ]
     .into_iter()
     .enumerate()
