@@ -47,6 +47,10 @@ use super::{SaveError, SaveErrorKind, check_layout, unmarshal};
 #[path = "writer_tests.rs"]
 mod writer_tests;
 
+#[cfg(test)]
+#[path = "writer_r2_tests.rs"]
+mod writer_r2_tests;
+
 /// The deprecated relay flag and the setting it is the inverse of.
 const PRIVATE_IP_ALIAS: &str = "codex.live-media-relay.allow-private-remote-ips";
 const PRIVATE_IP_CANONICAL: &str = "codex.live-media-relay.disable-private-remote-ips";
@@ -644,18 +648,9 @@ pub(crate) fn restore_v8_layout(
 ) -> Result<(), SaveError> {
     let upstreams_map =
         yaml_path(layout, "api-keys").is_some_and(|keys| keys.kind == Kind::Mapping);
-    // A newly writable multi-foot sequence must settle in one save. Project
-    // newly generated settings in the same pass as existing settings, rather
-    // than appending them in the later layout pass and moving them next time.
-    let complete_projection = super::tree::has_multiple_flow_item_feet(layout);
-    #[cfg(feature = "parity")]
-    let complete_projection = complete_projection
-        && super::parity::ablation::enabled(
-            super::parity::ablation::Protection::EmptyMappingPendingComment,
-        );
     for &(old, current) in V8_PATHS {
         let collision = old == "api-keys" && upstreams_map;
-        if yaml_path(layout, current).is_none() && !collision && !complete_projection {
+        if yaml_path(layout, current).is_none() && !collision {
             continue;
         }
         if legacy_path(root, old).is_none() {
