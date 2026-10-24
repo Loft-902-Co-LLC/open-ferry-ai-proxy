@@ -63,6 +63,7 @@ pub enum Deviation {
     RetainedInlineEmptyNullComment,
     RetainedEffectiveBlockScalarComment,
     RetainedBlockScalarCommentIndentation,
+    RetainedMultipleFlowItemFeet,
 }
 
 impl Deviation {
@@ -91,6 +92,7 @@ impl Deviation {
             Self::RetainedBlockScalarCommentIndentation => {
                 "retained block scalar comment indentation"
             }
+            Self::RetainedMultipleFlowItemFeet => "retained consecutive flow-item foot comments",
             Self::RetainedEffectiveBlockScalarComment => "retained effective block scalar comment",
             Self::UnloggedChangeLine => "change line upstream doesn't log",
         }
