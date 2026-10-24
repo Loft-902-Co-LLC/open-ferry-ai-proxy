@@ -2,16 +2,9 @@ name: Site
 
 on:
   pull_request:
-    paths:
-      - 'site/**'
-      - '.github/workflows/site.yml'
-      - '.github/scripts/site-check.py'
   push:
     branches: [main]
-    paths:
-      - 'site/**'
-      - '.github/workflows/site.yml'
-      - '.github/scripts/site-check.py'
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -31,9 +24,9 @@ jobs:
           python3 .github/scripts/site-check.py --self-test
 
   # Expected to fail until the owner enables Pages with source GitHub Actions.
-  # Only a manual dispatch deploys; pushes and pull requests only check the site.
+  # Only a manual dispatch on main deploys; other events only check the site.
   deploy:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 10

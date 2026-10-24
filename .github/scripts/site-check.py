@@ -17,7 +17,9 @@ from urllib.parse import unquote, urlsplit
 
 VOID = frozenset("area base br col embed hr img input link meta param source track wbr".split())
 REPO = "github.com/loft-902-co-llc/open-ferry-ai-proxy"
+PROJECT_PREFIX = "/open-ferry-ai-proxy/"
 URL_ATTRIBUTES = frozenset("href src poster action formaction data cite background".split())
+IDREF_ATTRIBUTES = frozenset("aria-controls aria-labelledby aria-describedby for".split())
 CSS_URL = re.compile(r"url\(\s*['\"]?([^'\"\s)]+)['\"]?\s*\)", re.I)
 CSS_IMPORT = re.compile(r"@import\s+(?:url\(\s*)?['\"]?([^'\"\s);]+)", re.I)
 
@@ -29,6 +31,7 @@ class Page(HTMLParser):
         self.errors = []
         self.stack = []
         self.ids = set()
+        self.idrefs = []
         self.urls = []
         self.lang = False
         self.title = False
@@ -60,6 +63,13 @@ class Page(HTMLParser):
             self.fail("relative", "base elements break project-relative URLs")
         resource = tag == "script" or (tag == "link" and "stylesheet" in (attrs.get("rel") or "").lower().split())
         for name, value in attrs.items():
+            if name == "href" and not (value or "").strip():
+                self.fail("empty-href", "href must not be empty")
+            if name in IDREF_ATTRIBUTES:
+                references = (value or "").split()
+                if not references:
+                    self.fail("idref", f"{name} needs a target id")
+                self.idrefs.extend((name, reference) for reference in references)
             if name in URL_ATTRIBUTES and value:
                 self.urls.append((value, resource and name in {"src", "href"}))
             if name == "srcset" and value:
@@ -96,6 +106,9 @@ class Page(HTMLParser):
         self.close()
         if self.stack:
             self.fail("html", f"unclosed tags: {self.stack}")
+        for attribute, reference in self.idrefs:
+            if reference not in self.ids:
+                self.fail("idref", f"{attribute} target missing: {reference}")
         for rule, present, message in (
             ("lang", self.lang, "html needs a language"),
             ("title", self.title, "page needs a nonempty title"),
@@ -106,6 +119,17 @@ class Page(HTMLParser):
                 self.fail(rule, message)
 
 
+class MarkdownAnchors(HTMLParser):
+    """Collect only real attributes on raw HTML tags, not prose or examples."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ids = set()
+
+    def handle_starttag(self, tag, attrs):
+        self.ids.update(value for name, value in attrs if name in {"id", "name"} and value)
+
+
 def markdown_ids(path):
     """GitHub heading slugs, including duplicate suffixes and explicit HTML ids.
 
@@ -113,21 +137,23 @@ def markdown_ids(path):
     links and HTML are stripped before GitHub's punctuation/space rules.
     """
     text = path.read_text(encoding="utf-8")
-    identifiers = set(re.findall(r"\b(?:id|name)=[\"']([^\"']+)[\"']", text))
+    identifiers = set()
     used = set()
     fence = None
     previous = ""
+    raw_html = []
     for line in text.splitlines():
-        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
         if marker:
             if fence is None:
-                fence = marker[1][0]
-            elif marker[1][0] == fence:
+                fence = (marker[1][0], len(marker[1]))
+            elif marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
                 fence = None
             previous = ""
             continue
         if fence:
             continue
+        raw_html.append(line)
         heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)(?:\s+#+\s*)?$", line)
         label = heading[1] if heading else None
         if label is None and previous.strip() and re.fullmatch(r"\s{0,3}(?:=+|-+)\s*", line):
@@ -145,6 +171,13 @@ def markdown_ids(path):
             candidate = f"{slug}-{suffix}"
         used.add(candidate)
         identifiers.add(candidate)
+    # Backtick runs must match in length; code spans may contain raw HTML and
+    # cross line breaks. Keep this separate from heading text normalization.
+    without_code = re.sub(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)", "", "\n".join(raw_html), flags=re.S)
+    anchors = MarkdownAnchors()
+    anchors.feed(without_code)
+    anchors.close()
+    identifiers.update(anchors.ids)
     return identifiers
 
 
@@ -199,9 +232,13 @@ def check(site, repo):
                 fail(origin, "url", f"unsupported scheme: {parsed.scheme}")
             return
         if parsed.path.startswith("/"):
-            fail(origin, "relative", f"use a project-relative URL: {url}")
-            return
-        target = (origin.parent / unquote(parsed.path)).resolve() if parsed.path else origin.resolve()
+            if origin == site / "404.html" and parsed.path.startswith(PROJECT_PREFIX):
+                target = (site / unquote(parsed.path[len(PROJECT_PREFIX):])).resolve()
+            else:
+                fail(origin, "relative", f"use a project-relative URL: {url}")
+                return
+        else:
+            target = (origin.parent / unquote(parsed.path)).resolve() if parsed.path else origin.resolve()
         if target.is_dir():
             target = target / "index.html"
         if not within(target, site) or not target.is_file():
@@ -255,21 +292,44 @@ def self_test():
         ("protocol-relative script", "external-resource", good.format('<script src="//example.invalid/code.js"></script>')),
         ("external stylesheet", "external-resource", good.format('<link rel="stylesheet" href="https://example.invalid/style.css">')),
         ("root-relative URL", "relative", good.format('<a href="/index.html">Go</a>')),
+        ("project prefix outside 404", "relative", good.format('<a href="/open-ferry-ai-proxy/index.html">Go</a>')),
+        ("fenced HTML is not an anchor", "repo-fragment", good.format('<a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#x">Go</a>')),
+        ("inline id text is not an anchor", "repo-fragment", good.format('<a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#y">Go</a>')),
+        ("inline HTML is not an anchor", "repo-fragment", good.format('<a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#inline-example">Go</a>')),
+        ("missing aria-controls target", "idref", good.format('<button aria-controls="absent">Go</button>')),
+        ("missing aria-labelledby target", "idref", good.format('<div aria-labelledby="top absent">Content</div>')),
+        ("missing aria-describedby target", "idref", good.format('<div aria-describedby="absent">Content</div>')),
+        ("missing label for target", "idref", good.format('<label for="absent">Name</label>')),
+        ("empty href", "empty-href", good.format('<a href="">Go</a>')),
     ]
     with tempfile.TemporaryDirectory(prefix="open-ferry-site-check-") as scratch:
         root = Path(scratch)
         site = root / "site"
         site.mkdir()
-        (root / "README.md").write_text("# Heading\n## Heading\n## Heading\n", encoding="utf-8", newline="\n")
+        markdown = '# Heading\n## Heading\n## Heading\n<a id="live-anchor" name="named-anchor"></a>\n```html\n<a name="x"></a>\n```\nInline `id="y"` and `<a id="inline-example"></a>`.\n'
+        (root / "README.md").write_text(markdown, encoding="utf-8", newline="\n")
         (site / "other.html").write_text(good.format(""), encoding="utf-8", newline="\n")
         (site / "asset.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"></svg>', encoding="utf-8", newline="\n")
         for label, rule, source in cases:
             (site / "index.html").write_text(source, encoding="utf-8", newline="\n")
             if not any(f"[{rule}]" in error for error in check(site, root)):
                 raise AssertionError(f"rule did not fire: {label}")
-        positive = good.format('<a href="other.html#top">Go</a><img src="asset.svg" alt=""><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#heading-2">Duplicate heading</a>')
+        positive = good.format('<a href="other.html#top">Go</a><img src="asset.svg" alt=""><button aria-controls="top" aria-labelledby="top" aria-describedby="top">Go</button><label for="field">Name</label><input id="field"><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#heading-2">Duplicate heading</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#live-anchor">Raw id</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#named-anchor">Raw name</a>')
         (site / "index.html").write_text(positive, encoding="utf-8", newline="\n")
         assert not check(site, root), check(site, root)
+        (site / "styles.css").write_text("body { color: #172b27; }", encoding="utf-8", newline="\n")
+        prefixed_404 = good.format('<link rel="stylesheet" href="/open-ferry-ai-proxy/styles.css"><img src="/open-ferry-ai-proxy/asset.svg" alt=""><a href="/open-ferry-ai-proxy/index.html#top">Go home</a>')
+        (site / "404.html").write_text(prefixed_404, encoding="utf-8", newline="\n")
+        assert not check(site, root), "404 project-prefix sample failed: " + str(check(site, root))
+        bad_404_cases = [
+            ("missing 404 prefixed target", prefixed_404.replace("/styles.css", "/missing.css")),
+            ("wrong 404 root prefix", prefixed_404.replace(PROJECT_PREFIX, "/another-project/")),
+        ]
+        for label, source in bad_404_cases:
+            (site / "404.html").write_text(source, encoding="utf-8", newline="\n")
+            if not any("[relative]" in error for error in check(site, root)):
+                raise AssertionError(f"rule did not fire: {label}")
+        (site / "404.html").write_text(prefixed_404, encoding="utf-8", newline="\n")
         css_cases = [
             ("missing CSS asset", "relative", 'body { background: url("absent.png"); }'),
             ("external CSS import", "external-resource", '@import "https://example.invalid/theme.css";'),
@@ -280,7 +340,7 @@ def self_test():
             (site / "styles.css").write_text(source, encoding="utf-8", newline="\n")
             if not any(f"[{rule}]" in error for error in check(site, root)):
                 raise AssertionError(f"rule did not fire: {label}")
-    print(f"Self-test passed: {len(cases) + len(css_cases)} bad samples rejected; valid cross-page links, alt and duplicate heading slugs accepted.")
+    print(f"Self-test passed: {len(cases) + len(css_cases) + len(bad_404_cases)} bad samples rejected; valid cross-page links, idrefs, raw HTML anchors and 404 project paths accepted.")
 
 
 def main():
@@ -295,7 +355,7 @@ def main():
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print("Site check passed: HTML, local URLs, fragments, repository paths/Markdown anchors, alt text, page metadata and local scripts/stylesheets.")
+    print("Site check passed: HTML, local URLs, fragments, repository paths/Markdown anchors, idrefs, nonempty links, alt text, page metadata and local scripts/stylesheets.")
     return 0
 
 
