@@ -2,14 +2,14 @@
 
 `tools/bench` runs open-ferry and CLIProxyAPI, one after the other, in front of the same fake upstream on 127.0.0.1, with the same config, and sends both the same requests: to each provider in its own format, and translated from another. It measures how long each takes to start, how many short requests it answers a second and how fast, how much time it adds to the upstream's, the CPU time it spends on each request, its memory, and how fast it passes on a long conversation.
 
-The results below are from one run on 2026-10-08, against CLIProxyAPI v8.0.20, on an Azure Standard_D8s_v6 VM (8 vCPUs, Intel Xeon Platinum 8573C) in East US, made for the run and deleted after. Its CPUs were idle before the run. In short:
+The results below are from one run on 2026-10-24, against CLIProxyAPI v8.0.38, on an Azure Standard_D8s_v6 VM (8 vCPUs, Intel Xeon Platinum 8573C) in East US, made for the run and deleted after. Its CPUs were idle before the run. In short:
 
-- **A long conversation** (a coding agent's 300 KiB request): open-ferry adds 4.4 to 14 ms to the upstream's time, and CLIProxyAPI 17 to 38 ms, 2.6 to 6.6 times as much. The gap is widest for Chat Completions sent on to Claude.
-- **Short requests:** open-ferry adds 0.7 to 2.8 ms at the median, and CLIProxyAPI 0.6 to 5.0 ms, and both answer as many requests a second, which the fake upstream's 20 ms wait sets. With one client at a time open-ferry adds less, for 9 of the 10 kinds of request; with 16, CLIProxyAPI adds up to 0.4 ms less, for all 10; with 64 they are even at the median, and open-ferry's 99th percentile is lower for all 10.
-- **CPU:** open-ferry spends 5% to 37% less CPU time per request in 29 of the 30 rows, and 2% more in the other.
-- **Upstream connections:** open-ferry keeps its connections to the upstream and reuses them, opening at most 48 for 64 clients. CLIProxyAPI opened 705 to 6,297 with 16 and 64 clients, and with 64 every kind of request reached the benchmark's limit on connections and stopped early, after 3.2 to 6.5 s of its 10.
-- **Start:** 15.5 ms to open-ferry's first answer, and 23.9 ms to CLIProxyAPI's (medians).
-- **Memory:** open-ferry uses less when idle (29.6 MiB, against 53.0 MiB) and more under load (98.7 MiB against 93.9 MiB at the median, and 127 MiB against 107 MiB at the peak).
+- **A long conversation** (a coding agent's 300 KiB request): open-ferry adds 4.0 to 13.5 ms to the upstream's time, and CLIProxyAPI 17 to 42 ms, 2.8 to 6.1 times as much. The gap is widest for Chat Completions sent on to Claude.
+- **Short requests:** open-ferry adds 0.5 to 2.2 ms at the median, and CLIProxyAPI 0.6 to 6.7 ms. With 1 and 16 clients both answer as many requests a second, which the fake upstream's 20 ms wait sets. With one client at a time open-ferry adds less, for all 10 kinds of request; with 16, CLIProxyAPI adds up to 0.3 ms less, for 8 of the 10; with 64, open-ferry adds less and its 99th percentile is lower, for all 10.
+- **CPU:** open-ferry spends 7% to 41% less CPU time per request, in all 30 rows.
+- **Upstream connections:** open-ferry keeps its connections to the upstream and reuses them, opening at most 48 for 64 clients. CLIProxyAPI opened 725 to 6,276 with 16 and 64 clients, and with 64 every kind of request reached the benchmark's limit on connections and stopped early, after 3.4 to 6.1 s of its 10.
+- **Start:** 16.9 ms to open-ferry's first answer, and 27.2 ms to CLIProxyAPI's (medians).
+- **Memory:** open-ferry uses less when idle (32.9 MiB, against 50.2 MiB) and more under load (104.7 MiB against 85.2 MiB at the median, and 136 MiB against 107 MiB at the peak). Most of open-ferry's idle memory is its own code and read-only data, which Linux counts once the process has touched it.
 
 Another machine gives other numbers; [Running it](#running-it) says how to get your own.
 
@@ -127,14 +127,16 @@ From the run described at the top of this page.
 
 <!-- bench-results:start -->
 <!-- Written by tools/bench's --out option. Don't edit it by hand: rerun the tool. -->
-Run on 2026-10-08 on Ubuntu 24.04 (Linux 6.17.0-1022-azure), INTEL(R) XEON(R) PLATINUM 8573C with 8 logical CPUs and 31 GiB of memory. Before the run its CPUs were 0% busy.
+Run on 2026-10-24 on Ubuntu 24.04 (Linux 7.0.0-1017-azure), INTEL(R) XEON(R) PLATINUM 8573C with 8 logical CPUs and 31 GiB of memory. Before the run its CPUs were 0% busy.
 
-The machine: Azure Standard_D8s_v6 (Intel Xeon Platinum 8573C, 8 vCPUs), East US
+The machine: Azure Standard_D8s_v6, East US
 
-- open-ferry: release build of commit `f2fdb1e`
-- CLIProxyAPI: v8.0.20 (commit `0f96f568e4db`), built with go1.26.4
+- open-ferry: release build of commit `4f7aa5b`
+- CLIProxyAPI: v8.0.38 (commit `0db190255716`), built with go1.26.4
 
-The Rust toolchain was `rustc 1.99.0 (b940084d7 2026-09-28)`, and Go go1.26.4.
+The Rust toolchain was `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, and Go go1.26.4.
+
+Each run keeps `config.yaml` in its root and captures proxy output in `logs/stdout.log` and `logs/stderr.log`. The logs directory is created before the proxy starts, keeping log writes outside its nonrecursive config watch.
 
 The fake upstream waited 20.0 ms before each answer. Each load level ran for 10.00 s. For the start time each proxy was started 5 times, after a start that wasn't measured. Each kind of long conversation request was sent 30 times, one after another.
 
@@ -144,16 +146,16 @@ The time a proxy adds to a request, on top of the fake upstream's: the latency a
 
 | Request | open-ferry, short | CLIProxyAPI, short | open-ferry, long | CLIProxyAPI, long |
 |---|---:|---:|---:|---:|
-| Chat Completions | 668 µs | 787 µs | 4.35 ms | 18.7 ms |
-| Chat Completions, streamed | 1.10 ms | 1.17 ms | 4.97 ms | 19.0 ms |
-| Claude Messages | 711 µs | 840 µs | 5.77 ms | 22.5 ms |
-| Claude Messages, streamed | 1.07 ms | 1.15 ms | 5.92 ms | 23.0 ms |
-| Chat Completions → Claude Messages | 851 µs | 968 µs | 5.75 ms | 37.7 ms |
-| Chat Completions → Claude Messages, streamed | 1.23 ms | 1.36 ms | 6.45 ms | 38.0 ms |
-| Claude Messages → Chat Completions | 719 µs | 829 µs | 5.59 ms | 16.9 ms |
-| Claude Messages → Chat Completions, streamed | 1.45 ms | 1.36 ms | 14.0 ms | 36.8 ms |
-| Responses → Chat Completions | 758 µs | 832 µs | 5.85 ms | 23.6 ms |
-| Responses → Chat Completions, streamed | 1.64 ms | 1.80 ms | 7.07 ms | 25.6 ms |
+| Chat Completions | 637 µs | 764 µs | 3.98 ms | 18.4 ms |
+| Chat Completions, streamed | 952 µs | 1.28 ms | 4.99 ms | 18.9 ms |
+| Claude Messages | 644 µs | 794 µs | 6.97 ms | 25.8 ms |
+| Claude Messages, streamed | 1.04 ms | 1.22 ms | 7.80 ms | 26.1 ms |
+| Chat Completions → Claude Messages | 786 µs | 962 µs | 6.77 ms | 41.5 ms |
+| Chat Completions → Claude Messages, streamed | 1.11 ms | 1.39 ms | 7.93 ms | 41.5 ms |
+| Claude Messages → Chat Completions | 623 µs | 845 µs | 5.53 ms | 17.0 ms |
+| Claude Messages → Chat Completions, streamed | 1.34 ms | 1.39 ms | 13.5 ms | 37.5 ms |
+| Responses → Chat Completions | 693 µs | 858 µs | 5.92 ms | 21.7 ms |
+| Responses → Chat Completions, streamed | 1.42 ms | 1.80 ms | 6.88 ms | 24.1 ms |
 
 #### Start time
 
@@ -161,8 +163,8 @@ From starting the process to its first answer on `GET /v1/models`.
 
 | Proxy | Median | Fastest | Slowest |
 |---|---:|---:|---:|
-| open-ferry | 15.5 ms | 15.3 ms | 15.9 ms |
-| CLIProxyAPI | 23.9 ms | 22.8 ms | 24.0 ms |
+| open-ferry | 16.9 ms | 16.3 ms | 17.1 ms |
+| CLIProxyAPI | 27.2 ms | 26.3 ms | 28.3 ms |
 
 #### Short requests
 
@@ -172,124 +174,124 @@ Chat Completions:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 668 µs | 542 µs | 0 | 0 |
-| 1 | CLIProxyAPI | 48 | 21.0 ms | 21.2 ms | 21.4 ms | 787 µs | 796 µs | 0 | 0 |
-| 16 | open-ferry | 756 | 21.1 ms | 21.5 ms | 22.1 ms | 950 µs | 532 µs | 0 | 15 |
-| 16 | CLIProxyAPI | 764 | 20.8 ms | 21.2 ms | 21.9 ms | 698 µs | 647 µs | 0 | 2,262 |
-| 64 | open-ferry | 3,047 | 20.9 ms | 21.4 ms | 22.0 ms | 782 µs | 489 µs | 0 | 48 |
-| 64 | CLIProxyAPI | 3,054* | 20.8 ms | 21.2 ms | 22.6 ms | 645 µs | 605 µs | 0 | 4,737 |
+| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.2 ms | 637 µs | 501 µs | 0 | 0 |
+| 1 | CLIProxyAPI | 48 | 21.0 ms | 21.2 ms | 21.5 ms | 764 µs | 798 µs | 0 | 0 |
+| 16 | open-ferry | 760 | 21.0 ms | 21.4 ms | 21.9 ms | 833 µs | 463 µs | 0 | 15 |
+| 16 | CLIProxyAPI | 764 | 20.9 ms | 21.3 ms | 22.1 ms | 727 µs | 672 µs | 0 | 2,453 |
+| 64 | open-ferry | 3,088 | 20.6 ms | 20.9 ms | 21.3 ms | 524 µs | 399 µs | 0 | 48 |
+| 64 | CLIProxyAPI | 3,043* | 20.8 ms | 21.1 ms | 23.6 ms | 641 µs | 629 µs | 0 | 4,545 |
 
 Chat Completions, streamed:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 46 | 21.5 ms | 21.7 ms | 21.9 ms | 1.10 ms | 1.40 ms | 0 | 0 |
-| 1 | CLIProxyAPI | 46 | 21.5 ms | 21.7 ms | 22.2 ms | 1.17 ms | 1.55 ms | 0 | 0 |
-| 16 | open-ferry | 735 | 21.6 ms | 22.2 ms | 23.1 ms | 1.33 ms | 1.07 ms | 0 | 0 |
-| 16 | CLIProxyAPI | 748 | 21.3 ms | 21.5 ms | 22.6 ms | 1.04 ms | 1.27 ms | 0 | 917 |
-| 64 | open-ferry | 2,928 | 21.6 ms | 22.6 ms | 24.1 ms | 1.32 ms | 1.02 ms | 0 | 0 |
-| 64 | CLIProxyAPI | 2,848* | 22.0 ms | 23.9 ms | 26.7 ms | 1.68 ms | 1.11 ms | 0 | 6,087 |
+| 1 | open-ferry | 47 | 21.3 ms | 21.5 ms | 21.7 ms | 952 µs | 1.13 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 46 | 21.7 ms | 21.9 ms | 22.3 ms | 1.28 ms | 1.67 ms | 0 | 0 |
+| 16 | open-ferry | 744 | 21.4 ms | 21.9 ms | 22.6 ms | 1.10 ms | 863 µs | 0 | 0 |
+| 16 | CLIProxyAPI | 745 | 21.3 ms | 21.6 ms | 22.7 ms | 1.11 ms | 1.37 ms | 0 | 1,275 |
+| 64 | open-ferry | 2,980 | 21.2 ms | 22.0 ms | 23.1 ms | 1.01 ms | 838 µs | 0 | 0 |
+| 64 | CLIProxyAPI | 2,822* | 22.1 ms | 24.2 ms | 29.2 ms | 1.78 ms | 1.21 ms | 0 | 5,727 |
 
 Claude Messages:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 711 µs | 542 µs | 0 | 0 |
-| 1 | CLIProxyAPI | 48 | 21.0 ms | 21.2 ms | 21.4 ms | 840 µs | 861 µs | 0 | 0 |
-| 16 | open-ferry | 756 | 21.1 ms | 21.6 ms | 22.1 ms | 973 µs | 554 µs | 0 | 15 |
-| 16 | CLIProxyAPI | 764 | 20.9 ms | 21.2 ms | 22.2 ms | 732 µs | 711 µs | 0 | 1,969 |
-| 64 | open-ferry | 3,037 | 21.0 ms | 21.5 ms | 22.2 ms | 857 µs | 516 µs | 0 | 48 |
-| 64 | CLIProxyAPI | 3,048* | 20.8 ms | 21.2 ms | 22.6 ms | 711 µs | 680 µs | 0 | 5,031 |
+| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 644 µs | 564 µs | 0 | 0 |
+| 1 | CLIProxyAPI | 47 | 21.1 ms | 21.3 ms | 21.4 ms | 794 µs | 863 µs | 0 | 0 |
+| 16 | open-ferry | 758 | 21.0 ms | 21.5 ms | 22.0 ms | 886 µs | 501 µs | 0 | 15 |
+| 16 | CLIProxyAPI | 761 | 20.9 ms | 21.3 ms | 22.3 ms | 788 µs | 754 µs | 0 | 2,195 |
+| 64 | open-ferry | 3,075 | 20.7 ms | 21.1 ms | 21.6 ms | 594 µs | 440 µs | 0 | 48 |
+| 64 | CLIProxyAPI | 2,973* | 21.1 ms | 22.5 ms | 25.4 ms | 982 µs | 749 µs | 0 | 4,806 |
 
 Claude Messages, streamed:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 47 | 21.4 ms | 21.6 ms | 21.9 ms | 1.07 ms | 1.31 ms | 0 | 0 |
-| 1 | CLIProxyAPI | 47 | 21.4 ms | 21.6 ms | 21.8 ms | 1.15 ms | 1.39 ms | 0 | 0 |
-| 16 | open-ferry | 739 | 21.5 ms | 22.1 ms | 22.9 ms | 1.26 ms | 992 µs | 0 | 0 |
-| 16 | CLIProxyAPI | 752 | 21.2 ms | 21.3 ms | 22.7 ms | 973 µs | 1.19 ms | 0 | 705 |
-| 64 | open-ferry | 2,965 | 21.4 ms | 22.1 ms | 23.0 ms | 1.16 ms | 958 µs | 0 | 1 |
-| 64 | CLIProxyAPI | 2,921* | 21.5 ms | 22.8 ms | 25.8 ms | 1.29 ms | 1.06 ms | 0 | 6,297 |
+| 1 | open-ferry | 47 | 21.4 ms | 21.6 ms | 21.8 ms | 1.04 ms | 1.31 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 46 | 21.6 ms | 21.8 ms | 22.1 ms | 1.22 ms | 1.55 ms | 0 | 0 |
+| 16 | open-ferry | 738 | 21.6 ms | 22.1 ms | 22.9 ms | 1.32 ms | 1.05 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 749 | 21.2 ms | 21.5 ms | 22.5 ms | 1.05 ms | 1.30 ms | 0 | 1,222 |
+| 64 | open-ferry | 2,962 | 21.4 ms | 22.2 ms | 23.5 ms | 1.18 ms | 1.01 ms | 0 | 1 |
+| 64 | CLIProxyAPI | 2,895* | 21.6 ms | 23.1 ms | 26.5 ms | 1.40 ms | 1.16 ms | 0 | 5,780 |
 
 Chat Completions → Claude Messages:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 47 | 21.2 ms | 21.4 ms | 21.6 ms | 851 µs | 805 µs | 0 | 0 |
-| 1 | CLIProxyAPI | 47 | 21.2 ms | 21.5 ms | 21.9 ms | 968 µs | 1.11 ms | 0 | 0 |
-| 16 | open-ferry | 744 | 21.4 ms | 22.1 ms | 22.8 ms | 1.21 ms | 761 µs | 0 | 0 |
-| 16 | CLIProxyAPI | 758 | 21.0 ms | 21.3 ms | 22.1 ms | 835 µs | 944 µs | 0 | 1,245 |
-| 64 | open-ferry | 2,946 | 21.6 ms | 22.4 ms | 23.3 ms | 1.40 ms | 749 µs | 0 | 0 |
-| 64 | CLIProxyAPI | 2,955* | 21.3 ms | 22.5 ms | 24.9 ms | 1.09 ms | 953 µs | 0 | 5,756 |
+| 1 | open-ferry | 47 | 21.2 ms | 21.4 ms | 21.5 ms | 786 µs | 762 µs | 0 | 0 |
+| 1 | CLIProxyAPI | 47 | 21.3 ms | 21.5 ms | 21.9 ms | 962 µs | 1.15 ms | 0 | 0 |
+| 16 | open-ferry | 749 | 21.3 ms | 21.8 ms | 22.6 ms | 1.04 ms | 724 µs | 0 | 0 |
+| 16 | CLIProxyAPI | 759 | 21.0 ms | 21.2 ms | 22.2 ms | 823 µs | 964 µs | 0 | 725 |
+| 64 | open-ferry | 3,021 | 21.1 ms | 21.5 ms | 22.4 ms | 870 µs | 683 µs | 0 | 0 |
+| 64 | CLIProxyAPI | 2,957* | 21.3 ms | 22.5 ms | 24.6 ms | 1.09 ms | 1.00 ms | 0 | 6,276 |
 
 Chat Completions → Claude Messages, streamed:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 46 | 21.6 ms | 21.8 ms | 21.9 ms | 1.23 ms | 1.60 ms | 0 | 0 |
-| 1 | CLIProxyAPI | 46 | 21.6 ms | 21.9 ms | 22.5 ms | 1.36 ms | 1.84 ms | 0 | 0 |
-| 16 | open-ferry | 732 | 21.7 ms | 22.2 ms | 22.9 ms | 1.45 ms | 1.19 ms | 0 | 0 |
-| 16 | CLIProxyAPI | 742 | 21.4 ms | 21.8 ms | 22.7 ms | 1.21 ms | 1.54 ms | 0 | 1,467 |
-| 64 | open-ferry | 2,916 | 21.7 ms | 22.6 ms | 24.1 ms | 1.44 ms | 1.15 ms | 0 | 0 |
-| 64 | CLIProxyAPI | 2,751* | 22.6 ms | 25.3 ms | 30.7 ms | 2.23 ms | 1.38 ms | 0 | 5,533 |
+| 1 | open-ferry | 46 | 21.5 ms | 21.7 ms | 21.9 ms | 1.11 ms | 1.42 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 46 | 21.7 ms | 22.0 ms | 22.5 ms | 1.39 ms | 1.90 ms | 0 | 0 |
+| 16 | open-ferry | 734 | 21.7 ms | 22.2 ms | 23.0 ms | 1.42 ms | 1.17 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 741 | 21.4 ms | 21.7 ms | 22.9 ms | 1.24 ms | 1.65 ms | 0 | 1,213 |
+| 64 | open-ferry | 2,927 | 21.6 ms | 22.5 ms | 23.8 ms | 1.40 ms | 1.12 ms | 0 | 0 |
+| 64 | CLIProxyAPI | 2,768* | 22.5 ms | 24.9 ms | 29.7 ms | 2.14 ms | 1.48 ms | 0 | 5,787 |
 
 Claude Messages → Chat Completions:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 719 µs | 564 µs | 0 | 1 |
-| 1 | CLIProxyAPI | 48 | 21.0 ms | 21.2 ms | 21.5 ms | 829 µs | 840 µs | 0 | 0 |
-| 16 | open-ferry | 754 | 21.1 ms | 21.7 ms | 22.4 ms | 1.00 ms | 552 µs | 0 | 15 |
-| 16 | CLIProxyAPI | 764 | 20.8 ms | 21.2 ms | 22.2 ms | 708 µs | 679 µs | 0 | 2,166 |
-| 64 | open-ferry | 3,036 | 21.0 ms | 21.5 ms | 22.2 ms | 867 µs | 509 µs | 0 | 48 |
-| 64 | CLIProxyAPI | 3,055* | 20.8 ms | 21.2 ms | 22.5 ms | 667 µs | 645 µs | 0 | 4,838 |
+| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 623 µs | 543 µs | 0 | 1 |
+| 1 | CLIProxyAPI | 47 | 21.0 ms | 21.2 ms | 21.5 ms | 845 µs | 863 µs | 0 | 0 |
+| 16 | open-ferry | 760 | 21.0 ms | 21.4 ms | 22.0 ms | 854 µs | 497 µs | 0 | 15 |
+| 16 | CLIProxyAPI | 764 | 20.9 ms | 21.3 ms | 22.2 ms | 725 µs | 707 µs | 0 | 2,298 |
+| 64 | open-ferry | 3,075 | 20.7 ms | 21.1 ms | 21.6 ms | 602 µs | 437 µs | 0 | 48 |
+| 64 | CLIProxyAPI | 3,054* | 20.8 ms | 21.2 ms | 22.5 ms | 676 µs | 667 µs | 0 | 4,703 |
 
 Claude Messages → Chat Completions, streamed:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 46 | 21.8 ms | 22.1 ms | 22.3 ms | 1.45 ms | 1.77 ms | 0 | 0 |
-| 1 | CLIProxyAPI | 46 | 21.7 ms | 21.9 ms | 22.5 ms | 1.36 ms | 1.74 ms | 0 | 0 |
-| 16 | open-ferry | 727 | 21.9 ms | 22.5 ms | 23.3 ms | 1.61 ms | 1.30 ms | 0 | 0 |
-| 16 | CLIProxyAPI | 742 | 21.4 ms | 21.7 ms | 23.2 ms | 1.20 ms | 1.47 ms | 0 | 1,162 |
-| 64 | open-ferry | 2,872 | 22.0 ms | 23.2 ms | 24.9 ms | 1.72 ms | 1.24 ms | 0 | 0 |
-| 64 | CLIProxyAPI | 2,747* | 22.6 ms | 25.7 ms | 29.7 ms | 2.21 ms | 1.30 ms | 0 | 5,869 |
+| 1 | open-ferry | 46 | 21.7 ms | 22.0 ms | 22.2 ms | 1.34 ms | 1.74 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 46 | 21.8 ms | 22.0 ms | 22.2 ms | 1.39 ms | 1.87 ms | 0 | 0 |
+| 16 | open-ferry | 735 | 21.6 ms | 22.3 ms | 23.4 ms | 1.36 ms | 1.38 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 741 | 21.4 ms | 21.8 ms | 23.2 ms | 1.23 ms | 1.56 ms | 0 | 858 |
+| 64 | open-ferry | 2,872 | 22.0 ms | 23.3 ms | 25.1 ms | 1.74 ms | 1.28 ms | 0 | 1 |
+| 64 | CLIProxyAPI | 2,680* | 22.9 ms | 27.1 ms | 33.3 ms | 2.55 ms | 1.40 ms | 0 | 6,144 |
 
 Responses → Chat Completions:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 48 | 20.9 ms | 21.1 ms | 21.3 ms | 758 µs | 607 µs | 0 | 0 |
-| 1 | CLIProxyAPI | 48 | 21.0 ms | 21.2 ms | 21.8 ms | 832 µs | 903 µs | 0 | 0 |
-| 16 | open-ferry | 751 | 21.2 ms | 21.8 ms | 22.4 ms | 1.08 ms | 599 µs | 0 | 0 |
-| 16 | CLIProxyAPI | 763 | 20.9 ms | 21.2 ms | 22.0 ms | 735 µs | 740 µs | 0 | 2,036 |
-| 64 | open-ferry | 3,007 | 21.2 ms | 21.8 ms | 22.6 ms | 1.05 ms | 558 µs | 0 | 0 |
-| 64 | CLIProxyAPI | 3,034* | 20.9 ms | 21.5 ms | 23.0 ms | 750 µs | 708 µs | 0 | 4,964 |
+| 1 | open-ferry | 48 | 21.0 ms | 21.2 ms | 21.4 ms | 693 µs | 588 µs | 0 | 0 |
+| 1 | CLIProxyAPI | 47 | 21.0 ms | 21.2 ms | 21.5 ms | 858 µs | 884 µs | 0 | 0 |
+| 16 | open-ferry | 758 | 21.0 ms | 21.4 ms | 22.0 ms | 903 µs | 541 µs | 0 | 0 |
+| 16 | CLIProxyAPI | 764 | 20.9 ms | 21.2 ms | 22.1 ms | 732 µs | 755 µs | 0 | 1,971 |
+| 64 | open-ferry | 3,057 | 20.8 ms | 21.2 ms | 21.9 ms | 709 µs | 491 µs | 0 | 0 |
+| 64 | CLIProxyAPI | 3,034* | 20.9 ms | 21.5 ms | 23.0 ms | 740 µs | 724 µs | 0 | 5,032 |
 
 Responses → Chat Completions, streamed:
 
 | Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | Errors | Upstream connections |
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | open-ferry | 45 | 22.0 ms | 22.2 ms | 22.4 ms | 1.64 ms | 2.25 ms | 0 | 0 |
-| 1 | CLIProxyAPI | 45 | 22.1 ms | 22.4 ms | 23.1 ms | 1.80 ms | 2.51 ms | 0 | 0 |
-| 16 | open-ferry | 716 | 22.1 ms | 22.9 ms | 24.2 ms | 1.86 ms | 1.90 ms | 0 | 0 |
-| 16 | CLIProxyAPI | 711 | 22.1 ms | 23.4 ms | 25.5 ms | 1.83 ms | 2.19 ms | 0 | 2,606 |
-| 64 | open-ferry | 2,733 | 23.1 ms | 24.7 ms | 26.9 ms | 2.76 ms | 1.70 ms | 0 | 0 |
-| 64 | CLIProxyAPI | 2,375* | 25.5 ms | 32.8 ms | 39.7 ms | 4.98 ms | 1.97 ms | 0 | 4,394 |
+| 1 | open-ferry | 46 | 21.8 ms | 22.0 ms | 22.2 ms | 1.42 ms | 1.94 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 45 | 22.2 ms | 22.5 ms | 23.0 ms | 1.80 ms | 2.52 ms | 0 | 0 |
+| 16 | open-ferry | 734 | 21.6 ms | 22.1 ms | 23.2 ms | 1.40 ms | 1.71 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 715 | 22.0 ms | 23.0 ms | 24.7 ms | 1.80 ms | 2.29 ms | 0 | 2,255 |
+| 64 | open-ferry | 2,803 | 22.5 ms | 24.0 ms | 26.0 ms | 2.19 ms | 1.54 ms | 0 | 0 |
+| 64 | CLIProxyAPI | 2,232* | 27.2 ms | 35.9 ms | 41.6 ms | 6.67 ms | 2.04 ms | 0 | 4,748 |
 
 \* Stopped early, at the limit of upstream connections:
 
-- CLIProxyAPI, Chat Completions, 64 clients: after 6.20 s
-- CLIProxyAPI, Chat Completions, streamed, 64 clients: after 4.48 s
-- CLIProxyAPI, Claude Messages, 64 clients: after 6.41 s
-- CLIProxyAPI, Claude Messages, streamed, 64 clients: after 5.18 s
-- CLIProxyAPI, Chat Completions → Claude Messages, 64 clients: after 5.19 s
-- CLIProxyAPI, Chat Completions → Claude Messages, streamed, 64 clients: after 4.11 s
-- CLIProxyAPI, Claude Messages → Chat Completions, 64 clients: after 6.45 s
-- CLIProxyAPI, Claude Messages → Chat Completions, streamed, 64 clients: after 4.23 s
-- CLIProxyAPI, Responses → Chat Completions, 64 clients: after 5.59 s
-- CLIProxyAPI, Responses → Chat Completions, streamed, 64 clients: after 3.21 s
+- CLIProxyAPI, Chat Completions, 64 clients: after 6.07 s
+- CLIProxyAPI, Chat Completions, streamed, 64 clients: after 4.12 s
+- CLIProxyAPI, Claude Messages, 64 clients: after 4.13 s
+- CLIProxyAPI, Claude Messages, streamed, 64 clients: after 4.66 s
+- CLIProxyAPI, Chat Completions → Claude Messages, 64 clients: after 5.69 s
+- CLIProxyAPI, Chat Completions → Claude Messages, streamed, 64 clients: after 4.48 s
+- CLIProxyAPI, Claude Messages → Chat Completions, 64 clients: after 5.93 s
+- CLIProxyAPI, Claude Messages → Chat Completions, streamed, 64 clients: after 4.39 s
+- CLIProxyAPI, Responses → Chat Completions, 64 clients: after 6.06 s
+- CLIProxyAPI, Responses → Chat Completions, streamed, 64 clients: after 3.44 s
 
 #### Memory
 
@@ -297,8 +299,8 @@ Resident memory (the working set on Windows), sampled every 50 ms.
 
 | Proxy | Idle after start | Under load (median) | Peak |
 |---|---:|---:|---:|
-| open-ferry | 29.6 MiB | 98.7 MiB | 127.2 MiB |
-| CLIProxyAPI | 53.0 MiB | 93.9 MiB | 106.7 MiB |
+| open-ferry | 32.9 MiB | 104.7 MiB | 136.0 MiB |
+| CLIProxyAPI | 50.2 MiB | 85.2 MiB | 107.1 MiB |
 
 #### Long conversation
 
@@ -306,26 +308,26 @@ A coding agent's conversation: a system prompt, two tools, and 241 messages with
 
 | Request | Proxy | p50 | p90 | Slowest | First bytes p50 | Proxy adds | Errors |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Chat Completions | open-ferry | 24.8 ms | 25.2 ms | 26.4 ms | 24.8 ms | 4.35 ms | 0 |
-| Chat Completions | CLIProxyAPI | 39.3 ms | 40.5 ms | 41.4 ms | 39.3 ms | 18.7 ms | 0 |
-| Chat Completions, streamed | open-ferry | 25.7 ms | 26.2 ms | 27.0 ms | 25.0 ms | 4.97 ms | 0 |
-| Chat Completions, streamed | CLIProxyAPI | 39.8 ms | 40.6 ms | 41.2 ms | 39.1 ms | 19.0 ms | 0 |
-| Claude Messages | open-ferry | 26.4 ms | 27.0 ms | 27.3 ms | 26.4 ms | 5.77 ms | 0 |
-| Claude Messages | CLIProxyAPI | 43.1 ms | 44.5 ms | 44.7 ms | 43.1 ms | 22.5 ms | 0 |
-| Claude Messages, streamed | open-ferry | 26.8 ms | 27.1 ms | 27.4 ms | 26.0 ms | 5.92 ms | 0 |
-| Claude Messages, streamed | CLIProxyAPI | 43.8 ms | 45.3 ms | 46.1 ms | 43.0 ms | 23.0 ms | 0 |
-| Chat Completions → Claude Messages | open-ferry | 26.6 ms | 26.9 ms | 27.2 ms | 26.6 ms | 5.75 ms | 0 |
-| Chat Completions → Claude Messages | CLIProxyAPI | 58.6 ms | 59.5 ms | 59.8 ms | 58.6 ms | 37.7 ms | 0 |
-| Chat Completions → Claude Messages, streamed | open-ferry | 27.2 ms | 27.6 ms | 27.8 ms | 26.5 ms | 6.45 ms | 0 |
-| Chat Completions → Claude Messages, streamed | CLIProxyAPI | 58.9 ms | 59.7 ms | 60.5 ms | 58.3 ms | 38.0 ms | 0 |
-| Claude Messages → Chat Completions | open-ferry | 26.2 ms | 26.5 ms | 27.1 ms | 26.2 ms | 5.59 ms | 0 |
-| Claude Messages → Chat Completions | CLIProxyAPI | 37.6 ms | 38.5 ms | 38.9 ms | 37.6 ms | 16.9 ms | 0 |
-| Claude Messages → Chat Completions, streamed | open-ferry | 34.9 ms | 35.4 ms | 35.5 ms | 34.1 ms | 14.0 ms | 0 |
-| Claude Messages → Chat Completions, streamed | CLIProxyAPI | 57.7 ms | 58.4 ms | 58.9 ms | 57.0 ms | 36.8 ms | 0 |
-| Responses → Chat Completions | open-ferry | 26.5 ms | 26.8 ms | 27.0 ms | 26.5 ms | 5.85 ms | 0 |
-| Responses → Chat Completions | CLIProxyAPI | 44.2 ms | 45.2 ms | 45.9 ms | 44.2 ms | 23.6 ms | 0 |
-| Responses → Chat Completions, streamed | open-ferry | 27.9 ms | 28.3 ms | 28.5 ms | 26.8 ms | 7.07 ms | 0 |
-| Responses → Chat Completions, streamed | CLIProxyAPI | 46.4 ms | 47.3 ms | 47.6 ms | 43.6 ms | 25.6 ms | 0 |
+| Chat Completions | open-ferry | 24.6 ms | 24.7 ms | 26.0 ms | 24.5 ms | 3.98 ms | 0 |
+| Chat Completions | CLIProxyAPI | 39.0 ms | 40.1 ms | 41.2 ms | 39.0 ms | 18.4 ms | 0 |
+| Chat Completions, streamed | open-ferry | 25.8 ms | 26.1 ms | 26.6 ms | 25.1 ms | 4.99 ms | 0 |
+| Chat Completions, streamed | CLIProxyAPI | 39.7 ms | 40.7 ms | 41.0 ms | 39.0 ms | 18.9 ms | 0 |
+| Claude Messages | open-ferry | 27.6 ms | 28.0 ms | 29.4 ms | 27.6 ms | 6.97 ms | 0 |
+| Claude Messages | CLIProxyAPI | 46.5 ms | 47.2 ms | 47.7 ms | 46.5 ms | 25.8 ms | 0 |
+| Claude Messages, streamed | open-ferry | 28.7 ms | 29.1 ms | 29.4 ms | 27.9 ms | 7.80 ms | 0 |
+| Claude Messages, streamed | CLIProxyAPI | 47.0 ms | 48.0 ms | 48.5 ms | 46.3 ms | 26.1 ms | 0 |
+| Chat Completions → Claude Messages | open-ferry | 27.7 ms | 28.0 ms | 28.1 ms | 27.7 ms | 6.77 ms | 0 |
+| Chat Completions → Claude Messages | CLIProxyAPI | 62.4 ms | 63.3 ms | 63.7 ms | 62.4 ms | 41.5 ms | 0 |
+| Chat Completions → Claude Messages, streamed | open-ferry | 28.8 ms | 29.2 ms | 29.3 ms | 28.1 ms | 7.93 ms | 0 |
+| Chat Completions → Claude Messages, streamed | CLIProxyAPI | 62.6 ms | 63.4 ms | 64.4 ms | 61.9 ms | 41.5 ms | 0 |
+| Claude Messages → Chat Completions | open-ferry | 26.2 ms | 26.4 ms | 26.7 ms | 26.2 ms | 5.53 ms | 0 |
+| Claude Messages → Chat Completions | CLIProxyAPI | 37.7 ms | 38.5 ms | 39.5 ms | 37.7 ms | 17.0 ms | 0 |
+| Claude Messages → Chat Completions, streamed | open-ferry | 34.4 ms | 35.1 ms | 35.3 ms | 33.8 ms | 13.5 ms | 0 |
+| Claude Messages → Chat Completions, streamed | CLIProxyAPI | 58.4 ms | 59.5 ms | 60.6 ms | 57.8 ms | 37.5 ms | 0 |
+| Responses → Chat Completions | open-ferry | 26.6 ms | 26.7 ms | 27.1 ms | 26.6 ms | 5.92 ms | 0 |
+| Responses → Chat Completions | CLIProxyAPI | 42.4 ms | 43.2 ms | 43.9 ms | 42.4 ms | 21.7 ms | 0 |
+| Responses → Chat Completions, streamed | open-ferry | 27.8 ms | 28.2 ms | 28.5 ms | 27.0 ms | 6.88 ms | 0 |
+| Responses → Chat Completions, streamed | CLIProxyAPI | 45.0 ms | 46.0 ms | 46.3 ms | 43.8 ms | 24.1 ms | 0 |
 
-The fake upstream answered 604,245 requests, after 20.2 ms on average.
+The fake upstream answered 600,591 requests, after 20.2 ms on average.
 <!-- bench-results:end -->
