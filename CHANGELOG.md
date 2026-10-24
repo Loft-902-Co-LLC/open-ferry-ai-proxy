@@ -158,6 +158,10 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - Whole-file v8 YAML saves preserve the replacement document's trailing comments, including a dashboard edit that only adds a final comment.
 - Dashboard config saves use the loaded config ETag as `If-Match` on v8 writes, refusing concurrent changes with a reload action and an unsaved-edit warning. Older endpoints without ETags remain usable.
 
+## [0.0.4] - 2026-10-24
+
+The fourth candidate for the first release, 0.1.0, published so that 0.0.3 has a signed release to update to. Like 0.0.3, it has the Windows installer change that makes Administrators the owner of a machine-wide install. It has what the [changelog](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/v0.0.4/CHANGELOG.md) lists under Unreleased on this date.
+
 ## [0.0.3] - 2026-10-24
 
 The third candidate for the first release, 0.1.0. Its Windows installer makes Administrators the owner of a machine-wide install, which 0.0.1 and 0.0.2 predate, so this release and the next can qualify the Windows machine form. It has what the [changelog](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/v0.0.3/CHANGELOG.md) lists under Unreleased on this date.
@@ -170,7 +174,8 @@ The second candidate for the first release, 0.1.0, published so that 0.0.1 has a
 
 A candidate for the first release, 0.1.0, published to test updating from one signed release to the next. It has what the [changelog](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/v0.0.1/CHANGELOG.md) lists under Unreleased on this date.
 
-[Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/compare/v0.0.3...HEAD
+[Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/compare/v0.0.4...HEAD
+[0.0.4]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.4
 [0.0.3]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.3
 [0.0.2]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.2
 [0.0.1]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/v0.0.1
