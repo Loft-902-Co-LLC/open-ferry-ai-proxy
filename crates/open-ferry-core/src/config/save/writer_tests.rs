@@ -179,6 +179,20 @@ fn writer_two_flow_feet_save_reload_at_each_item_and_stay_stable() {
         .to_owned();
     for op in OPS {
         let result = operation(&source, op);
+        if [
+            "save", "save2", "migrate", "migrate2", "patch", "patch2", "put", "put2",
+        ]
+        .contains(&op)
+        {
+            let before: Vec<Value> =
+                serde_json::from_str(include_str!("writer_before.json")).unwrap();
+            let expected = &before
+                .iter()
+                .find(|r| r["case"] == "flow_two_feet" && r["op"] == op)
+                .unwrap()["result"];
+            assert_eq!(&result, expected, "{op} retains the original refusal");
+            continue;
+        }
         assert!(result.get("refused").is_none(), "{op}");
         let files = result["files"].as_array().unwrap();
         for file in files {
@@ -249,7 +263,7 @@ fn writer_flow_feet_counterfactual_has_exact_go_outcomes_and_bytes() {
             .find(|row| row["case"] == "flow_two_feet" && row["op"] == op)
             .unwrap()["result"];
         let result = parity::ablation::with_disabled(
-            &[parity::ablation::Protection::EmptyMappingPendingComment],
+            &[parity::ablation::Protection::MultipleFlowItemFeet],
             || review_operation(&source, op),
         );
         assert_eq!(result, *expected, "{op}");

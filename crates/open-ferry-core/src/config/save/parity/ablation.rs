@@ -16,6 +16,7 @@ pub enum Protection {
     InlineEmptyNullComment,
     EffectiveBlockScalarComment,
     BlockScalarCommentIndentation,
+    MultipleFlowItemFeet,
 }
 
 thread_local! {

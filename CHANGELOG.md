@@ -115,7 +115,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
-- **Config writer flow-item foot comments** stay on their source items when multiple footed mappings precede an empty collection; these writes now succeed and settle in one write. CRLF version-comment paragraphs avoid an unnecessary separator.
+- **Keep consecutive flow-item foot comments on their items** during nested and raw config writes before an empty collection, preserve the following key's head comment, and avoid adding a separator before a CRLF version-comment paragraph. Retain existing refusals for saves that cannot keep their comments.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
