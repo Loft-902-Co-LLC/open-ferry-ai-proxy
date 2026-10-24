@@ -17,6 +17,7 @@ pub enum Protection {
     EffectiveBlockScalarComment,
     BlockScalarCommentIndentation,
     MultipleFlowItemFeet,
+    DeferredCommentOwners,
 }
 
 thread_local! {
@@ -182,13 +183,14 @@ pub(crate) fn record_normalization(input: &[u8], output: &[u8]) {
 mod tests {
     use super::*;
 
-    const ALL: [Protection; 6] = [
+    const ALL: [Protection; 7] = [
         Protection::EmptyMappingPendingComment,
         Protection::CanonicalVersionComment,
         Protection::DroppedSingleKeyComment,
         Protection::InlineEmptyNullComment,
         Protection::EffectiveBlockScalarComment,
         Protection::BlockScalarCommentIndentation,
+        Protection::DeferredCommentOwners,
     ];
 
     #[test]
