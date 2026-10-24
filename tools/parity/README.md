@@ -280,6 +280,9 @@ When Go loses a key comment during regrouping, its associated source value
 identity must still survive at that exact entry path; only its original
 key-side slot receives a budget. Opaque comment-copy IDs cannot name a path
 where the associated value identity did not survive.
+A complete explicit key-line block may appear at that independently relocated
+key's own head when Go is loadable. This rule requires the physical key-line
+source occurrence and never applies to an unmoved key.
 Deleted identities receive no relocation slot; an unmoved path keeps the strict
 sequence-identity rule. Counts, ordering, value proofs, complete byte binding,
 minimality, and the comparison outside protected comments still apply. The
@@ -299,6 +302,9 @@ exact parsed source key and entry. Save replays include the real intermediate
 encode/reparse before normalization. Independent archive layouts use opaque
 line IDs to establish parsed owners and occurrence ordinals; comment text
 supplies only the computed bytes. Each line receives one slot at that owner.
+The archived entry must decode to the original source values; a lossy upstream
+re-encode receives no archive budget. The computed owner is required even
+when Go emits equal text at a different owner.
 The layouts retain all surrounding source and document comments. A layout
 that cannot parse or loses an opaque archive identity supplies no slots.
 The complete computed multiplicity is required in addition to existing source
@@ -316,7 +322,7 @@ No paths, comment text or byte offsets enter kind signatures. A case with
 several failed checks contributes to several kind rows but only once to the
 total budget. No-reproducing-subset kinds include all failed trials.
 
-Classifier version 2 also compares the original Go failure boundary. If Rust
+The classifier also compares the original Go failure boundary. If Rust
 refuses a step that Go completed or got past, an ordinary Rust refusal is fatal,
 not a baselined comment-placement kind. A failed wrapper's successful prefix is
 `files.len() - 1` for `unloadable` (the last file failed reload), or `files.len()`
@@ -347,16 +353,12 @@ only: selected failures are not unbiased rate samples. The file records that
 distinction. An observation below its recorded seed/profile count (or
 with fewer PR case IDs) prints “Baseline can be lowered” and the refresh command.
 
-There are 13 kinds and a shared bound of **75 Different per 1,000** config-save
-cases; the exact PR Different set is empty. The ten nightly-sized calibration
-seeds had 249–308 Different out of 5,109 cases each, with no bound breaches.
-The normal seed-count predictive model estimates a **0.019% rate-only** false
-alarm probability, conditional on independent representative seeds and unchanged
-variance. It does not estimate discovery of new kinds. Leaving out seed 37
-misses a singleton kind, giving a leave-one-out novelty estimate of **1 in 10**
-nightly seeds; the run-incidence Good–Turing estimate is about **1 in 16**.
-Expect roughly 6–10% novelty failures early on, falling as kinds accumulate;
-these small-sample estimates are not guarantees.
+The refreshed budget retains **13 kinds** and a shared bound of **75 Different
+per 1,000** config-save cases; the exact PR Different set is empty. The ten
+nightly-sized calibration seeds have 243 to 304 Different out of 5,109 cases
+each. The 20% margin above the maximum observed rate, rounded up to five,
+still gives the same bound. These counts describe the calibration sample;
+the separate kind check still rejects an unseen failure kind.
 
 ### When the nightly fails
 
@@ -493,6 +495,12 @@ full refresh must first record the probes. Incremental refresh preserves existin
 absence in a legacy baseline.
 
 ### Classifier-version reclassification
+
+Version 4 records source-identity relocations, source-bound archive budgets and
+consistent alias ownership. Proving an earlier owner can expose a later
+blocking operation, changing a case's diagnostic kind. Reclassification of the
+previous saved proof corpus must still preserve all of its per-case kind sets,
+counts and fatal failures before collecting the refreshed verdicts.
 
 A classifier-version change requires reclassifying every saved observation with
 the new classifier through `--import-config-failures` and its bound proof files,

@@ -120,7 +120,7 @@ fn fingerprint_at(root: &Path, upstream: &str) -> Result<Fingerprint> {
     let sources = generator_sources_at(root)?;
     let generator_hash = generator_hash(sources.iter().map(|(p, s)| (p.as_str(), s.as_str())));
     Ok(BTreeMap::from([
-        ("classifier_version".into(), "3".into()),
+        ("classifier_version".into(), "4".into()),
         ("upstream_pin".into(), upstream.trim().into()),
         ("generator_sha256".into(), generator_hash),
     ]))
