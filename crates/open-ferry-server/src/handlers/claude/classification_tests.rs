@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn multi_event_streams_preserve_observation_and_bytes() {
+    for newline in ["\n", "\r\n"] {
+        let delta = format!(
+            "event: content_block_delta{newline}data: {{\"type\":\"content_block_delta\",\"delta\":{{\"text\":\"hello\"}}}}{newline}{newline}"
+        );
+        let stop = format!("event: message_stop{newline}data: {{\"type\":\"message_stop\"}}");
+        let error = format!(
+            "event: error{newline}data: {{\"type\":\"error\",\"error\":{{\"message\":\"failed\"}}}}{newline}{newline}"
+        );
+        let ping = format!("event: ping{newline}data: {{\"type\":\"ping\"}}{newline}{newline}");
+        for (input, saw_error, saw_stop) in [
+            (format!("{delta}{stop}{newline}{newline}"), false, true),
+            (format!("{delta}{stop}"), false, true),
+            (format!("{delta}{stop}{newline}"), false, true),
+            (format!("{delta}{error}{ping}"), true, false),
+            (format!("{delta}{error}{delta}{stop}"), true, true),
+        ] {
+            for chunk_size in [1, 7, 37, input.len()] {
+                let mut actual = ClaudeWriter::default();
+                let mut reference = ReferenceWriter::default();
+                let (mut got, mut want) = (BytesMut::new(), BytesMut::new());
+                for chunk in input.as_bytes().chunks(chunk_size) {
+                    actual.write_chunk(Bytes::copy_from_slice(chunk), &mut got);
+                    reference.write_chunk(Bytes::copy_from_slice(chunk), &mut want);
+                    assert_eq!(got, want);
+                    assert_eq!(
+                        (actual.saw_error_event, actual.saw_message_stop),
+                        (reference.saw_error_event, reference.saw_message_stop),
+                        "chunk size {chunk_size}"
+                    );
+                }
+                assert!(actual.close_error().is_none());
+                assert!(reference.close_error().is_none());
+                assert_eq!(
+                    (actual.saw_error_event, actual.saw_message_stop),
+                    (saw_error, saw_stop)
+                );
+                actual.write_done(&mut got);
+                reference.write_done(&mut want);
+                assert_eq!(got, want);
+                // A subsequent transport error must not duplicate an error event.
+                if saw_error {
+                    let failure = ErrorMessage::new(502, "transport failed");
+                    actual.write_terminal_error(&failure, &mut got);
+                    reference.write_terminal_error(&failure, &mut want);
+                    assert_eq!(got, want);
+                    assert_eq!(
+                        String::from_utf8_lossy(&got)
+                            .matches("event: error")
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn reused_buffers_preserve_claude_classification_and_stream_bytes() {
     let mut corpus = crate::handlers::openai::classification_tests::corpus();
     for event in [

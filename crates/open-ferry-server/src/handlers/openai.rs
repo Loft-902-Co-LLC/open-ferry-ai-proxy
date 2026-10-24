@@ -27,7 +27,6 @@ use super::{gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, openai_body, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
-#[cfg(test)]
 use crate::json;
 use crate::state::AppState;
 use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
@@ -223,7 +222,7 @@ struct ChatWriter {
 
 impl StreamWriter for ChatWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
-        let classification = classify_chunk(&chunk);
+        let classification = classify_chunk(&chunk, !self.saw_finish_reason);
         if let Some(error) = classification.terminal_error {
             self.terminal_chunk_error = Some(error);
             self.saw_finish_reason = true;
@@ -269,7 +268,7 @@ struct ChunkClassification {
     finish_reason: bool,
 }
 
-fn classify_chunk(chunk: &[u8]) -> ChunkClassification {
+fn classify_chunk(chunk: &[u8], check_finish_reason: bool) -> ChunkClassification {
     let chunk = go::trim_space(chunk);
     let chunk = chunk
         .strip_prefix(b"data:")
@@ -277,8 +276,9 @@ fn classify_chunk(chunk: &[u8]) -> ChunkClassification {
         .unwrap_or(chunk);
     let [choices, error] = crate::sse_check::fields(chunk, ["choices", "error"]);
     let terminal_error = if choices.is_none() && error.is_some_and(|error| error.is_object()) {
-        let message = error
-            .and_then(|error| error.get("message"))
+        // A document lookup can read beyond the error value's scanned span
+        // on malformed input. Preserve the original lookup on this cold path.
+        let message = json::get(chunk, "error.message")
             .map(|value| value.str())
             .unwrap_or_default();
         let message = if message.is_empty() {
@@ -291,13 +291,14 @@ fn classify_chunk(chunk: &[u8]) -> ChunkClassification {
         None
     };
     let finish_reason = terminal_error.is_some()
-        || choices.is_some_and(|choices| {
-            crate::sse_check::any_choice(choices, |choice| {
-                choice
-                    .get("finish_reason")
-                    .is_some_and(|reason| !reason.is_null() && !reason.str().is_empty())
-            })
-        });
+        || (check_finish_reason
+            && choices.is_some_and(|choices| {
+                crate::sse_check::any_choice(choices, |choice| {
+                    choice
+                        .get("finish_reason")
+                        .is_some_and(|reason| !reason.is_null() && !reason.str().is_empty())
+                })
+            }));
     ChunkClassification {
         terminal_error,
         finish_reason,

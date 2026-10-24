@@ -145,6 +145,8 @@ pub(crate) struct StreamSetup {
     pub(crate) web_search: Option<super::web_search::Scope>,
 }
 
+// Keep in sync with open-ferry-server/src/handlers/claude.rs. The private
+// stream modules cannot share this policy without moving it outside their scope.
 const OBSERVATION_REUSE_LIMIT: usize = 8 << 10;
 
 /// Joins nonempty data lines inside the observation's own storage. Writes
@@ -164,6 +166,8 @@ fn event_payload(raw: &mut [u8]) -> (&[u8], bool) {
             .map(trim_space)
             .filter(|data| !data.is_empty())
             .map(|data| {
+                // trim_space can return an unrelated empty slice. Filtering
+                // empties above ensures this nonempty subslice lies in raw.
                 let offset = data.as_ptr() as usize - raw.as_ptr() as usize;
                 offset..offset + data.len()
             });
@@ -388,6 +392,47 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_releases_large_event_capacity() {
+        let response = reqwest::Response::from(http::Response::new(Vec::<u8>::new()));
+        let mut state = State {
+            reader: LineReader::new(response),
+            setup: StreamSetup {
+                translator: None,
+                responses: false,
+                fast: false,
+                status: 200,
+                secrets: Secrets::new(),
+                web_search: None,
+            },
+            event: Vec::new(),
+            completed: false,
+            observation: format!(
+                "data: {{\"type\":\"content_block_delta\",\"text\":\"{}\"}}\n\n",
+                "x".repeat(2 * OBSERVATION_REUSE_LIMIT)
+            )
+            .into_bytes(),
+            observation_overflow: false,
+            stream_error: None,
+            pending: VecDeque::new(),
+            finished: false,
+        };
+        assert!(state.observation.len() > OBSERVATION_REUSE_LIMIT);
+        assert!(state.observation.capacity() > OBSERVATION_REUSE_LIMIT);
+        state.observe_event();
+        assert!(!state.completed);
+        assert!(state.observation.is_empty());
+        assert_eq!(state.observation.capacity(), 0);
+
+        state
+            .observation
+            .extend_from_slice(b"data: {\"type\":\"message_stop\"}\n\n");
+        state.observe_event();
+        assert!(state.completed);
+        assert!(state.observation.is_empty());
+        assert!(state.observation.capacity() <= OBSERVATION_REUSE_LIMIT);
+    }
 
     /// The original event extraction, kept independent of the in-place pass.
     fn reference_payload(raw: &[u8]) -> (Vec<u8>, bool) {

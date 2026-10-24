@@ -156,6 +156,8 @@ fn gunzip(body: Bytes) -> Bytes {
     }
 }
 
+// Keep in sync with open-ferry-providers/src/claude/stream.rs. The private
+// stream modules cannot share this policy without moving it outside their scope.
 const OBSERVATION_REUSE_LIMIT: usize = 8 << 10;
 
 /// Writes a Claude event stream: payloads as they are, and an `error`
