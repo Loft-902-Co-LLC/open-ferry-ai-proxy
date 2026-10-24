@@ -79,7 +79,7 @@
           </article>
           <article class="scenario" id="failover" aria-labelledby="failover-title">
             <div class="scenario-heading"><h3 id="failover-title">Quota failover</h3><span class="outcome">Recovered through account B</span></div>
-            <p class="scenario-context" data-claim="failover-context">Sample: both Codex accounts serve <code>gpt-5</code>, with no aliases or model pools. Account A returns HTTP 429 before any output reaches the client.</p>
+            <p class="scenario-context" data-claim="failover-context">Sample: both Codex accounts serve <code>gpt-5</code>, with no aliases, model pools or pre-token keep-alives. Account A returns HTTP 429 before any output reaches the client.</p>
             <ol class="steps" data-claim="failover-steps">
               <li><span class="timing">0 ms</span><div><strong>Check the client key; choose account A</strong><p>Account A is initially ready for the requested model.</p></div></li>
               <li><span class="timing">90 ms</span><div><strong>Record the quota failure</strong><p>The provider reports that account A’s quota is used up. No output has reached the client.</p></div></li>
@@ -91,7 +91,7 @@
           </article>
           <article class="scenario" id="unavailable" aria-labelledby="unavailable-title">
             <div class="scenario-heading"><h3 id="unavailable-title">No account ready</h3><span class="outcome">429 · model_cooldown</span></div>
-            <p class="scenario-context" data-claim="unavailable-context">Sample: account A is cooling down for <code>gpt-5</code>; account B is disabled. Additional retry rounds and cooldown waiting are disabled for these accounts.</p>
+            <p class="scenario-context" data-claim="unavailable-context">Sample: Codex account A is in a quota cooldown for <code>gpt-5</code>; account B is disabled. Additional retry rounds and cooldown waiting are disabled for these accounts.</p>
             <ol class="steps" data-claim="unavailable-steps">
               <li><span class="timing">0 ms</span><div><strong>Check availability</strong><p>Account B is excluded. Account A cannot serve this model until its cooldown ends.</p></div></li>
               <li><span class="timing">1 ms</span><div><strong>Return the cooldown error</strong><p>No upstream attempt is made in this sample. Wait for account A’s reset, or enable an eligible account.</p></div></li>
