@@ -39,6 +39,7 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 		identity++
 		n.Line = identity
 	})
+	raw := deepCopyNode(root)
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, value *yaml.Node) {
 		for slot, field := range map[string]*string{"head": &n.HeadComment, "line": &n.LineComment, "foot": &n.FootComment} {
 			lines := strings.Split(*field, "\n")
@@ -55,46 +56,7 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 			*field = strings.Join(lines, "\n")
 		}
 	})
-	var err error
-	switch operation["op"] {
-	case "save":
-		configSource := source
-		if text, ok := operation["config"].(string); ok {
-			configSource = text
-		}
-		cfg, parseErr := ParseConfigBytes([]byte(configSource))
-		if parseErr != nil {
-			return fail()
-		}
-		if _, ok := operation["config"].(string); ok {
-			if file, e := ParseConfigBytes([]byte(source)); e == nil {
-				cfg.Plugins = file.Plugins
-			}
-		}
-		root, err = paritySaveTree(root, cfg, []byte(source), operation["migrate"] == true)
-	case "write":
-		if IsV8ConfigLayout(root) {
-			root, err = parityNormalizeTree(root, true)
-		}
-	case "nested":
-		keys, ok := operation["keys"].([]any)
-		if !ok {
-			return fail()
-		}
-		cur := root
-		for i, key := range keys {
-			name, ok := key.(string)
-			if !ok {
-				return fail()
-			}
-			cur = getOrCreateMapValue(cur, name)
-			if i == len(keys)-1 {
-				cur.Kind, cur.Tag, cur.Value, cur.Content = yaml.ScalarNode, "!!str", "", nil
-			}
-		}
-	default:
-		return fail()
-	}
+	root, err := parityRunTree(source, operation, root, false)
 	if err != nil {
 		return fail()
 	}
@@ -113,6 +75,14 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 		}
 	})
 	result["moves"] = moves
+	archives, archiveErr := parityArchives(source, operation, raw)
+	if archiveErr != nil {
+		result["archives"] = []any{}
+		result["archive_unavailable"] = true
+		result["archive_failure"] = archiveErr.Error()
+	} else {
+		result["archives"] = archives
+	}
 	return result
 }
 
@@ -144,5 +114,59 @@ func parityClearGenerated(n *yaml.Node) {
 	n.HeadComment, n.LineComment, n.FootComment = "", "", ""
 	for _, c := range n.Content {
 		parityClearGenerated(c)
+	}
+}
+
+func parityRunTree(source string, operation map[string]any, root *yaml.Node, roundtrip bool) (*yaml.Node, error) {
+	var err error
+	switch operation["op"] {
+	case "save":
+		configSource := source
+		if text, ok := operation["config"].(string); ok {
+			configSource = text
+		}
+		cfg, parseErr := ParseConfigBytes([]byte(configSource))
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid ownership operation")
+		}
+		if _, ok := operation["config"].(string); ok {
+			if file, e := ParseConfigBytes([]byte(source)); e == nil {
+				cfg.Plugins = file.Plugins
+			}
+		}
+		root, err = paritySaveTree(root, cfg, []byte(source), operation["migrate"] == true, roundtrip)
+	case "write":
+		if IsV8ConfigLayout(root) {
+			root, err = parityNormalizeTree(root, true)
+		}
+	case "nested":
+		keys, ok := operation["keys"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid ownership operation")
+		}
+		cur := root
+		for i, key := range keys {
+			name, ok := key.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid ownership operation")
+			}
+			cur = getOrCreateMapValue(cur, name)
+			if i == len(keys)-1 {
+				cur.Kind, cur.Tag, cur.Value, cur.Content = yaml.ScalarNode, "!!str", "", nil
+			}
+		}
+	default:
+		return nil, fmt.Errorf("invalid ownership operation")
+	}
+	return root, err
+}
+
+func parityClearIdentities(n *yaml.Node) {
+	if n == nil {
+		return
+	}
+	n.Line = 0
+	for _, c := range n.Content {
+		parityClearIdentities(c)
 	}
 }

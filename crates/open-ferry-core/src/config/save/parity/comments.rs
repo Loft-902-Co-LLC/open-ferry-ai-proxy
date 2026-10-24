@@ -418,12 +418,17 @@ fn analyze_comments(
         return failed(json!({"reason":"source_comments_unparseable"}));
     };
     let mut relocated = false;
+    let mut archives = Vec::new();
     if let Some((operation, evidence)) = provenance {
         let Some(mapped) = relocated_source(source, operation, evidence, &s) else {
             return failed(json!({"reason":"source_identity_binding"}));
         };
         relocated = mapped.iter().any(|c| c.relocated);
         s = mapped;
+        let Some(generated) = archive_inventory(source, evidence) else {
+            return failed(json!({"reason":"source_archive_binding"}));
+        };
+        archives = generated;
     }
     let Some(r) = inventory(protected, false) else {
         return failed(json!({"reason":"protected_comments_unparseable"}));
@@ -435,7 +440,20 @@ fn analyze_comments(
         },
         None => None,
     };
+    let original_counts = counts(&s);
+    let archive_counts = counts(&archives);
+    s.extend(archives.clone());
     let (sc, rc) = (counts(&s), counts(&r));
+    // A computed archive line is new data, never a substitute for an equal
+    // source comment. Require the entire computed multiplicity in addition
+    // to every original occurrence of that text; owners are checked below.
+    for (text, n) in &archive_counts {
+        if rc.get(text).copied().unwrap_or_default()
+            != original_counts.get(text).copied().unwrap_or_default() + n
+        {
+            return failed(json!({"reason":"source_archive_budget"}));
+        }
+    }
     let gc = if let Some(g) = &g {
         counts(g)
     } else {
@@ -476,11 +494,7 @@ fn analyze_comments(
         }
         return CommentOwnership {
             failure: None,
-            rules: if relocated {
-                vec!["upstream-source-identity-relocation"]
-            } else {
-                vec![]
-            },
+            rules: provenance_rules(relocated, !archives.is_empty()),
         };
     }
     let empty = vec![];
@@ -488,11 +502,7 @@ fn analyze_comments(
     let Some(original_failure) = owner_failure(&s, gitems, &r) else {
         return CommentOwnership {
             failure: None,
-            rules: if relocated {
-                vec!["upstream-source-identity-relocation"]
-            } else {
-                vec![]
-            },
+            rules: provenance_rules(relocated, !archives.is_empty()),
         };
     };
     let mut remaining_failure = original_failure;
@@ -521,10 +531,7 @@ fn analyze_comments(
             continue;
         }
         let mut moves = vec![];
-        let mut rules = vec![];
-        if relocated {
-            rules.push("upstream-source-identity-relocation");
-        }
+        let mut rules = provenance_rules(relocated, !archives.is_empty());
         if mask & 1 != 0 {
             moves.extend(a.clone());
             rules.push("unloadable-entry-line-to-own-head");
@@ -552,6 +559,87 @@ fn analyze_comments(
         }
     }
     failed(remaining_failure)
+}
+
+fn provenance_rules(relocated: bool, archived: bool) -> Vec<&'static str> {
+    let mut rules = Vec::new();
+    if relocated {
+        rules.push("upstream-source-identity-relocation");
+    }
+    if archived {
+        rules.push("upstream-generated-archive");
+    }
+    rules
+}
+
+fn entry_signature(node: &Node) -> Value {
+    json!([
+        format!("{:?}", node.kind),
+        node.short_tag(),
+        node.value,
+        node.head_comment,
+        node.line_comment,
+        node.foot_comment,
+        node.content.iter().map(entry_signature).collect::<Vec<_>>()
+    ])
+}
+
+fn archive_binding(root: &Node, path: &[Part]) -> Option<Value> {
+    let (last, parents) = path.split_last()?;
+    let mut node = root;
+    for part in parents {
+        node = match part {
+            Part::Index(i) if node.kind == super::super::Kind::Sequence => node.content.get(*i)?,
+            Part::Key(tag, key) if node.kind == super::super::Kind::Mapping => {
+                node.pairs()
+                    .find(|(k, _)| &k.tag == tag && &k.value == key)?
+                    .1
+            }
+            _ => return None,
+        };
+    }
+    let Part::Key(tag, key) = last else {
+        return None;
+    };
+    let (k, v) = node
+        .pairs()
+        .find(|(k, _)| &k.tag == tag && &k.value == key)?;
+    Some(json!([entry_signature(k), entry_signature(v)]))
+}
+
+fn archive_inventory(source: &str, evidence: &Value) -> Option<Vec<Occurrence>> {
+    let Some(slots) = evidence.get("archives") else {
+        return Some(Vec::new());
+    };
+    let doc = unmarshal(source.as_bytes()).ok()?;
+    let root = super::super::expand_config_aliases(doc.content.first()?).ok()?;
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for slot in slots.as_array()? {
+        let source_owner =
+            parse_owner(&json!({"path":slot["source_key"],"node":"key","slot":"head"}))?;
+        let binding =
+            json!({"path":slot["source_key"],"entry":archive_binding(&root,&source_owner.path)?});
+        if slot["binding"] != binding {
+            return None;
+        }
+        let ordinal = slot["ordinal"].as_u64()?;
+        if !seen.insert((slot["source_key"].to_string(), ordinal)) {
+            return None;
+        }
+        let text = slot["text"].as_str()?;
+        if !text.starts_with('#') || text.contains(['\n', '\r']) {
+            return None;
+        }
+        out.push(Occurrence {
+            text: text.into(),
+            owner: parse_owner(&slot["owner"])?,
+            entry_line: false,
+            sequences: vec![],
+            relocated: false,
+        });
+    }
+    Some(out)
 }
 
 // Evidence comes from a separate Go source-tree replay. The full source and
@@ -685,6 +773,56 @@ mod tests {
     use super::*;
     fn owner(keys: &[&str], node: &str, slot: &str) -> Value {
         json!({"path":keys.iter().map(|k|json!({"key":k,"tag":"!!str"})).collect::<Vec<_>>(),"node":node,"slot":slot})
+    }
+    #[test]
+    fn generated_archive_slots_bind_source_keys_text_owner_and_each_occurrence() {
+        let source = "x-note: fixture\ndebug: false\nconfig-version: 8\n";
+        let operation = json!({"op":"save","migrate":true});
+        let protected = "debug: false\nconfig-version: 8\n\n# x-note: fixture\n";
+        let archive_owner = inventory(protected, false)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.text == "# x-note: fixture")
+            .unwrap()
+            .owner
+            .json();
+        let key = owner(&["x-note"], "key", "head")["path"].clone();
+        let binding_for = |s: &str| {
+            let doc = unmarshal(s.as_bytes()).unwrap();
+            json!({"path":key,"entry":archive_binding(doc.content.first().unwrap(),&[Part::Key("!!str".into(),"x-note".into())]).unwrap()})
+        };
+        let mut evidence = json!({"source":source,"operation":operation,"moves":[],"archives":[{"source_key":key,"binding":binding_for(source),"ordinal":0,"owner":archive_owner,"text":"# x-note: fixture"}]});
+        let proves = |s: &str, r: &str, e: &Value| {
+            comment_ownership_with_provenance(
+                s,
+                None,
+                r,
+                &["# x-note: fixture".into()],
+                &operation,
+                e,
+                true,
+            )
+            .accepted()
+        };
+        assert!(proves(source, protected, &evidence));
+        for bad in [
+            "debug: false\nconfig-version: 8\n\n# x-note: altered\n",
+            "debug: false\nconfig-version: 8\n\n# x-note: fixture\n# x-note: fixture\n",
+            "debug: false # x-note: fixture\nconfig-version: 8\n",
+        ] {
+            assert!(!proves(source, bad, &evidence));
+        }
+        let mut wrong_key = evidence.clone();
+        wrong_key["archives"][0]["source_key"] = owner(&["debug"], "key", "head")["path"].clone();
+        assert!(!proves(source, protected, &wrong_key));
+        let mut not_archived = evidence.clone();
+        not_archived["archives"] = json!([]);
+        assert!(!proves(source, protected, &not_archived));
+        // An existing source comment cannot stand in for a newly generated line.
+        let disguised = "x-note: fixture\n# x-note: fixture\ndebug: false\nconfig-version: 8\n";
+        evidence["source"] = disguised.into();
+        evidence["archives"][0]["binding"] = binding_for(disguised);
+        assert!(!proves(disguised, protected, &evidence));
     }
     #[test]
     fn upstream_relocations_require_exact_source_operation_destination_and_multiplicity() {
