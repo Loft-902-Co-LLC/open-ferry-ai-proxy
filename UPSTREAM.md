@@ -540,22 +540,27 @@ represents only as an opaque `AnyMap` marker; two such markers do not prove
 their values equal. Failed proofs are saved and counted; product builds contain none of
 the switches or traces and keep every protection. The Round 8 empty-collection foot-comment fix is outside this diagnostic switch set and remains enabled in every ablation; cases requiring its removal stay Different.
 
-For the upstream relocation root class (B1), the offline certifier independently
-replays the pinned tree edits on source-node identities. Each allowance is
-bound to the exact source, operation, surviving destination and comment slot.
-Generated or deleted identities supply no relocation slot, and equal comment
-text cannot prove a move. Unmoved owners retain the strict sequence filter;
-all value, multiplicity, ordering, byte-binding and minimality checks remain.
+For retained comments that upstream moves, the offline tool reruns the pinned
+Go edits on a separate copy of the exact input. It follows the original key,
+value or list item by a number, never by matching comment text. A Go transfer
+defines the comment's place only at its own node or the key now holding it.
+If Go drops it or attaches it elsewhere, the fallback keeps its original
+above/on/below position at its own node's new place. Saved proofs distinguish
+the two paths. Every moved line must remain there in order; a partly kept
+block fails. Deleted data cannot justify a move, and unchanged keys keep the
+existing checks. The relocation replay runs the edits on the parsed tree
+without the save's write-and-reload step, so a comment that step drops still
+has a destination; the archive replay includes that step.
 
-For generated archive comments (D1), the certifier observes upstream's archive
-construction from the source and operation, including the save's intermediate
-encode/reparse. Every line has a source-key/entry binding and one parsed owner
-slot established by an independent layout. Existing equal-text comments cannot
-consume that new budget. Archive text in the actual Go output is insufficient
-evidence; altered text, duplicates or another owner still fail the proof.
-The archive must decode to the original source values, and the computed owner
-is required even when Go places equal text elsewhere. A lossy re-encode gets
-no generated-comment budget.
+For archives of unknown keys, a separate replay computes the exact comment
+lines and their places from each original entry and the requested write.
+Each generated line must appear once there, in addition to any equal comments
+already in the input. The archive must parse back to the original values.
+Matching text in Go's actual output is not enough: changed text, duplicates,
+another place or a re-encode that loses values still fails. The other checks
+of values, counts, order, exact file bytes and the smallest set of necessary
+writer changes remain in force.
+Rust must also keep comments in a loadable Go result at the places Go wrote them.
 
 Generated-comment identities are rebound at the parsed comment's own position,
 including wrapped scalars. A canonical-version multipart head gets a separating
@@ -1452,9 +1457,9 @@ inputs are not fingerprinted yet. Code and dependency changes are judged by
 the resulting verdict.
 For a reviewed newly seen existing limitation, add `--baseline EXISTING` to
 refresh incrementally without lowering the bound or changing the exact PR set.
-Early kind-novelty estimates are about 1 in 10 to 1 in 16 nights, separate from
-the conditional 0.019% rate-only estimate. Follow-ups lower the budget with a
-full refresh.
+The earlier false-alarm and new-kind estimates came from the old calibration
+and were not recomputed after the refresh, so they are omitted here and in
+the parity README. Follow-ups lower the budget with a full refresh.
 
 ## Deliberately not ported
 

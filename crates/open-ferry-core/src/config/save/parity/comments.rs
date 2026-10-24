@@ -175,6 +175,12 @@ fn first_unmatched<'a>(needle: &'a [String], haystack: &[String]) -> Option<&'a 
     None
 }
 fn owner_failure(s: &[Occurrence], g: &[Occurrence], r: &[Occurrence]) -> Option<Value> {
+    let relocated = groups(
+        &s.iter()
+            .filter(|c| c.relocated)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
     let stable: Vec<_> = s
         .iter()
         .filter(|source| {
@@ -226,6 +232,17 @@ fn owner_failure(s: &[Occurrence], g: &[Occurrence], r: &[Occurrence]) -> Option
                 .or_else(|| first_unmatched(&go_order, &go))
                 .or_else(|| first_unmatched(&go_with_shared, &go));
             return Some(json!({"reason":"owner_order","owner":owner.json(),"text":text}));
+        }
+    }
+    // These source lines have an independently proved destination. After any
+    // permitted promotions, require every line there, in source order. An
+    // upper count bound alone would accept a partly dropped relocated block.
+    for (owner, required) in &relocated {
+        let actual = r.get(owner).cloned().unwrap_or_default();
+        if !subsequence(required, &actual) {
+            return Some(
+                json!({"reason":"relocated_source_witness","owner":owner.json(),"text":first_unmatched(required,&actual)}),
+            );
         }
     }
     // A global text count cannot substitute an equal comment at another owner.
@@ -498,8 +515,9 @@ fn analyze_comments(
     } else {
         return failed(json!({"reason":"source_comments_unparseable"}));
     }
-    // A step Go never executed has no observational licence for either a
-    // loss or a named owner change. Preserve every source occurrence exactly.
+    // Without a real Go result, keep every source line at the place computed
+    // by replaying Go's edit on our previous output (or its original place
+    // when no move was proved). There is no Go output to cross-check it.
     if go.is_none() && !observed_unloadable {
         if let Some(failure) = owner_failure(&s, &[], &r) {
             return failed(failure);
@@ -755,11 +773,22 @@ fn relocated_source(
     let mut result = items.to_vec();
     for c in &mut result {
         let ordinal = ordinals.entry(c.owner.clone()).or_default();
-        let destinations: BTreeSet<_> = moves
+        let matching: Vec<_> = moves
             .iter()
             .filter(|m| {
                 m["source"] == c.owner.json() && m["ordinal"].as_u64() == Some(*ordinal as u64)
             })
+            .collect();
+        // The source position and ordinal select the move. Text only checks
+        // that both parsers meant the same line; it never selects a donor.
+        if matching
+            .iter()
+            .any(|m| m["text"].as_str() != Some(c.text.as_str()))
+        {
+            return None;
+        }
+        let destinations: BTreeSet<_> = matching
+            .iter()
             .map(|m| m["destination"].to_string())
             .collect();
         *ordinal += 1;
@@ -809,8 +838,9 @@ fn parse_owner(value: &Value) -> Option<Owner> {
     })
 }
 
-/// Supplement strict ownership only with independently replayed upstream node
-/// destinations. An unobserved Go step still requires every source occurrence.
+/// Supplement the strict check with independently replayed Go edits. If the
+/// real Go run never reached this step, replay it on our previous output and
+/// require every source comment at its computed place, without a Go cross-check.
 pub fn comment_ownership_with_provenance(
     source: &str,
     go: Option<&str>,
@@ -955,7 +985,7 @@ mod tests {
     fn upstream_relocations_require_exact_source_operation_destination_and_multiplicity() {
         let source = "disable-cooling: false # own\ndebug: false # stay\n";
         let operation = json!({"op":"save","migrate":true});
-        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["disable-cooling"],"value","line"),"ordinal":0,"destination":owner(&["routing","cooldown","disable-cooling"],"value","line")}]});
+        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["disable-cooling"],"value","line"),"ordinal":0,"text":"# own","via":"observed","destination":owner(&["routing","cooldown","disable-cooling"],"value","line")}]});
         let protected =
             "routing:\n  cooldown:\n    disable-cooling: false # own\ndebug: false # stay\n";
         let proves = |s: &str, r: &str, op: &Value, proof: &Value| {
@@ -976,6 +1006,9 @@ mod tests {
             &evidence
         ));
         assert!(!proves(source, protected, &json!({"op":"save"}), &evidence));
+        let mut wrong_text = evidence.clone();
+        wrong_text["moves"][0]["text"] = "# stay".into();
+        assert!(!proves(source, protected, &operation, &wrong_text));
         // No destination for a deleted identity, including equal-text donors.
         let deleted = "disable-cooling: false # own\ngone: x # own\n";
         let mut proof = evidence.clone();
@@ -984,15 +1017,48 @@ mod tests {
         assert!(!proves(deleted, duplicated, &operation, &proof));
         // A slot-only change on an unmoved source keeps the strict rule.
         let unchanged = "# own\nx: 1\n";
-        let proof = json!({"source":unchanged,"operation":operation,"moves":[{"source":owner(&["x"],"key","head"),"ordinal":0,"destination":owner(&["x"],"value","line")}]});
+        let proof = json!({"source":unchanged,"operation":operation,"moves":[{"source":owner(&["x"],"key","head"),"ordinal":0,"text":"# own","via":"observed","destination":owner(&["x"],"value","line")}]});
         assert!(!proves(unchanged, "x: 1 # own\n", &operation, &proof));
+    }
+
+    #[test]
+    fn relocated_blocks_require_every_source_line_at_the_final_owner_in_order() {
+        let source = "config-version: 8\nopenai-compatibility:\n  - name: fixture\n    base-url: https://example.invalid/v1\n    # first\n    # second\n    api-key-entries:\n      - api-key: fixture\n";
+        let go = "config-version: 8\napi-keys:\n    openai-compatibility:\n        - name: fixture\n          base-url: https://example.invalid/v1\n          keys:\n            - api-key: fixture\n";
+        // Keep the review's physical indentation: both comments parse as the
+        // new keys entry's head even though they start in column zero.
+        let complete = go.replace("          keys:", "# first\n# second\n          keys:");
+        let operation = json!({"op":"write","body":source});
+        let from = json!({"path":[{"key":"openai-compatibility","tag":"!!str"},{"index":0},{"key":"api-key-entries","tag":"!!str"}],"node":"key","slot":"head"});
+        let to = json!({"path":[{"key":"api-keys","tag":"!!str"},{"key":"openai-compatibility","tag":"!!str"},{"index":0},{"key":"keys","tag":"!!str"}],"node":"key","slot":"head"});
+        let evidence = json!({"source":source,"operation":operation,"moves":[
+            {"source":from,"ordinal":0,"text":"# first","via":"fallback","destination":to},
+            {"source":from,"ordinal":1,"text":"# second","via":"fallback","destination":to}
+        ]});
+        let proves = |protected: &str| {
+            comment_ownership_with_provenance(
+                source,
+                Some(go),
+                protected,
+                &[],
+                &operation,
+                &evidence,
+                false,
+            )
+            .accepted()
+        };
+        assert!(proves(&complete));
+        assert!(!proves(&complete.replace("# second\n", "")));
+        assert!(!proves(
+            &complete.replace("# first\n# second", "# second\n# first")
+        ));
     }
 
     #[test]
     fn relocated_explicit_key_lines_use_only_the_same_surviving_key_head() {
         let source = "? old # own\n: 1\n";
         let operation = json!({"op":"save","migrate":true});
-        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["old"],"key","line"),"ordinal":0,"destination":owner(&["section","old"],"key","line")}]});
+        let evidence = json!({"source":source,"operation":operation,"moves":[{"source":owner(&["old"],"key","line"),"ordinal":0,"text":"# own","via":"fallback","destination":owner(&["section","old"],"key","line")}]});
         let go = "section:\n  old: 1\n";
         let protected = "section:\n  # own\n  old: 1\n";
         let result = comment_ownership_with_provenance(

@@ -2,8 +2,47 @@ package config
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestParityOwnershipIgnoresUnboundTransfersAndFallsBackToOwnNode(t *testing.T) {
+	for _, side := range []string{"key", "value", "item"} {
+		t.Run(side, func(t *testing.T) {
+			const marker = "# parity-origin-fixture"
+			own := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "fixture", Line: 7}
+			unrelated := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "other", Line: 8, LineComment: marker}
+			original := ParityOwner{[]any{map[string]any{"key": "old", "tag": "!!str"}}, side, "line"}
+			target := ParityOwner{[]any{map[string]any{"key": "moved", "tag": "!!str"}}, side, "line"}
+			root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "moved"}, own,
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "unrelated"}, unrelated,
+			}}
+			if side == "item" {
+				root = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{unrelated, own}}
+				original.Path = []any{map[string]any{"index": 0}}
+				target.Path = []any{map[string]any{"index": 1}}
+			}
+			origins := map[string]parityOrigin{marker: {Owner: original, Ordinal: 0, Identity: 7, Text: "# own"}}
+			moves := parityRelocations(root, origins)
+			if len(moves) != 1 {
+				t.Fatal("unbound placement must receive only its own-node fallback")
+			}
+			move := moves[0].(map[string]any)
+			if move["via"] != "fallback" || move["text"] != "# own" || !reflect.DeepEqual(move["destination"], target) {
+				t.Fatal("unbound placement defined a destination or changed the fallback slot")
+			}
+			// The same marker on its own node records the transfer instead.
+			unrelated.LineComment, own.LineComment = "", marker
+			moves = parityRelocations(root, origins)
+			if len(moves) != 1 || moves[0].(map[string]any)["via"] != "observed" {
+				t.Fatal("bound transfer did not take precedence over fallback")
+			}
+		})
+	}
+}
 
 func TestParityOwnershipSourceIdentities(t *testing.T) {
 	operation := map[string]any{"op": "save", "migrate": true}

@@ -269,48 +269,59 @@ The replies are real Codex event streams, so each one is then run through every 
 
 ## Config-save baseline
 
-The comment-ownership certifier can also use a per-step source-identity replay.
-The Go harness extracts the pinned save/normalization tree edits and runs them
-on an isolated parsed source, carrying opaque occurrence IDs through the real
-merge, list reorder and layout operations. Generated nodes have no source IDs.
-The proof binds the complete source bytes and operation, and replaces a source
-slot only with its unique surviving destination (path, key/value/item side,
-and head/line/foot slot). Equal comment text never establishes a destination.
-When Go loses a key comment during regrouping, its associated source value
-identity must still survive at that exact entry path; only its original
-key-side slot receives a budget. Opaque comment-copy IDs cannot name a path
-where the associated value identity did not survive.
-A complete explicit key-line block may appear at that independently relocated
-key's own head when Go is loadable. This rule requires the physical key-line
-source occurrence and never applies to an unmoved key.
-Deleted identities receive no relocation slot; an unmoved path keeps the strict
-sequence-identity rule. Counts, ordering, value proofs, complete byte binding,
-minimality, and the comparison outside protected comments still apply. The
-oracle never reads the protected output. Its evidence is saved with the proof;
-an unavailable oracle supplies no allowance.
+To check a retained comment's place, the tool parses the exact input for one
+write and reruns the pinned Go implementation's edits on a separate copy.
+It numbers the original parts of that tree so it can follow a particular
+key, value or list item through merges, reordering and v8 migration. Newly
+created parts get no original number. This replay never reads Rust's result.
 
-Sequence identities use alias-expanded values on all sides while output
-occurrence inventories remain physical. An anchor followed by an alias
-therefore has the same identity as its expanded control. The strict stability
-filter still rejects a comment moved to another item or a changed sequence.
-An output item that remains an alias can use only comments physically present
-on that source item; copied anchor comments do not fund a new alias comment.
+A recorded Go transfer defines the comment's new place only if it lands on
+the comment's own node, or on the key that now holds that node. It may also
+change whether the comment is above, on or below the key. If Go drops the
+comment or attaches it to an unrelated node, that attachment is ignored:
+the comment instead keeps its original above/on/below position at its own
+node's new place. This fallback covers key, value and list-item comments.
+Saved proofs label transfers seen in this replay as `observed` and the other
+choice as `fallback`. Deleted data or conflicting recorded destinations cannot
+justify a move. Matching text
+never finds the destination; it only checks that both parsers meant the same
+source line after its original place and position in the comment block
+selected the move.
 
-Generated archive comments have a separate budget. An observer at the pin's
-`commentUnknownV8Fields` archive construction binds each generated line to the
-exact parsed source key and entry. Save replays include the real intermediate
-encode/reparse before normalization. Independent archive layouts use opaque
-line IDs to establish parsed owners and occurrence ordinals; comment text
-supplies only the computed bytes. Each line receives one slot at that owner.
-The archived entry must decode to the original source values; a lossy upstream
-re-encode receives no archive budget. The computed owner is required even
-when Go emits equal text at a different owner.
-The layouts retain all surrounding source and document comments. A layout
-that cannot parse or loses an opaque archive identity supplies no slots.
-The complete computed multiplicity is required in addition to existing source
-occurrences of equal text, so an old comment cannot masquerade as a new archive.
-Changed text, extra copies, another owner, unarchived keys and mismatched source
-bindings receive no allowance. Every other proof check remains active.
+Every line of a moved comment block must be kept at its final place, in source
+order. Keeping only part of the block stays Different. One existing correction
+can put comments written on a key's own physical line immediately above that
+same key after it moves, when Go's output can be loaded. It does not apply to
+a key that stays where it was.
+The relocation replay runs the edits on the parsed tree without the save's
+write-and-reload step, so a comment that step drops still has a destination;
+the archive replay includes that step.
+If the real Go run stopped before a later write, the tool still replays that
+write on Rust's previous output and requires every source comment at the
+computed place. There is no real Go output to cross-check that placement.
+When Go did write a loadable file, Rust must still keep every comment Go kept
+at the place Go wrote it; a replayed move does not remove that check.
+
+When a list uses an alias, both sides are compared with the alias filled in,
+but comments are still counted where they are actually written. A comment on
+an anchor does not let a copy appear on an alias. Filling in aliases does not
+excuse moving a comment to another item or hiding a changed list.
+
+Go's v8 migration turns unknown entries into archive comments. A separate
+replay computes the exact new lines and where they must appear, using each
+original key and its complete entry. It keeps the surrounding comments and
+uses temporary markers to follow each generated line through writing and
+parsing. Each computed line must appear exactly once at that place, in
+addition to any identical comments already in the input. The archived entry
+must parse back to the original values; a re-encode that loses data cannot
+justify new lines. Altered text, extra copies, another place, an unarchived
+key or an unreadable replay stays Different, even if Go wrote matching text.
+
+All other checks still apply: values must agree with the separate run without
+comments; disabling the smallest necessary set of existing comment-preserving
+writer changes must reproduce Go's complete files; and bytes outside the
+proved differences must stay unchanged. Missing or mismatched replay evidence
+does not permit a difference. The evidence is saved with each proof.
 
 The CI script passes `--baseline tools/parity/baseline/config-save.json`.
 Without that option the tool keeps its strict exit verdict. The baseline
@@ -359,6 +370,8 @@ nightly-sized calibration seeds have 243 to 304 Different out of 5,109 cases
 each. The 20% margin above the maximum observed rate, rounded up to five,
 still gives the same bound. These counts describe the calibration sample;
 the separate kind check still rejects an unseen failure kind.
+Earlier false-alarm and new-kind estimates came from the old calibration and
+are omitted because this refresh did not recompute them.
 
 ### When the nightly fails
 
@@ -496,11 +509,10 @@ absence in a legacy baseline.
 
 ### Classifier-version reclassification
 
-Version 4 records source-identity relocations, source-bound archive budgets and
-consistent alias ownership. Proving an earlier owner can expose a later
-blocking operation, changing a case's diagnostic kind. Reclassification of the
-previous saved proof corpus must still preserve all of its per-case kind sets,
-counts and fatal failures before collecting the refreshed verdicts.
+Version 4 records the new comment checks. Once an earlier write is proved, a
+later write's failure becomes the one reported, so a case's diagnostic kind
+can change. Reclassifying the previous saved proofs must still preserve every
+case's kind set, count and fatal failures before collecting fresh results.
 
 A classifier-version change requires reclassifying every saved observation with
 the new classifier through `--import-config-failures` and its bound proof files,

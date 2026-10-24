@@ -19,6 +19,7 @@ type parityOrigin struct {
 	Owner    ParityOwner
 	Ordinal  int
 	Identity int
+	Text     string
 }
 
 // ParityOwnership runs tree edits extracted from the pinned implementation at
@@ -50,7 +51,7 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 					continue
 				}
 				id := fmt.Sprintf("# parity-origin-%d-%s-%d", n.Line, slot, ordinal)
-				origins[id] = parityOrigin{ParityOwner{path, side, slot}, ordinal, value.Line}
+				origins[id] = parityOrigin{ParityOwner{path, side, slot}, ordinal, value.Line, strings.TrimLeft(line, " \t")}
 				lines[i] = id
 				ordinal++
 			}
@@ -61,6 +62,19 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 	if err != nil {
 		return fail()
 	}
+	result["moves"] = parityRelocations(root, origins)
+	archives, archiveErr := parityArchives(source, operation, raw)
+	if archiveErr != nil {
+		result["archives"] = []any{}
+		result["archive_unavailable"] = true
+		result["archive_failure"] = archiveErr.Error()
+	} else {
+		result["archives"] = archives
+	}
+	return result
+}
+
+func parityRelocations(root *yaml.Node, origins map[string]parityOrigin) []any {
 	surviving := map[int]bool{}
 	destinations := map[int][]ParityOwner{}
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
@@ -86,14 +100,15 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 					continue
 				}
 				observed[strings.TrimSpace(line)] = true
-				moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "destination": ParityOwner{path, side, slot}})
+				moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "text": origin.Text, "via": "observed", "destination": ParityOwner{path, side, slot}})
 			}
 		}
 	})
-	// A source key comment may be lost by upstream while its associated
-	// value identity survives (for example api-key-entries becomes keys).
-	// Its original side/slot can use only that surviving logical entry path.
-	// Actual comment transfers above take precedence; no equal text is read.
+	// A transfer defines a destination only at the comment's own surviving
+	// node or the key holding it. A transfer to any other path is ignored.
+	// For a key, value or item comment with no bound transfer (including one
+	// Go misplaced), use its own node's surviving place in its original slot.
+	// Only a bound transfer takes precedence; no equal text is read.
 	for id, origin := range origins {
 		if observed[id] {
 			continue
@@ -106,19 +121,10 @@ func ParityOwnership(source string, operation map[string]any) map[string]any {
 			} else if origin.Owner.Node != target.Node {
 				continue
 			}
-			moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "destination": ParityOwner{target.Path, origin.Owner.Node, origin.Owner.Slot}})
+			moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "text": origin.Text, "via": "fallback", "destination": ParityOwner{target.Path, origin.Owner.Node, origin.Owner.Slot}})
 		}
 	}
-	result["moves"] = moves
-	archives, archiveErr := parityArchives(source, operation, raw)
-	if archiveErr != nil {
-		result["archives"] = []any{}
-		result["archive_unavailable"] = true
-		result["archive_failure"] = archiveErr.Error()
-	} else {
-		result["archives"] = archives
-	}
-	return result
+	return moves
 }
 
 func parityWalk(n *yaml.Node, path []any, side string, visit func(*yaml.Node, []any, string, *yaml.Node)) {
