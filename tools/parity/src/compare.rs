@@ -132,6 +132,14 @@ impl JsonForm {
                         .is_some_and(|value| compact(&value) == rust)
             }
             Self::InText => {
+                // Raw fallbacks may quote an entire JSON string token, too.
+                // Require its source before trying the whole-value form:
+                // ordinary text containing JSON-looking strings stays exact.
+                if (source.is_some() || bound.is_some())
+                    && Self::Whole.matches(go, rust, numbers, source, bound)
+                {
+                    return true;
+                }
                 let rust_start = rust.as_ptr() as usize;
                 let (go, rust) = (parts(go, numbers), parts(rust, numbers));
                 go.len() == rust.len()
@@ -814,6 +822,112 @@ mod tests {
         let go = json!({ "arguments": r#""<\/a>""# });
         let rust = json!({ "arguments": r#""</a>""# });
         assert!(compare(&go, &rust, JSON_AT).differences.is_empty());
+    }
+
+    fn quoted_json(go: &str, rust: &str, source: &str, declared: bool) -> Comparison {
+        compare_numbers_from_request(
+            &json!({"text":go}),
+            &json!({"text":rust}),
+            if declared { JSON_AT } else { &[] },
+            Numbers::AsWritten,
+            Some(source),
+        )
+    }
+
+    #[test]
+    fn quoted_json_accepts_only_the_compact_complete_source_token() {
+        let go = r#""caf\u00e9 na\u00efve fa\u00e7ade""#;
+        let rust = r#""café naïve façade""#;
+        let source = format!(r#"{{"text":{go}}}"#);
+        let cmp = quoted_json(go, rust, &source, true);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::EmbeddedJson]));
+
+        // Literal Unicode is already identical, without a deviation.
+        let cmp = quoted_json(rust, rust, &source, true);
+        assert!(cmp.differences.is_empty());
+        assert!(cmp.deviations.is_empty());
+
+        // A lexical whole token can contain JSON-looking text as data.
+        let go = r#""caf\u00e9 [1, 2] {\"x\": 1}""#;
+        let rust = r#""café [1, 2] {\"x\": 1}""#;
+        assert!(
+            quoted_json(go, rust, &format!(r#"{{"text":{go}}}"#), true)
+                .differences
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn quoted_json_rejects_a_different_value_or_noncompact_spelling() {
+        let go = r#""caf\u00e9""#;
+        let source = format!(r#"{{"text":{go}}}"#);
+        for rust in [r#""coffee""#, r#""caf\u00E9""#] {
+            let cmp = quoted_json(go, rust, &source, true);
+            assert_eq!(cmp.differences.len(), 1, "{rust}");
+            assert!(cmp.deviations.is_empty());
+        }
+    }
+
+    #[test]
+    fn quoted_json_rejects_invalid_go_text_even_with_a_claimed_witness() {
+        // Isolate parsing from provenance: a witness cannot make invalid
+        // JSON into a compact value, even if a caller claims it was copied.
+        let cmp = compare_numbers_with_witness(
+            &json!({"text":"not JSON"}),
+            &json!({"text":"null"}),
+            JSON_AT,
+            Numbers::AsWritten,
+            Some(r#"{"text":"not JSON"}"#),
+            Some(&|_, _, _, _| true),
+        );
+        assert_eq!(cmp.differences.len(), 1);
+        assert!(cmp.deviations.is_empty());
+    }
+
+    #[test]
+    fn quoted_json_rejects_missing_or_wrong_place_source_tokens() {
+        let go = r#""caf\u00e9""#;
+        let rust = r#""café""#;
+        for source in [
+            "{}".to_owned(),
+            r#"{"text":"café"}"#.to_owned(),
+            format!(r#"{{"text":"different","elsewhere":{go}}}"#),
+        ] {
+            let cmp = quoted_json(go, rust, &source, true);
+            assert_eq!(cmp.differences.len(), 1, "{source}");
+            assert!(cmp.deviations.is_empty());
+        }
+        // Legacy text paths without any source retain their old strictness
+        // for whole quoted tokens.
+        assert_eq!(
+            compare(&json!({"text":go}), &json!({"text":rust}), JSON_AT)
+                .differences
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn quoted_json_rejects_undeclared_paths() {
+        let go = r#""caf\u00e9""#;
+        let source = format!(r#"{{"text":{go}}}"#);
+        let cmp = quoted_json(go, r#""café""#, &source, false);
+        assert_eq!(cmp.differences.len(), 1);
+        assert!(cmp.deviations.is_empty());
+    }
+
+    #[test]
+    fn quoted_json_whole_value_uses_the_suites_number_rule() {
+        let go = json!({"text":"-0"});
+        let rust = json!({"text":"0"});
+        let compare = |numbers| {
+            compare_numbers_from_request(&go, &rust, JSON_AT, numbers, Some(r#"{"text":-0}"#))
+        };
+        let cmp = compare(Numbers::Respelled);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::EmbeddedJson]));
+        assert_eq!(compare(Numbers::AsWritten).differences.len(), 1);
     }
 
     #[test]

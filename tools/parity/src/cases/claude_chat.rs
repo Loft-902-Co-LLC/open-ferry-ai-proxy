@@ -366,9 +366,8 @@ pub fn requests() -> Vec<Case> {
         Case::new(
             "huge-max-tokens-with-summary",
             "claude-sonnet-4-5-20250929",
-            r#"{"max_tokens":1e30,"include_reasoning":true,"messages":[{"role":"user","content":"hi"}]}"#,
-        )
-        .known_difference("Go's int64(1e30) depends on the CPU; Rust saturates, so a budget fits"),
+            r#"{"max_tokens":1e30,"include_reasoning":true,"metadata":{"user_id":"parity-overflow"},"messages":[{"role":"user","content":"hi"}]}"#,
+        ),
     ];
 
     // Effort levels, on models with levels, with budgets only, and unknown.

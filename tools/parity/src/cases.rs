@@ -184,8 +184,7 @@ pub fn hand_written() -> Vec<Case> {
             "huge-float-budget",
             "gpt-5",
             r#"{"thinking":{"type":"enabled","budget_tokens":1e30}}"#,
-        )
-        .known_difference("Go's int64(1e30) depends on the CPU; Rust saturates"),
+        ),
         Case::new(
             "infinite-number-as-text",
             "gpt-5",

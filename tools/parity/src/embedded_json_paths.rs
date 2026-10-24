@@ -443,3 +443,87 @@ fn gemini_instructions_have_raw_value_provenance() {
         false,
     );
 }
+
+#[test]
+fn gemini_raw_string_fallbacks_have_route_bound_source_witnesses() {
+    let raw = r#""caf\u00e9 na\u00efve fa\u00e7ade""#;
+    for (to, pointer) in [
+        ("openai", "/messages/0/content"),
+        ("codex", "/input/0/output"),
+        ("claude", "/messages/0/content/0/content"),
+    ] {
+        let mut case = crate::cases::gemini::raw_json_requests()
+            .into_iter()
+            .find(|case| case.name == "raw-json-response-escaped")
+            .unwrap();
+        case.options = json!({"from":"gemini","to":to,"stream":false});
+        let translator = Translator::RegistryRequest;
+        assert_eq!(
+            translator.embedded_json_request_source(&case),
+            Some(case.request.as_str())
+        );
+        let mut go = translator.run_rust(&case).unwrap();
+        *go.pointer_mut(pointer).expect("tool output") = raw.into();
+        let output = crate::upstream::GoResult::Output(go.to_string().into_bytes());
+        let result = crate::evaluate(translator, &case, &output);
+        assert!(
+            matches!(&result.outcome, crate::Outcome::Equivalent(d) if d.contains(&Deviation::EmbeddedJson)),
+            "{to}"
+        );
+
+        // The same escaped token elsewhere cannot witness this output after
+        // the translated response itself uses literal Unicode.
+        let mut unrelated = case.clone();
+        unrelated.request = unrelated
+            .request
+            .replace(r"caf\u00e9 na\u00efve fa\u00e7ade", "café naïve façade");
+        unrelated.request.pop();
+        unrelated.request.push_str(&format!(r#","unused":{raw}}}"#));
+        let result = crate::evaluate(translator, &unrelated, &output);
+        assert!(
+            matches!(result.outcome, crate::Outcome::Different(_)),
+            "{to}: unrelated token"
+        );
+    }
+}
+
+#[test]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn stale_float_markers_now_compare_identically_on_x86() {
+    let cases = crate::cases::registry::requests();
+    for (name, go) in [
+        (
+            "claude-to-codex-huge-float-budget",
+            json!({
+                "model":"gpt-5","instructions":"","input":[],
+                "parallel_tool_calls":true,"reasoning":{"effort":"medium"},
+                "stream":true,"store":false,"include":["reasoning.encrypted_content"]
+            }),
+        ),
+        (
+            "claude-to-openai-huge-float-budget",
+            json!({"model":"gpt-5","messages":[],"stream":true}),
+        ),
+        (
+            "openai-to-claude-huge-max-tokens-with-summary",
+            json!({
+                "model":"claude-sonnet-4-5-20250929",
+                "max_tokens":i64::MIN,
+                "messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+                "metadata":{"user_id":"parity-overflow"},"stream":true
+            }),
+        ),
+    ] {
+        let case = cases.iter().find(|case| case.name == name).unwrap();
+        assert!(case.known_difference.is_none(), "{name}");
+        let result = crate::evaluate(
+            Translator::RegistryRequest,
+            case,
+            &crate::upstream::GoResult::Output(go.to_string().into_bytes()),
+        );
+        assert!(
+            matches!(result.outcome, crate::Outcome::Identical),
+            "{name}"
+        );
+    }
+}
