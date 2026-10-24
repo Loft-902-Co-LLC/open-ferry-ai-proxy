@@ -550,17 +550,21 @@ to reload partly as document head, while retaining every real source document
 comment at the document. It applies to no nested or later key. These operations
 remain under the canonical-version protection, before intermediate and final
 emissions. Config inputs containing literal U+0085 (NEXT LINE), U+2028
-(LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) now use the yaml.v3 parser
-already used by the writer. This aligns values, keys, comments and document
-boundaries with CLIProxyAPI. Other inputs retain the existing saphyr parser. Syntax errors on the new
-path use yaml.v3 wording; the tab and compact-alias syntax differences
+(LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR), or repeated leading byte
+order marks, now use the yaml.v3 parser already used by the writer, with the
+original bytes. This aligns values, keys, comments and document boundaries
+with CLIProxyAPI. Other inputs retain the existing saphyr parser. Syntax
+errors on the new path use yaml.v3 wording; the tab and compact-alias syntax differences
 below apply only to the saphyr path.
-Alias expansions share their anchor text and retain the alias-ratio and
-64 MiB owned-value budgets, the 256-level depth limit, the null-key cycle
+Alias expansions share their anchor values and normalized tags, as the
+saphyr path does; tags therefore need no per-expansion owned-value charge.
+They retain the alias-ratio and 64 MiB owned-value budgets, the 256-level depth limit, the null-key cycle
 check and the full-input NUL/control-character check. The writer parser's
 copied-target node cap and invalid UTF-8 tag-byte replacement apply on this
-path too. The old reader-disagreement write refusal and forced live-scalar
-quoting have been removed: lossless live emission follows Go's bytes.
+path too. In both writer and loader use, cumulative alias-target copies are
+also limited to 64 MiB of owned text, checked before cloning and excluding
+already shared target content; exceeding it reports excessive aliasing.
+The old reader-disagreement write refusal and forced live-scalar quoting have been removed: lossless live emission follows Go's bytes.
 The single-document witness uses the matching parser for loadable input;
 its conservative rejected-emission scan treats leading directives as a
 preamble and still refuses a real second document.

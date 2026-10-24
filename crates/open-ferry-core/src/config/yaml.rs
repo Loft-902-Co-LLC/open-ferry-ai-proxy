@@ -718,6 +718,8 @@ pub(crate) fn from_writer_node(node: &yaml3::Node) -> Result<Node, YamlError> {
         alias_depth: 0,
         poisoned: false,
         text: HashMap::new(),
+        tags: HashMap::new(),
+        node_tags: HashMap::new(),
     };
     converter.node(node, 1)
 }
@@ -731,6 +733,9 @@ struct Converter<'a> {
     // Alias targets share text with the original anchor, including the
     // composer's copy of it. Borrow keys until conversion finishes.
     text: HashMap<&'a str, Text>,
+    tags: HashMap<String, Text>,
+    // Normalize each immutable source node once, even across alias visits.
+    node_tags: HashMap<*const yaml3::Node, Text>,
 }
 
 impl<'a> Converter<'a> {
@@ -739,6 +744,20 @@ impl<'a> Converter<'a> {
             .entry(value)
             .or_insert_with(|| value.into())
             .clone()
+    }
+
+    fn tag(&mut self, node: &'a yaml3::Node) -> Text {
+        let address = std::ptr::from_ref(node);
+        if let Some(tag) = self.node_tags.get(&address) {
+            return tag.clone();
+        }
+        let tag = self
+            .tags
+            .entry(node.short_tag())
+            .or_insert_with_key(|tag| tag.as_str().into())
+            .clone();
+        self.node_tags.insert(address, tag.clone());
+        tag
     }
 
     fn node(&mut self, node: &'a yaml3::Node, depth: usize) -> Result<Node, YamlError> {
@@ -769,7 +788,7 @@ impl<'a> Converter<'a> {
             WriterKind::Scalar => {
                 return Ok(Node {
                     kind: Kind::Scalar,
-                    tag: node.short_tag().into(),
+                    tag: self.tag(node),
                     value: self.text(&node.value),
                     line: node.line,
                     tagged: node.style.has(Style::TAGGED),
@@ -820,7 +839,7 @@ impl<'a> Converter<'a> {
         }
         Ok(Node {
             kind,
-            tag: node.short_tag().into(),
+            tag: self.tag(node),
             content,
             line: node.line,
             flow: node.style.has(Style::FLOW),
@@ -830,11 +849,14 @@ impl<'a> Converter<'a> {
     }
 }
 
+// Repeated leading BOMs also need yaml.v3's original-byte scanning: stripping
+// one before dispatch would strip two in total and can change later keys.
+fn uses_writer_parser(text: &str) -> bool {
+    text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) || text.starts_with("\u{feff}\u{feff}")
+}
+
 /// Reads the first YAML document; `None` when there is none.
 pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
-    let text = text
-        .strip_prefix(|c: char| c as u32 == 0xFEFF)
-        .unwrap_or(text);
     // saphyr would stop at a NUL and read what came before as the whole
     // document.
     if !text.chars().all(reader_accepts) {
@@ -842,7 +864,7 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
             "yaml: control characters are not allowed".to_owned(),
         ));
     }
-    if text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+    if uses_writer_parser(text) {
         let node = yaml3::compose::unmarshal(text.as_bytes())
             .map_err(|error| YamlError::Syntax(error.message().to_owned()))?;
         return if node.kind == yaml3::Kind::Zero {
@@ -851,6 +873,7 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
             from_writer_node(&node).map(Some)
         };
     }
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut aliases = HashSet::new();
     let error = match read_document(text, &mut aliases) {
         Ok(root) => return Ok(root),
@@ -894,10 +917,7 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
 /// even an empty one, or text that can't be read as far as that, where
 /// whether one follows can't be told.
 pub(crate) fn has_more_documents(text: &str) -> bool {
-    let text = text
-        .strip_prefix(|c: char| c as u32 == 0xFEFF)
-        .unwrap_or(text);
-    if text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+    if uses_writer_parser(text) {
         use yaml3::types::EventType;
         let mut parser = yaml3::parser::Parser::new(text.as_bytes());
         let mut started = false;
@@ -913,6 +933,7 @@ pub(crate) fn has_more_documents(text: &str) -> bool {
             }
         }
     }
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut started = false;
     for item in Parser::new_from_str(text) {
         match item {
@@ -2448,6 +2469,56 @@ mod tests {
             budget.charge(&copy),
             Err(YamlError::Fatal(EXCESSIVE_ALIASING.to_owned()))
         );
+    }
+
+    #[test]
+    fn repeated_bom_reads_the_same_keys_as_go_and_writer() {
+        // Recorded with pinned yaml.v3 v3.0.1 / Go 1.26.4, including LF.
+        for separator in ['\u{2028}', '\u{0085}', '\u{2029}', '\n'] {
+            for marks in 0..=2 {
+                let source = format!("{}# c{separator}debug: true\n", "\u{feff}".repeat(marks));
+                let expected = if marks == 2 { "ebug" } else { "debug" };
+                let writer = yaml3::compose::unmarshal(source.as_bytes()).unwrap();
+                assert_eq!(writer.content[0].content[0].value, expected);
+                let root = parse_document(&source).unwrap().unwrap();
+                assert_eq!(root.content[0].value, expected);
+                assert!(!has_more_documents(&source));
+                assert!(has_more_documents(&format!("{source}---\nother: true\n")));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_bom_document_witness_uses_the_original_bytes() {
+        // Pinned Go rejects the empty key after its BOM scan skips `a`.
+        for separator in ['\u{2028}', '\u{0085}', '\u{2029}', '\n'] {
+            for marks in 0..=2 {
+                let source = format!("{}# c{separator}a: 1\n", "\u{feff}".repeat(marks));
+                assert_eq!(has_more_documents(&source), marks == 2);
+                assert_eq!(parse_document(&source).is_err(), marks == 2);
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_alias_tags_share_the_anchor_allocation() {
+        let tag = format!("tag:x,2026:{}", "A".repeat(16 << 10));
+        for prefix in ["# c\n", "# c\u{2028}"] {
+            for value in ["x", "[x]", "{x: y}"] {
+                let source = format!(
+                    "{prefix}a: &a !<{tag}> {value}\nrefs: [{}]\n",
+                    vec!["*a"; 128].join(", ")
+                );
+                let root = parse_document(&source).unwrap().unwrap();
+                let anchor = yaml_path(&root, "a").unwrap();
+                let refs = yaml_path(&root, "refs").unwrap();
+                assert_eq!(anchor.tag, tag.as_str());
+                assert_eq!(refs.content.len(), 128);
+                for copy in &refs.content {
+                    assert!(copy.tag.shares(&anchor.tag));
+                }
+            }
+        }
     }
 
     #[test]
