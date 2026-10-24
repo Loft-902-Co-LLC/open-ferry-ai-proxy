@@ -68,11 +68,10 @@ mod merge;
 #[doc(hidden)]
 pub mod parity;
 pub(crate) use merge::normalize_collection_node_styles;
-mod tree;
+pub(crate) mod tree;
 mod v8;
 mod write;
 
-use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
@@ -86,14 +85,17 @@ use super::yaml3::{Kind, MAP_TAG, NULL_TAG, STR_TAG};
 
 // The tree operations the v8 config edits ([`super::v8_edit`]) build on.
 pub(crate) use super::yaml3::Node;
+#[cfg(test)]
+pub(crate) use tree::normalize_comment_indentation;
 pub(crate) use tree::{
     copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index,
-    get_or_create_map_value, legacy_path, marshal, marshal_config, normalize_comment_indentation,
-    remove_map_key, set_yaml_path_with_comments, yaml_path, yaml_path_mut,
+    get_or_create_map_value, legacy_path, marshal, marshal_config, remove_map_key,
+    set_yaml_path_with_comments, yaml_path, yaml_path_mut,
 };
 pub(crate) use v8::{
     flatten_v8, is_v8_config_layout, normalize_config_layout, normalize_config_layout_doc,
-    project_v8_config_aliases, v8_aliases,
+    normalize_config_layout_receipted, normalize_config_layout_source, project_v8_config_aliases,
+    v8_aliases,
 };
 pub(crate) use write::WriteLock;
 
@@ -609,14 +611,33 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 
 /// The bytes [`write_file`] writes for `data`.
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
-    let doc = unmarshal(data)?;
-    let mut out = Cow::Borrowed(data);
+    let (candidate, source) = candidate_write_file(data)?;
+    Ok(tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source) = candidate_write_file(data).ok()?;
+        Some(tree::finish_comment_owners_replay(&source, candidate))
+    }))
+}
+
+fn candidate_write_file(
+    data: &[u8],
+) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
+    let (doc, source) = tree::read_comment_source(data)?;
+    let out = tree::source_yaml(data, &doc);
+    Ok((candidate_write_file_receipted(out)?, source))
+}
+
+/// The edit path also crosses this final write stage. Keep the original
+/// occurrence bindings through it before choosing any repaired output.
+pub(crate) fn candidate_write_file_receipted(
+    mut out: tree::ReceiptedYaml,
+) -> Result<tree::ReceiptedYaml, SaveError> {
+    let doc = tree::read_receipted(&out)?;
     if let Some(root) = doc.content.first()
         && is_v8_config_layout(root)?
     {
-        out = Cow::Owned(normalize_config_layout(data, true)?.0);
+        out = normalize_config_layout_receipted(out, true)?;
     }
-    Ok(normalize_comment_indentation(&out))
+    Ok(tree::normalize_receipted(out))
 }
 
 fn rebind_generated_comments(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
@@ -647,7 +668,8 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
     {
         field.value = generated_plugin_configs(configs)?;
     }
-    let (rendered, mut identities) = encode::marshal_with_comment_ids(&value)?;
+    let (rendered, mut identities, mut receipts) = encode::marshal_with_receipts(&value)?;
+    let mut receipt_bytes = rendered.clone();
     let mut generated = match compose::unmarshal(&rendered) {
         Ok(generated) => generated,
         Err(error) => {
@@ -661,14 +683,23 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
                 return Err(error.into());
             };
             repair_generated_plugin_nodes(plugins);
-            let (rendered, retry_ids) = encode::marshal_with_comment_ids(&value)?;
+            let (rendered, retry_ids, retry_receipts) = encode::marshal_with_receipts(&value)?;
             identities = retry_ids;
+            receipts = retry_receipts;
+            receipt_bytes = rendered.clone();
             compose::unmarshal(&rendered)?
         }
     };
     // Re-parsing generated YAML changes ownership/positions. Rebind only an
     // actual emitted occurrence with the exact output line and full comment.
     rebind_generated_comments(&mut generated, &identities);
+    tree::rebind_comment_receipts(
+        &mut generated,
+        &tree::ReceiptedYaml {
+            bytes: receipt_bytes,
+            receipts,
+        },
+    );
     if generated.kind != Kind::Document {
         return Err(invalid("invalid generated yaml structure"));
     }
@@ -761,7 +792,19 @@ pub(crate) fn render_preserving_comments(
     cfg: &Config,
     migrate_v8: bool,
 ) -> Result<Vec<u8>, SaveError> {
-    let mut original = unmarshal(data)?;
+    let (candidate, source) = candidate_preserving_comments(data, cfg, migrate_v8)?;
+    Ok(tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source) = candidate_preserving_comments(data, cfg, migrate_v8).ok()?;
+        Some(tree::finish_comment_owners_replay(&source, candidate))
+    }))
+}
+
+fn candidate_preserving_comments(
+    data: &[u8],
+    cfg: &Config,
+    migrate_v8: bool,
+) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
+    let (mut original, mut source) = tree::read_comment_source(data)?;
     if original.kind != Kind::Document || original.content.is_empty() {
         return Err(invalid("invalid yaml document structure"));
     }
@@ -814,11 +857,12 @@ pub(crate) fn render_preserving_comments(
         v8::retain_version_comment_owner(root)?;
     }
 
-    let mut out = normalize_comment_indentation(&marshal_config(&original)?);
+    source.include_copies(&original);
+    let mut out = tree::normalize_receipted(tree::marshal_config_receipted(&original)?);
     if migrating {
-        out = normalize_config_layout(&out, true)?.0;
+        out = normalize_config_layout_receipted(out, true)?;
     }
-    Ok(out)
+    Ok((out, source))
 }
 
 /// The bytes [`update_nested_scalar`] writes for the file `data`.
@@ -827,7 +871,19 @@ pub(crate) fn render_nested_scalar(
     keys: &[&str],
     value: &str,
 ) -> Result<Vec<u8>, SaveError> {
-    let mut doc = unmarshal(data)?;
+    let (candidate, source) = candidate_nested_scalar(data, keys, value)?;
+    Ok(tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source) = candidate_nested_scalar(data, keys, value).ok()?;
+        Some(tree::finish_comment_owners_replay(&source, candidate))
+    }))
+}
+
+fn candidate_nested_scalar(
+    data: &[u8],
+    keys: &[&str],
+    value: &str,
+) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
+    let (mut doc, mut source) = tree::read_comment_source(data)?;
     if doc.kind != Kind::Document || doc.content.is_empty() {
         return Err(invalid("invalid yaml document structure"));
     }
@@ -865,7 +921,11 @@ pub(crate) fn render_nested_scalar(
         }
         node = next;
     }
-    Ok(normalize_comment_indentation(&marshal_config(&doc)?))
+    source.include_copies(&doc);
+    Ok((
+        tree::normalize_receipted(tree::marshal_config_receipted(&doc)?),
+        source,
+    ))
 }
 
 #[cfg(test)]
@@ -2355,3 +2415,17 @@ mod review_r10_steer_tests;
 
 #[cfg(test)]
 mod review_r11_tests;
+
+#[cfg(test)]
+mod owner_tests;
+
+#[cfg(test)]
+mod owner_matrix_tests;
+
+#[cfg(all(test, feature = "parity"))]
+mod owner_evidence_tests;
+
+#[cfg(test)]
+mod owner_legacy_ops;
+#[cfg(test)]
+mod owner_legacy_tests;

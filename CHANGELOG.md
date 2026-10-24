@@ -115,6 +115,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
+- Keep config comments on their original settings and list items when a save would otherwise move them.
 - **Config writer flow-item foot comments** stay on their source items when multiple footed mappings precede an empty collection; these writes now succeed and settle in one write. CRLF version-comment paragraphs avoid an unnecessary separator.
 
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.

@@ -146,6 +146,33 @@ pub(crate) fn marshal_with_comment_ids(
     Ok((encoder.emitter.into_output(), ids))
 }
 
+/// Generated settings with both the legacy line IDs and occurrence sidecar.
+pub(crate) fn marshal_with_receipts(
+    value: &Value,
+) -> Result<
+    (
+        Vec<u8>,
+        Vec<super::CommentEmission>,
+        super::EmissionReceipts,
+    ),
+    YamlError,
+> {
+    let (bytes, ids) = marshal_with_comment_ids(value)?;
+    let mut encoder = Encoder::new();
+    if encoder
+        .encode(value)
+        .and_then(|()| encoder.finish())
+        .is_err()
+    {
+        return Ok((bytes, ids, super::EmissionReceipts::default()));
+    }
+    let mut receipts = encoder.emitter.take_receipts();
+    if encoder.emitter.into_output() != bytes {
+        receipts = super::EmissionReceipts::default();
+    }
+    Ok((bytes, ids, receipts))
+}
+
 /// Keep only pending key comments whose faithful recipient is the canonical
 /// version scalar. A preserved version comment would otherwise push them onto
 /// the next unrelated key. This dry pass never changes emitted scalar values.
@@ -193,17 +220,28 @@ pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), Ya
                 let value_pending = is_pending(value, value_serial);
                 let mut comments = Vec::new();
                 if key_pending {
-                    comments.push(std::mem::take(&mut key.line_comment));
+                    comments.push((
+                        std::mem::take(&mut key.line_comment),
+                        std::mem::take(&mut key.comment_receipts.line),
+                    ));
                     key.line_comment_id = None;
                 }
                 if value_pending {
-                    comments.push(std::mem::take(&mut value.line_comment));
+                    comments.push((
+                        std::mem::take(&mut value.line_comment),
+                        std::mem::take(&mut value.comment_receipts.line),
+                    ));
                     value.line_comment_id = None;
                 }
-                for comment in comments {
+                for (comment, mut receipts) in comments {
                     if !key.head_comment.is_empty() {
                         key.head_comment.push('\n');
                     }
+                    let base = key.head_comment.len();
+                    for span in &mut receipts {
+                        span.at += base;
+                    }
+                    key.comment_receipts.head.extend(receipts);
                     key.head_comment.push_str(&comment);
                 }
                 key_serial = value_serial + size(value);
@@ -232,6 +270,19 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
     Ok(encoder.emitter.into_output())
 }
 
+/// A local representation candidate, retaining its exact occurrence writes.
+pub(crate) fn faithful_node_receipted(
+    node: &Node,
+    indent: usize,
+) -> Result<(Vec<u8>, super::EmissionReceipts), YamlError> {
+    let mut encoder = Encoder::new();
+    encoder.set_indent(indent);
+    encoder.encode_node(node)?;
+    encoder.finish()?;
+    let receipts = encoder.emitter.take_receipts();
+    Ok((encoder.emitter.into_output(), receipts))
+}
+
 /// Quote live config scalars before their config emission. Archive emission
 /// uses its own all-tag quote rule before prefixing lines with comments.
 pub(crate) fn quote_config_unicode(n: &mut Node) {
@@ -253,6 +304,13 @@ pub(crate) fn protected_node(
     node: &Node,
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
+    protected_node_receipted(node, indent).map(|(bytes, marks, _)| (bytes, marks))
+}
+
+pub(crate) fn protected_node_receipted(
+    node: &Node,
+    indent: usize,
+) -> Result<(Vec<u8>, Vec<super::types::Mark>, super::EmissionReceipts), YamlError> {
     let mut node = node.clone();
     protect_pending_item_foot(&mut node);
     protect_conflicting_key_comments(&mut node, indent, true)?;
@@ -262,7 +320,8 @@ pub(crate) fn protected_node(
     encoder.encode_node(&node)?;
     encoder.finish()?;
     let protected = std::mem::take(&mut encoder.emitter.protected_scalars);
-    Ok((encoder.emitter.into_output(), protected))
+    let receipts = encoder.emitter.take_receipts();
+    Ok((encoder.emitter.into_output(), protected, receipts))
 }
 
 /// A mapping item's foot cannot reload on the item in block style: yaml.v3
@@ -388,6 +447,12 @@ pub(crate) fn protect_conflicting_key_comments(
                     if !key.head_comment.is_empty() {
                         key.head_comment.push('\n');
                     }
+                    let base = key.head_comment.len();
+                    let mut receipts = std::mem::take(&mut key.comment_receipts.line);
+                    for span in &mut receipts {
+                        span.at += base;
+                    }
+                    key.comment_receipts.head.extend(receipts);
                     key.head_comment
                         .push_str(&std::mem::take(&mut key.line_comment));
                 }
@@ -467,13 +532,23 @@ impl Encoder {
             .map_err(|error| YamlError::fail(error.message()))
     }
 
+    fn emit_receipted(
+        &mut self,
+        event: Event,
+        receipts: super::CommentReceipts,
+    ) -> Result<(), YamlError> {
+        self.emitter
+            .emit_receipted(event, receipts)
+            .map_err(|error| YamlError::fail(error.message()))
+    }
+
     pub(crate) fn encode_node(&mut self, node: &Node) -> Result<(), YamlError> {
         self.init()?;
         if node.kind == Kind::Document {
-            return self.node(node, "", false, 0);
+            return self.node(node, "", &[], false, 0);
         }
         self.emit(Event::document_start(None, Vec::new(), true))?;
-        self.node(node, "", false, 0)?;
+        self.node(node, "", &[], false, 0)?;
         self.emit(Event::document_end(true))
     }
 
@@ -502,7 +577,7 @@ impl Encoder {
         let depth = depth.saturating_add(1);
         match value {
             Value::Null => self.nilv(),
-            Value::Node(node) => self.node(node, "", false, depth),
+            Value::Node(node) => self.node(node, "", &[], false, depth),
             Value::Duration(nanos) => self.stringv(&duration_string(*nanos)),
             Value::Str(text) => self.stringv(text),
             Value::Bool(value) => self.plain(if *value { "true" } else { "false" }),
@@ -623,7 +698,12 @@ impl Encoder {
         event.empty_inline_value = std::mem::take(&mut self.empty_inline_value);
         event.empty_block_mapping_value = std::mem::take(&mut self.empty_block_mapping_value);
         event.empty_collection_value = std::mem::take(&mut self.empty_collection_value);
-        self.emit(event)
+        let mut receipts = comments.receipts.cloned().unwrap_or_default();
+        receipts.tail = comments.tail_receipts.to_vec();
+        if comments.drop_foot {
+            receipts.foot.clear();
+        }
+        self.emit_receipted(event, receipts)
     }
 
     /// `encoder.node`. With `drop_foot`, the node is written without its
@@ -633,6 +713,7 @@ impl Encoder {
         &mut self,
         node: &Node,
         tail: &str,
+        tail_receipts: &[super::ReceiptSpan],
         drop_foot: bool,
         depth: usize,
     ) -> Result<(), YamlError> {
@@ -695,13 +776,38 @@ impl Encoder {
             Kind::Document => {
                 let mut event = Event::document_start(None, Vec::new(), true);
                 event.head_comment = node.head_comment.as_bytes().to_vec();
-                self.emit(event)?;
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: node.comment_receipts.head.clone(),
+                        tail: tail_receipts.to_vec(),
+                        ..super::CommentReceipts::default()
+                    },
+                )?;
                 for child in &node.content {
-                    self.node(child, "", false, depth)?;
+                    self.node(child, "", &[], false, depth)?;
                 }
                 let mut event = Event::document_end(true);
                 event.foot_comment = foot.as_bytes().to_vec();
-                self.emit(event)
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: if node.kind == Kind::Alias {
+                            node.comment_receipts.head.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        line: node.comment_receipts.line.clone(),
+                        foot: if drop_foot {
+                            Vec::new()
+                        } else {
+                            node.comment_receipts.foot.clone()
+                        },
+                        tail: tail_receipts.to_vec(),
+                    },
+                )
             }
             Kind::Sequence => {
                 let style = if node.style.has(Style::FLOW) {
@@ -716,15 +822,40 @@ impl Encoder {
                     style,
                 );
                 event.head_comment = node.head_comment.as_bytes().to_vec();
-                self.emit(event)?;
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: node.comment_receipts.head.clone(),
+                        tail: tail_receipts.to_vec(),
+                        ..super::CommentReceipts::default()
+                    },
+                )?;
                 for child in &node.content {
-                    self.node(child, "", false, depth)?;
+                    self.node(child, "", &[], false, depth)?;
                 }
                 let mut event = Event::sequence_end();
                 event.line_comment = node.line_comment.as_bytes().to_vec();
                 event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
-                self.emit(event)
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: if node.kind == Kind::Alias {
+                            node.comment_receipts.head.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        line: node.comment_receipts.line.clone(),
+                        foot: if drop_foot {
+                            Vec::new()
+                        } else {
+                            node.comment_receipts.foot.clone()
+                        },
+                        tail: tail_receipts.to_vec(),
+                    },
+                )
             }
             Kind::Mapping => {
                 let style = if node.style.has(Style::FLOW) {
@@ -740,7 +871,15 @@ impl Encoder {
                 );
                 event.tail_comment = tail.as_bytes().to_vec();
                 event.head_comment = node.head_comment.as_bytes().to_vec();
-                self.emit(event)?;
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: node.comment_receipts.head.clone(),
+                        tail: tail_receipts.to_vec(),
+                        ..super::CommentReceipts::default()
+                    },
+                )?;
 
                 // The tail logic below moves the foot comment of prior keys
                 // to the following key, since the value for each key may be
@@ -748,6 +887,7 @@ impl Encoder {
                 // the entirety of the value is streamed. The last tail is
                 // processed with the mapping end event.
                 let mut tail = "";
+                let mut tail_ids: &[super::ReceiptSpan] = &[];
                 for [key, value] in node.content.as_chunks::<2>().0 {
                     let key_foot = key.foot_comment.as_str();
                     self.empty_block_mapping_value = key.kind == Kind::Scalar
@@ -762,9 +902,10 @@ impl Encoder {
                             && short_tag(&value.tag) == super::NULL_TAG
                             && value.value.is_empty())
                             || (value.kind == Kind::Mapping && value.content.is_empty()));
-                    self.node(key, tail, !key_foot.is_empty(), depth)?;
+                    self.node(key, tail, tail_ids, !key_foot.is_empty(), depth)?;
                     tail = key_foot;
-                    self.node(value, "", false, depth)?;
+                    tail_ids = &key.comment_receipts.foot;
+                    self.node(value, "", &[], false, depth)?;
                 }
 
                 let mut event = Event::mapping_end();
@@ -772,7 +913,24 @@ impl Encoder {
                 event.line_comment = node.line_comment.as_bytes().to_vec();
                 event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
-                self.emit(event)
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: if node.kind == Kind::Alias {
+                            node.comment_receipts.head.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        line: node.comment_receipts.line.clone(),
+                        foot: if drop_foot {
+                            Vec::new()
+                        } else {
+                            node.comment_receipts.foot.clone()
+                        },
+                        tail: tail_ids.to_vec(),
+                    },
+                )
             }
             Kind::Alias => {
                 let mut event = Event::alias(node.value.as_bytes().to_vec());
@@ -780,7 +938,24 @@ impl Encoder {
                 event.line_comment = node.line_comment.as_bytes().to_vec();
                 event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
-                self.emit(event)
+                self.emit_receipted(
+                    event,
+                    super::CommentReceipts {
+                        owner: node.comment_receipts.owner.clone(),
+                        head: if node.kind == Kind::Alias {
+                            node.comment_receipts.head.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        line: node.comment_receipts.line.clone(),
+                        foot: if drop_foot {
+                            Vec::new()
+                        } else {
+                            node.comment_receipts.foot.clone()
+                        },
+                        tail: tail_receipts.to_vec(),
+                    },
+                )
             }
             Kind::Scalar => {
                 let style = if node.style.has(Style::DOUBLE_QUOTED) {
@@ -805,6 +980,9 @@ impl Encoder {
                     style,
                     Comments {
                         node_id,
+                        receipts: Some(&node.comment_receipts),
+                        tail_receipts,
+                        drop_foot,
                         line_id: node.line_comment_id.as_ref(),
                         head: &node.head_comment,
                         line: &node.line_comment,
@@ -827,6 +1005,9 @@ impl Encoder {
 #[derive(Clone, Copy, Default)]
 struct Comments<'a> {
     node_id: usize,
+    receipts: Option<&'a super::CommentReceipts>,
+    tail_receipts: &'a [super::ReceiptSpan],
+    drop_foot: bool,
     line_id: Option<&'a super::CommentId>,
     mark: super::types::Mark,
     head: &'a str,

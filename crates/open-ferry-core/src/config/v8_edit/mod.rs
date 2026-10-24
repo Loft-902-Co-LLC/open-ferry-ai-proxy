@@ -330,8 +330,26 @@ fn rendered_error(error: save::SaveError) -> V8EditError {
 /// The bytes [`edit_v8`] writes for the file `data`, and the config they
 /// load as.
 pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8EditError> {
-    let (mut doc, _) =
-        save_step!(stored, normalize_config_layout_doc(data, true)).map_err(stored_error)?;
+    let (candidate, source, config) = render_candidate(data, edit)?;
+    let bytes = save::tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source, _) = render_candidate(data, edit).ok()?;
+        Some(save::tree::finish_comment_owners_replay(&source, candidate))
+    });
+    Ok((bytes, config))
+}
+
+fn render_candidate(
+    data: &[u8],
+    edit: &V8Edit,
+) -> Result<(save::tree::ReceiptedYaml, save::tree::CommentSource, Config), V8EditError> {
+    let (mut doc, _, mut source) = if save::tree::owner_protection_enabled() {
+        save_step!(stored, save::normalize_config_layout_source(data, true))
+            .map_err(stored_error)?
+    } else {
+        let (doc, changed) =
+            save_step!(stored, normalize_config_layout_doc(data, true)).map_err(stored_error)?;
+        (doc, changed, save::tree::CommentSource::default())
+    };
     let Some(root) = doc.content.first_mut() else {
         return Err(V8EditError::StoredInvalid("empty config".to_owned()));
     };
@@ -347,7 +365,9 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         }
         None
     } else {
-        Some(apply_body(root, &parts, edit)?)
+        let (replacement, body_source) = apply_body_receipted(root, &parts, edit)?;
+        source.append(body_source);
+        Some(replacement)
     };
     normalize_v8_config_aliases(root).map_err(V8EditError::InvalidConfig)?;
     if !edit.yaml && edit.method != V8Method::Delete {
@@ -368,18 +388,140 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         && parts.is_empty()
         && let Some(replacement) = replacement
     {
+        doc.comment_receipts.owner = replacement.comment_receipts.owner;
+        doc.comment_receipts.head = replacement.comment_receipts.head;
+        doc.comment_receipts.foot = replacement.comment_receipts.foot;
         doc.head_comment = replacement.head_comment;
         doc.foot_comment = replacement.foot_comment;
     }
     // Generated intermediates must already agree in the loader and writer.
     super::yaml3::encode::quote_config_unicode(&mut doc);
-    let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
-    let config =
-        Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
-    validate_v8_config(&data).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
-    let (data, _) =
-        save_step!(rendered, normalize_config_layout(&data, true)).map_err(rendered_error)?;
-    Ok((data, config))
+    source.include_copies(&doc);
+    let emitted = if save::tree::owner_protection_enabled() {
+        save::tree::marshal_receipted(&doc, 4)
+            .map_err(|error| V8EditError::InvalidConfig(error.to_string()))?
+    } else {
+        save::tree::ReceiptedYaml {
+            bytes: marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?,
+            receipts: Default::default(),
+        }
+    };
+    let config = Config::parse(&emitted.bytes)
+        .map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
+    validate_v8_config(&emitted.bytes)
+        .map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
+    let rendered = if save::tree::owner_protection_enabled() {
+        save_step!(
+            rendered,
+            save::normalize_config_layout_receipted(emitted, true)
+        )
+        .map_err(rendered_error)?
+    } else {
+        let (bytes, _) = save_step!(rendered, normalize_config_layout(&emitted.bytes, true))
+            .map_err(rendered_error)?;
+        save::tree::ReceiptedYaml {
+            bytes,
+            receipts: Default::default(),
+        }
+    };
+    // edit_v8 and preview_v8 both finish with WriteConfig. Its normalizer
+    // must use the original edit source owners, rather than treating an
+    // already drifted intermediate recipient as a new source owner.
+    let rendered = if save::tree::owner_protection_enabled() {
+        save_step!(rendered, save::candidate_write_file_receipted(rendered))
+            .map_err(rendered_error)?
+    } else {
+        rendered
+    };
+    Ok((rendered, source, config))
+}
+
+/// Run the existing edit unchanged, then transport metadata through the same
+/// structural patch/replacement choices. No comment text is used as identity.
+fn apply_body_receipted(
+    root: &mut Node,
+    parts: &[&str],
+    edit: &V8Edit,
+) -> Result<(Node, save::tree::CommentSource), V8EditError> {
+    let before = root.clone();
+    let mut replacement = apply_body(root, parts, edit)?;
+    if !save::tree::owner_protection_enabled() {
+        return Ok((replacement, Default::default()));
+    }
+    let Ok((mut update, mut source)) = save::tree::read_comment_source(&edit.body) else {
+        return Ok((replacement, Default::default()));
+    };
+    strip_auth_indexes_from_update(parts, &mut update);
+    replacement.comment_receipts = update.comment_receipts.clone();
+    let Some(mut value) = update.content.into_iter().next() else {
+        return Ok((replacement, Default::default()));
+    };
+    if parts.is_empty() {
+        normalize_v8_config_aliases(&mut value).map_err(V8EditError::InvalidConfig)?;
+    }
+    fn carry(dst: &mut Node, src: &Node, complete: &mut bool) {
+        if dst.kind != src.kind || dst.content.len() != src.content.len() {
+            *complete = false;
+            return;
+        }
+        dst.comment_receipts = src.comment_receipts.clone();
+        dst.comment_key_owner = src.comment_key_owner.clone();
+        for (dst, src) in dst.content.iter_mut().zip(&src.content) {
+            carry(dst, src, complete);
+        }
+    }
+    fn patch(
+        dst: &mut Node,
+        old: Option<&Node>,
+        value: &Node,
+        is_patch: bool,
+        complete: &mut bool,
+    ) {
+        if is_patch
+            && let Some(old) = old
+            && old.kind == Kind::Mapping
+            && value.kind == Kind::Mapping
+        {
+            for (key, value) in value.pairs() {
+                let Some(i) = find_map_key_index(dst, &key.value) else {
+                    *complete = false;
+                    continue;
+                };
+                let previous = find_map_key_index(old, &key.value);
+                if previous.is_none() {
+                    carry(&mut dst.content[i], key, complete);
+                }
+                patch(
+                    &mut dst.content[i + 1],
+                    previous.map(|i| &old.content[i + 1]),
+                    value,
+                    true,
+                    complete,
+                );
+            }
+        } else if let Some(old) = old
+            && old.kind == Kind::Scalar
+            && value.kind == Kind::Scalar
+        {
+            dst.comment_receipts = old.comment_receipts.clone();
+            dst.comment_key_owner = old.comment_key_owner.clone();
+        } else {
+            carry(dst, value, complete);
+        }
+    }
+    if let Some(dst) = config_v8_node_mut(root, parts) {
+        patch(
+            dst,
+            config_v8_node(&before, parts),
+            &value,
+            edit.method == V8Method::Patch,
+            &mut source.complete,
+        );
+    } else {
+        source.complete = false;
+    }
+    source.include_copies(root);
+    Ok((replacement, source))
 }
 
 /// A `PUT` or `PATCH`: reads the body and puts it at the path.
@@ -719,6 +861,14 @@ fn strip_auth_indexes_from_update(parts: &[&str], update: &mut Node) {
         ["api-keys", ..] => strip_auth_indexes_from_groups(node),
         _ => {}
     }
+}
+
+#[cfg(test)]
+pub(crate) fn owner_audit_candidate(
+    data: &[u8],
+    edit: &V8Edit,
+) -> Result<(save::tree::ReceiptedYaml, save::tree::CommentSource), V8EditError> {
+    render_candidate(data, edit).map(|(candidate, source, _)| (candidate, source))
 }
 
 #[cfg(test)]

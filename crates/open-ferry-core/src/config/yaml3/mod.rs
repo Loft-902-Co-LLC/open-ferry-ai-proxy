@@ -194,6 +194,10 @@ pub(crate) struct Node {
     /// A document's root, a sequence's items, or a mapping's keys and
     /// values in turn.
     pub(crate) content: Vec<Node>,
+    /// Per-occurrence source receipts, independent of the current recipient.
+    pub(crate) comment_receipts: CommentReceipts,
+    /// A moved setting carries its mapping key correspondence as well.
+    pub(crate) comment_key_owner: Option<CommentId>,
     /// The comments before the node.
     pub(crate) head_comment: String,
     /// The comment after the node on its line.
@@ -227,6 +231,17 @@ impl CommentId {
         }
     }
 
+    pub(crate) fn in_scope_of(&self, other: &Self) -> Self {
+        Self {
+            source: self.source.clone(),
+            aliases: other.aliases.clone(),
+        }
+    }
+
+    pub(crate) fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source)
+    }
+
     pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
         let mut copy = self.clone();
         copy.aliases.extend_from_slice(scopes);
@@ -246,6 +261,88 @@ impl PartialEq for CommentId {
     }
 }
 impl Eq for CommentId {}
+
+/// The source slot of a physical comment occurrence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommentSlot {
+    Head,
+    Line,
+    Foot,
+}
+
+/// One occurrence's source owner; never recovered by matching its text.
+#[derive(Clone, Debug)]
+pub(crate) struct CommentReceipt {
+    pub(crate) id: CommentId,
+    pub(crate) owner: CommentId,
+    pub(crate) slot: CommentSlot,
+    pub(crate) ordinal: usize,
+}
+
+/// A receipt's byte position inside a node's current comment string.
+#[derive(Clone, Debug)]
+pub(crate) struct ReceiptSpan {
+    pub(crate) at: usize,
+    pub(crate) receipt: CommentReceipt,
+}
+
+/// Node/event/pending-buffer companions; tails are deferred mapping-key feet.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CommentReceipts {
+    pub(crate) owner: Option<CommentId>,
+    pub(crate) head: Vec<ReceiptSpan>,
+    pub(crate) line: Vec<ReceiptSpan>,
+    pub(crate) foot: Vec<ReceiptSpan>,
+    pub(crate) tail: Vec<ReceiptSpan>,
+}
+
+impl CommentReceipts {
+    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+        fn copies(spans: &[ReceiptSpan], scopes: &[Arc<()>]) -> Vec<ReceiptSpan> {
+            spans
+                .iter()
+                .map(|span| ReceiptSpan {
+                    at: span.at,
+                    receipt: CommentReceipt {
+                        id: span.receipt.id.in_aliases(scopes),
+                        owner: span.receipt.owner.in_aliases(scopes),
+                        slot: span.receipt.slot,
+                        ordinal: span.receipt.ordinal,
+                    },
+                })
+                .collect()
+        }
+        Self {
+            owner: self.owner.as_ref().map(|id| id.in_aliases(scopes)),
+            head: copies(&self.head, scopes),
+            line: copies(&self.line, scopes),
+            foot: copies(&self.foot, scopes),
+            tail: copies(&self.tail, scopes),
+        }
+    }
+}
+
+/// Exact bytes written for one occurrence, excluding its terminating break.
+#[derive(Clone, Debug)]
+pub(crate) struct ReceiptEmission {
+    pub(crate) offset: usize,
+    pub(crate) length: usize,
+    pub(crate) receipt: CommentReceipt,
+}
+
+/// Structural node correspondence in this emission's event stream.
+#[derive(Clone, Debug)]
+pub(crate) struct NodeOwnerEmission {
+    pub(crate) path: Vec<usize>,
+    pub(crate) owner: CommentId,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EmissionReceipts {
+    pub(crate) comments: Vec<ReceiptEmission>,
+    pub(crate) owners: Vec<NodeOwnerEmission>,
+    pub(crate) overwritten: Vec<ReceiptSpan>,
+}
 
 /// Actual emitted occurrence, allowing a generated YAML parse to retain lineage.
 pub(crate) struct CommentEmission {
