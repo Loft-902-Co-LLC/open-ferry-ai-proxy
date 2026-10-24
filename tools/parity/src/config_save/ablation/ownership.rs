@@ -48,7 +48,7 @@ pub(super) fn analyze(
             written,
             &case.options["steps"][index],
             evidence,
-            observed,
+            observed && go.is_none(),
         )
     } else if go.is_none() && !observed {
         core::unobserved_comment_ownership(source, protected)
