@@ -1,7 +1,9 @@
 """Not upstream's: verify a no-feature release library contains no fault hooks.
-Run with python -I check-release.py <cargo-build.json> after cargo build
---release -p open-ferry-supervisor --lib --no-default-features --message-format=json.
+Run with python -I check-release.py <cargo-build.json> after
+CARGO_PROFILE_RELEASE_LTO=off cargo build --release -p open-ferry-supervisor
+--lib --no-default-features --message-format=json.
 Positive control: build with --features blue-green-test and run with --self-test.
+Keep LTO off for both scans: bitcode does not store these strings as plain bytes.
 The input must be the output of that successful build, not a directory of old artifacts.
 """
 import json
@@ -33,8 +35,57 @@ REQUIRED = (
 )
 
 
-def scan(artifact):
-    content = artifact.read_bytes()
+def require_machine_code(content):
+    if not content.startswith(b"!<arch>\n"):
+        raise ValueError("release library is not an ar archive")
+    offset = 8
+    members = []
+    long_names = b""
+    while offset < len(content):
+        header = content[offset:offset + 60]
+        if len(header) != 60 or header[58:60] != b"`\n" or not header[48:58].strip().isdigit():
+            raise ValueError("invalid ar member header in release library")
+        size = int(header[48:58])
+        start = offset + 60
+        end = start + size
+        if end + size % 2 > len(content):
+            raise ValueError("truncated ar member in release library")
+        name = header[:16].rstrip(b" ")
+        data = content[start:end]
+        if name == b"//":
+            long_names = data
+        else:
+            members.append((name, data))
+        offset = end + size % 2
+
+    objects = 0
+    machine_code = False
+    for name, data in members:
+        if name.startswith(b"#1/"):
+            # BSD stores the long name at the start of the member's data.
+            if not name[3:].isdigit() or int(name[3:]) > len(data):
+                raise ValueError("invalid BSD ar member name in release library")
+            length = int(name[3:])
+            name, data = data[:length].rstrip(b"\0"), data[length:]
+        elif name.startswith(b"/") and name[1:].isdigit():
+            # GNU/COFF stores long names in //, referenced by byte offset.
+            index = int(name[1:])
+            if index >= len(long_names):
+                raise ValueError("invalid GNU ar member name in release library")
+            name = long_names[index:].split(b"\n", 1)[0].split(b"\0", 1)[0].rstrip(b"/")
+        else:
+            name = name.rstrip(b"/")
+        if name.endswith(b".o"):
+            objects += 1
+            if not data.startswith((b"BC\xC0\xDE", b"\xDE\xC0\x17\x0B")):
+                machine_code = True
+    if not objects:
+        raise ValueError("no object members found in release library")
+    if not machine_code:
+        raise ValueError("library was built with LTO, so its code is LLVM bitcode, where these strings aren't plain bytes; build it with CARGO_PROFILE_RELEASE_LTO=off")
+
+
+def scan(artifact, content):
     found = [text.decode("ascii") for text in FORBIDDEN if text in content]
     if found:
         raise ValueError(f"fault hooks found in {artifact.name}: {', '.join(found)}")
@@ -63,13 +114,17 @@ def main():
     if not artifacts:
         raise SystemExit("no release library found in this Cargo build")
     for artifact in artifacts:
+        content = artifact.read_bytes()
+        try:
+            require_machine_code(content)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         if positive:
-            content = artifact.read_bytes()
             missing = [text.decode("ascii") for text in REQUIRED if text not in content]
             if missing:
                 raise SystemExit(f"positive control missing required hooks: {', '.join(missing)}")
         try:
-            scan(artifact)
+            scan(artifact, content)
         except ValueError as error:
             if not positive:
                 raise SystemExit(str(error)) from error

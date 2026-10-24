@@ -192,7 +192,10 @@ jobs:
           PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
         run: |
           set -euo pipefail
-          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --message-format=json > "$RUNNER_TEMP/supervisor-build.json"
+          # The .rlib scan needs machine code; LTO leaves bitcode in it.
+          # Feature gating is independent of LTO. The binary below is scanned
+          # as shipped, with the workspace's LTO profile.
+          CARGO_PROFILE_RELEASE_LTO=off cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --message-format=json > "$RUNNER_TEMP/supervisor-build.json"
           "$PYTHON" -I crates/open-ferry-supervisor/check-release.py "$RUNNER_TEMP/supervisor-build.json"
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --message-format=json > "$RUNNER_TEMP/open-ferry-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py "$RUNNER_TEMP/open-ferry-build.json"
@@ -251,7 +254,10 @@ jobs:
           suffix=
           if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
           "$PYTHON" -I crates/open-ferry-update/tests/check_release_seams.py --self-test "target/release/examples/release-seam-check$suffix"
-          cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
+          # The .rlib scan needs machine code; LTO leaves bitcode in it.
+          # Feature gating is independent of LTO. The binary below is scanned
+          # as shipped, with the workspace's LTO profile.
+          CARGO_PROFILE_RELEASE_LTO=off cargo build --release --locked -p open-ferry-supervisor --lib --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/supervisor-feature-build.json"
           "$PYTHON" -I crates/open-ferry-supervisor/check-release.py --self-test "$RUNNER_TEMP/supervisor-feature-build.json"
           cargo build --release --locked -p open-ferry --bin open-ferry --no-default-features --features blue-green-test --message-format=json > "$RUNNER_TEMP/open-ferry-feature-build.json"
           "$PYTHON" -I crates/open-ferry/check-release.py --self-test "$RUNNER_TEMP/open-ferry-feature-build.json"

@@ -181,7 +181,11 @@ pub fn mark(router: axum::Router, marker: &str) -> axum::Router {
             let value = value.clone();
             async move {
                 let mut response = next.run(request).await;
-                response.headers_mut().insert(MARKER_HEADER, value);
+                // The release scan needs this name as plain bytes; LTO can
+                // otherwise build it from immediate values.
+                response
+                    .headers_mut()
+                    .insert(std::hint::black_box(MARKER_HEADER), value);
                 response
             }
         },
