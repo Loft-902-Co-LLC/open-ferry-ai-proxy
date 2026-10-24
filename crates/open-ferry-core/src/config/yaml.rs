@@ -20,9 +20,9 @@
 //! it when it writes the tree out and reads it back, and
 //! [`from_writer_node`] turns a tree of the config writer
 //! ([`super::yaml3`]) into one of these, so it can be decoded as upstream
-//! decodes its writer's trees. Inputs containing NEL, LS or PS use that parser
-//! too, so scalars, comments and document boundaries follow yaml.v3. Other
-//! inputs keep the `saphyr-parser` scanner.
+//! decodes its writer's trees. Inputs with NEL, LS, PS or repeated leading
+//! BOMs use that parser with their original bytes. Other inputs keep the
+//! `saphyr-parser` scanner.
 //!
 //! An alias expands to a copy of its anchor's node that shares the
 //! anchor's text, so the tree takes memory in proportion to the input
@@ -34,7 +34,7 @@
 //! which may be a secret.
 //!
 //! Deviations from upstream:
-//! - Without NEL, LS or PS, syntax error wording is saphyr's, as
+//! - On the saphyr path, syntax error wording is saphyr's, as
 //!   `yaml: line N: <message>`; only the line matches yaml.v3. saphyr also
 //!   accepts a few inputs yaml.v3 rejects,
 //!   such as a tab before a top-level key, and rejects a few it accepts,
@@ -48,7 +48,7 @@
 //! - An alias cycle or excessive aliasing under a key that the decode pass
 //!   skips (a null key) is still an error, and keys read after excessive
 //!   aliasing is detected aren't checked for duplicates.
-//! - Without NEL, LS or PS, flow collections nest at most 255 deep
+//! - On the saphyr path, flow collections nest at most 255 deep
 //!   (saphyr's limit). The yaml.v3 parser path keeps the 256-level limit.
 //! - `strconv.Quote`'s notion of a printable rune is approximated: control
 //!   characters, white space other than U+0020 and the common format
@@ -63,14 +63,14 @@
 //!   that aliases expanded to add up to more than 64 MiB. yaml.v3 shares a
 //!   Go string between its copies and has no such limit, beyond its ratio
 //!   of aliases to nodes, which applies here too.
-//! - Without NEL, LS or PS, an alias used as a mapping key with the `:`
+//! - On the saphyr path, an alias used as a mapping key with the `:`
 //!   right after its name (`*k: v`) is read as yaml.v3 reads it only when
 //!   the `:` is followed by
 //!   a space, a line break or the end of the input. saphyr takes the `:` as
 //!   part of the name, so the others (`{*k:1}`, `[*k:]`) are an `unknown
 //!   anchor` error.
 //! - The yaml.v3 parser path limits copied alias targets to 1,048,576
-//!   nodes before conversion, in addition to the shared alias limits.
+//!   nodes and 64 MiB of owned text, checked before cloning.
 //!   Invalid UTF-8 bytes in escaped tags become U+FFFD, as in the writer.
 
 use std::cell::Cell;
