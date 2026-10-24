@@ -282,6 +282,11 @@ minimality, and the comparison outside protected comments still apply. The
 oracle never reads the protected output. Its evidence is saved with the proof;
 an unavailable oracle supplies no allowance.
 
+Sequence identities use alias-expanded values on all sides while output
+occurrence inventories remain physical. An anchor followed by an alias
+therefore has the same identity as its expanded control. The strict stability
+filter still rejects a comment moved to another item or a changed sequence.
+
 Generated archive comments have a separate budget. An observer at the pin's
 `commentUnknownV8Fields` archive construction binds each generated line to the
 exact parsed source key and entry. Save replays include the real intermediate
