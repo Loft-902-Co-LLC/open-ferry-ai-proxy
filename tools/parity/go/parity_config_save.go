@@ -43,10 +43,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,9 +62,13 @@ type configSaveStep struct {
 }
 
 type configSaveOptions struct {
-	File  string           `json:"file"`
-	Trace bool             `json:"_ablation_trace"`
-	Steps []configSaveStep `json:"steps"`
+	File      string           `json:"file"`
+	Trace     bool             `json:"_ablation_trace"`
+	Steps     []configSaveStep `json:"steps"`
+	Ownership *struct {
+		Source    string         `json:"source"`
+		Operation map[string]any `json:"operation"`
+	} `json:"_ownership_request"`
 }
 
 func init() {
@@ -70,9 +76,18 @@ func init() {
 }
 
 func configSaveSteps(in input) []byte {
+	// The structured reply retains errors and proof data. Upstream warnings
+	// can echo config values; never send those to the parity run's log.
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	logger.SetOutput(io.Discard)
+	defer logger.SetOutput(previousOutput)
 	var options configSaveOptions
 	if err := json.Unmarshal(in.Options, &options); err != nil {
 		panic(err)
+	}
+	if options.Ownership != nil {
+		return configSaveJSON(config.ParityOwnership(options.Ownership.Source, options.Ownership.Operation))
 	}
 	dir, err := os.MkdirTemp("", "open-ferry-parity-config-save-")
 	if err != nil {
