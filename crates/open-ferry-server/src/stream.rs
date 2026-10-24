@@ -183,12 +183,23 @@ pub(crate) fn pre_first_token_interval(config: &StreamingConfig) -> Option<Durat
 }
 
 /// Headers available when a keepalive commits the response.
-#[derive(Clone, Default)]
-pub(crate) struct CommitHeaders(std::sync::Arc<std::sync::Mutex<HeaderMap>>);
+#[derive(Clone)]
+pub(crate) struct CommitHeaders(Option<std::sync::Arc<std::sync::Mutex<HeaderMap>>>);
 
 impl CommitHeaders {
+    /// Only a pre-first-token ticker can use these headers.
+    pub(crate) fn new(interval: Option<Duration>) -> Self {
+        Self(
+            interval
+                .filter(|period| !period.is_zero())
+                .map(|_| Default::default()),
+        )
+    }
+
     pub(crate) fn set(&self, headers: &HeaderMap) {
-        *self.0.lock().unwrap() = headers.clone();
+        if let Some(shared) = &self.0 {
+            *shared.lock().unwrap() = headers.clone();
+        }
     }
 }
 
@@ -258,7 +269,10 @@ where
             }
         }
     });
-    sse_response(&headers.0.lock().unwrap(), Body::from_stream(body))
+    let headers = headers
+        .0
+        .expect("pre-first-token ticker has commit headers");
+    sse_response(&headers.lock().unwrap(), Body::from_stream(body))
 }
 
 /// A 200 event stream: the SSE headers, then the provider's headers that
@@ -383,6 +397,70 @@ pub(crate) mod tests {
     use http_body_util::BodyExt;
 
     pub(crate) mod pre_first_token;
+
+    #[test]
+    fn disabled_commit_headers_allocate_nothing() {
+        let mut upstream = HeaderMap::new();
+        upstream.insert("x-request-id", HeaderValue::from_static("upstream"));
+        crate::allocation_probe::start();
+        for interval in [None, Some(Duration::ZERO)] {
+            let headers = CommitHeaders::new(interval);
+            let copy = headers.clone();
+            copy.set(&upstream);
+        }
+        assert_eq!(crate::allocation_probe::finish(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_pre_first_token_preserves_upstream_headers_without_shared_state() {
+        for interval in [None, Some(Duration::ZERO)] {
+            let shared = CommitHeaders::new(interval);
+            assert!(shared.0.is_none());
+            let mut upstream = HeaderMap::new();
+            upstream.insert("x-request-id", HeaderValue::from_static("upstream"));
+            shared.set(&upstream);
+            let response = pre_first_token(
+                interval,
+                shared,
+                async move { upstream },
+                |headers, committed| {
+                    assert!(!committed);
+                    sse_response(&headers, Body::from("data: upstream\n\n"))
+                },
+            )
+            .await;
+            assert_eq!(response.headers()["x-request-id"], "upstream");
+            assert_eq!(collect(response.into_body()).await, "data: upstream\n\n");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_first_token_commits_available_upstream_headers() {
+        let interval = Some(Duration::from_secs(1));
+        let shared = CommitHeaders::new(interval);
+        let available = shared.clone();
+        let response = pre_first_token(
+            interval,
+            shared,
+            async move {
+                let mut headers = HeaderMap::new();
+                headers.insert("x-request-id", HeaderValue::from_static("upstream"));
+                available.set(&headers);
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                headers
+            },
+            |headers, committed| {
+                assert!(committed);
+                sse_response(&headers, Body::from("data: upstream\n\n"))
+            },
+        )
+        .await;
+        assert_eq!(response.headers()["x-request-id"], "upstream");
+        assert_eq!(
+            collect(response.into_body()).await,
+            ": keep-alive\n\n: keep-alive\n\ndata: upstream\n\n"
+        );
+    }
 
     struct Lines;
 

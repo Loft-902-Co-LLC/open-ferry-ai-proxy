@@ -157,7 +157,7 @@ pub(crate) async fn action(
     if method == Method::Stream {
         let sse = alt.is_empty();
         let call = Call::new(&state, &client, Format::GEMINI, &model, raw, &alt, true);
-        let commit_headers = crate::stream::CommitHeaders::default();
+        let commit_headers = crate::stream::CommitHeaders::new(pre_ft.filter(|_| sse));
         let upstream_headers = commit_headers.clone();
         let first = async move {
             let started = match call {

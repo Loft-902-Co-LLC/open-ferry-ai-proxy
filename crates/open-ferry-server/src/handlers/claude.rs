@@ -75,7 +75,7 @@ pub(crate) async fn messages(
     }
 
     let call = Call::new(&state, &client, Format::CLAUDE, &model, raw, "", true);
-    let commit_headers = crate::stream::CommitHeaders::default();
+    let commit_headers = crate::stream::CommitHeaders::new(pre_ft);
     let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = match call {
@@ -156,6 +156,8 @@ fn gunzip(body: Bytes) -> Bytes {
     }
 }
 
+const OBSERVATION_REUSE_LIMIT: usize = 8 << 10;
+
 /// Writes a Claude event stream: payloads as they are, and an `error`
 /// event at the end of one that fails.
 struct ClaudeWriter {
@@ -188,8 +190,17 @@ impl Default for ClaudeWriter {
 
 impl ClaudeWriter {
     fn observe_line(&mut self) {
-        let line = std::mem::take(&mut self.line);
-        let line = open_ferry_translate::go::trim_space(&line);
+        let mut line = std::mem::take(&mut self.line);
+        self.observe_line_bytes(&line);
+        line.clear();
+        // A large event must not pin its peak capacity for the stream's life.
+        if line.capacity() <= OBSERVATION_REUSE_LIMIT {
+            self.line = line;
+        }
+    }
+
+    fn observe_line_bytes(&mut self, line: &[u8]) {
+        let line = open_ferry_translate::go::trim_space(line);
         let line_overflow = std::mem::take(&mut self.line_overflow);
         if line.is_empty() && !line_overflow {
             self.flush_event();
@@ -202,7 +213,8 @@ impl ClaudeWriter {
             return;
         }
         if let Some(event) = line.strip_prefix(b"event:") {
-            self.event = String::from_utf8_lossy(event).trim().to_owned();
+            self.event.clear();
+            self.event.push_str(String::from_utf8_lossy(event).trim());
         } else if let Some(data) = line.strip_prefix(b"data:") {
             let data = open_ferry_translate::go::trim_space(data);
             if self.data.len() + data.len() < MAX_LINE {
@@ -243,9 +255,16 @@ impl ClaudeWriter {
     }
 
     fn flush_event(&mut self) {
-        let data = std::mem::take(&mut self.data);
+        let mut data = std::mem::take(&mut self.data);
         if !self.observation_overflow && !data.is_empty() {
             self.observe_json(&data, true);
+        }
+        data.clear();
+        if data.capacity() <= OBSERVATION_REUSE_LIMIT {
+            self.data = data;
+        }
+        if self.event.capacity() > OBSERVATION_REUSE_LIMIT {
+            self.event = String::new();
         }
     }
 
@@ -535,3 +554,6 @@ mod truncation_tests {
         assert_eq!(&out[..], b"event: error\ndata: {\"type\":\"error\"}\n\n");
     }
 }
+
+#[cfg(test)]
+mod classification_tests;

@@ -108,7 +108,7 @@ pub(crate) async fn interactions(
     let call = new_call(&state, &client, &target, &model, raw);
 
     if target.stream {
-        let commit_headers = crate::stream::CommitHeaders::default();
+        let commit_headers = crate::stream::CommitHeaders::new(pre_ft);
         let upstream_headers = commit_headers.clone();
         let first = async move {
             let started = match call {

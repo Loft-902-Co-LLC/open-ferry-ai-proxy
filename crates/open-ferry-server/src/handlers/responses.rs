@@ -196,7 +196,7 @@ async fn respond_streaming(
     );
     let codex = is_codex_client(&client.headers);
     let context = client.context.clone();
-    let commit_headers = crate::stream::CommitHeaders::default();
+    let commit_headers = crate::stream::CommitHeaders::new(pre_ft);
     let upstream_headers = commit_headers.clone();
     let first = async move {
         let started = match call {
