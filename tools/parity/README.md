@@ -276,6 +276,10 @@ merge, list reorder and layout operations. Generated nodes have no source IDs.
 The proof binds the complete source bytes and operation, and replaces a source
 slot only with its unique surviving destination (path, key/value/item side,
 and head/line/foot slot). Equal comment text never establishes a destination.
+When Go loses a key comment during regrouping, its associated source value
+identity must still survive at that exact entry path; only its original
+key-side slot receives a budget. Opaque comment-copy IDs cannot name a path
+where the associated value identity did not survive.
 Deleted identities receive no relocation slot; an unmoved path keeps the strict
 sequence-identity rule. Counts, ordering, value proofs, complete byte binding,
 minimality, and the comparison outside protected comments still apply. The
