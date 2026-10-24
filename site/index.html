@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Open Ferry is a pre-alpha local proxy for coding agents. Explore sample routing, check compatibility, and build from source.">
+  <title>Open Ferry — dependable routes for coding agents</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="index.html" aria-label="Open Ferry home"><span class="wordmark" aria-hidden="true">of/</span> Open Ferry</a>
+    <nav aria-label="Main navigation">
+      <a href="#compatibility">Compatibility</a>
+      <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md">Docs</a>
+      <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow status" data-claim="status"><span class="status-mark" aria-hidden="true"></span> Pre-alpha · 0.1.0 isn’t out yet</p>
+        <!-- HERO COPY: draft 1. Keep this headline and supporting line together when swapping drafts. -->
+        <h1 id="hero-title">Dependable routes for coding agents.<br><span>Clear reasons when they stop.</span></h1>
+        <p class="hero-description" data-claim="hero">Route through your own accounts, recover from startup failures, and see when an account needs attention.</p>
+        <!-- END HERO COPY -->
+        <div class="hero-actions">
+          <a class="button primary" href="#setup">Start locally <span aria-hidden="true">↗</span></a>
+          <a class="button secondary" href="#demo">Explore a request <span aria-hidden="true">↓</span></a>
+        </div>
+        <ul class="facts" aria-label="Project facts" data-claim="facts">
+          <li>Open source</li><li><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/LICENSE">MIT licensed</a></li><li>Runs on your machine</li>
+        </ul>
+      </div>
+      <aside class="hero-aside" aria-label="Project orientation">
+        <span class="large-mark" aria-hidden="true">of/</span>
+        <p class="mono">YOUR TOOL.<br>YOUR ACCOUNTS.<br>A ROUTE YOU CAN FOLLOW.</p>
+        <p data-claim="port">A Rust port of CLIProxyAPI, with a local credential manager.</p>
+        <a class="text-link" href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/UPSTREAM.md">Read the porting notes <span aria-hidden="true">↗</span></a>
+      </aside>
+    </section>
+
+    <section class="formats wrap" aria-labelledby="formats-title">
+      <h2 class="eyebrow" id="formats-title">Client API formats</h2>
+      <ul data-claim="formats"><li>OpenAI Responses</li><li>Chat Completions</li><li>Claude Messages</li><li>Gemini</li></ul>
+      <a href="#compatibility">Check the limits <span aria-hidden="true">↓</span></a>
+    </section>
+
+    <section class="demo-section wrap" id="demo" aria-labelledby="demo-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">01 / Follow the route</p><h2 id="demo-title">One request. Three outcomes.</h2></div>
+        <p class="section-intro">Choose a sample to follow the account decision.</p>
+      </div>
+      <div class="demo-panel">
+        <div class="demo-topline"><span class="mono">ROUTING WALKTHROUGH</span><strong class="sample-label">Sample data · names &amp; timings</strong></div>
+        <p class="demo-disclaimer">Illustration only. No network calls, sessions or credentials.</p>
+        <ol class="route" aria-label="Request route" data-claim="route"><li>Coding tool</li><li><span aria-hidden="true">→</span> Open Ferry</li><li><span aria-hidden="true">→</span> Provider</li></ol>
+        <div class="scenario-controls" role="group" aria-label="Sample scenario" hidden>
+          <button type="button" aria-controls="healthy" aria-pressed="true" data-scenario="healthy"><span class="mono">01</span> Healthy account <span class="selection-marker">Selected</span></button>
+          <button type="button" aria-controls="failover" aria-pressed="false" data-scenario="failover"><span class="mono">02</span> Quota failover <span class="selection-marker" hidden>Selected</span></button>
+          <button type="button" aria-controls="unavailable" aria-pressed="false" data-scenario="unavailable"><span class="mono">03</span> No account ready <span class="selection-marker" hidden>Selected</span></button>
+        </div>
+        <p class="sr-only" id="demo-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
+        <noscript><p>All three sample scenarios are shown below.</p></noscript>
+        <div class="scenarios">
+          <article class="scenario" id="healthy" aria-labelledby="healthy-title">
+            <div class="scenario-heading"><h3 id="healthy-title">Healthy account</h3><span class="outcome">Response streaming</span></div>
+            <p class="scenario-context" data-claim="healthy-context">Sample: a Codex request for <code>gpt-5</code>, with session affinity enabled and an existing binding to account A. Affinity is off by default.</p>
+            <ol class="steps" data-claim="healthy-steps">
+              <li><span class="timing">0 ms</span><div><strong>Accept the request</strong><p>The client’s proxy key is checked.</p></div></li>
+              <li><span class="timing">1 ms</span><div><strong>Keep account A</strong><p>The session’s bound account is ready for this model. With no usable binding, priority and the configured strategy choose an account.</p></div></li>
+              <li><span class="timing">240 ms</span><div><strong>Stream the answer back</strong><p>The provider answers through account A; output returns to the coding tool.</p></div></li>
+            </ol>
+            <p class="demo-note" data-claim="affinity">Affinity can keep a conversation on a ready account for prompt-cache reuse; it does not guarantee a cache hit.</p>
+          </article>
+          <article class="scenario" id="failover" aria-labelledby="failover-title">
+            <div class="scenario-heading"><h3 id="failover-title">Quota failover</h3><span class="outcome">Recovered through account B</span></div>
+            <p class="scenario-context" data-claim="failover-context">Sample: both Codex accounts serve <code>gpt-5</code>, with no aliases or model pools. Account A returns HTTP 429 before any output reaches the client.</p>
+            <ol class="steps" data-claim="failover-steps">
+              <li><span class="timing">0 ms</span><div><strong>Check the client key; choose account A</strong><p>Account A is initially ready for the requested model.</p></div></li>
+              <li><span class="timing">90 ms</span><div><strong>Record the quota failure</strong><p>The provider reports that account A’s quota is used up. No output has reached the client.</p></div></li>
+              <li><span class="timing">92 ms</span><div><strong>Try account B, keeping gpt-5</strong><p>Another eligible account is tried within the configured credential limit.</p></div></li>
+              <li><span class="timing">330 ms</span><div><strong>Return account B’s stream</strong><p>The answer arrives through account B.</p></div></li>
+            </ol>
+            <p class="demo-note" data-claim="keys"><strong>Two different keys.</strong> The client’s proxy key is never sent upstream. The selected account’s provider credentials go to the provider.</p>
+            <p class="demo-note" data-claim="partial"><strong>Before output only.</strong> This recovery does not replay a response after partial output has reached the client.</p>
+          </article>
+          <article class="scenario" id="unavailable" aria-labelledby="unavailable-title">
+            <div class="scenario-heading"><h3 id="unavailable-title">No account ready</h3><span class="outcome">429 · model_cooldown</span></div>
+            <p class="scenario-context" data-claim="unavailable-context">Sample: account A is cooling down for <code>gpt-5</code>; account B is disabled. Additional retry rounds and cooldown waiting are disabled for these accounts.</p>
+            <ol class="steps" data-claim="unavailable-steps">
+              <li><span class="timing">0 ms</span><div><strong>Check availability</strong><p>Account B is excluded. Account A cannot serve this model until its cooldown ends.</p></div></li>
+              <li><span class="timing">1 ms</span><div><strong>Return the cooldown error</strong><p>No upstream attempt is made in this sample. Wait for account A’s reset, or enable an eligible account.</p></div></li>
+            </ol>
+            <div class="error-example" data-claim="cooldown-body"><p class="mono">HTTP 429 · sample error body</p><pre><code>{
+  "error": {
+    "code": "model_cooldown",
+    "message": "All credentials for model gpt-5 are cooling down via provider codex",
+    "model": "gpt-5",
+    "provider": "codex",
+    "reset_seconds": 60,
+    "reset_time": "1m0s"
+  }
+}</code></pre></div>
+            <p class="demo-note" data-claim="retry-limit">Retry and wait settings change this behavior. The sample disables both; the general routing policy can wait and try another round.</p>
+          </article>
+        </div>
+        <div class="demo-sources"><span>Check the behavior:</span> <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/routing.md">Routing guide</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/crates/open-ferry-core/src/manager/execute.rs">Execution code</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/crates/open-ferry-core/src/exec/error.rs">Error shapes</a></div>
+      </div>
+    </section>
+
+    <section class="evidence wrap" id="compatibility" aria-labelledby="compatibility-title">
+      <div class="section-heading"><div><p class="eyebrow">02 / Check the evidence</p><h2 id="compatibility-title">Read the limits before you switch.</h2></div></div>
+      <div class="evidence-columns">
+        <article>
+          <p class="eyebrow">Compatibility you can check</p>
+          <h3>A port with a pinned reference.</h3>
+          <p data-claim="pin">Open Ferry is ported from <strong>CLIProxyAPI v8.0.38</strong>. Differential tests send the same inputs through upstream’s Go code and the Rust port, then compare the outputs.</p>
+          <p data-claim="supported">Supported upstreams include Codex, Claude, Gemini, Vertex AI and OpenAI-compatible providers. Client formats, models and features depend on the upstream and connection type.</p>
+          <p data-claim="unsupported">Client impersonation, the plugin host, Home/cluster mode and Realtime are not ported. Documented deviations remain.</p>
+          <ul class="source-links"><li><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/UPSTREAM.md">Ported modules &amp; differences <span aria-hidden="true">↗</span></a></li><li><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#parity-with-cliproxyapi">README parity results <span aria-hidden="true">↗</span></a></li><li><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/tools/parity/README.md">How parity is tested <span aria-hidden="true">↗</span></a></li><li><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/migrating-from-cliproxyapi.md">Migration &amp; unsupported features <span aria-hidden="true">↗</span></a></li></ul>
+        </article>
+        <article>
+          <p class="eyebrow">Performance with the fine print</p>
+          <h3>A benchmark, with its boundaries.</h3>
+          <p data-claim="benchmark-machine">The published run used an Azure Standard_D8s_v6 VM: 8 vCPUs, Intel Xeon Platinum 8573C, in East US, on 2026-10-24.</p>
+          <p data-claim="benchmark-workload">Both proxies ran in front of the same fake upstream. The workload includes short requests and a coding agent’s long conversation, streamed and unstreamed, in native and translated formats.</p>
+          <p data-claim="benchmark-limits">It does not measure real providers, TLS, OAuth credentials or WebSockets. The load generator shares the machine; connection limits stopped some CLIProxyAPI load levels early.</p>
+          <a class="text-link" href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/benchmarks.md">Read the results &amp; reproduce the run <span aria-hidden="true">↗</span></a>
+        </article>
+      </div>
+    </section>
+
+    <section class="setup-section" id="setup" aria-labelledby="setup-title">
+      <div class="wrap">
+        <div class="section-heading"><div><p class="eyebrow">03 / Start locally</p><h2 id="setup-title">Build it. Add an account. Connect.</h2></div><p class="section-intro" data-claim="candidates">Candidate releases exist to test signed updates. For install scripts, see the <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#install">README’s Install section</a>.</p></div>
+        <ol class="setup-steps">
+          <li><span class="step-number" aria-hidden="true">01</span><div><h3>Install locally</h3><p data-claim="build-requirements">You need Rust and a C compiler; some systems also need CMake. This source build runs the proxy without the dashboard app.</p><pre data-claim="build-commands"><code>git clone https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy.git
+cd open-ferry-ai-proxy
+cargo build --release --locked -p open-ferry</code></pre><p data-claim="build-binary">Put <code>target/release/open-ferry</code> (<code>open-ferry.exe</code> on Windows) on your PATH. Then create a local config:</p><pre data-claim="init-command"><code>open-ferry init</code></pre><p data-claim="init-instructions">Run the check and start commands that <code>init</code> prints, with the config path already filled in.</p><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#build-from-source">Full build instructions, including the dashboard <span aria-hidden="true">↗</span></a></div></li>
+          <li><span class="step-number" aria-hidden="true">02</span><div><h3>Add a provider</h3><p data-claim="provider-setup">With the server running, this command starts a Codex sign-in through the server:</p><pre data-claim="login-command"><code>open-ferry credentials login codex</code></pre><p data-claim="provider-options">API-key providers can be configured using the commented examples in your config. For Claude, read the connection options and limits first.</p><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/cli.md#open-ferry-credentials">Credential commands <span aria-hidden="true">↗</span></a> · <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/claude-subscription.md">Claude connections <span aria-hidden="true">↗</span></a></div></li>
+          <li><span class="step-number" aria-hidden="true">03</span><div><h3>Connect a tool</h3><p data-claim="client-setup">Print the Codex client setup for your config:</p><pre data-claim="client-command"><code>open-ferry clients setup codex</code></pre><p data-claim="client-output">The command prints a base URL and config snippet, with the client key masked. It does not write the tool’s config. Follow the CLI guide to supply the key privately.</p><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/cli.md#open-ferry-clients-setup">Connect Codex or another client <span aria-hidden="true">↗</span></a></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="questions wrap" aria-labelledby="questions-title">
+      <div class="section-heading"><div><p class="eyebrow">04 / Before you start</p><h2 id="questions-title">Questions people ask.</h2></div></div>
+      <dl class="faq">
+        <div><dt>What carries over from CLIProxyAPI?</dt><dd data-claim="migration">The config and auth directory are read in place. <code>open-ferry migrate</code> previews a switch and asks first; <code>open-ferry migrate -undo</code> reverses the recorded switch. Unsupported providers and features can block migration. Read the <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/migrating-from-cliproxyapi.md">migration and undo guide</a>.</dd></div>
+        <div><dt>Which Claude connections are available?</dt><dd data-claim="claude">An Anthropic API key; your installed Claude Code through <code>claude-cli</code>; or the legacy Claude sign-in. <code>claude-cli</code> does not support client tools or token counting. The project advises against the legacy sign-in; its testing found only Haiku access. See <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/claude-subscription.md">Claude connection types and limits</a>.</dd></div>
+        <div><dt>Where do requests go, and what is kept?</dt><dd data-claim="privacy">Requests go to the selected upstream. The local usage ledger records calls while enabled, without prompt or answer text and without client keys in clear. Request logs can contain request and answer bodies, with known secrets scrubbed; failures can be logged even when <code>request-log</code> is off. Automatic update checks contact GitHub unless disabled. Read <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/dashboard-api.md#usage">usage records</a>, <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/UPSTREAM.md#request-logs">request logging</a>, <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/configuration.md">configuration</a> and <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/updates.md#what-is-requested-and-how-often">update requests</a>.</dd></div>
+        <div><dt>Who sets billing and terms?</dt><dd data-claim="terms">Your provider’s billing and terms still apply. Whether subscription access through a proxy is allowed depends on those terms. Read the <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#a-word-on-terms-of-service">terms note</a> and the connection guide before using an account.</dd></div>
+        <div><dt>How do I report a security problem privately?</dt><dd data-claim="security">Use the repository’s Security tab and choose “Report a vulnerability.” Keep real secrets out of the report. The <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/SECURITY.md">security policy</a> explains what to include.</dd></div>
+        <div><dt>How do updates and rollback work?</dt><dd data-claim="updates">Eligible installs can verify and stage signed releases; <code>open-ferry update</code> installs one and <code>open-ferry update -rollback</code> uses the kept previous version. Restart behavior depends on the install and supervisor. A source build reports new releases but does not replace itself. See <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/docs/updates.md">updates and rollback</a> and the <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/ROADMAP.md">remaining qualification work</a>.</dd></div>
+        <div><dt>Which versions do these docs cover?</dt><dd data-claim="versions">This pre-release page was checked against source snapshot <code>b1d15532</code>, pinned to CLIProxyAPI <code>v8.0.38</code>. The <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/README.md#status">README status</a> and <a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/UPSTREAM.md#pinned-reference">upstream pin</a> describe the development version. Linked <code>main</code> docs evolve; use the matching tag’s docs when testing a candidate.</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap">
+    <div class="footer-heading"><a class="brand" href="index.html"><span class="wordmark" aria-hidden="true">of/</span> Open Ferry</a><span class="mono">LOCAL ROUTES. OPEN SOURCE.</span></div>
+    <p data-claim="credits">Open Ferry is a port of <a href="https://github.com/router-for-me/CLIProxyAPI">CLIProxyAPI</a> by <a href="https://github.com/luispater">Luis Pater</a>, <a href="https://github.com/router-for-me">Router-For.ME</a> and its contributors. Its request translation, routing and management API are modelled on CLIProxyAPI’s.</p>
+    <p data-claim="independence">Open Ferry is independent, and not affiliated with or endorsed by CLIProxyAPI, Router-For.ME, OpenAI, Anthropic or Google.</p>
+    <nav aria-label="Project policies"><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/LICENSE">MIT license</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/SECURITY.md">Security</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a><a href="https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/CONTRIBUTING.md">Contributing</a></nav>
+  </footer>
+</body>
+</html>
