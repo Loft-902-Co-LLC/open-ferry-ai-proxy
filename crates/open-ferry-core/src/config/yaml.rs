@@ -20,7 +20,9 @@
 //! it when it writes the tree out and reads it back, and
 //! [`from_writer_node`] turns a tree of the config writer
 //! ([`super::yaml3`]) into one of these, so it can be decoded as upstream
-//! decodes its writer's trees. `saphyr-parser` does the scanning.
+//! decodes its writer's trees. Inputs containing NEL, LS or PS use that parser
+//! too, so scalars, comments and document boundaries follow yaml.v3. Other
+//! inputs keep the `saphyr-parser` scanner.
 //!
 //! An alias expands to a copy of its anchor's node that shares the
 //! anchor's text, so the tree takes memory in proportion to the input
@@ -32,8 +34,9 @@
 //! which may be a secret.
 //!
 //! Deviations from upstream:
-//! - Syntax error wording is saphyr's, as `yaml: line N: <message>`; only the
-//!   line matches yaml.v3. saphyr also accepts a few inputs yaml.v3 rejects,
+//! - Without NEL, LS or PS, syntax error wording is saphyr's, as
+//!   `yaml: line N: <message>`; only the line matches yaml.v3. saphyr also
+//!   accepts a few inputs yaml.v3 rejects,
 //!   such as a tab before a top-level key, and rejects a few it accepts,
 //!   such as a tab right after a key's `:`.
 //! - Nesting deeper than 256 levels, aliases included, is an error
@@ -45,7 +48,8 @@
 //! - An alias cycle or excessive aliasing under a key that the decode pass
 //!   skips (a null key) is still an error, and keys read after excessive
 //!   aliasing is detected aren't checked for duplicates.
-//! - Flow collections nest at most 255 deep (saphyr's limit).
+//! - Without NEL, LS or PS, flow collections nest at most 255 deep
+//!   (saphyr's limit). The yaml.v3 parser path keeps the 256-level limit.
 //! - `strconv.Quote`'s notion of a printable rune is approximated: control
 //!   characters, white space other than U+0020 and the common format
 //!   characters are escaped.
@@ -59,11 +63,15 @@
 //!   that aliases expanded to add up to more than 64 MiB. yaml.v3 shares a
 //!   Go string between its copies and has no such limit, beyond its ratio
 //!   of aliases to nodes, which applies here too.
-//! - An alias used as a mapping key with the `:` right after its name
-//!   (`*k: v`) is read as yaml.v3 reads it only when the `:` is followed by
+//! - Without NEL, LS or PS, an alias used as a mapping key with the `:`
+//!   right after its name (`*k: v`) is read as yaml.v3 reads it only when
+//!   the `:` is followed by
 //!   a space, a line break or the end of the input. saphyr takes the `:` as
 //!   part of the name, so the others (`{*k:1}`, `[*k:]`) are an `unknown
 //!   anchor` error.
+//! - The yaml.v3 parser path limits copied alias targets to 1,048,576
+//!   nodes before conversion, in addition to the shared alias limits.
+//!   Invalid UTF-8 bytes in escaped tags become U+FFFD, as in the writer.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -709,20 +717,31 @@ pub(crate) fn from_writer_node(node: &yaml3::Node) -> Result<Node, YamlError> {
         aliases: 0,
         alias_depth: 0,
         poisoned: false,
+        text: HashMap::new(),
     };
     converter.node(node, 1)
 }
 
 /// [`from_writer_node`]'s walk, counting decodes as [`Expander`] does.
-struct Converter {
+struct Converter<'a> {
     decodes: u64,
     aliases: u64,
     alias_depth: u32,
     poisoned: bool,
+    // Alias targets share text with the original anchor, including the
+    // composer's copy of it. Borrow keys until conversion finishes.
+    text: HashMap<&'a str, Text>,
 }
 
-impl Converter {
-    fn node(&mut self, node: &yaml3::Node, depth: usize) -> Result<Node, YamlError> {
+impl<'a> Converter<'a> {
+    fn text(&mut self, value: &'a str) -> Text {
+        self.text
+            .entry(value)
+            .or_insert_with(|| value.into())
+            .clone()
+    }
+
+    fn node(&mut self, node: &'a yaml3::Node, depth: usize) -> Result<Node, YamlError> {
         use yaml3::{AliasTarget, Kind as WriterKind, Style};
 
         if node.kind == WriterKind::Document {
@@ -751,7 +770,7 @@ impl Converter {
                 return Ok(Node {
                     kind: Kind::Scalar,
                     tag: node.short_tag().into(),
-                    value: node.value.as_str().into(),
+                    value: self.text(&node.value),
                     line: node.line,
                     tagged: node.style.has(Style::TAGGED),
                     aliased,
@@ -778,7 +797,7 @@ impl Converter {
                 let mut expanded = expanded?;
                 if expanded.kind != Kind::Poison {
                     expanded.alias = Some(Box::new(AliasRef {
-                        name: node.value.as_str().into(),
+                        name: self.text(&node.value),
                         line: node.line,
                     }));
                 }
@@ -822,6 +841,15 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
         return Err(YamlError::Syntax(
             "yaml: control characters are not allowed".to_owned(),
         ));
+    }
+    if text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+        let node = yaml3::compose::unmarshal(text.as_bytes())
+            .map_err(|error| YamlError::Syntax(error.message().to_owned()))?;
+        return if node.kind == yaml3::Kind::Zero {
+            Ok(None)
+        } else {
+            from_writer_node(&node).map(Some)
+        };
     }
     let mut aliases = HashSet::new();
     let error = match read_document(text, &mut aliases) {
@@ -869,6 +897,22 @@ pub(crate) fn has_more_documents(text: &str) -> bool {
     let text = text
         .strip_prefix(|c: char| c as u32 == 0xFEFF)
         .unwrap_or(text);
+    if text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
+        use yaml3::types::EventType;
+        let mut parser = yaml3::parser::Parser::new(text.as_bytes());
+        let mut started = false;
+        loop {
+            match parser.parse() {
+                Ok(event) => match event.typ {
+                    EventType::DocumentStart if started => return true,
+                    EventType::DocumentStart => started = true,
+                    EventType::StreamEnd => return false,
+                    _ => {}
+                },
+                Err(_) => return true,
+            }
+        }
+    }
     let mut started = false;
     for item in Parser::new_from_str(text) {
         match item {
@@ -2403,6 +2447,106 @@ mod tests {
         assert_eq!(
             budget.charge(&copy),
             Err(YamlError::Fatal(EXCESSIVE_ALIASING.to_owned()))
+        );
+    }
+
+    #[test]
+    fn unicode_breaks_use_go_values_and_document_boundaries() {
+        for separator in ['\u{0085}', '\u{2028}', '\u{2029}'] {
+            let source = format!("a: 'x{separator}        y'\n");
+            let root = parse_document(&source).unwrap().unwrap();
+            let expected = if separator == '\u{0085}' {
+                "x y".to_owned()
+            } else {
+                format!("x{separator}y")
+            };
+            assert_eq!(yaml_path(&root, "a").unwrap().value, expected.as_str());
+            let source = format!("a: [1, # c{separator} 2]\n");
+            let root = parse_document(&source).unwrap().unwrap();
+            assert_eq!(yaml_path(&root, "a").unwrap().content.len(), 2);
+            assert!(!has_more_documents(&source));
+            assert!(has_more_documents(&format!(
+                "# c{separator}a: 1\n---\nb: 2\n"
+            )));
+            let duplicate = format!("a: 1{separator}a: 2\n");
+            let root = parse_document(&duplicate).unwrap().unwrap();
+            assert!(check_shape(&root).unwrap_err().message().contains("line 2"));
+        }
+    }
+
+    #[test]
+    fn unicode_path_keeps_depth_cycle_and_full_input_control_checks() {
+        for prefix in ["# comment\n", "# comment\u{2028}\n"] {
+            for depth in [MAX_DEPTH - 1, MAX_DEPTH, MAX_DEPTH + 1] {
+                let source = format!("{prefix}{}x\n", "- ".repeat(depth));
+                assert_eq!(parse_document(&source).is_ok(), depth < MAX_DEPTH);
+            }
+            let root = parse_document(&format!("{prefix}null: &a [*a]\n"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                check_shape(&root),
+                Err(YamlError::Fatal("anchor 'a' value contains itself".into()))
+            );
+            for control in ['\0', '\u{1}', '\u{7f}', '\u{80}', '\u{ffff}'] {
+                // A control beyond the first document must still be rejected,
+                // even when yaml.v3's bounded reader would never reach it.
+                let source = format!("{prefix}a: 1\n---\n# {}{control}\n", "x".repeat(20_000));
+                assert_eq!(
+                    parse_document(&source),
+                    Err(YamlError::Syntax(
+                        "yaml: control characters are not allowed".into()
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_alias_fanout_shares_text_and_keeps_both_budgets() {
+        let long = format!("{}\u{2028}tail", "x".repeat(64 << 10));
+        let aliases = vec!["*big"; 1100].join(", ");
+        let source = format!("unused:\n  anchor: &big '{long}'\n  copies: [{aliases}]\n");
+        let root = parse_document(&source).unwrap().unwrap();
+        assert_eq!(check_shape(&root), Ok(()));
+        let merged = expand_merges(&root.clone());
+        for root in [&root, &merged] {
+            let anchor = yaml_path(root, "unused.anchor").unwrap();
+            let copies = yaml_path(root, "unused.copies").unwrap();
+            assert_eq!(copies.content.len(), 1100);
+            assert!(!anchor.aliased);
+            let budget = AliasBudget::default();
+            let mut refused = false;
+            for copy in &copies.content {
+                assert!(copy.aliased);
+                assert!(copy.value.shares(&anchor.value));
+                refused |= budget.charge(copy).is_err();
+            }
+            assert!(refused);
+            assert_eq!(budget.0.get(), 1100 * long.len());
+        }
+        assert!(
+            crate::config::AnyValue::parse_yaml(&source)
+                .unwrap_err()
+                .to_string()
+                .contains(EXCESSIVE_ALIASING)
+        );
+
+        let mut bomb = String::from("# comment\u{2028}\na0: &a0 [x, x, x, x, x, x, x, x, x, x]\n");
+        for level in 1..9 {
+            bomb.push_str(&format!(
+                "a{level}: &a{level} [{}]\n",
+                vec![format!("*a{}", level - 1); 10].join(", ")
+            ));
+        }
+        let root = parse_document(&bomb).unwrap().unwrap();
+        assert_eq!(
+            check_shape(&root),
+            Err(YamlError::Fatal(EXCESSIVE_ALIASING.into()))
+        );
+        assert_eq!(
+            check_decode_any(&root),
+            Err(YamlError::Fatal(EXCESSIVE_ALIASING.into()))
         );
     }
 

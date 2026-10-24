@@ -317,8 +317,6 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         doc.head_comment = replacement.head_comment;
         doc.foot_comment = replacement.foot_comment;
     }
-    // Generated intermediates must already agree in the loader and writer.
-    super::yaml3::encode::quote_config_unicode(&mut doc);
     let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
