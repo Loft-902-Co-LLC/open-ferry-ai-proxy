@@ -120,7 +120,11 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
                         n.content.iter().map(identity).collect::<Vec<_>>()
                     ])
                 }
-                sequences.push(identity(n));
+                // Inventories retain physical output occurrences. Only the
+                // value identity is alias-expanded on every side, matching
+                // the source basis without inventing output comments.
+                let expanded = super::super::expand_config_aliases(n).ok()?;
+                sequences.push(identity(&expanded));
                 for (i, v) in n.content.iter().enumerate() {
                     path.push(Part::Index(i));
                     visit(v, path, Side::Item, 0, out, sequences)?;
@@ -773,6 +777,29 @@ mod tests {
     use super::*;
     fn owner(keys: &[&str], node: &str, slot: &str) -> Value {
         json!({"path":keys.iter().map(|k|json!({"key":k,"tag":"!!str"})).collect::<Vec<_>>(),"node":node,"slot":slot})
+    }
+    #[test]
+    fn alias_sequence_identities_use_the_same_basis_without_moving_comments() {
+        let source = "xs:\n  - &a foo # ca\n  - *a\nk: 1\n";
+        let go = "xs:\n  - &a foo\n  - *a\nk: 2\n";
+        let protected = "xs:\n  - &a foo # ca\n  - *a\nk: 2\n";
+        assert!(retained_comment_ownership(source, go, protected));
+        assert!(retained_comment_ownership(
+            source,
+            "xs:\n  - foo\n  - foo\nk: 2\n",
+            "xs:\n  - foo # ca\n  - foo\nk: 2\n"
+        ));
+        assert!(!retained_comment_ownership(
+            source,
+            go,
+            "xs:\n  - &a foo\n  - *a # ca\nk: 2\n"
+        ));
+        assert!(!retained_comment_ownership(
+            source,
+            "xs:\n  - &a other\n  - *a\nk: 2\n",
+            "xs:\n  - &a other # ca\n  - *a\nk: 2\n"
+        ));
+        assert_eq!(comment_occurrences(protected, "# ca", false), Some(1));
     }
     #[test]
     fn generated_archive_slots_bind_source_keys_text_owner_and_each_occurrence() {
