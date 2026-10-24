@@ -9,15 +9,16 @@ import (
 )
 
 func TestParityArchiveBudgetsAreComputedFromSourceKeys(t *testing.T) {
-	for _, source := range []string{
+	for index, source := range []string{
 		"x-note: fixture\nconfig-version: 8\n",
 		"x-note:\n  nested: fixture # own\nconfig-version: 8\n",
 		"x-note: |\n  fixture\nconfig-version: 8\n",
 		"x-note: {nested: [fixture]}\nconfig-version: 8\n",
+		"? x-note # own key\n: fixture # own value\nconfig-version: 8\n",
 	} {
 		proof := ParityOwnership(source, map[string]any{"op": "save", "migrate": true})
 		if proof["unavailable"] != nil || proof["archive_unavailable"] != nil {
-			t.Fatal("archive construction unavailable", proof["archive_failure"])
+			t.Fatalf("archive construction unavailable in fixture %d: %v", index, proof["archive_failure"])
 		}
 		slots := proof["archives"].([]any)
 		if len(slots) == 0 {
@@ -71,6 +72,13 @@ func TestParityArchiveBudgetsAreComputedFromSourceKeys(t *testing.T) {
 				t.Fatal("independent archive line/owner differs from pinned save")
 			}
 		}
+	}
+}
+
+func TestParityArchiveRefusesAnUnboundDocumentFootLayout(t *testing.T) {
+	proof := ParityOwnership("# top\nx-note: fixture\nconfig-version: 8\n\n# tail\n", map[string]any{"op": "save", "migrate": true})
+	if proof["archive_unavailable"] != true || len(proof["archives"].([]any)) != 0 {
+		t.Fatal("ambiguous document-foot layout received an archive slot")
 	}
 }
 

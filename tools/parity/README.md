@@ -293,6 +293,8 @@ exact parsed source key and entry. Save replays include the real intermediate
 encode/reparse before normalization. Independent archive layouts use opaque
 line IDs to establish parsed owners and occurrence ordinals; comment text
 supplies only the computed bytes. Each line receives one slot at that owner.
+The layouts retain all surrounding source and document comments. A layout
+that cannot parse or loses an opaque archive identity supplies no slots.
 The complete computed multiplicity is required in addition to existing source
 occurrences of equal text, so an old comment cannot masquerade as a new archive.
 Changed text, extra copies, another owner, unarchived keys and mismatched source
