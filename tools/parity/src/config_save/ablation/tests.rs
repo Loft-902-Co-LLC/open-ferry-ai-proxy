@@ -469,6 +469,12 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             assert_eq!(&protected, expected);
         }
         let result = certify(&case, go, &protected, |candidate| {
+            // Historical fixtures contain no independent identity replay.
+            // Refuse that optional oracle instead of inventing provenance;
+            // all of their original strict negative assertions stay active.
+            if candidate.options.get("_ownership_request").is_some() {
+                return Ok(GoResult::Panic("identity fixture unavailable".into()));
+            }
             let p = row["probes"]
                 .as_array()
                 .unwrap()
