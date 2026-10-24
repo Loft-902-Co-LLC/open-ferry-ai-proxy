@@ -232,21 +232,25 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
     Ok(encoder.emitter.into_output())
 }
 
-// yaml.v3 can consume a leading break as the missing block-header break.
+// yaml.v3 can consume a leading break as the missing block-header break,
+// or write a tab-leading block without the indentation indicator it needs.
 // Test the decoded text: an escaped source can produce the same value.
-fn leading_unicode_block_break(value: &str) -> bool {
-    value.starts_with(['\n', '\u{2028}', '\u{2029}']) && value.contains(['\u{2028}', '\u{2029}'])
+fn leading_unicode_block_break(value: &str, retained_block: bool) -> bool {
+    value.starts_with(['\n', '\u{2028}', '\u{2029}'])
+        || (!retained_block && value.trim_start_matches(' ').starts_with('\t'))
 }
 
-/// Quote only live scalars whose block emission would lose a leading break.
+/// Quote live block scalars whose leading break or tab would not round-trip.
 /// Archive emission keeps its separate all-break quoting protection.
 pub(crate) fn quote_config_unicode(node: &mut Node) {
+    let retained_block = node.style.has(Style::LITERAL) || node.style.has(Style::FOLDED);
     let block = !node.style.has(Style::DOUBLE_QUOTED)
         && !node.style.has(Style::SINGLE_QUOTED)
-        && (node.style.has(Style::LITERAL)
-            || node.style.has(Style::FOLDED)
-            || node.value.contains('\n'));
-    if node.kind == Kind::Scalar && block && leading_unicode_block_break(&node.value) {
+        && (retained_block || node.value.contains('\n'));
+    if node.kind == Kind::Scalar
+        && block
+        && leading_unicode_block_break(&node.value, retained_block)
+    {
         node.style = if node.tag != STR_TAG || node.style.has(Style::TAGGED) {
             Style::DOUBLE_QUOTED | Style::TAGGED
         } else {
@@ -560,7 +564,7 @@ impl Encoder {
             super::resolve_tag(text) == STR_TAG && !(is_base60_float(text) || is_old_bool(text));
         let style = if self.protect_generated_unicode
             && !self.flow
-            && leading_unicode_block_break(text)
+            && leading_unicode_block_break(text, false)
             && text.contains('\n')
         {
             ScalarStyle::DoubleQuoted
@@ -781,7 +785,17 @@ impl Encoder {
                 self.emit(event)
             }
             Kind::Scalar => {
-                let style = if node.style.has(Style::DOUBLE_QUOTED) {
+                let block = node.style.has(Style::LITERAL)
+                    || node.style.has(Style::FOLDED)
+                    || node.value.contains('\n');
+                let style = if node.style.has(Style::DOUBLE_QUOTED)
+                    || (self.protect_generated_unicode
+                        && !node.style.has(Style::SINGLE_QUOTED)
+                        && block
+                        && leading_unicode_block_break(
+                            &node.value,
+                            node.style.has(Style::LITERAL) || node.style.has(Style::FOLDED),
+                        )) {
                     ScalarStyle::DoubleQuoted
                 } else if node.style.has(Style::SINGLE_QUOTED) {
                     ScalarStyle::SingleQuoted

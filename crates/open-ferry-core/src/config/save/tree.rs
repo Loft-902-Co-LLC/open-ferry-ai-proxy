@@ -231,13 +231,13 @@ pub(crate) fn remove_map_key(node: &mut Node, key: &str) {
 /// bring in that the mapping doesn't have, and no anchors. An alias's own
 /// comments go; its anchor node's come along.
 pub(crate) fn expand_config_aliases(node: &Node) -> Result<Node, YamlError> {
-    let mut budget = MAX_ALIAS_COPIES;
+    let mut budget = (MAX_ALIAS_COPIES, 64usize << 20);
     expand(node, &mut budget, false, 0, &mut Vec::new())
 }
 
 fn expand(
     node: &Node,
-    budget: &mut usize,
+    budget: &mut (usize, usize),
     aliased: bool,
     depth: usize,
     scopes: &mut Vec<std::sync::Arc<()>>,
@@ -270,8 +270,21 @@ fn expand(
         };
     }
     if aliased {
-        *budget = budget
+        budget.0 = budget
+            .0
             .checked_sub(1)
+            .ok_or_else(|| YamlError::fail("document contains excessive aliasing"))?;
+        let text = [
+            &node.tag,
+            &node.value,
+            &node.head_comment,
+            &node.line_comment,
+            &node.foot_comment,
+        ]
+        .into_iter()
+        .try_fold(0usize, |size, text| size.checked_add(text.len()));
+        budget.1 = text
+            .and_then(|text| budget.1.checked_sub(text))
             .ok_or_else(|| YamlError::fail("document contains excessive aliasing"))?;
     }
     let mut copy = Node {

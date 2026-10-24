@@ -121,7 +121,10 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
             return Ok(config);
         }
         Err(error @ YamlError::Fatal(_)) => {
-            return Err(ConfigError::new(ConfigErrorKind::Decode, error.message()));
+            return Err(ConfigError::new(
+                ConfigErrorKind::Decode,
+                format!("{prefix}{}", error.message()),
+            ));
         }
         Err(error) => {
             let message = format!("{prefix}{}", error.message());
@@ -280,12 +283,12 @@ mod tests {
         copied.push_str(&"x".repeat(4096));
         copied.push_str(&"]".repeat(8));
         copied.push_str("\nrefs: [*a0, *a1, *a2, *a3, *a4, *a5, *a6, *a7]\n");
-        let readers: [Reader; 3] = [
-            |bytes| Config::parse(bytes),
-            Config::load_bytes,
-            Config::load_bytes_quietly,
+        let readers: [(Reader, &str); 3] = [
+            (|bytes| Config::parse(bytes), "parse config payload: "),
+            (Config::load_bytes, "failed to parse config file: "),
+            (Config::load_bytes_quietly, "failed to parse config file: "),
         ];
-        for reader in readers {
+        for (reader, prefix) in readers {
             let actual = refused(super::super::yaml3::compose::with_copy_text_limit_for_test(
                 16 << 10,
                 || reader(copied.as_bytes()),
@@ -293,7 +296,7 @@ mod tests {
             assert_eq!(actual.kind(), expected.kind());
             assert_eq!(
                 actual.to_string().lines().next(),
-                expected.to_string().lines().next()
+                Some(format!("{prefix}yaml: document contains excessive aliasing").as_str())
             );
         }
     }
