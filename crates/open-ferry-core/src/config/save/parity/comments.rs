@@ -446,6 +446,15 @@ fn analyze_comments(
     };
     let original_counts = counts(&s);
     let archive_counts = counts(&archives);
+    let actual_owners = groups(&r);
+    for (owner, expected) in groups(&archives) {
+        if !subsequence(
+            &expected,
+            actual_owners.get(&owner).map_or(&[], Vec::as_slice),
+        ) {
+            return failed(json!({"reason":"source_archive_owner"}));
+        }
+    }
     s.extend(archives.clone());
     let (sc, rc) = (counts(&s), counts(&r));
     // A computed archive line is new data, never a substitute for an equal
@@ -917,6 +926,19 @@ mod tests {
         ] {
             assert!(!proves(source, bad, &evidence));
         }
+        let wrong_owner = "debug: false # x-note: fixture\nconfig-version: 8\n";
+        assert!(
+            !comment_ownership_with_provenance(
+                source,
+                Some(wrong_owner),
+                wrong_owner,
+                &[],
+                &operation,
+                &evidence,
+                true
+            )
+            .accepted()
+        );
         let mut wrong_key = evidence.clone();
         wrong_key["archives"][0]["source_key"] = owner(&["debug"], "key", "head")["path"].clone();
         assert!(!proves(source, protected, &wrong_key));

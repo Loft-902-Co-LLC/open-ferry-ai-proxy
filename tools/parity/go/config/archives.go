@@ -10,16 +10,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var parityArchiveObserver func(*yaml.Node, string, string)
+var parityArchiveObserver func(*yaml.Node, *yaml.Node, string, string)
 var parityArchiveAppendObserver func(string)
 var parityArchiveDocumentObserver func(*yaml.Node)
 
 // Inserted immediately after the pin computes an archive block, before it
 // deletes the source entry. The ordinary harness has no observer installed.
-func parityArchiveEntry(key *yaml.Node, section, text string) {
+func parityArchiveEntry(key, value *yaml.Node, section, text string) {
 	if parityArchiveObserver != nil {
-		parityArchiveObserver(key, section, text)
+		parityArchiveObserver(key, value, section, text)
 	}
+}
+
+func parityArchiveValues(n *yaml.Node) string {
+	var value func(*yaml.Node) any
+	value = func(n *yaml.Node) any {
+		children := []any{}
+		for _, child := range n.Content {
+			children = append(children, value(child))
+		}
+		return []any{n.Kind, n.ShortTag(), n.Value, children}
+	}
+	data, _ := json.Marshal(value(n))
+	return string(data)
 }
 
 func parityArchiveAppended(previous string) {
@@ -135,9 +148,11 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 		prefix += "-"
 	}
 	bindings := map[int]map[string]any{}
+	values := map[int]string{}
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, value *yaml.Node) {
 		if side == "key" {
 			bindings[n.Line] = map[string]any{"path": path, "entry": []any{parityEntrySignature(n), parityEntrySignature(value)}}
+			values[n.Line] = parityArchiveValues(value)
 		}
 	})
 	lines := []parityArchiveLine{}
@@ -146,12 +161,31 @@ func parityArchives(source string, operation map[string]any, root *yaml.Node) ([
 	footer := ""
 	footerBound := false
 	batchStart := 0
-	parityArchiveObserver = func(key *yaml.Node, section, text string) {
+	parityArchiveObserver = func(key, value *yaml.Node, section, text string) {
+		binding := bindings[key.Line]
+		if values[key.Line] != parityArchiveValues(value) {
+			binding = nil
+		}
+		// The archive's YAML text must also decode to the original values.
+		// An upstream scalar re-encode that changes data receives no budget.
+		body := []string{}
+		for _, line := range strings.Split(text, "\n") {
+			if !strings.HasPrefix(line, "# ") {
+				binding = nil
+			}
+			body = append(body, strings.TrimPrefix(line, "# "))
+		}
+		var archived yaml.Node
+		if yaml.Unmarshal([]byte(strings.Join(body, "\n")+"\n"), &archived) != nil || len(archived.Content) != 1 || archived.Content[0].Kind != yaml.MappingNode || len(archived.Content[0].Content) != 2 {
+			binding = nil
+		} else if parityArchiveValues(archived.Content[0].Content[1]) != values[key.Line] {
+			binding = nil
+		}
 		for i, line := range strings.Split(text, "\n") {
 			marker := fmt.Sprintf("%s%d", prefix, len(lines))
 			markerIDs[marker] = len(lines)
 			markers = append(markers, marker)
-			lines = append(lines, parityArchiveLine{bindings[key.Line], i, line, section})
+			lines = append(lines, parityArchiveLine{binding, i, line, section})
 		}
 	}
 	parityArchiveAppendObserver = func(previous string) {
