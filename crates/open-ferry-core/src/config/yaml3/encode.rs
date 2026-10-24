@@ -139,7 +139,6 @@ pub(crate) fn marshal_with_comment_ids(
 ) -> Result<(Vec<u8>, Vec<super::CommentEmission>), YamlError> {
     let mut encoder = Encoder::new();
     encoder.emitter.record_comments = true;
-    encoder.protect_generated_unicode = true;
     encoder.encode(value)?;
     encoder.finish()?;
     let ids = std::mem::take(&mut encoder.emitter.emitted_comments);
@@ -230,21 +229,6 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
     encoder.encode_node(node)?;
     encoder.finish()?;
     Ok(encoder.emitter.into_output())
-}
-
-/// Quote live config scalars before their config emission. Archive emission
-/// uses its own all-tag quote rule before prefixing lines with comments.
-pub(crate) fn quote_config_unicode(n: &mut Node) {
-    if n.kind == Kind::Scalar && n.value.contains(['\u{2028}', '\u{2029}', '\u{0085}']) {
-        n.style = if n.tag != STR_TAG || n.style.has(super::Style::TAGGED) {
-            super::Style::DOUBLE_QUOTED | super::Style::TAGGED
-        } else {
-            super::Style::DOUBLE_QUOTED
-        };
-    }
-    for c in &mut n.content {
-        quote_config_unicode(c);
-    }
 }
 
 /// Config writer protection, also exposing exactly which source scalars the
@@ -389,7 +373,6 @@ pub(crate) fn protect_conflicting_key_comments(
 
 /// yaml.v3's `encoder`, as a `yaml.Encoder` writing to memory.
 pub(crate) struct Encoder {
-    protect_generated_unicode: bool,
     emitter: Emitter,
     /// The next collection is written in flow style.
     flow: bool,
@@ -407,7 +390,6 @@ impl Encoder {
         let mut emitter = Emitter::new();
         emitter.set_unicode(true);
         Self {
-            protect_generated_unicode: false,
             emitter,
             flow: false,
             indent: 0,
@@ -547,11 +529,7 @@ impl Encoder {
         // unquoted. If it doesn't, there's no need to quote it.
         let can_use_plain =
             super::resolve_tag(text) == STR_TAG && !(is_base60_float(text) || is_old_bool(text));
-        let style = if self.protect_generated_unicode
-            && text.contains(['\u{2028}', '\u{2029}', '\u{0085}'])
-        {
-            ScalarStyle::DoubleQuoted
-        } else if text.contains('\n') {
+        let style = if text.contains('\n') {
             if self.flow {
                 ScalarStyle::DoubleQuoted
             } else {

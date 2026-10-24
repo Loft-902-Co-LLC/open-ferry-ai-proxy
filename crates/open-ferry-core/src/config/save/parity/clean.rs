@@ -1,25 +1,22 @@
 //! Comment-free inputs and faithful output witnesses for offline comparison.
 use super::super::{Node, unmarshal};
 
-/// Complete parse on loadable text. For a rejected emission, document
-/// boundaries must still occur on boundary lines; conservatively refuse any
+/// Check loadable text with the same parser used to load it. Directives
+/// before the first document are a preamble, not content. For a rejected
+/// emission, document boundaries must still occur on boundary lines; conservatively refuse any
 /// such line after content, including one that might have been quoted data.
 pub fn single_document(text: &str) -> bool {
     use crate::config::yaml;
     if yaml::parse_document(text).is_ok() {
-        if yaml::has_more_documents(text) {
-            return false;
-        }
-        // The loader does not split comments on these YAML line breaks, but
-        // the writer does. Scan them too, even after a successful loader parse.
-        if !text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) {
-            return true;
-        }
+        return !yaml::has_more_documents(text);
     }
     let (mut started, mut ended) = (false, false);
     for line in text.split(['\n', '\r', '\u{0085}', '\u{2028}', '\u{2029}']) {
         let line = line.strip_prefix('\u{feff}').unwrap_or(line);
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+        if line.trim().is_empty()
+            || line.trim_start().starts_with('#')
+            || (!started && !ended && line.starts_with('%'))
+        {
             continue;
         }
         let indicator = |s: &str| {
@@ -103,6 +100,20 @@ pub fn same_values(a: &str, b: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unicode_directive_preambles_do_not_hide_a_second_document() {
+        for directive in ["%YAML 1.1\n", "%TAG ! tag:x,2000:\n"] {
+            let source = format!("{directive}---\na: 1 # c\u{2028}x: 2\n");
+            assert!(single_document(&source));
+            assert!(!single_document(&format!("{source}---\nb: 3\n")));
+            // The conservative fallback for rejected emission must also
+            // distinguish a directive preamble from document content.
+            let rejected = format!("{directive}---\na: [\n");
+            assert!(single_document(&rejected));
+            assert!(!single_document(&format!("{rejected}---\nb: 3\n")));
+        }
+    }
+
     #[test]
     fn opaque_mapping_markers_never_prove_value_equality() {
         for source in [

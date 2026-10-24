@@ -158,6 +158,63 @@ mod tests {
     const PARSE: &str = "parse config payload: ";
     const MAPPING: &str = "config must be a mapping";
 
+    #[test]
+    fn unicode_breaks_reach_file_payload_quiet_and_v8_readers() {
+        for separator in ['\u{0085}', '\u{2028}', '\u{2029}'] {
+            let source = format!(
+                "auth-dir: 'x{separator}        y'\ndebug: # c{separator}  true\napi-keys: [# c{separator}  your-api-key-1]\n"
+            );
+            let expected = if separator == '\u{0085}' {
+                "x y".to_owned()
+            } else {
+                format!("x{separator}y")
+            };
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, &source).unwrap();
+            let (hashed, hash) = Config::load_with_sha256(&path).unwrap();
+            assert_eq!(hash, super::super::save::sha256_hex(source.as_bytes()));
+            for config in [
+                hashed,
+                Config::load(&path).unwrap(),
+                Config::load_bytes(source.as_bytes()).unwrap(),
+                Config::load_bytes_quietly(source.as_bytes()).unwrap(),
+                Config::parse(&source).unwrap(),
+            ] {
+                assert_eq!(config.auth_dir, expected);
+                assert!(config.debug);
+                // Safe mode consumes this loaded list without parsing YAML again.
+                assert_eq!(config.api_keys, ["your-api-key-1"]);
+            }
+            let migrated = super::super::V8Document::migrate(source.as_bytes()).unwrap();
+            assert_eq!(
+                migrated.value(&["oauth", "auth-dir"]).unwrap().unwrap(),
+                super::super::AnyValue::Str(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_value_reader_keeps_existing_merge_behavior() {
+        // The CLI value reader's existing merge handling is separate from
+        // scanning line breaks. Keep it the same on both scanner paths.
+        for body in ["base: &base {}\nuse: {<<: *base}\n", "use: {<<: }\n"] {
+            let ordinary = format!("# comment\n{body}");
+            let expected = super::super::AnyValue::parse_yaml(&ordinary).unwrap();
+            for separator in ['\u{0085}', '\u{2028}', '\u{2029}'] {
+                let unicode = format!("# comment{separator}{body}");
+                assert_eq!(
+                    super::super::AnyValue::parse_yaml(&unicode).unwrap(),
+                    expected
+                );
+                let (value, extras) =
+                    super::super::AnyValue::parse_yaml_with_extras(&unicode).unwrap();
+                assert_eq!(value, expected);
+                assert!(!extras.more_documents);
+            }
+        }
+    }
+
     /// Upstream's `yaml.Unmarshal` into a `Config`: flattened and decoded,
     /// without the checks and clean-ups.
     fn unmarshal(text: &str) -> Config {

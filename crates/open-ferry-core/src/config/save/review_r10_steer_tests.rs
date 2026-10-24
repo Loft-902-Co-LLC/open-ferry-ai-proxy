@@ -3,7 +3,7 @@ use crate::config::testing::TempDir;
 use crate::config::v8_edit::{V8Edit, V8Method, edit_v8, preview_v8};
 
 #[test]
-fn review_r10_comment_separators_refuse_without_changing_the_file() {
+fn review_r10_comment_separators_follow_go_after_each_write() {
     let mut observations = Vec::new();
     for sep in ['\u{2028}', '\u{2029}', '\u{0085}'] {
         for (shape, source) in [
@@ -50,12 +50,38 @@ fn review_r10_comment_separators_refuse_without_changing_the_file() {
                     }
                 };
                 let out = std::fs::read_to_string(&path).unwrap();
-                let refusal = result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|e| e.contains("write refused"))
-                    && out == source;
-                observations.push(serde_json::json!({"shape":shape,"separator":format!("U+{:04X}",sep as u32),"op":op,"refused_unchanged":refusal,"error":result.err(),"out":out}));
+                let writable = result.is_ok() && Config::load(&path).is_ok();
+                observations.push(serde_json::json!({"shape":shape,"separator":format!("U+{:04X}",sep as u32),"op":op,"writable":writable}));
+                assert!(result.is_ok(), "{shape} {op}");
+                if shape.starts_with("debug") {
+                    assert_eq!(
+                        Config::load_bytes(source.as_bytes()).unwrap().debug,
+                        Config::load_bytes(out.as_bytes()).unwrap().debug
+                    );
+                    continue;
+                }
+                let keep = match shape {
+                    "plugin" => "plugins.configs.demo.text",
+                    "sequence" => "x",
+                    _ => "debug",
+                };
+                let source_root = loader_root(source.as_bytes()).unwrap().unwrap();
+                let mut output_root = loader_root(out.as_bytes()).unwrap().unwrap();
+                if shape == "sequence" && loader_yaml::yaml_path(&output_root, keep).is_none() {
+                    // Go archives unknown top-level fields during migration.
+                    // Read that archive back to check the same sequence value.
+                    let archived = out[out.find("# x:").unwrap()..]
+                        .lines()
+                        .take_while(|line| line.starts_with('#'))
+                        .map(|line| line.strip_prefix("# ").unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    output_root = loader_root(archived.as_bytes()).unwrap().unwrap();
+                }
+                assert_eq!(
+                    unicode_values(loader_yaml::yaml_path(&source_root, keep).unwrap()),
+                    unicode_values(loader_yaml::yaml_path(&output_root, keep).unwrap())
+                );
             }
         }
     }
@@ -64,7 +90,7 @@ fn review_r10_comment_separators_refuse_without_changing_the_file() {
     }
     let failures: Vec<_> = observations
         .iter()
-        .filter(|r| r["refused_unchanged"] != true)
+        .filter(|r| r["writable"] != true)
         .map(|r| (&r["shape"], &r["separator"], &r["op"]))
         .collect();
     assert!(failures.is_empty(), "{failures:?}");
@@ -103,7 +129,8 @@ fn review_r10_generated_escaped_unicode_key_is_writable() {
         let plugin = yaml_path(&doc.content[0], "plugins.configs.demo").unwrap();
         let i = find_map_key_index(plugin, "k\u{2028}ey").unwrap();
         assert_eq!(plugin.content[i + 1].value, "1");
-        assert!(out.contains("\\L"));
+        assert!(out.contains("k\u{2028}"));
+        assert!(!out.contains("\\L"));
     }
 }
 #[test]
@@ -151,4 +178,13 @@ fn review_r10_agreeing_literal_unicode_sources_remain_writable() {
         }
         assert_eq!(before, after);
     }
+}
+
+fn unicode_values(node: &loader_yaml::Node) -> serde_json::Value {
+    serde_json::json!([
+        format!("{:?}", node.kind),
+        node.tag.as_str(),
+        node.value.as_str(),
+        node.content.iter().map(unicode_values).collect::<Vec<_>>()
+    ])
 }

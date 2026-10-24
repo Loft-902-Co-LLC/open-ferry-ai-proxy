@@ -3,7 +3,7 @@ use crate::config::testing::TempDir;
 use crate::config::v8_edit::{V8Edit, V8Method, edit_v8, preview_v8};
 
 #[test]
-fn review_r9_unicode_sources_preserve_loader_values_or_refuse_without_writing() {
+fn review_r9_unicode_sources_preserve_go_values_after_writing() {
     for separator in ['\u{2028}', '\u{2029}', '\u{0085}'] {
         for style in ["single", "double", "plain"] {
             for tail in ["        b", "", "\n        b"] {
@@ -51,13 +51,7 @@ fn review_r9_unicode_sources_preserve_loader_values_or_refuse_without_writing() 
                             _ => unreachable!(),
                         };
                         let after = std::fs::read(&path).unwrap();
-                        if let Err(error) = result {
-                            assert!(
-                                error.contains("write refused, file unchanged"),
-                                "{op}: {error}"
-                            );
-                            assert_eq!(after, source.as_bytes());
-                        }
+                        result.unwrap();
                         assert_eq!(
                             Config::load_bytes(&after).unwrap().auth_dir,
                             before.auth_dir,
@@ -93,7 +87,7 @@ fn review_r9_generated_unicode_and_explicit_escapes_remain_writable() {
 }
 
 #[test]
-fn review_r9_unicode_disagreement_in_untyped_values_also_refuses() {
+fn review_r9_unicode_untyped_values_follow_go_and_remain_writable() {
     for source in [
         "plugins:\n  configs:\n    demo:\n      text: 'a\u{2028}        b'\n",
         "plugins:\n  configs:\n    demo:\n      text: |\n        a\u{2029}        b\n",
@@ -101,8 +95,23 @@ fn review_r9_unicode_disagreement_in_untyped_values_also_refuses() {
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
         std::fs::write(&path, source).unwrap();
-        let error = write_file(&path, source.as_bytes()).unwrap_err();
-        assert_eq!(error.kind(), SaveErrorKind::Unwritable);
-        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+        let before = crate::config::AnyValue::parse_yaml(source).unwrap();
+        write_file(&path, source.as_bytes()).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(crate::config::AnyValue::parse_yaml(&after).unwrap(), before);
     }
+}
+
+#[test]
+fn unicode_writer_unmarshal_keeps_go_first_document_semantics() {
+    // The loader deliberately checks controls throughout the input. The
+    // writer's yaml.Unmarshal must retain Go's bounded first-document read;
+    // reintroducing the old loader-comparison guard would conflate them.
+    let source = format!(
+        "a: [1, # c\u{2028} 2]\n---\nb: 2\n# {}\0\n",
+        "x".repeat(64 << 10)
+    );
+    assert!(compose::unmarshal(source.as_bytes()).is_ok());
+    assert!(unmarshal(source.as_bytes()).is_ok());
+    assert!(Config::load_bytes(source.as_bytes()).is_err());
 }
