@@ -7,11 +7,12 @@ use serde_json::Value;
 use crate::cases::Case;
 use crate::translator::Translator;
 
-const ALL: [Protection; 4] = [
+const ALL: [Protection; 5] = [
     Protection::EmptyMappingPendingComment,
     Protection::CanonicalVersionComment,
     Protection::DroppedSingleKeyComment,
     Protection::InlineEmptyNullComment,
+    Protection::MultipleFlowItemFeet,
 ];
 
 fn case(fixture: &Value) -> Case {
