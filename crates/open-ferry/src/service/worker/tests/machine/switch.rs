@@ -175,7 +175,7 @@ async fn hand_over(rig: &mut Rig) -> String {
     rig.fake()
         .send(Message::HandOver { budget_ms: 5_000 })
         .await;
-    match rig.fake().recv_other().await {
+    match rig.fake().recv_other_for("hand-over: handed_over").await {
         Message::HandedOver { state_id, .. } => state_id,
         other => panic!("expected handed_over, got {other:?}"),
     }
@@ -268,7 +268,7 @@ async fn a_failed_hand_over_waits_for_resume_and_resume_restores_the_worker() {
     assert!(is_updating(&answer), "{answer}");
 
     rig.fake().send(Message::Resume).await;
-    let next = rig.fake().recv_other().await;
+    let next = rig.fake().recv_other_for("resume: resumed").await;
     assert!(matches!(next, Message::Resumed), "{next:?}");
     let answer = get(management, MANAGEMENT_CONFIG).await;
     assert!(!is_updating(&answer), "the 503 outlived resumed: {answer}");
@@ -299,7 +299,7 @@ async fn a_resume_after_handed_over_takes_the_lease_back() {
     hand_over(&mut rig).await;
     assert!(rig.lease_is_free());
     rig.fake().send(Message::Resume).await;
-    let next = rig.fake().recv_other().await;
+    let next = rig.fake().recv_other_for("resume: resumed").await;
     assert!(matches!(next, Message::Resumed), "{next:?}");
     assert!(!rig.lease_is_free(), "resume retook the lease");
     let answer = get(management, MANAGEMENT_CONFIG).await;
@@ -350,7 +350,7 @@ async fn a_resume_that_cannot_retake_the_lease_stops_the_worker() {
 async fn a_resume_with_no_hand_over_changes_nothing() {
     let mut rig = active_rig(managed(Role::Active)).await;
     rig.fake().send(Message::Resume).await;
-    let next = rig.fake().recv_other().await;
+    let next = rig.fake().recv_other_for("resume: resumed").await;
     assert!(matches!(next, Message::Resumed), "{next:?}");
     // `go` and `take_over` are not for an active worker.
     rig.fake().send(Message::Go).await;
@@ -372,7 +372,7 @@ async fn a_watching_worker_answers_resume_and_stays_watching() {
     rig.fake().send(Message::Go).await;
     assert_eq!(rig.fake().recv_status().await.2, "watching");
     rig.fake().send(Message::Resume).await;
-    let next = rig.fake().recv_other().await;
+    let next = rig.fake().recv_other_for("resume: resumed").await;
     assert!(matches!(next, Message::Resumed), "{next:?}");
     assert_eq!(rig.fake().ping().await, "watching");
     assert!(rig.rotating());
@@ -972,7 +972,7 @@ mod stepped {
         quiet(&mut rig).await;
         held.release();
 
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
         assert_eq!(rig.fake().recv_status().await.2, "active");
         assert!(
@@ -1485,7 +1485,7 @@ mod seams {
         assert!(rig.path("handover.json").exists());
 
         rig.fake().send(Message::Resume).await;
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
         assert!(!rig.lease_is_free(), "the lease was kept");
         let answer = get(management, MANAGEMENT_CONFIG).await;
@@ -1640,7 +1640,7 @@ mod seams {
         assert!(is_updating(&answer), "{barrier}: {answer}");
 
         rig.fake().send(Message::Resume).await;
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{barrier}: {next:?}");
         let answer = get(management, MANAGEMENT_CONFIG).await;
         assert!(!is_updating(&answer), "{barrier}: {answer}");
@@ -2041,7 +2041,7 @@ mod seams {
         assert!(!rig.path("handover.json").exists());
 
         rig.fake().send(Message::Resume).await;
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
         assert!(!rig.lease_is_free(), "the lease was kept");
         let answer = get(management, MANAGEMENT_CONFIG).await;
@@ -2107,12 +2107,39 @@ mod seams {
         answer
     }
 
-    /// A codex credential named `name` in `dir`.
+    /// The management listing acknowledges that every fixture credential was
+    /// registered before the test closes the gate or changes the files.
+    async fn wait_listed(address: SocketAddr, names: &[&str]) {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let listed = get_bearer(address, "/v0/management/auth-files", "pw").await;
+                if names.iter().all(|name| listed.contains(name)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            panic!("credential registration: {names:?} were not listed: {error}")
+        });
+    }
+
+    /// A codex credential named `name` in `dir`. Its expiry stays beyond the
+    /// executor's 96-hour refresh lead: these tests exercise config and file
+    /// reloads, and an automatic OAuth refresh would hold the hand-over gate.
     fn credential(dir: &std::path::Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join(name),
-            r#"{"type":"codex","email":"a@example.com","access_token":"access-0","refresh_token":"refresh-0"}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "type": "codex",
+                "email": "a@example.com",
+                "access_token": "access-0",
+                "refresh_token": "refresh-0",
+                "expired": (chrono::Utc::now() + chrono::TimeDelta::days(10)).to_rfc3339(),
+            }))
+            .unwrap(),
         )
         .unwrap();
     }
@@ -2131,15 +2158,7 @@ mod seams {
         let mut rig = active_rig(setup).await;
         let root = rig._dir.path().to_owned();
         credential(&root.join("auth"), "codex-old.json");
-        let mut listed = String::new();
-        for _ in 0..500 {
-            listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
-            if listed.contains("codex-old.json") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(listed.contains("codex-old.json"), "{listed}");
+        wait_listed(rig.main, &["codex-old.json"]).await;
         let answer = get_bearer(rig.main, "/v1/models", "old-key").await;
         assert!(!answer.starts_with("HTTP/1.1 401"), "{answer}");
 
@@ -2157,7 +2176,7 @@ mod seams {
         .unwrap();
 
         rig.fake().send(Message::Resume).await;
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
         let answer = get_bearer(rig.main, "/v1/models", "old-key").await;
         assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
@@ -2259,20 +2278,12 @@ mod seams {
         let root = rig._dir.path().to_owned();
         credential(&root.join("auth"), "codex-gone.json");
         credential(&root.join("auth"), "codex-kept.json");
-        let mut listed = String::new();
-        for _ in 0..500 {
-            listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
-            if listed.contains("codex-gone.json") && listed.contains("codex-kept.json") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(listed.contains("codex-gone.json"), "{listed}");
+        wait_listed(rig.main, &["codex-gone.json", "codex-kept.json"]).await;
 
         hand_over(&mut rig).await;
         std::fs::remove_file(root.join("auth").join("codex-gone.json")).unwrap();
         rig.fake().send(Message::Resume).await;
-        let next = rig.fake().recv_other().await;
+        let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
         let listed = get_bearer(rig.main, "/v0/management/auth-files", "pw").await;
         assert!(listed.contains("codex-kept.json"), "{listed}");
