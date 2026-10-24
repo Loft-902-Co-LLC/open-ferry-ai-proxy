@@ -81,6 +81,10 @@ pub use open_ferry_core::config::save::UndoCheck;
 pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method, V8Precondition};
 use open_ferry_core::config::{save, v8_edit};
 use open_ferry_core::gate::{ActiveGate, Operation};
+#[cfg(not(test))]
+use save::write_file_with_sha256 as write_file_bytes;
+#[cfg(test)]
+use tests::write_file_bytes;
 
 use crate::auth_files::run_blocking;
 use crate::bind;
@@ -347,7 +351,7 @@ impl ConfigWriter for FileConfigWriter {
             .gate
             .write_permit()
             .map_err(|_| WriteError::switching())?;
-        save::write_file_with_sha256(&self.path, data)
+        write_file_bytes(&self.path, data)
             .map(Some)
             .map_err(WriteError::from)
     }

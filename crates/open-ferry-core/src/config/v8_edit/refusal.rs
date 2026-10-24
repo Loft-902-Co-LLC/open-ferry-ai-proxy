@@ -33,10 +33,98 @@ pub fn safe_unwritable_message(message: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::config::save::{SaveError, SaveErrorKind};
     use crate::config::v8_edit::{V8EditError, rendered_error, stored_error, write_error};
+
+    use std::cell::RefCell;
+
+    thread_local! {
+        static REFUSAL: RefCell<Option<(&'static str, SaveError)>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn take_refusal(site: &str) -> Option<SaveError> {
+        REFUSAL.with_borrow_mut(|slot| {
+            if slot.as_ref().is_some_and(|(expected, _)| *expected == site) {
+                slot.take().map(|(_, error)| error)
+            } else {
+                None
+            }
+        })
+    }
+
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REFUSAL.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+
+    // These operations don't use the generator. After the loader removes
+    // its Unicode guard they have no real Unwritable producer, so inject a
+    // generator-produced error at the operation boundary, before its mapper.
+    fn assert_real_refusal_at(site: &'static str) {
+        use crate::config::Config;
+        use crate::config::v8_edit::{V8Edit, V8Method, edit_v8_if, preview_v8};
+        let config = Config::load_bytes(
+            b"payload:\n  default:\n  - params:\n      field: {1: placeholder}\n",
+        )
+        .unwrap();
+        let error = crate::config::save::render_preserving_comments(b"port: 1\n", &config, false)
+            .unwrap_err();
+        assert_eq!(error.kind(), SaveErrorKind::Unwritable);
+        assert_eq!(error.to_string(), REASON);
+        let dir = crate::config::testing::TempDir::new();
+        let path = dir.join("config.yaml");
+        let before = b"port: 1\n";
+        std::fs::write(&path, before).unwrap();
+        let edit = V8Edit {
+            method: V8Method::Patch,
+            path: vec!["server".into(), "port".into()],
+            body: b"2".to_vec(),
+            yaml: false,
+        };
+        REFUSAL.with_borrow_mut(|slot| {
+            assert!(slot.is_none());
+            *slot = Some((site, error));
+        });
+        let _reset = Reset;
+        let error = if site == "preview" {
+            preview_v8(before, &edit).unwrap_err()
+        } else {
+            edit_v8_if(&path, &edit, None).unwrap_err()
+        };
+        assert_eq!(error, V8EditError::Unwritable(REASON.into()));
+        assert_eq!(error.to_string(), format!("config_unwritable: {REASON}"));
+        assert!(
+            REFUSAL.with_borrow(|slot| slot.is_none()),
+            "mapping boundary was not reached"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!crate::config::save::backup_path(&path).exists());
+    }
+
+    #[test]
+    fn real_refusal_at_lock_mapping() {
+        assert_real_refusal_at("lock");
+    }
+    #[test]
+    fn real_refusal_at_write_mapping() {
+        assert_real_refusal_at("write");
+    }
+    #[test]
+    fn real_refusal_at_preview_mapping() {
+        assert_real_refusal_at("preview");
+    }
+    #[test]
+    fn real_refusal_at_stored_mapping() {
+        assert_real_refusal_at("stored");
+    }
+    #[test]
+    fn real_refusal_at_rendered_mapping() {
+        assert_real_refusal_at("rendered");
+    }
 
     const REASON: &str =
         "payload.default[0]: a mapping with a key that isn't a string can't be written";

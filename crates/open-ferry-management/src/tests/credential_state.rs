@@ -904,6 +904,7 @@ async fn config_api_key_status_preservation_refusal_changes_nothing() {
                 "message":"payload.default[0]: a mapping with a key that isn't a string can't be written"
             })
         );
+        // The stand-in never writes; these assertions cover route-layer publication only.
         assert_eq!(std::fs::read(dir.config_path()).unwrap(), before);
         assert!(*api.state.config() == *config);
         assert!(Arc::ptr_eq(&current(&api, &id), &credential));

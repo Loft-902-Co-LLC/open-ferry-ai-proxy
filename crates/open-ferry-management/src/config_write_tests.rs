@@ -201,3 +201,53 @@ fn allowed_writes_and_missing_files_under_trusted_parents_work_as_before() {
     assert_eq!(Config::load(&path).unwrap().port, 1235);
     assert_eq!(calls.load(Ordering::SeqCst), 16);
 }
+
+thread_local! {
+    static RAW_WRITE_REFUSAL: std::cell::RefCell<Option<save::SaveError>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn write_file_bytes(path: &Path, data: &[u8]) -> Result<String, save::SaveError> {
+    match RAW_WRITE_REFUSAL.with_borrow_mut(Option::take) {
+        Some(error) => Err(error),
+        None => save::write_file_with_sha256(path, data),
+    }
+}
+
+#[tokio::test]
+async fn raw_write_maps_a_producer_refusal_to_the_exact_conflict_code() {
+    let dir = crate::tests::scratch_dir();
+    let path = dir.path().join("config.yaml");
+    let before = b"port: 1\n";
+    std::fs::write(&path, before).unwrap();
+    let config =
+        Config::load_bytes(b"payload:\n  default:\n  - params:\n      field: {1: placeholder}\n")
+            .unwrap();
+    let refusal = save::save_preserving_comments(&path, &config, false).unwrap_err();
+    assert_eq!(refusal.kind(), SaveErrorKind::Unwritable);
+    let reason = refusal.to_string();
+    RAW_WRITE_REFUSAL.with_borrow_mut(|slot| *slot = Some(refusal));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RAW_WRITE_REFUSAL.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    let _reset = Reset;
+    let error = FileConfigWriter::new(&path)
+        .write_file(b"port: 2\n")
+        .unwrap_err();
+    assert_eq!(error, WriteError::unwritable(&reason));
+    assert!(error.is_unwritable());
+    assert!(RAW_WRITE_REFUSAL.with_borrow(|slot| slot.is_none()));
+    let response = unwritable_response(&error.to_string());
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"error":"config_unwritable", "message":reason})
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!save::backup_path(&path).exists());
+}

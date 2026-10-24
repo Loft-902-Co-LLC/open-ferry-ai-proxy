@@ -235,6 +235,25 @@ impl fmt::Display for V8EditError {
 
 impl std::error::Error for V8EditError {}
 
+// Fault injection stays at each mapping boundary; production evaluates only
+// the real operation. Tests feed producer-generated SaveErrors through the
+// public edit/preview entry points, so a disconnected mapper is detected too.
+macro_rules! save_step {
+    ($site:ident, $operation:expr) => {{
+        #[cfg(test)]
+        {
+            match refusal::tests::take_refusal(stringify!($site)) {
+                Some(error) => Err(error),
+                None => $operation,
+            }
+        }
+        #[cfg(not(test))]
+        {
+            $operation
+        }
+    }};
+}
+
 /// Makes `edit` to the config file at `path` in the v8 layout, checks the
 /// result and writes it, and returns the config the file now holds
 /// (upstream's `ConfigV8` for `PUT`, `PATCH` and `DELETE`, up to its
@@ -262,7 +281,7 @@ pub fn edit_v8_if(
     edit: &V8Edit,
     condition: Option<&V8Precondition>,
 ) -> Result<(Config, String), V8EditError> {
-    let lock = save::WriteLock::acquire(path).map_err(write_error)?;
+    let lock = save_step!(lock, save::WriteLock::acquire(path)).map_err(write_error)?;
     let data = std::fs::read(path).map_err(|_| V8EditError::ReadFailed)?;
     if let Some(condition) = condition {
         let current_sha256 = save::sha256_hex(&data);
@@ -271,7 +290,8 @@ pub fn edit_v8_if(
         }
     }
     let (out, config) = render(&data, edit)?;
-    let sha256 = save::write_file_locked(&lock, path, &out).map_err(write_error)?;
+    let sha256 =
+        save_step!(write, save::write_file_locked(&lock, path, &out)).map_err(write_error)?;
     Ok((config, sha256))
 }
 
@@ -280,7 +300,7 @@ pub fn edit_v8_if(
 /// what a change would make before it makes it.
 pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
     let (data, _) = render(data, edit)?;
-    save::render_write_file(&data).map_err(write_error)
+    save_step!(preview, save::render_write_file(&data)).map_err(write_error)
 }
 
 fn write_error(error: save::SaveError) -> V8EditError {
@@ -310,7 +330,8 @@ fn rendered_error(error: save::SaveError) -> V8EditError {
 /// The bytes [`edit_v8`] writes for the file `data`, and the config they
 /// load as.
 pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8EditError> {
-    let (mut doc, _) = normalize_config_layout_doc(data, true).map_err(stored_error)?;
+    let (mut doc, _) =
+        save_step!(stored, normalize_config_layout_doc(data, true)).map_err(stored_error)?;
     let Some(root) = doc.content.first_mut() else {
         return Err(V8EditError::StoredInvalid("empty config".to_owned()));
     };
@@ -356,7 +377,8 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
     let config =
         Config::parse(&data).map_err(|error| V8EditError::Unprocessable(error.to_string()))?;
     validate_v8_config(&data).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
-    let (data, _) = normalize_config_layout(&data, true).map_err(rendered_error)?;
+    let (data, _) =
+        save_step!(rendered, normalize_config_layout(&data, true)).map_err(rendered_error)?;
     Ok((data, config))
 }
 

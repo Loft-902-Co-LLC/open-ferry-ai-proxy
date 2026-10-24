@@ -209,6 +209,7 @@ async fn refusal_routes_answer_conflict_and_preserve_file_and_snapshot() {
         assert_eq!(answer.status, StatusCode::CONFLICT, "{path}");
         let body: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
         assert_eq!(body, json!({"error":"config_unwritable", "message":REASON}));
+        // This stand-in never writes: these assertions check the route layer only.
         assert_eq!(std::fs::read(dir.config_path()).unwrap(), before);
         assert!(*api.state.config() == *config);
         assert_eq!(api.state.config_sha256(), hash);
@@ -232,6 +233,7 @@ async fn real_generator_refusals_keep_both_reasons_and_leave_bytes_unchanged() {
             let body: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
             assert_eq!(body, json!({"error":"config_unwritable", "message":reason}));
             assert_eq!(std::fs::read(dir.config_path()).unwrap(), raw.as_bytes());
+            assert!(!open_ferry_core::config::save::backup_path(&dir.config_path()).exists());
             assert!(!api.state.config().debug);
             assert_eq!(api.state.config_sha256(), hash);
         }
