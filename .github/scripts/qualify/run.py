@@ -766,7 +766,14 @@ class Qualification:
         # Keep generated client/management keys, and use an empty local auth directory.
         auth = self.data / "auth" if self.machine else WORK / "auth"
         config["oauth"]["auth-dir"] = str(auth)
-        auth.mkdir(exist_ok=self.machine)
+        if self.machine and self.os == "Windows":
+            # The service creates it, as for a real install. This elevated
+            # process may default new objects to its own account as owner
+            # (the built-in Administrator does), and the service refuses that.
+            require(not auth.is_symlink() and (not auth.exists() or (auth.is_dir() and not any(auth.iterdir()))),
+                    "the machine auth directory must be missing or empty")
+        else:
+            auth.mkdir(exist_ok=self.machine)
         with self.config.open("w", encoding="utf-8", newline="\n") as output:
             yaml.safe_dump(config, output, sort_keys=False)
         # Supported service working-directory .env, shared by supervisor and workers.
