@@ -865,8 +865,13 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
         ));
     }
     if uses_writer_parser(text) {
-        let node = yaml3::compose::unmarshal(text.as_bytes())
-            .map_err(|error| YamlError::Syntax(error.message().to_owned()))?;
+        let node = yaml3::compose::unmarshal(text.as_bytes()).map_err(|error| {
+            if error.message() == "yaml: document contains excessive aliasing" {
+                YamlError::Fatal(EXCESSIVE_ALIASING.into())
+            } else {
+                YamlError::Syntax(error.message().to_owned())
+            }
+        })?;
         return if node.kind == yaml3::Kind::Zero {
             Ok(None)
         } else {

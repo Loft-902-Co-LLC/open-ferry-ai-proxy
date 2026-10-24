@@ -91,8 +91,31 @@ pub(crate) fn unmarshal(data: &[u8]) -> Result<Node, YamlError> {
     }
     result
 }
+#[cfg(test)]
+std::thread_local! {
+    static COPY_TEXT_LIMIT_FOR_TEST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(in crate::config) fn with_copy_text_limit_for_test<T>(
+    limit: usize,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COPY_TEXT_LIMIT_FOR_TEST.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(COPY_TEXT_LIMIT_FOR_TEST.with(|cell| cell.replace(Some(limit))));
+    run()
+}
+
 fn unmarshal_inner(data: &[u8]) -> Result<Node, YamlError> {
-    unmarshal_with_copy_text_limit(data, MAX_ALIAS_COPY_TEXT)
+    let limit = MAX_ALIAS_COPY_TEXT;
+    #[cfg(test)]
+    let limit = COPY_TEXT_LIMIT_FOR_TEST.with(|cell| cell.get().unwrap_or(limit));
+    unmarshal_with_copy_text_limit(data, limit)
 }
 
 fn unmarshal_with_copy_text_limit(data: &[u8], copy_text_limit: usize) -> Result<Node, YamlError> {

@@ -133,12 +133,13 @@ pub(crate) fn marshal(value: &Value) -> Result<Vec<u8>, YamlError> {
     encoder.close()
 }
 
-/// Faithful generated settings plus the identity of each emitted line comment.
+/// Generated settings and comment identities, with leading-break protection.
 pub(crate) fn marshal_with_comment_ids(
     value: &Value,
 ) -> Result<(Vec<u8>, Vec<super::CommentEmission>), YamlError> {
     let mut encoder = Encoder::new();
     encoder.emitter.record_comments = true;
+    encoder.protect_generated_unicode = true;
     encoder.encode(value)?;
     encoder.finish()?;
     let ids = std::mem::take(&mut encoder.emitter.emitted_comments);
@@ -229,6 +230,32 @@ pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlE
     encoder.encode_node(node)?;
     encoder.finish()?;
     Ok(encoder.emitter.into_output())
+}
+
+// yaml.v3 can consume a leading break as the missing block-header break.
+// Test the decoded text: an escaped source can produce the same value.
+fn leading_unicode_block_break(value: &str) -> bool {
+    value.starts_with(['\n', '\u{2028}', '\u{2029}']) && value.contains(['\u{2028}', '\u{2029}'])
+}
+
+/// Quote only live scalars whose block emission would lose a leading break.
+/// Archive emission keeps its separate all-break quoting protection.
+pub(crate) fn quote_config_unicode(node: &mut Node) {
+    let block = !node.style.has(Style::DOUBLE_QUOTED)
+        && !node.style.has(Style::SINGLE_QUOTED)
+        && (node.style.has(Style::LITERAL)
+            || node.style.has(Style::FOLDED)
+            || node.value.contains('\n'));
+    if node.kind == Kind::Scalar && block && leading_unicode_block_break(&node.value) {
+        node.style = if node.tag != STR_TAG || node.style.has(Style::TAGGED) {
+            Style::DOUBLE_QUOTED | Style::TAGGED
+        } else {
+            Style::DOUBLE_QUOTED
+        };
+    }
+    for child in &mut node.content {
+        quote_config_unicode(child);
+    }
 }
 
 /// Config writer protection, also exposing exactly which source scalars the
@@ -373,6 +400,7 @@ pub(crate) fn protect_conflicting_key_comments(
 
 /// yaml.v3's `encoder`, as a `yaml.Encoder` writing to memory.
 pub(crate) struct Encoder {
+    protect_generated_unicode: bool,
     emitter: Emitter,
     /// The next collection is written in flow style.
     flow: bool,
@@ -390,6 +418,7 @@ impl Encoder {
         let mut emitter = Emitter::new();
         emitter.set_unicode(true);
         Self {
+            protect_generated_unicode: false,
             emitter,
             flow: false,
             indent: 0,
@@ -529,7 +558,13 @@ impl Encoder {
         // unquoted. If it doesn't, there's no need to quote it.
         let can_use_plain =
             super::resolve_tag(text) == STR_TAG && !(is_base60_float(text) || is_old_bool(text));
-        let style = if text.contains('\n') {
+        let style = if self.protect_generated_unicode
+            && !self.flow
+            && leading_unicode_block_break(text)
+            && text.contains('\n')
+        {
+            ScalarStyle::DoubleQuoted
+        } else if text.contains('\n') {
             if self.flow {
                 ScalarStyle::DoubleQuoted
             } else {
