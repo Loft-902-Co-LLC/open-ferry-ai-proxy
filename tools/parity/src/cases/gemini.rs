@@ -233,6 +233,54 @@ pub fn requests() -> Vec<Case> {
             ));
         }
     }
+    cases.extend(raw_json_requests());
+    cases
+}
+
+/// Exact source spellings embedded as JSON text by the Gemini request ports.
+/// These run directly and through the registry for Codex, Claude and Chat.
+pub fn raw_json_requests() -> Vec<Case> {
+    let mut cases = Vec::new();
+    for (spelling, text) in [
+        ("escaped", r#"caf\u00e9 na\u00efve fa\u00e7ade"#),
+        ("literal", "café naïve façade"),
+    ] {
+        for (name, parts) in [
+            (
+                "call-arguments",
+                r#"[{"functionCall":{"name":"lookup","id":"call_explicit","args":{"query":"TEXT"}}}]"#,
+            ),
+            (
+                "response-content",
+                r#"[{"functionResponse":{"name":"lookup","id":"call_explicit","response":{"content":"TEXT"}}}]"#,
+            ),
+            (
+                "response",
+                r#"[{"functionResponse":{"name":"lookup","id":"call_explicit","response":"TEXT"}}]"#,
+            ),
+            (
+                "response-object",
+                r#"[{"functionResponse":{"name":"lookup","id":"call_explicit","response":{"answer":"TEXT"}}}]"#,
+            ),
+            (
+                "derived-call-id",
+                r#"[{"functionCall":{"name":"lookup","args":{"query":"TEXT"}}},{"functionResponse":{"name":"lookup","response":{"answer":"TEXT"}}}]"#,
+            ),
+            (
+                "derived-response-id",
+                r#"[{"functionResponse":{"name":"lookup","response":"TEXT"}}]"#,
+            ),
+        ] {
+            let request = format!(
+                r#"{{"metadata":{{"user_id":"parity-raw-json"}},"contents":[{{"role":"model","parts":{}}}]}}"#,
+                parts.replace("TEXT", text)
+            );
+            cases.push(
+                Case::new(format!("raw-json-{name}-{spelling}"), "gpt-5", request)
+                    .with_options(json!({"stream":false})),
+            );
+        }
+    }
     cases
 }
 

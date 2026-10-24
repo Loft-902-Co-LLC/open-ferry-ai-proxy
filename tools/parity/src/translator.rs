@@ -1255,7 +1255,10 @@ impl Translator {
     pub fn embedded_json_request_source(self, case: &Case) -> Option<&str> {
         match self {
             Self::RegistryRequest => self.native(case)?.embedded_json_request_source(case),
-            Self::GeminiResponsesRequest => Some(&case.request),
+            Self::GeminiResponsesRequest
+            | Self::CodexGeminiRequest
+            | Self::ClaudeGeminiRequest
+            | Self::OpenAIGeminiRequest => Some(&case.request),
             Self::Interactions(kind)
                 if matches!(
                     kind.slug(),
@@ -1270,7 +1273,8 @@ impl Translator {
 
     /// Where this translator writes JSON compactly while upstream copies its
     /// text. Unlisted strings must match exactly; reviewed request routes also
-    /// require the non-string source witness above.
+    /// require the complete lexical source witness above, including a quoted
+    /// string token where upstream embeds that token's raw JSON text.
     pub fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         use JsonForm::{GoEscaped, InText, Whole};
         match self {
