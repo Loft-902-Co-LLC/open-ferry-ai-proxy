@@ -22,7 +22,7 @@ fn review_r10_plain_source_unicode_values_reload_after_each_write_path() {
 }
 
 #[test]
-fn review_r10_exact_unicode_sources_preserve_loaded_values_or_refuse() {
+fn review_r10_exact_unicode_sources_preserve_go_values_after_writing() {
     for line in [
         "    auth-dir: '/a\u{2028}        b'",
         "    auth-dir: '/a\u{2028}b'",
@@ -44,14 +44,30 @@ fn review_r10_exact_unicode_sources_preserve_loaded_values_or_refuse() {
                     std::fs::write(&path, out).unwrap();
                 })
             };
-            if let Err(error) = result {
-                assert_eq!(error.kind(), SaveErrorKind::Unwritable);
-                assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
-            }
+            result.unwrap();
             assert_eq!(
                 Config::load(&path).unwrap().auth_dir,
                 before,
                 "{op} {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_r10_live_unicode_emission_matches_the_faithful_go_encoder() {
+    for separator in ['\u{0085}', '\u{2028}', '\u{2029}'] {
+        for tail in ["b", "        b", "\nb", ""] {
+            let value = format!("/a{separator}{tail}");
+            let scalar = Node::scalar(STR_TAG, &value);
+            assert_eq!(
+                marshal_config(&scalar).unwrap(),
+                encode::faithful_node(&scalar, 2).unwrap()
+            );
+            let generated = encode::Value::Str(value);
+            assert_eq!(
+                encode::marshal_with_comment_ids(&generated).unwrap().0,
+                encode::marshal(&generated).unwrap()
             );
         }
     }
