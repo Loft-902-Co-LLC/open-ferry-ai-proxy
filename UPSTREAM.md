@@ -581,28 +581,21 @@ equivalence permits the identical ordered paragraphs of the output’s first roo
 to reload partly as document head, while retaining every real source document
 comment at the document. It applies to no nested or later key. These operations
 remain under the canonical-version protection, before intermediate and final
-emissions. Config emission also escapes U+2028,
-U+2029 and U+0085 in generated and retained scalars. Go writes LS/PS strings
-single-quoted and reads its own emission back losslessly; NEL is already escaped.
-open-ferry's saphyr loader reads Go's LS/PS form differently, retaining the
-continuation indentation. The escaping is an interim deviation to preserve
-the value open-ferry loads, not a repair of yaml.v3's writer. Before editing
-source text containing literal U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH
-SEPARATOR) or U+0085 (NEXT LINE), the writer compares both parsed trees, including document presence, collection
-shape, decoded values and normalized tags. A separator ending a comment may
-expose content even when the loader sees no document. Disagreement refuses the
-write with the differing scalar’s source line and key path, or the separator’s
-physical source line and affected path for a structural mismatch. The character
-names are included and the file stays unchanged. Agreeing literal sources remain
-writable. This conservative full-tree guard also refuses `# harmless<NEL>\nx: |\n`:
-the parsers disagree on the empty block scalar at EOF even without the NEL.
-That needless refusal is deferred; it loses no file data.
-V8 edit request bodies use yaml.v3-compatible parsing. Generated intermediates
-and values are quoted before loader validation; these are not refused as ambiguous
-source text. Explicit escapes remain writable and safely quoted.
-The live loader and Go can already read these literal source forms differently;
-this write guard does not change loading. Matching the loader to yaml.v3,
-then removing the quoting and refusal, is deferred to a follow-up.
+emissions. Config inputs containing literal U+0085 (NEXT LINE), U+2028
+(LINE SEPARATOR) or U+2029 (PARAGRAPH SEPARATOR) now use the yaml.v3 parser
+already used by the writer. This aligns values, keys, comments and document
+boundaries with CLIProxyAPI. Other inputs retain the existing saphyr parser. Syntax errors on the new
+path use yaml.v3 wording; the tab and compact-alias syntax differences
+below apply only to the saphyr path.
+Alias expansions share their anchor text and retain the alias-ratio and
+64 MiB owned-value budgets, the 256-level depth limit, the null-key cycle
+check and the full-input NUL/control-character check. The writer parser's
+copied-target node cap and invalid UTF-8 tag-byte replacement apply on this
+path too. The old reader-disagreement write refusal and forced live-scalar
+quoting have been removed: lossless live emission follows Go's bytes.
+The single-document witness uses the matching parser for loadable input;
+its conservative rejected-emission scan treats leading directives as a
+preamble and still refuses a real second document.
 
 - Archived config scalars containing U+2028, U+2029 or U+0085 are quoted
   before their YAML is commented out, including custom-tagged scalars. Their
@@ -1453,7 +1446,7 @@ CI uses [`tools/parity/baseline/config-save.json`](tools/parity/baseline/config-
 as a run-level ratchet for **uncertified config-save Differences**. It changes
 neither certification nor product behavior; request suites stay strict. Rounds
 9–10 left source-identity relocations, archive comment binding, owner/slot
-tracking and LS/PS/NEL loader alignment unresolved. Copying Go's destructive
+tracking unresolved; LS/PS/NEL loader alignment is now complete. Copying Go's destructive
 writes is not the remedy. Known diagnostic kinds have a total rate budget;
 new kinds, new deterministic PR-case IDs, fingerprint changes and
 non-certification failures still fail. Follow-up fixes lower this baseline.

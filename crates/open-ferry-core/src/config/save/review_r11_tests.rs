@@ -29,18 +29,18 @@ fn operation(source: &str, op: &str) -> (Result<(), String>, String) {
 }
 
 #[test]
-fn review_r11_opus_guard_shapes_and_messages() {
+fn review_r11_unicode_shapes_follow_go() {
     for source in [
         "# c\u{0085}auth-dir: /secret\n",
         "x: &a 1\ny: &a\u{2028}  !!str 1\nz: *a\nauth-dir: /old\n",
     ] {
         for op in ["save", "nested"] {
             let (result, out) = operation(source, op);
-            assert!(result.is_err(), "{op} {out}");
-            assert_eq!(out, source);
+            assert!(result.is_ok(), "{op}");
+            Config::load_bytes(out.as_bytes()).unwrap();
         }
     }
-    for (source, line, path) in [
+    for (source, _line, path) in [
         ("x: 1\nyy: 2\na: 1 # c\u{2028}b: 2\n", 3, "b"),
         ("--- # c\u{2028}a: 1\n", 1, "a"),
         ("a: 1 # c\u{2028}b: 2\n", 1, "b"),
@@ -48,11 +48,8 @@ fn review_r11_opus_guard_shapes_and_messages() {
         ("# harmless\u{0085}\nx: 1\na: 1 # c\u{2028}b: 2\n", 3, "b"),
         ("x: 1\r\na: 1 # c\u{2028}b: 2\r\nz: 3\r\n", 2, "b"),
     ] {
-        let message = unmarshal(source.as_bytes()).unwrap_err().to_string();
-        eprintln!("opus guard {source:?}: {message}");
-        assert!(message.contains(&format!("line {line}")), "{message}");
-        assert!(message.contains(&format!("path $.{path}")), "{message}");
-        assert!(message.contains("config value"), "{message}");
+        let doc = unmarshal(source.as_bytes()).unwrap();
+        assert!(yaml_path(&doc.content[0], path).is_some());
     }
 }
 
@@ -168,12 +165,12 @@ fn review_r11_opus_first_key_head_equivalence_is_named_and_narrow() {
 }
 
 #[test]
-fn review_r11_opus_empty_block_eof_remains_a_conservative_refusal() {
+fn review_r11_unicode_empty_block_eof_matches_go() {
     let source = "# harmless\u{0085}\nx: |\n";
     for op in ["save", "nested"] {
         let (result, out) = operation(source, op);
-        assert!(result.unwrap_err().contains("write refused"));
-        assert_eq!(out, source);
+        result.unwrap();
+        Config::load_bytes(out.as_bytes()).unwrap();
     }
     assert!(operation("# harmless\nx: |\n", "nested").0.is_ok());
 }
@@ -279,23 +276,14 @@ fn review_r11_opus_balanced_owner_negatives() {
 }
 
 #[test]
-fn review_r11_01_absent_document_disagreement_refuses_all_write_paths() {
+fn review_r11_01_unicode_comment_exposes_the_go_document() {
     let source = "# c\u{2028}debug: true\n";
-    assert!(!Config::load_bytes(source.as_bytes()).unwrap().debug);
-    let results: Vec<_> = ["nested", "put", "raw"]
-        .into_iter()
-        .map(|op| {
-            let (result, output) = operation(source, op);
-            eprintln!("finding 1 {op}: {result:?}; output={output:?}");
-            (result.is_err(), output == source)
-        })
-        .collect();
-    assert!(
-        results
-            .iter()
-            .all(|&(refused, unchanged)| refused && unchanged),
-        "{results:?}"
-    );
+    assert!(Config::load_bytes(source.as_bytes()).unwrap().debug);
+    for op in ["nested", "put", "raw"] {
+        let (result, output) = operation(source, op);
+        result.unwrap();
+        assert!(Config::load_bytes(output.as_bytes()).unwrap().debug);
+    }
 }
 
 #[test]
@@ -333,9 +321,18 @@ fn review_r11_02_rebound_anchor_tag_must_not_change_alias_type() {
         z_type(&after)
     );
     eprintln!("finding 2 result={result:?}; before={before:?}; after={after:?}; output={output:?}");
-    assert!(result.is_err());
-    assert_eq!(output, source);
-    assert_eq!(before, after);
+    result.unwrap();
+    assert_eq!(z_type(&before), "integer");
+    assert_eq!(z_type(&after), "integer");
+    if let (crate::config::AnyValue::Map(mut before), crate::config::AnyValue::Map(mut after)) =
+        (before, after)
+    {
+        before.remove("auth-dir");
+        after.remove("auth-dir");
+        assert_eq!(before, after);
+    } else {
+        panic!("expected mappings");
+    }
 }
 
 #[test]
