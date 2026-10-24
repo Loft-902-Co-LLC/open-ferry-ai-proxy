@@ -481,6 +481,14 @@ fn analyze_comments(
             );
         }
     }
+    // An alias that remains serialized has only its own physical comments.
+    // Source expansion may copy an anchor's comment into its value inventory;
+    // that copy cannot license a new comment written on the alias itself.
+    if let Some(physical) = physical_alias_owners(source, protected, &s) {
+        s = physical;
+    } else {
+        return failed(json!({"reason":"source_comments_unparseable"}));
+    }
     // A step Go never executed has no observational licence for either a
     // loss or a named owner change. Preserve every source occurrence exactly.
     if go.is_none() && !observed_unloadable {
@@ -563,6 +571,52 @@ fn analyze_comments(
         }
     }
     failed(remaining_failure)
+}
+
+fn physical_alias_owners(
+    source: &str,
+    protected: &str,
+    items: &[Occurrence],
+) -> Option<Vec<Occurrence>> {
+    fn visit(node: &Node, path: &mut Vec<Part>, aliases: &mut BTreeSet<Vec<Part>>) {
+        match node.kind {
+            super::super::Kind::Alias => {
+                aliases.insert(path.clone());
+            }
+            super::super::Kind::Mapping => {
+                for (k, v) in node.pairs() {
+                    path.push(Part::Key(k.tag.clone(), k.value.clone()));
+                    visit(v, path, aliases);
+                    path.pop();
+                }
+            }
+            super::super::Kind::Sequence => {
+                for (i, n) in node.content.iter().enumerate() {
+                    path.push(Part::Index(i));
+                    visit(n, path, aliases);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let doc = unmarshal(protected.as_bytes()).ok()?;
+    let mut aliases = BTreeSet::new();
+    visit(doc.content.first()?, &mut Vec::new(), &mut aliases);
+    if aliases.is_empty() {
+        return Some(items.to_vec());
+    }
+    let mut out: Vec<_> = items
+        .iter()
+        .filter(|c| !aliases.contains(&c.owner.path))
+        .cloned()
+        .collect();
+    out.extend(
+        inventory(source, false)?
+            .into_iter()
+            .filter(|c| aliases.contains(&c.owner.path)),
+    );
+    Some(out)
 }
 
 fn provenance_rules(relocated: bool, archived: bool) -> Vec<&'static str> {
