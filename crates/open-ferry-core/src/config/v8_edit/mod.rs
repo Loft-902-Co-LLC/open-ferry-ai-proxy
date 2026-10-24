@@ -289,9 +289,9 @@ pub fn edit_v8_if(
             return Err(V8EditError::PreconditionFailed { current_sha256 });
         }
     }
-    let (out, config) = render(&data, edit)?;
-    let sha256 =
-        save_step!(write, save::write_file_locked(&lock, path, &out)).map_err(write_error)?;
+    let (out, config) = render_complete(&data, edit)?;
+    let sha256 = save_step!(write, save::write_rendered_file_locked(&lock, path, out))
+        .map_err(write_error)?;
     Ok((config, sha256))
 }
 
@@ -299,8 +299,8 @@ pub fn edit_v8_if(
 /// same checks, written nowhere. Not upstream's: `open-ferry config` shows
 /// what a change would make before it makes it.
 pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
-    let (data, _) = render(data, edit)?;
-    save_step!(preview, save::render_write_file(&data)).map_err(write_error)
+    let (prepared, _) = render_complete(data, edit)?;
+    save_step!(preview, save::render_prepared_file(prepared)).map_err(write_error)
 }
 
 fn write_error(error: save::SaveError) -> V8EditError {
@@ -336,6 +336,42 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         Some(save::tree::finish_comment_owners_replay(&source, candidate))
     });
     Ok((bytes, config))
+}
+
+/// Keep the original edit source through the callers' final WriteConfig step.
+/// Its errors still cross the original write/preview save_step boundary.
+fn render_complete(
+    data: &[u8],
+    edit: &V8Edit,
+) -> Result<(save::PreparedWrite, Config), V8EditError> {
+    if !save::tree::owner_protection_enabled() {
+        let (bytes, config) = render(data, edit)?;
+        return Ok((
+            save::PreparedWrite {
+                candidate: save::tree::ReceiptedYaml {
+                    bytes,
+                    receipts: Default::default(),
+                },
+                source: Default::default(),
+                repeat: Box::new(|_| None),
+            },
+            config,
+        ));
+    }
+    let (candidate, source, config) = render_candidate(data, edit)?;
+    let edit = edit.clone();
+    Ok((
+        save::PreparedWrite {
+            candidate,
+            source,
+            repeat: Box::new(move |bytes| {
+                let (candidate, source, _) = render_candidate(bytes, &edit).ok()?;
+                let candidate = save::candidate_write_file_receipted(candidate).ok()?;
+                Some(save::tree::finish_comment_owners_replay(&source, candidate))
+            }),
+        },
+        config,
+    ))
 }
 
 fn render_candidate(
@@ -423,15 +459,6 @@ fn render_candidate(
             bytes,
             receipts: Default::default(),
         }
-    };
-    // edit_v8 and preview_v8 both finish with WriteConfig. Its normalizer
-    // must use the original edit source owners, rather than treating an
-    // already drifted intermediate recipient as a new source owner.
-    let rendered = if save::tree::owner_protection_enabled() {
-        save_step!(rendered, save::candidate_write_file_receipted(rendered))
-            .map_err(rendered_error)?
-    } else {
-        rendered
     };
     save::check_values(&rendered.bytes, &intended).map_err(rendered_error)?;
     Ok((rendered, source, config))
@@ -869,7 +896,9 @@ pub(crate) fn owner_audit_candidate(
     data: &[u8],
     edit: &V8Edit,
 ) -> Result<(save::tree::ReceiptedYaml, save::tree::CommentSource), V8EditError> {
-    render_candidate(data, edit).map(|(candidate, source, _)| (candidate, source))
+    let (candidate, source, _) = render_candidate(data, edit)?;
+    let candidate = save::candidate_write_file_receipted(candidate).map_err(write_error)?;
+    Ok((candidate, source))
 }
 
 #[cfg(test)]

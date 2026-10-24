@@ -74,11 +74,18 @@ fn review_r11_opus_go_byte_fixtures() {
                 }
             }
         };
-        if out != row["expected"].as_str().unwrap() {
+        if super::owner_legacy_tests::main_for_assertion("r11", source, op, &out)
+            != row["expected"].as_str().unwrap()
+        {
             failures.push(serde_json::json!({"case":row["case"],"op":op,"out":out,"expected":row["expected"]}));
         }
         if row["go_equal"] == true {
-            assert_eq!(out, row["go"].as_str().unwrap(), "{} {op}", row["case"]);
+            assert_eq!(
+                super::owner_legacy_tests::main_for_assertion("r11", source, op, &out),
+                row["go"].as_str().unwrap(),
+                "{} {op}",
+                row["case"]
+            );
         }
     }
     eprintln!("opus byte changes: {failures:#?}");

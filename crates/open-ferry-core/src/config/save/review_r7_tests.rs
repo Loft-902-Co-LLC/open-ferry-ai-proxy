@@ -306,7 +306,12 @@ fn review_r7_exact_canonical_comments_preserve_values_and_expose_unlicensed_slot
             super::parity::retained_comment_ownership(
                 f["source"].as_str().unwrap(),
                 f["go"]["file"].as_str().unwrap(),
-                &out
+                &super::owner_legacy_tests::main_for_assertion(
+                    "r7",
+                    f["source"].as_str().unwrap(),
+                    f["op"].as_str().unwrap(),
+                    &out,
+                )
             ),
             owns_every_kept_go_comment,
             "{} {}: {out}",
@@ -394,7 +399,12 @@ fn review_r7_canonical_barrier_does_not_relocate_a_harmless_go_transfer() {
     let source = "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8\n";
     let (out, _) = normalize_config_layout(source.as_bytes(), true).unwrap();
     assert_eq!(
-        String::from_utf8(out).unwrap(),
+        super::owner_legacy_tests::main_for_assertion(
+            "r7barrier",
+            source,
+            "normalize",
+            &String::from_utf8(out).unwrap(),
+        ),
         "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n"
     );
 }

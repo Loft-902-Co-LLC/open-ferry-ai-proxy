@@ -1,0 +1,3969 @@
+[
+  {
+    "recipe": {
+      "id": "block/s1/save",
+      "group": "block",
+      "key": "s1/save",
+      "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "path": [
+          "observability",
+          "logs",
+          "debug"
+        ],
+        "body": "true"
+      },
+      "frozen": "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags: ! # moved\n        - |- # own\n          a\n        - b\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[1]",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "block/s1/nested",
+      "group": "block",
+      "key": "s1/nested",
+      "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+      "op": "nested",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "path": [
+          "observability",
+          "logs",
+          "debug"
+        ],
+        "body": "true"
+      },
+      "frozen": "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\nauth-dir: /x\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\n        - b\ndebug: false\nauth-dir: /x\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags: ! # moved\n        - |- # own\n          a\n        - b\ndebug: false\nauth-dir: /x\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[1]",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "block/s1/raw-v8",
+      "group": "block",
+      "key": "s1/raw-v8",
+      "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+      "op": "raw-v8",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "path": [
+          "observability",
+          "logs",
+          "debug"
+        ],
+        "body": "true"
+      },
+      "frozen": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: false\n"
+    },
+    "main": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags: ! # moved\n                - |- # own\n                  a\n                - b\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[1]",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "block/s1/put",
+      "group": "block",
+      "key": "s1/put",
+      "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+      "op": "put",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "path": [
+          "observability",
+          "logs",
+          "debug"
+        ],
+        "body": "true"
+      },
+      "frozen": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+    },
+    "main": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags: ! # moved\n                - |- # own\n                  a\n                - b\nobservability:\n    logs:\n        debug: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[1]",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "block/s1/patch",
+      "group": "block",
+      "key": "s1/patch",
+      "source": "config-version: 8\nplugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\n        - b\ndebug: false\n",
+      "op": "patch",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "path": [
+          "observability",
+          "logs",
+          "debug"
+        ],
+        "body": "true"
+      },
+      "frozen": "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+    },
+    "main": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags:\n                - \"a\" # moved\n# own\n                - b\nobservability:\n    logs:\n        debug: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "config-version: 8\nplugins:\n    configs:\n        alpha:\n            tags: ! # moved\n                - |- # own\n                  a\n                - b\nobservability:\n    logs:\n        debug: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[1]",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/0",
+      "group": "null",
+      "key": "0",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/2",
+      "group": "null",
+      "key": "2",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "debug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: null # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/4",
+      "group": "null",
+      "key": "4",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/6",
+      "group": "null",
+      "key": "6",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "debug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: ~ # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/8",
+      "group": "null",
+      "key": "8",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta:  # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta:  # null comment\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n# moved\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n# moved\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": false,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/10",
+      "group": "null",
+      "key": "10",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta:  # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "debug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n# moved\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n# moved\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n\n    zeta: # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": false,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/12",
+      "group": "null",
+      "key": "12",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "null/14",
+      "group": "null",
+      "key": "14",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false\n",
+      "op": "save",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "config": "debug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\n    zeta: !!null null # null comment\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.zeta",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.zeta",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r7/M0/raw",
+      "group": "r7",
+      "key": "M0/raw",
+      "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+      "op": "raw",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "keys": [
+        "auth-dir"
+      ]
+    },
+    "main": {
+      "files": [
+        "models:\n# k\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "models: ! # k\n\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.models.catalog:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": false,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.models.catalog",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.config-version",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r7/M0/normalize",
+      "group": "r7",
+      "key": "M0/normalize",
+      "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+      "op": "normalize",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "keys": [
+        "auth-dir"
+      ]
+    },
+    "main": {
+      "files": [
+        "models:\n    # k\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "models: ! # k\n\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.models.catalog:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": false,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.models.catalog",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.config-version",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r7/M0/nested",
+      "group": "r7",
+      "key": "M0/nested",
+      "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+      "op": "nested",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "keys": [
+        "auth-dir"
+      ]
+    },
+    "main": {
+      "files": [
+        "debug: false\nmodels:\n  catalog: '' # v\nconfig-version: 8 # cv\nauth-dir: /x # k\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "debug: false\nmodels: ! # k\n  catalog: '' # v\nconfig-version: 8 # cv\nauth-dir: /x\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.models.catalog:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.models.catalog",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.config-version",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r7/M0/put",
+      "group": "r7",
+      "key": "M0/put",
+      "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8 # cv\n",
+      "op": "put",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "keys": [
+        "auth-dir"
+      ]
+    },
+    "main": {
+      "files": [
+        "models:\n# k\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "models: ! # k\n\n    catalog: '' # v\nconfig-version: 8 # cv\nobservability:\n    logs:\n        debug: false\noauth:\n    auth-dir: \"/x\"\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.models.catalog:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": false,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.models.catalog",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.config-version",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r7barrier/canonical",
+      "group": "r7barrier",
+      "key": "canonical",
+      "source": "debug: false\nmodels: &m # k\n  catalog: '' # v\nconfig-version: 8\n",
+      "op": "normalize",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "frozen": "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n"
+    },
+    "main": {
+      "files": [
+        "models:\n    catalog: '' # v\nconfig-version: 8 # k\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "models: ! # k\n    catalog: '' # v\nconfig-version: 8\nobservability:\n    logs:\n        debug: false\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.models.catalog:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.config-version",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.models.catalog",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.models.catalog",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r10/0/put",
+      "group": "r10",
+      "key": "0/put",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # item foot\n\n  # rse head\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "put",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      }
+    },
+    "main": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# item foot\n# rse head\n    request-scoped-errors: {}\n    auth-dir: \"/x\"\nconfig-version: 8\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# item foot\n    # rse head\n    request-scoped-errors: {}\n    auth-dir: \"/x\"\nconfig-version: 8\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.request-scoped-errors:key",
+              "slot": "Head",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 1,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.request-scoped-errors:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r10/1/put",
+      "group": "r10",
+      "key": "1/put",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n# item foot\n  # rse head\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "put",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      }
+    },
+    "main": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# item foot\n# rse head\n    request-scoped-errors: {}\n    auth-dir: \"/x\"\nconfig-version: 8\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# item foot\n    # rse head\n    request-scoped-errors: {}\n    auth-dir: \"/x\"\nconfig-version: 8\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.request-scoped-errors:key",
+              "slot": "Head",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 1,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.request-scoped-errors:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r11/flow_first_foot/nested",
+      "group": "r11",
+      "key": "flow_first_foot/nested",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "nested",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": "/x",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "frozen": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+    },
+    "main": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r11/flow_first_foot/raw",
+      "group": "r11",
+      "key": "flow_first_foot/raw",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "raw",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "frozen": "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f1\n\n            - {name: c, alias: d}\n    request-scoped-errors: {}\nconfig-version: 8\n"
+    },
+    "main": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f1\n\n            - {name: c, alias: d}\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f1\n\n            - {name: c, alias: d}\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "r11/flow_first_foot/nested2",
+      "group": "r11",
+      "key": "flow_first_foot/nested2",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "nested2",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "frozen": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+    },
+    "main": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n",
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n",
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f1\n\n      - {name: c, alias: d}\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "modnested/plugin",
+      "group": "modnested",
+      "key": "plugin",
+      "source": "plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\ndebug: false\n",
+      "op": "nested",
+      "params": {
+        "save_auth": "/x",
+        "nested_keys": [
+          "models",
+          "catalog"
+        ],
+        "nested_values": "https://catalog.example/models.json",
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "frozen": "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    alpha:\n      tags: ! # moved\n        - |- # own\n          a\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.alpha.tags[0]",
+              "slot": "Line",
+              "part": 1
+            },
+            "main": [
+              {
+                "path": "$.debug:key",
+                "slot": "Head",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": false,
+                "same_part": false
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.alpha.tags[0]",
+                "slot": "Line",
+                "part": 1,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "pending/legacy-plain",
+      "group": "pending",
+      "key": "legacy-plain",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\ndebug: false\n",
+      "op": "save",
+      "params": {},
+      "config": "auth-dir: /x\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              },
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "pending/legacy-line",
+      "group": "pending",
+      "key": "legacy-line",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\ndebug: false # next\n",
+      "op": "save",
+      "params": {},
+      "config": "auth-dir: /x\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ndebug: false # next\ncredential-concurrency: # moved\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ndebug: false # next\ncredential-concurrency: # moved\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\ndebug: false # next\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.credential-concurrency:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              },
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.debug",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "pending/legacy-last",
+      "group": "pending",
+      "key": "legacy-last",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\n",
+      "op": "save",
+      "params": {},
+      "config": "auth-dir: /x\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ncredential-concurrency: # moved\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\ncredential-concurrency: # moved\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.credential-concurrency:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              },
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "pending/legacy-map",
+      "group": "pending",
+      "key": "legacy-map",
+      "source": "plugins:\n  configs:\n    gamma: &g # moved\n      enabled: false # on\nrouting:\n  strategy: round-robin\n",
+      "op": "save",
+      "params": {},
+      "config": "auth-dir: /x\ndebug: false\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      enabled: false # on\nrouting: # moved\n  strategy: round-robin\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      enabled: false # on\nrouting: # moved\n  strategy: round-robin\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma: ! # moved\n      enabled: false # on\nrouting:\n  strategy: round-robin\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.routing:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              },
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "aliases/alias-inside-plugin",
+      "group": "aliases",
+      "key": "alias-inside-plugin",
+      "source": "plugins:\n  configs:\n    gamma:\n      settings: &s # moved\n        enabled: false # on\n      copy: *s\ndebug: false\n",
+      "op": "save",
+      "params": {},
+      "config": "auth-dir: /x\n",
+      "frozen": "plugins:\n  configs:\n    gamma:\n      settings:\n        enabled: false # on\n      copy: # moved\n        enabled: false # on\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+    },
+    "main": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      settings:\n        enabled: false # on\n      copy: # moved\n        enabled: false # on\ndebug: false # moved\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "plugins:\n  configs:\n    gamma:\n      settings: ! # moved\n        enabled: false # on\n      copy: ! # moved\n        enabled: false # on\ndebug: false\ncredential-concurrency:\n  cpa-heartbeat-timeout: 3s\n  cpa-cancel-bound: 5s\n  reclaim-grace: 5s\n  cleanup-interval: 5s\n  release-flush-interval: 250ms\n  release-max-backoff: 2s\n  busy-retry-min: 250ms\n  busy-retry-max: 1s\n  max-limit: 1000000\ncredential-in-flight:\n  snapshot-interval: 2s\n  stale-after: 10s\n  max-part-bytes: 262144\n  max-part-count: 64\n  max-revision-bytes: 16777216\n  max-aggregate-groups: 100000\n  max-details: 10000\n  max-string-bytes: 256\n  staging-retention: 1m\nauth-dir: /x # moved\ndiscovery:\n  service-type: _ai-gateway._tcp\n  subtypes:\n    - _chat-completions\n    - _responses\n    - _messages\n    - _generate-content\n    - _interactions\nredis-usage-queue-retention-seconds: 60\ndisable-cooling: false\nrequest-retry: 0\nws-auth: true\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.plugins.configs.gamma.settings.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.copy:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.settings.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.plugins.configs.gamma.settings.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.settings.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.settings.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 2,
+            "source": {
+              "path": "$.plugins.configs.gamma.copy.enabled:key",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.debug",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              },
+              {
+                "path": "$.auth-dir",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": false,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.copy.enabled:key",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 3,
+            "source": {
+              "path": "$.plugins.configs.gamma.copy.enabled",
+              "slot": "Line",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.plugins.configs.gamma.copy.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.plugins.configs.gamma.copy.enabled",
+                "slot": "Line",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "counterfactual/nested",
+      "group": "counterfactual",
+      "key": "nested",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f0\n\n      - {name: c, alias: d}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "nested",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "disable_empty": true
+    },
+    "main": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "counterfactual/nested2",
+      "group": "counterfactual",
+      "key": "nested2",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f0\n\n      - {name: c, alias: d}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "nested2",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "disable_empty": true
+    },
+    "main": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n# f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n",
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /x\n",
+        "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b,}\n      # f0\n\n      - {name: c, alias: d,}\n# f1\n  request-scoped-errors: {}\nconfig-version: 8\nauth-dir: /y\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "counterfactual/raw",
+      "group": "counterfactual",
+      "key": "raw",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f0\n\n      - {name: c, alias: d}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "raw",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "disable_empty": true
+    },
+    "main": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "recipe": {
+      "id": "counterfactual/raw2",
+      "group": "counterfactual",
+      "key": "raw2",
+      "source": "oauth:\n  model-alias:\n    antigravity:\n      - {name: a, alias: b}\n      # f0\n\n      - {name: c, alias: d}\n      # f1\n\n  request-scoped-errors: {}\nconfig-version: 8\n",
+      "op": "raw2",
+      "params": {
+        "save_auth": [
+          "/x",
+          "/y"
+        ],
+        "nested_keys": [
+          "auth-dir"
+        ],
+        "nested_values": [
+          "/x",
+          "/y"
+        ],
+        "paths": {
+          "put": [
+            "oauth",
+            "auth-dir"
+          ],
+          "patch": [
+            "oauth"
+          ]
+        },
+        "bodies": {
+          "put": "\"/x\"",
+          "patch": "{\"auth-dir\":\"/x\"}"
+        }
+      },
+      "disable_empty": true
+    },
+    "main": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n# f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n",
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b}\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "on": {
+      "files": [
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n",
+        "oauth:\n    model-alias:\n        antigravity:\n            - {name: a, alias: b,}\n            # f0\n\n            - {name: c, alias: d,}\n# f1\n    request-scoped-errors: {}\nconfig-version: 8\n"
+      ]
+    },
+    "proofs": [
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "faithful_main": false,
+        "complete": true,
+        "new_holds": true,
+        "new_equals_actual": true,
+        "same_values": true,
+        "stable": true,
+        "receipts": [
+          {
+            "occurrence": 0,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[0]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[0]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          },
+          {
+            "occurrence": 1,
+            "source": {
+              "path": "$.oauth.model-alias.antigravity[1]",
+              "slot": "Foot",
+              "part": 0
+            },
+            "main": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ],
+            "new": [
+              {
+                "path": "$.oauth.model-alias.antigravity[1]",
+                "slot": "Foot",
+                "part": 0,
+                "same_owner": true,
+                "same_slot": true,
+                "same_part": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
