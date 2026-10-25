@@ -375,6 +375,24 @@ fn review_r15_value_check_accepts_loader_normalization() {
 }
 
 #[test]
+fn review_r15_value_check_accepts_shadowed_legacy_structs() {
+    for source in [
+        "config-version: 8\nserver: {tls: {}}\ntls: bad\n",
+        "config-version: 8\nmanagement: {}\nremote-management: bad\n",
+    ] {
+        assert!(Config::parse(source).is_err());
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "port: 1\n").unwrap();
+        assert!(
+            write_file(&path, source.as_bytes()).is_ok(),
+            "the canonical mapping must replace the shadowed legacy value"
+        );
+        assert!(Config::load(&path).is_ok());
+    }
+}
+
+#[test]
 fn review_r15_safety_net_preserves_values_or_refuses_without_writing() {
     for mapping in [true, false] {
         let source = if mapping {

@@ -126,7 +126,13 @@ impl IntendedValues {
             }
         }
         if let Some((doc, migrate)) = &self.raw {
-            let cfg = config_from_node(doc)?;
+            // A canonical v8 mapping can discard a malformed legacy alias.
+            // Decode the same normalized layout that this write will load.
+            let cfg = if *migrate {
+                config_from_node(&normalized_document(doc, true)?)?
+            } else {
+                config_from_node(doc)?
+            };
             return Self::capture(doc.clone(), &cfg, *migrate, true)?.difference(data, actual);
         }
         let expected = self.values.as_ref().expect("a captured save intent");
@@ -291,12 +297,7 @@ fn prune_normalized(dst: &mut Node, src: Option<&Node>, schema: &Schema, path: &
     }
 }
 
-fn canonical(
-    doc: &Node,
-    generated: Option<&Node>,
-    schema: &Schema,
-    migrate: bool,
-) -> Result<Semantic, SaveError> {
+fn normalized_document(doc: &Node, migrate: bool) -> Result<Node, SaveError> {
     let mut doc = doc.clone();
     if doc.kind == Kind::Document
         && let Some(root) = doc.content.first_mut()
@@ -308,6 +309,16 @@ fn canonical(
         let bytes = encode::faithful_node(&doc, 2)?;
         doc = save::normalize_config_layout_doc(&bytes, true)?.0;
     }
+    Ok(doc)
+}
+
+fn canonical(
+    doc: &Node,
+    generated: Option<&Node>,
+    schema: &Schema,
+    migrate: bool,
+) -> Result<Semantic, SaveError> {
+    let doc = normalized_document(doc, migrate)?;
     let first = doc
         .content
         .first()
