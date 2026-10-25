@@ -163,7 +163,7 @@ fn repaired_rows() -> Vec<Value> {
         serde_json::from_str(include_str!("../testdata/writer/owner_legacy.json")).unwrap(),
     )
 }
-pub(super) fn independent_canonical_owners(data: &[u8]) -> super::owner_tests::OwnerInventory {
+fn independent_layout_paths() -> Vec<(&'static str, &'static str)> {
     let mut paths: Vec<_> = super::super::v8::V8_PATHS
         .iter()
         .chain(super::super::layout::V8_STRUCT_PATHS)
@@ -172,26 +172,306 @@ pub(super) fn independent_canonical_owners(data: &[u8]) -> super::owner_tests::O
         .copied()
         .collect();
     paths.sort_by_key(|(old, _)| std::cmp::Reverse(old.split('.').count()));
-    let mut result = std::collections::BTreeMap::new();
-    for ((mut path, side, slot, part, hash), count) in super::owner_tests::independent_owners(data)
-    {
-        for (old, current) in &paths {
-            let old: Vec<_> = old.split('.').map(|s| format!("!!str:{s}")).collect();
-            if path.get(1..).is_some_and(|p| p.starts_with(&old)) {
-                path.splice(
-                    1..1 + old.len(),
-                    current.split('.').map(|s| format!("!!str:{s}")),
-                );
-                break;
-            }
+    paths
+}
+fn independent_field<'a>(node: &'a Node, name: &str) -> Option<&'a Node> {
+    node.pairs()
+        .find(|(key, _)| key.value == name)
+        .map(|(_, value)| value)
+}
+fn independent_canonical_path(
+    mut path: Vec<String>,
+    paths: &[(&str, &str)],
+    legacy_access: bool,
+) -> Vec<String> {
+    let Some(root) = path.get(1).and_then(|key| key.strip_prefix("!!str:")) else {
+        return path;
+    };
+    for (old, family) in super::super::v8::V8_KEY_FAMILIES {
+        if root == *old {
+            path.splice(
+                1..2,
+                ["!!str:api-keys".to_owned(), format!("!!str:{family}")],
+            );
+            return path;
         }
+    }
+    for (old, current) in paths {
+        if old.split('.').next() != Some(root) {
+            continue;
+        }
+        // The same root name is a legacy access-key sequence or a v8 provider
+        // mapping. Its parsed shape, rather than comments, determines the move.
+        if *old == "api-keys" && !legacy_access {
+            continue;
+        }
+        let old: Vec<_> = old.split('.').map(|s| format!("!!str:{s}")).collect();
+        if path.get(1..).is_some_and(|p| p.starts_with(&old)) {
+            path.splice(
+                1..1 + old.len(),
+                current.split('.').map(|s| format!("!!str:{s}")),
+            );
+            break;
+        }
+    }
+    path
+}
+pub(super) fn independent_canonical_owners(data: &[u8]) -> super::owner_tests::OwnerInventory {
+    let doc = unmarshal(data).unwrap();
+    let legacy_access = doc
+        .content
+        .first()
+        .and_then(|root| independent_field(root, "api-keys"))
+        .is_some_and(|node| node.kind == Kind::Sequence);
+    let paths = independent_layout_paths();
+    let mut result = std::collections::BTreeMap::new();
+    for ((path, side, slot, part, hash), count) in super::owner_tests::independent_owners(data) {
+        let path = independent_canonical_path(path, &paths, legacy_access);
         *result.entry((path, side, slot, part, hash)).or_insert(0) += count;
     }
     result
 }
+fn independent_expected_owners(data: &[u8], rendered: &[u8]) -> super::owner_tests::OwnerInventory {
+    fn parse(data: &[u8]) -> Node {
+        let mut doc = unmarshal(data).unwrap();
+        if let Some(root) = doc.content.first_mut() {
+            *root = expand_config_aliases(root).unwrap();
+        }
+        doc
+    }
+    fn nodes<'a>(
+        node: &'a Node,
+        path: &mut Vec<String>,
+        side: &'static str,
+        out: &mut Vec<(Vec<String>, &'static str, &'a Node)>,
+    ) {
+        out.push((path.clone(), side, node));
+        if node.kind == Kind::Mapping {
+            for (key, value) in node.pairs() {
+                path.push(format!("{}:{}", key.short_tag(), key.value));
+                nodes(key, path, "key", out);
+                nodes(value, path, "value", out);
+                path.pop();
+            }
+        } else {
+            for (index, child) in node.content.iter().enumerate() {
+                path.push(index.to_string());
+                nodes(
+                    child,
+                    path,
+                    if node.kind == Kind::Document {
+                        "root"
+                    } else {
+                        "item"
+                    },
+                    out,
+                );
+                path.pop();
+            }
+        }
+    }
+    fn indexed(doc: &Node) -> Vec<(Vec<String>, &'static str, &Node)> {
+        let mut result = Vec::new();
+        nodes(doc, &mut Vec::new(), "document", &mut result);
+        let paths = independent_layout_paths();
+        let legacy_access = doc
+            .content
+            .first()
+            .and_then(|root| independent_field(root, "api-keys"))
+            .is_some_and(|node| node.kind == Kind::Sequence);
+        for (path, _, _) in &mut result {
+            *path = independent_canonical_path(std::mem::take(path), &paths, legacy_access);
+        }
+        result
+    }
+    fn same_scalar(left: &Node, right: &Node) -> bool {
+        left.kind == Kind::Scalar
+            && right.kind == Kind::Scalar
+            && left.short_tag() == right.short_tag()
+            && left.value == right.value
+    }
+    let source = parse(data);
+    let target = parse(rendered);
+    let source_nodes = indexed(&source);
+    let target_nodes = indexed(&target);
+    let mut moves = Vec::new();
+    for (source_path, source_side, source) in &source_nodes {
+        if source.kind != Kind::Sequence {
+            continue;
+        }
+        let Some((_, _, target)) = target_nodes
+            .iter()
+            .find(|(path, side, _)| path == source_path && side == source_side)
+        else {
+            continue;
+        };
+        if target.kind != Kind::Sequence {
+            continue;
+        }
+        // Scalar list edits retain occurrences in their original order within
+        // each non-empty trimmed value. Pairing parsed values never consults
+        // comment text, receipt identity, or the repair gate.
+        let mut old_values = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        let mut new_values = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        for (index, item) in source.content.iter().enumerate() {
+            if item.kind == Kind::Scalar && !item.value.trim().is_empty() {
+                old_values.entry(item.value.trim()).or_default().push(index);
+            }
+        }
+        for (index, item) in target.content.iter().enumerate() {
+            if item.kind == Kind::Scalar && !item.value.trim().is_empty() {
+                new_values.entry(item.value.trim()).or_default().push(index);
+            }
+        }
+        for (value, old_indices) in old_values {
+            if let Some(new_indices) = new_values.get(value) {
+                for (index, next) in old_indices.into_iter().zip(new_indices) {
+                    let mut old = source_path.clone();
+                    old.push(index.to_string());
+                    let mut new = source_path.clone();
+                    new.push(next.to_string());
+                    moves.push((old, new));
+                }
+            }
+        }
+    }
+
+    let mut expected = std::collections::BTreeMap::new();
+    for ((mut path, side, slot, part, hash), count) in independent_canonical_owners(data) {
+        if let Some((old, new)) = moves.iter().find(|(old, _)| path.starts_with(old)) {
+            path.splice(..old.len(), new.iter().cloned());
+        } else if path.len() >= 4
+            && path[0] == "0"
+            && path[1] == "!!str:api-keys"
+            && let Some((entry_path, _, entry)) = source_nodes.iter().find(|(p, side, node)| {
+                (p.len() == 4 || (p.len() == 6 && p[4] == "!!str:keys"))
+                    && path.starts_with(p)
+                    && *side == "item"
+                    && independent_field(node, "api-key").is_some()
+            })
+            && let Some(key) = independent_field(entry, "api-key")
+        {
+            let source_count = source_nodes
+                .iter()
+                .filter(|(p, side, node)| {
+                    (p.len() == 4 || (p.len() == 6 && p[4] == "!!str:keys"))
+                        && p[..3] == entry_path[..3]
+                        && *side == "item"
+                        && independent_field(node, "api-key")
+                            .is_some_and(|other| same_scalar(key, other))
+                })
+                .count();
+            let candidates: Vec<_> = target_nodes
+                .iter()
+                .filter(|(p, side, node)| {
+                    p.len() == 6
+                        && p[..3] == entry_path[..3]
+                        && p[4] == "!!str:keys"
+                        && *side == "item"
+                        && independent_field(node, "api-key")
+                            .is_some_and(|other| same_scalar(key, other))
+                })
+                .collect();
+            if source_count == 1
+                && let [(key_path, _, _)] = candidates.as_slice()
+            {
+                let tail = &path[entry_path.len()..];
+                let key_path: Vec<_> = key_path.iter().chain(tail).cloned().collect();
+                let group_path: Vec<_> = key_path[..4].iter().chain(tail).cloned().collect();
+                let key_exists = target_nodes
+                    .iter()
+                    .any(|(p, s, _)| *p == key_path && *s == side);
+                let group_exists = target_nodes
+                    .iter()
+                    .any(|(p, s, _)| *p == group_path && *s == side);
+                if !tail.is_empty() && key_exists != group_exists {
+                    path = if key_exists { key_path } else { group_path };
+                } else if tail.is_empty() && key_exists {
+                    path = key_path;
+                }
+            }
+        }
+        *expected.entry((path, side, slot, part, hash)).or_insert(0) += count;
+    }
+    expected
+}
+fn independent_source_owners_held(data: &[u8], rendered: &[u8]) -> bool {
+    let actual = independent_canonical_owners(rendered);
+    independent_expected_owners(data, rendered)
+        .iter()
+        .all(|(owner, count)| actual.get(owner) == Some(count))
+}
+
+#[test]
+fn owner_independent_inventory_tracks_retained_keys_without_licensing_comment_moves() {
+    let source = "access:\n  api-keys:\n    # source key\n    - retained\n";
+    let correct = "access:\n  api-keys:\n    - inserted\n    # source key\n    - retained\n";
+    let wrong = "access:\n  api-keys:\n    # source key\n    - inserted\n    - retained\n";
+    assert!(independent_source_owners_held(
+        source.as_bytes(),
+        correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        source.as_bytes(),
+        wrong.as_bytes()
+    ));
+    let repeated_source = "access:\n  api-keys:\n    # first source\n    - ' retained '\n    # second source\n    - retained\n";
+    let repeated_correct = "access:\n  api-keys:\n    - inserted\n    # first source\n    - retained\n    # second source\n    - ' retained '\n";
+    let repeated_wrong = "access:\n  api-keys:\n    - inserted\n    # second source\n    - retained\n    # first source\n    - ' retained '\n";
+    assert!(independent_source_owners_held(
+        repeated_source.as_bytes(),
+        repeated_correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        repeated_source.as_bytes(),
+        repeated_wrong.as_bytes()
+    ));
+    let scalar_source =
+        "oauth-excluded-models:\n  antigravity: [first, empty, retained # source item\n  ]\n";
+    let scalar_correct =
+        "oauth:\n  excluded-models:\n    antigravity: [first, retained # source item\n    ]\n";
+    let scalar_wrong =
+        "oauth:\n  excluded-models:\n    antigravity: [first # source item\n    , retained]\n";
+    assert!(independent_source_owners_held(
+        scalar_source.as_bytes(),
+        scalar_correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        scalar_source.as_bytes(),
+        scalar_wrong.as_bytes()
+    ));
+    let source = "claude-api-key:\n  - api-key: retained\n    cloak:\n      sensitive-words:\n        # source child\n        - word\n";
+    let correct = "api-keys:\n  claude:\n    - keys:\n        - api-key: retained\n          cloak:\n            sensitive-words:\n              # source child\n              - word\n        - api-key: other\n          cloak:\n            sensitive-words:\n              - word\n";
+    let wrong = "api-keys:\n  claude:\n    - keys:\n        - api-key: retained\n          cloak:\n            sensitive-words:\n              - word\n        - api-key: other\n          cloak:\n            sensitive-words:\n              # source child\n              - word\n";
+    assert!(independent_source_owners_held(
+        source.as_bytes(),
+        correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        source.as_bytes(),
+        wrong.as_bytes()
+    ));
+    let entry_source =
+        "meta-api-key:\n  # source entry\n  - api-key: retained\n    base-url: endpoint\n";
+    let entry_correct = "api-keys:\n  meta:\n    - base-url: endpoint\n      keys:\n        # source entry\n        - api-key: retained\n";
+    let entry_wrong_group = "api-keys:\n  meta:\n    # source entry\n    - base-url: endpoint\n      keys:\n        - api-key: retained\n";
+    let entry_wrong_provider = "api-keys:\n  meta:\n    - base-url: endpoint\n      keys:\n        - api-key: retained\n  xai:\n    - keys:\n        # source entry\n        - api-key: retained\n";
+    assert!(independent_source_owners_held(
+        entry_source.as_bytes(),
+        entry_correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        entry_source.as_bytes(),
+        entry_wrong_group.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        entry_source.as_bytes(),
+        entry_wrong_provider.as_bytes()
+    ));
+}
 
 fn independent_step_proof(input: &[u8], main: &[u8], output: &[u8]) -> Value {
-    let source = independent_canonical_owners(input);
+    let source = independent_expected_owners(input, main);
     let main = independent_canonical_owners(main);
     let actual = independent_canonical_owners(output);
     let drift = source
@@ -416,7 +696,7 @@ fn owner_audit_persisted_sweeps() {
             let go_loadable = go.is_some_and(|g| {
                 Config::load_bytes(g.as_bytes()).is_ok() && parity::single_document(g)
             });
-            let source_owners = independent_canonical_owners(input);
+            let source_owners = independent_expected_owners(input, &candidate.0.bytes);
             let holds = |owners: &super::owner_tests::OwnerInventory| {
                 source_owners
                     .iter()
@@ -462,6 +742,52 @@ fn owner_audit_persisted_sweeps() {
     );
 }
 
+#[test]
+#[ignore = "offline independent parse/path recheck of cached writer evidence"]
+fn owner_recheck_cached_semantic_owners() {
+    let input = std::env::var_os("FU_OWNERS_CACHED_INPUT").unwrap();
+    let output = std::env::var_os("FU_OWNERS_CACHED_OUTPUT").unwrap();
+    let mut rows: Vec<Value> = serde_json::from_slice(&std::fs::read(input).unwrap()).unwrap();
+    let mut failed = 0;
+    for row in &mut rows {
+        for step in row["steps"].as_array_mut().unwrap() {
+            if step["call_changed"] != true {
+                continue;
+            }
+            let source = step["input"].as_str().unwrap().as_bytes();
+            let main = step["main_candidate"].as_str().unwrap().as_bytes();
+            let actual = step["actual"].as_str().unwrap().as_bytes();
+            let proof = independent_step_proof(source, main, actual);
+            let expected = independent_expected_owners(source, actual)
+                .into_iter()
+                .collect::<Vec<_>>();
+            let good = step["proof"]["faithful_main"] == false
+                && [
+                    "complete",
+                    "new_holds",
+                    "new_equals_actual",
+                    "same_values",
+                    "stable",
+                ]
+                .iter()
+                .all(|key| step["proof"][*key] == true)
+                && ["main_drift", "source_owners_held", "multiplicity"]
+                    .iter()
+                    .all(|key| proof[*key] == true);
+            step["original_index_inventory"] = step["independent"].clone();
+            step["original_index_proved"] = step["proved"].clone();
+            step["independent"] = proof;
+            step["independent_expected_source_owners"] = json!(expected);
+            step["independent_rust_source_owners_held"] =
+                step["independent"]["source_owners_held"].clone();
+            step["proved"] = json!(good);
+            failed += usize::from(!good);
+        }
+    }
+    std::fs::write(output, serde_json::to_vec(&rows).unwrap()).unwrap();
+    assert_eq!(failed, 0, "cached independent semantic owner proof failed");
+}
+
 #[cfg(feature = "parity")]
 #[test]
 #[ignore = "offline independent same-input Go source-owner witnesses"]
@@ -472,22 +798,25 @@ fn owner_audit_same_input_go_witnesses() {
     .unwrap();
     let mut result = Vec::new();
     for row in rows {
-        let source = independent_canonical_owners(row["source"].as_str().unwrap().as_bytes());
-        let rust = independent_canonical_owners(row["rust"].as_str().unwrap().as_bytes());
-        let holds = |owners: &super::owner_tests::OwnerInventory| {
-            source
-                .iter()
-                .all(|(owner, count)| owners.get(owner) == Some(count))
-        };
-        assert!(holds(&rust), "same-input witness lost a Rust source owner");
-        let go_file = row["go"]["files"].get(0).and_then(Value::as_str);
-        let go = go_file
+        let source_data = row["source"].as_str().unwrap().as_bytes();
+        let rust_data = row["rust"].as_str().unwrap().as_bytes();
+        let source = independent_expected_owners(source_data, rust_data);
+        let rust = independent_canonical_owners(rust_data);
+        assert!(
+            independent_source_owners_held(source_data, rust_data),
+            "same-input witness lost a Rust source owner"
+        );
+        let go_file = row["go"]["files"]
+            .get(0)
+            .and_then(Value::as_str)
             .filter(|text| {
                 Config::load_bytes(text.as_bytes()).is_ok() && parity::single_document(text)
-            })
-            .map(|text| independent_canonical_owners(text.as_bytes()));
+            });
+        let go = go_file.map(|text| independent_canonical_owners(text.as_bytes()));
+        let go_holds =
+            go_file.map(|text| independent_source_owners_held(source_data, text.as_bytes()));
         result.push(json!({"id":row["id"],"rust_source_owners_held":true,
-            "go_source_owners_held":go.as_ref().map(holds),
+            "go_source_owners_held":go_holds,
             "source":source.into_iter().collect::<Vec<_>>(),
             "rust":rust.into_iter().collect::<Vec<_>>(),
             "go":go.map(|v|v.into_iter().collect::<Vec<_>>())}));
