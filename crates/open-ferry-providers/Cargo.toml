@@ -19,6 +19,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 crc32fast = "1.5.2"
 flate2 = "1.1.10"
 futures-util = { version = "0.3.34", features = ["sink"] }
+h2 = "0.4.19"
 http = "1.5.0"
 httparse = "1.10.1"
 memchr = "2.8.3"
@@ -43,5 +44,6 @@ url = "2.5.8"
 
 [dev-dependencies]
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["full", "test-util"] }

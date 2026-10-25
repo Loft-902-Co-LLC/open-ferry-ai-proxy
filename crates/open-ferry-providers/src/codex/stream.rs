@@ -99,6 +99,15 @@ impl fmt::Display for LineError {
     }
 }
 
+impl std::error::Error for LineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::TooLong => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ReaderState {
     Reading,
@@ -447,7 +456,10 @@ impl State {
             let line = line.map_err(|error| {
                 tracing::debug!("codex: stream read failed: {error}");
                 self.reader.report(&error);
-                ExecError::new(ErrorKind::Upstream, error.to_string())
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(ErrorKind::Upstream, error.to_string()),
+                )
             })?;
             let line_len = self.reader.raw_bytes;
             let raw_lines = self.reader.raw_lines;

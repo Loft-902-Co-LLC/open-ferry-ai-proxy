@@ -261,7 +261,10 @@ impl State {
             tracing::debug!("meta: stream read failed: {error}");
             self.reader.report(&error);
             let text = self.secrets.text(error.to_string(), Policy::Client);
-            return Err(ExecError::new(ErrorKind::Upstream, text));
+            return Err(crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, text),
+            ));
         }
         Ok(())
     }

@@ -213,12 +213,16 @@ pub(crate) fn raw_stream(response: reqwest::Response, secrets: Secrets) -> Chunk
                 }
                 Err(error) => {
                     state.done = true;
-                    let error = ExecError::new(
-                        ErrorKind::Upstream,
-                        state
-                            .secrets
-                            .text(error_chain(&error.without_url()), Policy::Client),
-                    );
+                    let error = {
+                        let error = error.without_url();
+                        crate::transport::classify(
+                            &error,
+                            ExecError::new(
+                                ErrorKind::Upstream,
+                                state.secrets.text(error_chain(&error), Policy::Client),
+                            ),
+                        )
+                    };
                     observe_send::attempt_error(state.tap.as_ref(), &error);
                     state.failure = Some(error);
                     let rest = std::mem::take(&mut state.held);

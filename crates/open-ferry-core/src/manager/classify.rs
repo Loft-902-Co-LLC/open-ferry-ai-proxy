@@ -21,8 +21,10 @@
 //!   no such bound. A [`TransportFault::Transient`] fault, which only an
 //!   executor sets, plays its part: it makes the error a transient transport
 //!   failure even when its kind is a deadline, and never a lifecycle one.
-//! - A closed HTTP/2 connection is known by hyper's texts as well as Go's
-//!   (see [`is_http2_closed_connection_message`]).
+//! - A closed connection is known by the executor's typed [`TransportFault`]
+//!   as well as hyper's and Go's texts (see
+//!   [`is_http2_closed_connection_message`]). Executors preserve unambiguous
+//!   EOF and socket error types before flattening their messages.
 //! - The manager's own errors carry their cause as a summary, so the
 //!   classifiers don't look through to it.
 

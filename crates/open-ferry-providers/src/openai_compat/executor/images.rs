@@ -101,9 +101,12 @@ impl OpenAiCompatExecutor {
             return Err(status_error(status, &headers, &body).into());
         }
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            ExecError::new(
-                ErrorKind::Upstream,
-                secrets.text(error.to_string(), Policy::Client),
+            crate::transport::classify(
+                &error,
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error.to_string(), Policy::Client),
+                ),
             )
         })?;
         let data = match secrets.bytes(&data, Policy::Client) {
@@ -252,10 +255,16 @@ async fn error_body(
     let tap = BodyTap::of(&response);
     let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
     if let Some(error) = error {
-        let error = ExecError::new(
-            ErrorKind::Upstream,
-            secrets.text(error_chain(&error.without_url()), Policy::Client),
-        );
+        let error = {
+            let error = error.without_url();
+            crate::transport::classify(
+                &error,
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error), Policy::Client),
+                ),
+            )
+        };
         observe_send::attempt_error(tap.as_ref(), &error);
         return Err(error);
     }

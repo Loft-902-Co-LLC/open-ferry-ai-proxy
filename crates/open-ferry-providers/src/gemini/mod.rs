@@ -272,10 +272,12 @@ async fn post(
         .send()
         .await
         .map_err(|error| {
-            ExecError::new(
+            let error = error.without_url();
+            let failure = ExecError::new(
                 ErrorKind::Upstream,
-                secrets.text(error_chain(&error.without_url()), Policy::Client),
-            )
+                secrets.text(error_chain(&error), Policy::Client),
+            );
+            crate::transport::classify(&error, failure)
         })?;
     observe_send::response(tap, &mut response);
     let status = response.status().as_u16();
@@ -297,10 +299,11 @@ async fn read_answer(
 ) -> Result<(HeaderMap, Vec<u8>), ExecError> {
     let headers = response.headers().clone();
     let data = read_body(response, MAX_LINE).await.map_err(|error| {
-        ExecError::new(
+        let failure = ExecError::new(
             ErrorKind::Upstream,
             secrets.text(error.to_string(), Policy::Client),
-        )
+        );
+        crate::transport::classify(&error, failure)
     })?;
     Ok((headers, redact_answer(secrets, data)))
 }

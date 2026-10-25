@@ -79,9 +79,7 @@ use futures_util::future::BoxFuture;
 use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
-use open_ferry_core::exec::{
-    ExecError, Format, Options, Request, Response, StreamResponse, TransportFault,
-};
+use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
@@ -90,7 +88,7 @@ use open_ferry_translate::json::exact;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::{Map, Value};
 
-use super::client::{Clients, error_chain, is_closed_connection, read_body, read_body_prefix};
+use super::client::{Clients, error_chain, read_body, read_body_prefix};
 use super::compaction;
 use super::headers::{self, Inputs};
 use super::oauth::{ClaudeAuth, Endpoints, REFRESH_LEAD};
@@ -393,16 +391,9 @@ impl ClaudeExecutor {
             .send()
             .await
             .map_err(|error| {
-                let closed = is_closed_connection(&error);
-                let failure =
-                    plain_error(secrets.text(error_chain(&error.without_url()), Policy::Client));
-                // The typed error says what the flattened text may not: the
-                // connection was closed under the call.
-                if closed {
-                    failure.with_transport(TransportFault::Lifecycle)
-                } else {
-                    failure
-                }
+                let error = error.without_url();
+                let failure = plain_error(secrets.text(error_chain(&error), Policy::Client));
+                crate::transport::classify(&error, failure)
             })?;
         observe_send::response(tap, &mut response);
         Ok((response, secrets))
@@ -502,9 +493,13 @@ impl ClaudeExecutor {
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
         let tap = BodyTap::of(&response);
-        let data = read_body(response, MAX_LINE)
-            .await
-            .map_err(|error| wrap_fast(fast, status, plain_error(error.to_string())))?;
+        let data = read_body(response, MAX_LINE).await.map_err(|error| {
+            wrap_fast(
+                fast,
+                status,
+                crate::transport::classify(&error, plain_error(error.to_string())),
+            )
+        })?;
         let data = redact_answer(&secrets, data);
         if upstream_stream {
             stream::validate(&data).map_err(|mut error| {
@@ -734,7 +729,7 @@ impl ClaudeExecutor {
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
             .await
-            .map_err(|error| plain_error(error.to_string()))?;
+            .map_err(|error| crate::transport::classify(&error, plain_error(error.to_string())))?;
         let data = redact_answer(&secrets, data);
         let count = serde_json::from_slice::<Value>(&data)
             .map_or(0, |value| json::int_at(&value, "input_tokens"));

@@ -214,9 +214,13 @@ impl XaiExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    ),
                 )
             })?;
         observe_send::response(tap, &mut response);
@@ -275,9 +279,12 @@ impl XaiExecutor {
             return Err(errors::status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
-        let data = read_body(response, MAX_LINE)
-            .await
-            .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        let data = read_body(response, MAX_LINE).await.map_err(|error| {
+            crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, error.to_string()),
+            )
+        })?;
         replay::clear_after_compaction(&prepared.replay);
         Ok((prepared, data, response_headers, secrets))
     }
@@ -404,9 +411,12 @@ impl XaiExecutor {
                 Err(error) => {
                     tracing::debug!("xai: response read failed: {error}");
                     reader.report(&error);
-                    return Err(ExecError::new(
-                        ErrorKind::Upstream,
-                        secrets.text(error.to_string(), Policy::Client),
+                    return Err(crate::transport::classify(
+                        &error,
+                        ExecError::new(
+                            ErrorKind::Upstream,
+                            secrets.text(error.to_string(), Policy::Client),
+                        ),
                     ));
                 }
             };
@@ -510,7 +520,10 @@ impl XaiExecutor {
             let tap = BodyTap::of(&response);
             let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
             if let Some(error) = error {
-                let error = ExecError::new(ErrorKind::Upstream, error_chain(&error));
+                let error = crate::transport::classify(
+                    &error,
+                    ExecError::new(ErrorKind::Upstream, error_chain(&error)),
+                );
                 observe_send::attempt_error(tap.as_ref(), &error);
                 return Err(error);
             }

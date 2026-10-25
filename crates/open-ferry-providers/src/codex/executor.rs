@@ -330,9 +330,13 @@ impl CodexExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    ),
                 )
             })?;
         observe_send::response(tap, &mut response);
@@ -377,9 +381,12 @@ impl CodexExecutor {
             );
         }
         let response_headers = response.headers().clone();
-        let data = read_body(response, MAX_LINE)
-            .await
-            .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        let data = read_body(response, MAX_LINE).await.map_err(|error| {
+            crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, error.to_string()),
+            )
+        })?;
         // Whole, before it is restored and translated; the taps read it as it
         // came.
         let data = match secrets.bytes(&data, Policy::Client) {
@@ -552,7 +559,10 @@ impl CodexExecutor {
             let tap = BodyTap::of(&response);
             let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
             if let Some(error) = error {
-                let error = ExecError::new(ErrorKind::Upstream, error_chain(&error));
+                let error = crate::transport::classify(
+                    &error,
+                    ExecError::new(ErrorKind::Upstream, error_chain(&error)),
+                );
                 observe_send::attempt_error(tap.as_ref(), &error);
                 return Err(error);
             }
