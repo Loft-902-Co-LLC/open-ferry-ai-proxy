@@ -1181,12 +1181,18 @@ fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
 // Ported from TestConvertGeminiResponseToClaude_ParameterlessToolContinuationDoesNotDuplicateEmptyObject.
 #[test]
 fn parameterless_continuation_emits_one_empty_object() {
-    let request = json!({"tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]});
-    let output = stream(&request, &[
-        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"switch"}}}]}}]}"#,
-        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}]}"#,
-    ]).concat();
-    assert_eq!(input_deltas(&output), "{}");
+    for tool in [
+        json!({"name":"EnterPlanMode"}),
+        json!({"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}}),
+        json!({"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}),
+    ] {
+        let request = json!({"tools":[tool]});
+        let output = stream(&request, &[
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"switch"}}}]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}]}"#,
+        ]).concat();
+        assert_eq!(input_deltas(&output), "{}", "{request}: {output}");
+    }
 }
 
 #[test]
@@ -1206,6 +1212,34 @@ fn implicit_open_tool_continuation_ordering() {
     check_empty_tool_continuations(&request);
 }
 
+#[test]
+#[ignore = "needs the p42 argument helper"]
+fn implicit_open_final_empty_chunk() {
+    let request =
+        json!({"tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]});
+    for split in [false, true] {
+        let mut translator = GeminiToClaudeStream::new(&request);
+        if split {
+            let first = translator.translate(br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":{}}}]}}]}"#);
+            assert!(input_deltas(&first).is_empty(), "{first}");
+        }
+        let call = if split {
+            json!({"args":{}})
+        } else {
+            json!({"name":"echo","args":{}})
+        };
+        let last = json!({"candidates":[{"content":{"parts":[{"functionCall":call}]},"finishReason":"STOP"}]});
+        let mut output = translator.translate(last.to_string().as_bytes());
+        output.push_str(&translator.translate(b"[DONE]"));
+        assert_eq!(input_deltas(&output), "{}", "{output}");
+        assert_eq!(
+            output.matches("\"type\":\"input_json_delta\"").count(),
+            1,
+            "{output}"
+        );
+    }
+}
+
 fn check_empty_tool_continuations(request: &Value) {
     for (first, continuation) in [
         (json!({}), json!({"user":"v"})),
@@ -1220,6 +1254,9 @@ fn check_empty_tool_continuations(request: &Value) {
         let mut translator = GeminiToClaudeStream::new(request).with_translated_request(&sent);
         let first_chunk = json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":first}}]}}]});
         let first_out = translator.translate(first_chunk.to_string().as_bytes());
+        if first.get("user").is_none() {
+            assert!(input_deltas(&first_out).is_empty(), "{first_out}");
+        }
         let continuation_chunk = json!({"candidates":[{"content":{"parts":[{"functionCall":{"args":continuation}}]},"finishReason":"STOP"}]});
         let output = first_out
             + &translator.translate(continuation_chunk.to_string().as_bytes())
