@@ -141,6 +141,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Detect truncated Claude streams**, including Gemini, Vertex and OpenAI-compatible streams serving Claude; retain observed usage and emit one bounded, correctly framed terminal error.
 - **Filter private Meta subscription usage telemetry** from streamed and collected replies, Responses SSE and WebSocket forwarding.
 - **Preserve reasoning usage and first-token timing:** map both nested Chat Completions reasoning dialects to nonstream Responses, recognize flat SGLang reasoning counts, and count completed reasoning text as effective output.
+- **The request-log status filter explains an out-of-range code before searching.** It accepts codes from 100 to 599 and classes such as 4xx, instead of sending an invalid code and showing the server's error.
 - **Initialize and finalize empty Claude and claude-cli Responses patch streams** as upstream does.
 - **Credential-file model exclusions override provider-global OAuth rules.** Clearing them resumes the latest globals without replacing runtime tokens; malformed existing lists load leniently while uploads and field patches reject invalid rules before saving.
 - **Credential field/status edits reject replacement registrations**, retain concurrent refreshes and field edits, and return 404 for config-sourced file fields.

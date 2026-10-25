@@ -109,6 +109,10 @@ export const logSearchForm = z.object({
     .refine(
       (value) => value === "" || /^(\d{3}|[1-5]xx)$/i.test(value),
       "A status is three digits, such as 502, or a class, such as 5xx.",
+    )
+    .refine(
+      (value) => value === "" || /^([1-5][0-9]{2}|[1-5]xx)$/i.test(value),
+      "Use a status from 100 to 599, or a class such as 4xx.",
     ),
   model: z.string(),
   q: z.string(),
