@@ -1219,6 +1219,13 @@ fn a_refused_default_auth_directory_is_not_suggested_in_its_own_place() {
         let refusal = refused(authorize_auth_dir(&probe, Path::new(&other))).to_string();
         assert!(refusal.contains("set auth-dir"), "{refusal}");
     }
+    // Written with `.`, it is refused for that, and the plain default would do.
+    let mut probe = Fake::new(Platform::Linux, true);
+    probe.dir(MACHINE);
+    let dotted = format!("{MACHINE}/./auth");
+    let refusal = refused(authorize_auth_dir(&probe, Path::new(&dotted))).to_string();
+    assert!(refusal.contains("`.` or `..`"), "{refusal}");
+    assert!(refusal.contains("set auth-dir"), "{refusal}");
 }
 
 #[test]

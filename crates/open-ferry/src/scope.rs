@@ -801,9 +801,9 @@ pub(crate) fn authorize_auth_dir(probe: &dyn Probe, auth_dir: &Path) -> Result<(
         .as_ref()
         .map(|root| probe.platform().join(root, AUTH_DIR))
         .filter(|default| {
-            !auth_dir
-                .to_str()
-                .is_some_and(|text| os_service::same_path(probe.platform(), text, default))
+            !auth_dir.to_str().is_some_and(|text| {
+                os_service::names_default_auth_dir(probe.platform(), text, default)
+            })
         })
         .map(|default| format!(", or set auth-dir to {default}"))
         .unwrap_or_default();

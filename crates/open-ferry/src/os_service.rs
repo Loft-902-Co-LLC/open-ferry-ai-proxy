@@ -805,7 +805,7 @@ pub(crate) fn authorize_auth_dir_with(
 ) -> Result<(), String> {
     let default = platform.join(root, "auth");
     // Suggesting the directory that was just refused would not help.
-    let instead = if same_path(platform, path, &default) {
+    let instead = if names_default_auth_dir(platform, path, &default) {
         String::new()
     } else {
         format!(", or set auth-dir to {default}")
@@ -2921,8 +2921,19 @@ fn parse_record_kind(bytes: &[u8], kind: &str) -> Option<Record> {
     })
 }
 
+/// Whether `path` is written as the default auth directory: a full path,
+/// without `.` or `..`, that `platform` compares equal to `default`. Any
+/// other spelling still gets the default suggested in its place.
+pub(crate) fn names_default_auth_dir(platform: Platform, path: &str, default: &str) -> bool {
+    platform.is_absolute(path)
+        && !path
+            .split(|c| platform.is_separator(c))
+            .any(|part| part == "." || part == "..")
+        && same_path(platform, path, default)
+}
+
 /// Whether two paths are the same as `platform` compares them.
-pub(crate) fn same_path(platform: Platform, a: &str, b: &str) -> bool {
+fn same_path(platform: Platform, a: &str, b: &str) -> bool {
     let (a, b) = (platform.clean(a), platform.clean(b));
     match platform {
         Platform::Windows | Platform::MacOs => a.eq_ignore_ascii_case(&b),

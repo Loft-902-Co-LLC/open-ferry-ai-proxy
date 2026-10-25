@@ -5213,6 +5213,44 @@ fn auth_directory_trust_and_aliases_are_checked_at_install() {
 }
 
 #[test]
+fn only_a_plain_full_default_auth_directory_goes_without_the_suggestion() {
+    for (platform, default, same, other) in [
+        (
+            Platform::Linux,
+            "/var/lib/open-ferry/auth",
+            vec!["/var/lib/open-ferry/auth", "/var/lib/open-ferry//auth/"],
+            vec![
+                "var/lib/open-ferry/auth",
+                "/var/lib/open-ferry/./auth",
+                "/var/lib/open-ferry/x/../auth",
+                "/var/lib/open-ferry/AUTH",
+            ],
+        ),
+        (
+            Platform::Windows,
+            r"C:\ProgramData\open-ferry\auth",
+            vec![
+                r"C:\ProgramData\open-ferry\auth",
+                "c:/programdata/open-ferry/AUTH",
+            ],
+            vec![
+                r"ProgramData\open-ferry\auth",
+                r"\ProgramData\open-ferry\auth",
+                r"C:\ProgramData\open-ferry\.\auth",
+                r"C:\ProgramData\open-ferry\x\..\auth",
+            ],
+        ),
+    ] {
+        for path in same {
+            assert!(names_default_auth_dir(platform, path, default), "{path}");
+        }
+        for path in other {
+            assert!(!names_default_auth_dir(platform, path, default), "{path}");
+        }
+    }
+}
+
+#[test]
 fn helper_paths_do_not_search_the_working_directory_or_path() {
     #[cfg(windows)]
     for name in ["whoami.exe", "schtasks.exe", "sc.exe"] {
