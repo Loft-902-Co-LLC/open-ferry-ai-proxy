@@ -24,6 +24,7 @@ mod responses_ttft_helpers;
 mod service_tier;
 mod stream_lifecycle;
 mod stream_response_model_observer;
+mod stream_usage_merge;
 mod support;
 mod usage_helpers;
 mod xai;
