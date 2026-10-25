@@ -115,6 +115,7 @@ export function ConfirmDialog({
       open={open}
       title={title}
       onClose={onCancel}
+      onCancel={pending ? () => undefined : undefined}
       footer={
         <>
           <Button data-autofocus onClick={onCancel} disabled={pending}>

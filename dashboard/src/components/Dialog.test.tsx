@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { Dialog } from "./Dialog";
+import { ConfirmDialog, Dialog } from "./Dialog";
 
 /** What the browser does on Escape: a cancelable "cancel" event, then it closes. */
 function pressEscape(dialog: HTMLElement): boolean {
@@ -42,5 +42,54 @@ describe("Dialog", () => {
       </Dialog>,
     );
     expect(dialog).not.toHaveAttribute("open");
+  });
+});
+
+describe("ConfirmDialog", () => {
+  it("prevents Escape while pending, then lets idle Escape cancel", () => {
+    const onCancel = vi.fn();
+    const onConfirm = vi.fn();
+    const props = {
+      title: "Delete file?",
+      confirmLabel: "Delete file",
+      onCancel,
+      onConfirm,
+    };
+    const { rerender } = render(<ConfirmDialog {...props} open pending />);
+    const dialog = screen.getByRole("dialog", { name: "Delete file?" });
+
+    expect(pressEscape(dialog)).toBe(false);
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(dialog).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete file" })).toBeDisabled();
+
+    rerender(<ConfirmDialog {...props} open pending={false} />);
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete file" })).toBeEnabled();
+    expect(pressEscape(dialog)).toBe(true);
+    // jsdom doesn't perform the browser's default close after cancel.
+    fireEvent(dialog, new Event("close"));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("lets the owner close a pending dialog when the action completes", () => {
+    const onCancel = vi.fn();
+    const onConfirm = vi.fn();
+    const props = {
+      title: "Delete file?",
+      confirmLabel: "Delete file",
+      onCancel,
+      onConfirm,
+    };
+    const { rerender } = render(<ConfirmDialog {...props} open pending />);
+    const dialog = screen.getByRole("dialog", { name: "Delete file?" });
+
+    rerender(<ConfirmDialog {...props} open={false} pending={false} />);
+    expect(dialog).not.toHaveAttribute("open");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });
