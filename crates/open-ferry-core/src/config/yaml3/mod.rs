@@ -42,6 +42,11 @@
 //!   `%`-escapes decode to bytes that aren't UTF-8 holds U+FFFD for them
 //!   and is written back that way, where yaml.v3 keeps the bytes.
 
+#![allow(
+    clippy::mutable_key_type,
+    reason = "CommentId lookup hints do not participate in equality or hashing"
+)]
+
 pub(crate) mod chars;
 pub(crate) mod compose;
 pub(crate) mod emitter;
@@ -216,6 +221,81 @@ pub(crate) struct Node {
     pub(crate) column: usize,
 }
 
+/// One shared alias path per expansion, rather than a vector per receipt.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AliasScopes(Option<Arc<AliasScope>>);
+
+#[derive(Debug)]
+struct AliasScope {
+    parent: AliasScopes,
+    token: Arc<()>,
+    depth: usize,
+    hash: u64,
+}
+
+impl AliasScopes {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    fn fingerprint(&self) -> u64 {
+        self.0.as_ref().map_or(0, |scope| scope.hash)
+    }
+
+    pub(crate) fn pushed(&self, token: Arc<()>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::hash::DefaultHasher::new();
+        self.fingerprint().hash(&mut hash);
+        (Arc::as_ptr(&token) as usize).hash(&mut hash);
+        Self(Some(Arc::new(AliasScope {
+            parent: self.clone(),
+            token,
+            depth: self.0.as_ref().map_or(1, |scope| scope.depth + 1),
+            hash: hash.finish(),
+        })))
+    }
+
+    fn appended(&self, suffix: &Self) -> Self {
+        if self.is_empty() {
+            return suffix.clone();
+        }
+        let mut tokens = Vec::new();
+        let mut scope = suffix.0.as_deref();
+        while let Some(current) = scope {
+            tokens.push(&current.token);
+            scope = current.parent.0.as_deref();
+        }
+        let mut result = self.clone();
+        for token in tokens.into_iter().rev() {
+            result = result.pushed(token.clone());
+        }
+        result
+    }
+}
+
+impl PartialEq for AliasScopes {
+    fn eq(&self, other: &Self) -> bool {
+        let (mut left, mut right) = (&self.0, &other.0);
+        loop {
+            match (left, right) {
+                (None, None) => return true,
+                (Some(a), Some(b)) => {
+                    if Arc::ptr_eq(a, b) {
+                        return true;
+                    }
+                    if a.depth != b.depth || a.hash != b.hash || !Arc::ptr_eq(&a.token, &b.token) {
+                        return false;
+                    }
+                    left = &a.parent.0;
+                    right = &b.parent.0;
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+impl Eq for AliasScopes {}
+
 /// Identity of one source comment, including its alias-expansion occurrence.
 #[derive(Clone, Debug)]
 pub(crate) struct CommentId(Arc<CommentIdentity>);
@@ -223,14 +303,18 @@ pub(crate) struct CommentId(Arc<CommentIdentity>);
 #[derive(Debug)]
 struct CommentIdentity {
     source: Option<CommentId>,
-    aliases: Vec<Arc<()>>,
+    aliases: AliasScopes,
+    // A document-local lookup hint. Equality never depends on it, and every
+    // lookup checks the full identity before using the hinted slot.
+    index: std::sync::atomic::AtomicUsize,
 }
 
 impl CommentId {
     pub(crate) fn fresh() -> Self {
         Self(Arc::new(CommentIdentity {
             source: None,
-            aliases: Vec::new(),
+            aliases: AliasScopes::default(),
+            index: std::sync::atomic::AtomicUsize::new(usize::MAX),
         }))
     }
 
@@ -239,19 +323,13 @@ impl CommentId {
     }
 
     pub(crate) fn in_scope_of(&self, other: &Self) -> Self {
-        if self.0.aliases.len() == other.0.aliases.len()
-            && self
-                .0
-                .aliases
-                .iter()
-                .zip(&other.0.aliases)
-                .all(|(a, b)| Arc::ptr_eq(a, b))
-        {
+        if self.0.aliases == other.0.aliases {
             return self.clone();
         }
         Self(Arc::new(CommentIdentity {
             source: Some(self.origin().clone()),
             aliases: other.0.aliases.clone(),
+            index: std::sync::atomic::AtomicUsize::new(usize::MAX),
         }))
     }
 
@@ -267,16 +345,25 @@ impl CommentId {
         Arc::ptr_eq(&self.origin().0, &other.origin().0)
     }
 
-    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+    pub(crate) fn in_aliases(&self, scopes: &AliasScopes) -> Self {
         if scopes.is_empty() {
             return self.clone();
         }
-        let mut aliases = self.0.aliases.clone();
-        aliases.extend_from_slice(scopes);
         Self(Arc::new(CommentIdentity {
             source: Some(self.origin().clone()),
-            aliases,
+            aliases: self.0.aliases.appended(scopes),
+            index: std::sync::atomic::AtomicUsize::new(usize::MAX),
         }))
+    }
+
+    pub(crate) fn comment_index(&self) -> usize {
+        self.0.index.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn assign_comment_index(&self, index: usize) {
+        self.0
+            .index
+            .store(index, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -284,25 +371,15 @@ impl PartialEq for CommentId {
     fn eq(&self, other: &Self) -> bool {
         #[cfg(test)]
         crate::config::save::tree::comment_work(1);
-        self.same_source(other)
-            && self.0.aliases.len() == other.0.aliases.len()
-            && self
-                .0
-                .aliases
-                .iter()
-                .zip(&other.0.aliases)
-                .all(|(a, b)| Arc::ptr_eq(a, b))
+        Arc::ptr_eq(&self.0, &other.0)
+            || (self.same_source(other) && self.0.aliases == other.0.aliases)
     }
 }
 impl Eq for CommentId {}
 
 impl std::hash::Hash for CommentId {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (Arc::as_ptr(&self.origin().0) as usize).hash(state);
-        self.0.aliases.len().hash(state);
-        for scope in &self.0.aliases {
-            (Arc::as_ptr(scope) as usize).hash(state);
-        }
+        (self.source_key() as u64 ^ self.0.aliases.fingerprint().rotate_left(17)).hash(state);
     }
 }
 
@@ -379,7 +456,7 @@ impl From<CommentReceipts> for SparseReceipts {
     }
 }
 impl SparseReceipts {
-    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+    pub(crate) fn in_aliases(&self, scopes: &AliasScopes) -> Self {
         if scopes.is_empty() {
             return self.clone();
         }
@@ -391,10 +468,10 @@ impl SparseReceipts {
 }
 
 impl CommentReceipts {
-    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+    pub(crate) fn in_aliases(&self, scopes: &AliasScopes) -> Self {
         fn copies(
             spans: &[ReceiptSpan],
-            scopes: &[Arc<()>],
+            scopes: &AliasScopes,
             original_owner: Option<&CommentId>,
             scoped_owner: Option<&CommentId>,
         ) -> Vec<ReceiptSpan> {

@@ -489,23 +489,29 @@ impl Emitter {
             | EventType::SequenceStart
             | EventType::Scalar
             | EventType::Alias => {
-                let mut path = Vec::new();
-                if let Some((parent, next)) = self.owner_stack.last_mut() {
-                    path.clone_from(parent);
-                    path.push(*next);
-                    *next += 1;
-                }
-                if let Some(owner) = owner {
-                    self.node_owners.push(super::NodeOwnerEmission {
-                        path: path.clone(),
-                        owner,
-                    });
-                }
-                if matches!(
+                let collection = matches!(
                     event.typ,
                     EventType::DocumentStart | EventType::MappingStart | EventType::SequenceStart
-                ) {
+                );
+                let mut path = Vec::new();
+                if let Some((parent, next)) = self.owner_stack.last_mut() {
+                    if collection || owner.is_some() {
+                        path.clone_from(parent);
+                        path.push(*next);
+                    }
+                    *next += 1;
+                }
+                if collection {
+                    if let Some(owner) = owner {
+                        self.node_owners.push(super::NodeOwnerEmission {
+                            path: path.clone(),
+                            owner,
+                        });
+                    }
                     self.owner_stack.push((path, 0));
+                } else if let Some(owner) = owner {
+                    self.node_owners
+                        .push(super::NodeOwnerEmission { path, owner });
                 }
             }
             EventType::DocumentEnd | EventType::MappingEnd | EventType::SequenceEnd => {

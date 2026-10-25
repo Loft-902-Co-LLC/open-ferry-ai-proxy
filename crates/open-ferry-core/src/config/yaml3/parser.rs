@@ -213,6 +213,7 @@ pub(crate) struct Parser<'a> {
 
     // Parallel source positions are opt-in and never affect parser decisions.
     track_comment_positions: bool,
+    source_is_ascii: bool,
     pending_positions: CommentPositions,
     stem_positions: Vec<CommentPosition>,
     pub(crate) event_positions: CommentPositions,
@@ -431,11 +432,16 @@ impl<'a> Parser<'a> {
 }
 
 impl Parser<'_> {
+    fn source_offset(&self, index: usize) -> Option<usize> {
+        if self.source_is_ascii {
+            (index <= self.input.len()).then_some(index)
+        } else {
+            self.source_offsets.get(index).copied()
+        }
+    }
+
     fn mark_offset(&self, mark: Mark) -> usize {
-        self.source_offsets
-            .get(mark.index)
-            .copied()
-            .unwrap_or(self.input.len())
+        self.source_offset(mark.index).unwrap_or(self.input.len())
     }
 
     /// Track source byte positions through the same pending queues as text.
@@ -443,7 +449,22 @@ impl Parser<'_> {
         let mut parser = Parser::new(input);
         parser.track_comment_positions = true;
         parser.source_lines.push(0);
-        if let Ok(text) = checked_comment_text(input) {
+        if input.is_ascii() {
+            #[cfg(test)]
+            crate::config::save::tree::comment_work(input.len());
+            parser.source_is_ascii = true;
+            let mut cr = false;
+            for (at, byte) in input.iter().enumerate() {
+                if *byte == b'\n' && cr {
+                    if let Some(last) = parser.source_lines.last_mut() {
+                        *last = at + 1;
+                    }
+                } else if matches!(byte, b'\r' | b'\n') {
+                    parser.source_lines.push(at + 1);
+                }
+                cr = *byte == b'\r';
+            }
+        } else if let Ok(text) = checked_comment_text(input) {
             parser.source_offsets = text
                 .char_indices()
                 .map(|(at, _)| at)
@@ -556,13 +577,27 @@ impl Parser<'_> {
                         if !part.is_empty() {
                             let offset = if first {
                                 first = false;
-                                let offset =
-                                    self.source_offsets.get(comment.start_mark.index).copied();
+                                let index = comment.start_mark.index;
+                                let offset = if self.source_is_ascii {
+                                    (index <= self.input.len()).then_some(index)
+                                } else {
+                                    self.source_offsets.get(index).copied()
+                                };
                                 if let Some(offset) = offset {
-                                    source_line = self
+                                    let correct_line = self
                                         .source_lines
-                                        .partition_point(|start| *start <= offset)
-                                        .saturating_sub(1);
+                                        .get(source_line)
+                                        .is_some_and(|start| *start <= offset)
+                                        && self
+                                            .source_lines
+                                            .get(source_line + 1)
+                                            .is_none_or(|end| offset < *end);
+                                    if !correct_line {
+                                        source_line = self
+                                            .source_lines
+                                            .partition_point(|start| *start <= offset)
+                                            .saturating_sub(1);
+                                    }
                                 }
                                 offset
                             } else {
@@ -588,6 +623,9 @@ impl Parser<'_> {
                                 }
                             };
                             let Some(offset) = offset else { break };
+                            if pending.capacity() == 0 {
+                                pending.reserve_exact(1);
+                            }
                             pending.push(CommentPosition {
                                 at: base + usize::from(base > 0) + relative,
                                 offset,
