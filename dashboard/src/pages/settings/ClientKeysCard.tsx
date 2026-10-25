@@ -152,7 +152,8 @@ export interface ClientKeysCardProps {
 }
 
 /**
- * The keys clients of the proxy authenticate with: `api-keys` in config.yaml.
+ * The keys clients of the proxy authenticate with: `access.api-keys` in the
+ * current config.yaml layout, or the top-level `api-keys` list in older files.
  * Adding or deleting one is a change like a setting's edit: it waits for
  * "Review and save".
  */
@@ -169,7 +170,13 @@ export function ClientKeysCard({ keys, changes, onChanges, readOnly, versioned }
   return (
     <Card
       title="Client API keys"
-      description="The keys clients send to use the proxy, kept in config.yaml as api-keys."
+      description={
+        <>
+          The keys clients send to use the proxy, kept in config.yaml as <Code>access.api-keys</Code>
+          {" "}in the current layout. Older files use a top-level <Code>api-keys</Code> list. The
+          current layout's top-level <Code>api-keys</Code> mapping holds provider keys.
+        </>
+      }
       actions={
         !writable ? undefined : (
           <Button
@@ -192,8 +199,9 @@ export function ClientKeysCard({ keys, changes, onChanges, readOnly, versioned }
             {unsupported
               ? "This server doesn't serve its client keys to the dashboard. "
               : "This server has no way to save config.yaml from here. "}
-            Add and delete them under <Code>api-keys</Code> in config.yaml itself, and the server
-            picks them up when it reloads the file.
+            Add and delete them under <Code>access.api-keys</Code> in the current config.yaml
+            layout (the top-level <Code>api-keys</Code> list in older files), and the server picks
+            them up when it reloads the file.
           </p>
         </Alert>
       )}
