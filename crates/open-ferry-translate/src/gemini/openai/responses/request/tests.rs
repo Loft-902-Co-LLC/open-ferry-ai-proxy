@@ -665,7 +665,8 @@ fn convert_openai_responses_request_to_gemini_does_not_retarget_extra_previous_c
                         && string(&parts[1], "text").is_empty()
                         && string(&parts[1], "thoughtSignature") == signature2
                         && string(&parts[2], "functionCall.id") == "call-2"
-                        && string(&parts[2], "thoughtSignature").is_empty(),
+                        && string(&parts[2], "thoughtSignature")
+                            == GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR,
                     "extra previous function carrier retargeted: {}",
                     Value::from(parts.to_vec())
                 );
