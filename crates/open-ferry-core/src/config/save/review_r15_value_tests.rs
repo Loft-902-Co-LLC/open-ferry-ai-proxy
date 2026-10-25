@@ -1,0 +1,122 @@
+use super::*;
+use crate::config::AnyValue;
+use crate::config::testing::TempDir;
+use crate::config::v8_edit::{V8Edit, V8Method, edit_v8};
+
+fn named<'a>(value: &'a AnyValue, key: &str) -> Option<&'a AnyValue> {
+    match value {
+        AnyValue::Map(map) => map
+            .get(key)
+            .filter(|value| matches!(value, AnyValue::Str(_)))
+            .or_else(|| map.values().find_map(|value| named(value, key))),
+        AnyValue::Seq(items) => items.iter().find_map(|value| named(value, key)),
+        _ => None,
+    }
+}
+
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap()
+        .replace('\u{2028}', "\\L")
+        .replace('\u{2029}', "\\P")
+}
+
+fn save_operation(path: &Path, op: &str) -> Result<(), String> {
+    if op == "put" {
+        edit_v8(
+            path,
+            &V8Edit {
+                method: V8Method::Put,
+                path: vec!["server".into(), "port".into()],
+                body: b"1234".to_vec(),
+                yaml: false,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    } else {
+        let mut config = Config::load(path).map_err(|error| error.to_string())?;
+        config.debug = !config.debug;
+        save_preserving_comments(path, &config, op == "migrate").map_err(|error| error.to_string())
+    }
+}
+
+fn mapping_values(op: &str) {
+    let values = [
+        "      x\n\u{2028}",
+        "  x\n\u{2028}",
+        " x\n\u{2028}",
+        "   x\n\u{2028}",
+        "      x\n\u{2029}",
+        "      x\u{2028}y\n",
+        "      x\n",
+        "  x\n",
+        " x\n",
+        "   x\n",
+        "  \t  x\n\u{2028}",
+        " \t x\n\u{2028}",
+    ];
+    for value in values {
+        let quoted = quoted(value);
+        for (label, source, key) in [
+            (
+                "claude",
+                format!("claude-api-key:\n  - api-key: {quoted}\n"),
+                "api-key",
+            ),
+            (
+                "claude later key",
+                format!("claude-api-key:\n  - prefix: p\n    api-key: {quoted}\n"),
+                "api-key",
+            ),
+            (
+                "payload",
+                format!(
+                    "payload: {{default: [{{models: [{{name: \"*\"}}], params: {{probe: [{{text: {quoted}}}]}}}}]}}\n"
+                ),
+                "text",
+            ),
+            (
+                "payload later key",
+                format!(
+                    "payload: {{default: [{{models: [{{name: \"*\"}}], params: {{probe: [{{a: z, text: {quoted}}}]}}}}]}}\n"
+                ),
+                "text",
+            ),
+            (
+                "openai entry",
+                format!(
+                    "openai-compatibility:\n  - name: n\n    base-url: https://example.invalid\n    api-key-entries:\n      - api-key: {quoted}\n"
+                ),
+                "api-key",
+            ),
+        ] {
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, source).unwrap();
+            save_operation(&path, op).unwrap_or_else(|_| panic!("{label} {op} refused"));
+            let output = std::fs::read_to_string(&path).unwrap();
+            let actual = AnyValue::parse_yaml(&output).unwrap();
+            assert!(
+                named(&actual, key) == Some(&AnyValue::Str(value.into())),
+                "{label} {op} changed the value"
+            );
+            Config::load(&path).unwrap();
+        }
+    }
+}
+
+#[test]
+fn review_r15_mapping_values_survive_settings() {
+    mapping_values("settings");
+}
+
+#[test]
+fn review_r15_mapping_values_survive_migrate() {
+    mapping_values("migrate");
+}
+
+#[test]
+fn review_r15_mapping_values_survive_put() {
+    mapping_values("put");
+}
