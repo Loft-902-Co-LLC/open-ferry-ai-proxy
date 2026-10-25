@@ -551,25 +551,36 @@ comment at the document. It applies to no nested or later key. These operations
 remain under the canonical-version protection, before intermediate and final
 emissions. Config files containing literal U+0085 (NEXT LINE, NEL), U+2028
 (LINE SEPARATOR, LS) or U+2029 (PARAGRAPH SEPARATOR, PS), or starting with repeated
-byte order marks, read as CLIProxyAPI reads them: values, keys, comments and
-document boundaries follow yaml.v3. Other files use saphyr. Syntax errors
-follow the selected parser's wording; the tab and compact-alias differences
-below apply only to saphyr. Two byte order marks at the start are read as Go
-reads them: a following `port` key becomes `ort`, and saves write `ort`.
+byte order marks, read values, keys, comments and document boundaries as
+CLIProxyAPI reads them, using yaml.v3. Other files use saphyr, with one fallback:
+a quoted string continued at the first column is read with yaml.v3 when saphyr
+refuses its indentation and yaml.v3 accepts it. If both refuse, the original
+saphyr error is kept. Saphyr exposes a message and position for this refusal,
+with no separate error code. Other syntax errors use the selected parser's
+wording; the tab and compact-alias differences below apply only to saphyr.
+With two leading byte order marks, Go's reader drops the first character of
+every line after the first: `port` becomes `ort` and `api-keys` becomes
+`pi-keys`. Saves use the key names that were read.
 
-Values that would be written across several lines are written in double
-quotes if they start with a line feed (LF), LS or PS. Fresh values starting
-with a tab are also quoted, as are generated list items starting with spaces:
-CLIProxyAPI can omit the needed indentation hint or write it at the wrong
-offset, making the file unreadable or changing the value. A mapping value
-with spaces before its tab keeps Go's block representation when that reads
-back correctly. Retained tab-leading source blocks keep their indentation
-indicator and style. This includes escaped input, settings values, sequence
-items and plugin settings. Other values use Go's bytes when those bytes
-preserve the value. The block styles described below are kept for values
-outside this double-quoting rule. Text saved as comments keeps
-its separate Unicode quoting protection described below. Files with a real
-second YAML document are still refused, including after leading directives.
+Text that would be written as a block uses double quotes for an initial line
+feed (LF), LS or PS. The same applies to newly set tab-leading text and to
+space-leading text in direct list items, and values in mappings that are list
+items. This protects settings and plugin data that CLIProxyAPI would change
+or write in an unreadable form, including values supplied with YAML escapes.
+Existing blocks keep their style when their value and position allow it.
+Moving some existing tab-leading blocks still gives a safe refusal. Mapping
+values outside lists do not need the extra space-leading rule. Text saved as
+comments keeps its separate Unicode quoting protection described below.
+Files with a real second YAML document are still refused, including after
+leading directives.
+
+Before a config file is replaced, saves compare the values it would load with
+the values supplied before encoding. Both sides go through the loader's
+cleanups, so trimmed or lowercased fields compare by their cleaned values.
+Unknown keys that migration or PUT intentionally drops are allowed to disappear.
+Other changed values cause a refusal before the backup or replacement; the
+error names the first changed setting path and prints neither value. Direct
+writes and undo keep the supplied bytes and also require the file to load.
 
 Aliases reuse their anchors' values and tags. The loader limits the text it
 expands into settings to 64 MiB. When yaml.v3 reads a file, copying anchors
