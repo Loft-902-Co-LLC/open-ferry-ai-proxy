@@ -617,9 +617,8 @@ fn stop_reason(finish_reason: &str, saw_tool_call: bool) -> &'static str {
     }
     match finish_reason {
         "MAX_TOKENS" => "max_tokens",
-        "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "IMAGE_SAFETY" => {
-            "refusal"
-        }
+        "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "IMAGE_SAFETY"
+        | "MALFORMED_RESPONSE" => "refusal",
         _ => "end_turn",
     }
 }

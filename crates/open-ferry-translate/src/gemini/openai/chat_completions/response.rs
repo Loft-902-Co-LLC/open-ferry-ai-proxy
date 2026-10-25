@@ -10,8 +10,10 @@
 //! Thought text becomes `reasoning_content`, function calls become tool
 //! calls, and inline data becomes `images`, as `data:` URLs. A candidate's
 //! finish reason is sent once a chunk carries usage; a candidate that called
-//! a tool finishes with `tool_calls`. Tool names are mapped back from their
-//! sanitized form ([`restore_sanitized_tool_name`]) using the tools the client
+//! a tool finishes with `tool_calls`. Without inline usage, a cached finish
+//! reason is sent with later usage or on `[DONE]`, once per candidate. Tool
+//! names are mapped back from their sanitized form
+//! ([`restore_sanitized_tool_name`]) using the tools the client
 //! declared, which upstream reads from `tools[].name`, so Chat Completions
 //! tools, named in `tools[].function.name`, keep their sanitized names.
 //!
@@ -53,6 +55,10 @@ pub struct GeminiToOpenAIStream {
     saw_tool_call: HashSet<i64>,
     /// Each candidate's last finish reason, upper-cased.
     finish_reason: HashMap<i64, String>,
+    sent_finish_reason: HashSet<i64>,
+    model_version: String,
+    response_id: String,
+    pending_usage: Option<Value>,
 }
 
 impl GeminiToOpenAIStream {
@@ -65,57 +71,115 @@ impl GeminiToOpenAIStream {
             function_index: HashMap::new(),
             saw_tool_call: HashSet::new(),
             finish_reason: HashMap::new(),
+            sent_finish_reason: HashSet::new(),
+            model_version: "model".to_owned(),
+            response_id: String::new(),
+            pending_usage: None,
         }
     }
 
     /// Translates one chunk, a Gemini response with or without its `data:`
-    /// prefix, into the chunks to send. `[DONE]` gives none.
+    /// prefix, into the chunks to send. `[DONE]` flushes pending finishes.
     pub fn translate(&mut self, chunk: &[u8]) -> Vec<Value> {
         let chunk = match chunk.strip_prefix(b"data:") {
             Some(data) => go::trim_space(data),
             None => chunk,
         };
         if chunk == b"[DONE]" {
-            return Vec::new();
+            let mut base = self.base_chunk();
+            if let Some(usage) = &self.pending_usage {
+                base["usage"] = usage.clone();
+            }
+            return self.pending_finish_chunks(&base);
         }
         let response = crate::json::exact::from_slice(chunk).unwrap_or(Value::Null);
-
-        let mut base = json!({
-            "id": "",
-            "object": "chat.completion.chunk",
-            "created": 12345,
-            "model": "model",
-            "choices": [{
-                "index": 0,
-                "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": null},
-                "finish_reason": null,
-                "native_finish_reason": null,
-            }],
-        });
         if let Some(model) = response.get("modelVersion") {
-            base["model"] = Value::String(str_of(Some(model)).into_owned());
+            self.model_version = str_of(Some(model)).into_owned();
         }
         if let Some(created) = response.get("createTime")
             && let Some(created) = unix_seconds(&str_of(Some(created)))
         {
             self.unix_timestamp = created;
         }
-        base["created"] = Value::from(self.unix_timestamp);
         if let Some(id) = response.get("responseId") {
-            base["id"] = Value::String(str_of(Some(id)).into_owned());
+            self.response_id = str_of(Some(id)).into_owned();
         }
+        let mut base = self.base_chunk();
         let usage = response.get("usageMetadata");
         if let Some(usage) = usage {
             base["usage"] = usage_of(usage);
+            self.pending_usage = None;
+        } else if let Some(usage) = response.get("cpaUsageMetadata") {
+            self.pending_usage = Some(usage_of(usage));
         }
 
         match response.get("candidates") {
-            Some(Value::Array(candidates)) => candidates
+            Some(Value::Array(candidates)) if !candidates.is_empty() => candidates
                 .iter()
                 .map(|candidate| self.candidate_chunk(&base, candidate, usage.is_some()))
                 .collect(),
-            _ if usage.is_some() => vec![base],
+            _ if usage.is_some() => {
+                let chunks = self.pending_finish_chunks(&base);
+                if chunks.is_empty() {
+                    vec![base]
+                } else {
+                    chunks
+                }
+            }
             _ => Vec::new(),
+        }
+    }
+
+    fn base_chunk(&self) -> Value {
+        json!({
+            "id": self.response_id,
+            "object": "chat.completion.chunk",
+            "created": self.unix_timestamp,
+            "model": self.model_version,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": null},
+                "finish_reason": null,
+                "native_finish_reason": null,
+            }],
+        })
+    }
+
+    fn pending_finish_chunks(&mut self, base: &Value) -> Vec<Value> {
+        let mut indices: Vec<_> = self
+            .finish_reason
+            .iter()
+            .filter(|(index, reason)| {
+                !reason.is_empty() && !self.sent_finish_reason.contains(index)
+            })
+            .map(|(&index, _)| index)
+            .collect();
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .map(|index| {
+                let mut chunk = base.clone();
+                chunk["choices"][0]["index"] = Value::from(index);
+                self.apply_finish_reason(&mut chunk["choices"][0], index);
+                chunk
+            })
+            .collect()
+    }
+
+    fn apply_finish_reason(&mut self, choice: &mut Value, index: i64) {
+        let reason = self.finish_reason.get(&index).map_or("", String::as_str);
+        if !reason.is_empty() && self.sent_finish_reason.insert(index) {
+            let finish = if self.saw_tool_call.contains(&index) {
+                "tool_calls"
+            } else if reason == "MAX_TOKENS" {
+                "max_tokens"
+            } else if content_filter_finish_reason(reason) {
+                "content_filter"
+            } else {
+                "stop"
+            };
+            choice["finish_reason"] = Value::from(finish);
+            choice["native_finish_reason"] = Value::String(go::to_lower(reason));
         }
     }
 
@@ -188,17 +252,8 @@ impl GeminiToOpenAIStream {
             }
         }
 
-        let reason = self.finish_reason.get(&index).map_or("", String::as_str);
-        if !reason.is_empty() && has_usage {
-            let finish = if self.saw_tool_call.contains(&index) {
-                "tool_calls"
-            } else if reason == "MAX_TOKENS" {
-                "max_tokens"
-            } else {
-                "stop"
-            };
-            choice["finish_reason"] = Value::from(finish);
-            choice["native_finish_reason"] = Value::String(go::to_lower(reason));
+        if has_usage {
+            self.apply_finish_reason(choice, index);
         }
         chunk
     }
@@ -253,7 +308,11 @@ fn choice(candidate: &Value, names: Option<&SanitizedToolNames>) -> Value {
     choice["index"] = Value::from(candidate.get("index").map_or(0, int_of));
     if let Some(reason) = candidate.get("finishReason") {
         let reason = go::to_lower(&str_of(Some(reason)));
-        choice["finish_reason"] = Value::String(reason.clone());
+        choice["finish_reason"] = if content_filter_finish_reason(&reason) {
+            Value::from("content_filter")
+        } else {
+            Value::String(reason.clone())
+        };
         choice["native_finish_reason"] = Value::String(reason);
     }
 
@@ -324,6 +383,20 @@ fn choice(candidate: &Value, names: Option<&SanitizedToolNames>) -> Value {
 fn part_text(part: &Value) -> Option<&Value> {
     part.get("text")
         .or_else(|| path(part, "audioTranscription.text"))
+}
+
+fn content_filter_finish_reason(reason: &str) -> bool {
+    matches!(
+        go::to_upper(reason.trim()).as_str(),
+        "SAFETY"
+            | "RECITATION"
+            | "BLOCKLIST"
+            | "PROHIBITED_CONTENT"
+            | "SPII"
+            | "IMAGE_SAFETY"
+            | "MALFORMED_RESPONSE"
+            | "MALFORMED_FUNCTION_CALL"
+    )
 }
 
 fn inline_data(part: &Value) -> Option<&Value> {

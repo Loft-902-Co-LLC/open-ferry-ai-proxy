@@ -85,7 +85,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::at;
-use super::request::equal_fold;
 use super::signature_carrier::{ANY, FUNCTION, NEXT, PREVIOUS, STANDALONE, TEXT, encode};
 use super::trailing_signature::cache_text_signatures;
 use super::web_search::{
@@ -163,14 +162,25 @@ impl Usage {
 /// `geminiResponsesTerminalState`: the final event, response status and
 /// `incomplete_details` a finish reason gives.
 fn terminal_state(finish_reason: &str) -> (&'static str, &'static str, Option<Value>) {
-    if equal_fold(finish_reason.trim(), "MAX_TOKENS") {
-        (
+    match crate::go::to_upper(finish_reason.trim()).as_str() {
+        "MAX_TOKENS" => (
             "response.incomplete",
             "incomplete",
             Some(json!({"reason": "max_output_tokens"})),
-        )
-    } else {
-        ("response.completed", COMPLETED, None)
+        ),
+        "SAFETY"
+        | "RECITATION"
+        | "BLOCKLIST"
+        | "PROHIBITED_CONTENT"
+        | "SPII"
+        | "IMAGE_SAFETY"
+        | "MALFORMED_RESPONSE"
+        | "MALFORMED_FUNCTION_CALL" => (
+            "response.incomplete",
+            "incomplete",
+            Some(json!({"reason": "content_filter"})),
+        ),
+        _ => ("response.completed", COMPLETED, None),
     }
 }
 
