@@ -1386,3 +1386,19 @@ fn implicit_open_union_and_reclean_paths_preserve_unproven_placeholders() {
         assert_eq!(clean_arguments(&args, "echo", &original, &sent), expected);
     }
 }
+
+#[test]
+fn open_schema_regressions_match_uncached_analysis() {
+    for uncached in [false, true] {
+        let check = || {
+            implicit_open_objects_preserve_arguments();
+            open_objects_remove_only_proven_translated_placeholders();
+            implicit_open_union_and_reclean_paths_preserve_unproven_placeholders();
+        };
+        if uncached {
+            super::analysis_memo_tests::with_legacy(check);
+        } else {
+            check();
+        }
+    }
+}
