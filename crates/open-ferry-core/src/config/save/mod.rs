@@ -477,12 +477,31 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     let intended = IntendedValues::bytes(data)?;
     let (candidate, source) = candidate_write_file(data)?;
+    let protects_key_feet = source.key_feet_need_restoring(&candidate);
     let output = tree::finish_comment_owners(&source, candidate, |data| {
+        if protects_key_feet && !raw_feet_survive_following_saves(data) {
+            return None;
+        }
         let (candidate, source) = candidate_write_file(data).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
     });
     check_values(&output, &intended)?;
     Ok(output)
+}
+
+fn raw_feet_survive_following_saves(data: &[u8]) -> bool {
+    let Ok(config) = Config::parse(data) else {
+        return false;
+    };
+    [false, true].into_iter().all(|migrate| {
+        let Ok((candidate, source)) = candidate_preserving_comments(data, &config, migrate) else {
+            return false;
+        };
+        let Ok(output) = render_preserving_comments(data, &config, migrate) else {
+            return false;
+        };
+        tree::output_holds_source(&source, candidate, &output)
+    })
 }
 
 fn candidate_write_file(
@@ -507,7 +526,7 @@ fn candidate_write_file(
 pub(crate) fn candidate_write_file_receipted(
     mut out: tree::ReceiptedYaml,
 ) -> Result<tree::ReceiptedYaml, SaveError> {
-    let doc = tree::read_receipted(&out)?;
+    let doc = tree::read_receipted_for_render(&out)?;
     if let Some(root) = doc.content.first()
         && is_v8_config_layout(root)?
     {
@@ -696,6 +715,7 @@ fn candidate_preserving_comments(
     migrate_v8: bool,
 ) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
     let (mut original, mut source) = tree::read_comment_source(data)?;
+    source.repair_key_feet = true;
     if original.kind != Kind::Document || original.content.is_empty() {
         return Err(invalid("invalid yaml document structure"));
     }

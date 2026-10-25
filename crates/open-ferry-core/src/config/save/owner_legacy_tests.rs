@@ -863,3 +863,65 @@ fn owner_audit_same_input_go_witnesses() {
     )
     .unwrap();
 }
+
+#[test]
+#[ignore = "offline independent raw-write then save/migrate history audit"]
+fn owner_round5_raw_history_audit() {
+    let rows: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FU_OWNERS_HISTORY_INPUT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut results = Vec::new();
+    for row in rows {
+        let source = row["source"].as_str().unwrap().as_bytes();
+        let main = row["main"].as_str().unwrap().as_bytes();
+        let protected = row["protected"].as_str().unwrap().as_bytes();
+        for migrate in [false, true] {
+            let save = |data: &[u8]| -> Result<Vec<u8>, String> {
+                let cfg = Config::parse(data).map_err(|_| "config parse".to_owned())?;
+                render_preserving_comments(data, &cfg, migrate)
+                    .map_err(|_| "save refusal".to_owned())
+            };
+            let before = tree::without_owner_protection(|| save(main));
+            let after = save(protected);
+            let mut result = json!({"id":row["id"],"migrate":migrate,"base_ok":before.is_ok(),"head_ok":after.is_ok()});
+            if let (Ok(before), Ok(after)) = (before, after) {
+                let expected = independent_expected_owners(source, &before);
+                let old = independent_canonical_owners(&before);
+                let new = independent_canonical_owners(&after);
+                let hashes: std::collections::BTreeSet<_> =
+                    expected.keys().map(|(_, _, _, _, hash)| hash).collect();
+                let mut worse = Vec::new();
+                for hash in hashes {
+                    let group = |inventory: &super::owner_tests::OwnerInventory| {
+                        inventory
+                            .iter()
+                            .filter(|((_, _, _, _, h), _)| h == hash)
+                            .map(|(owner, count)| (owner.clone(), *count))
+                            .collect::<Vec<_>>()
+                    };
+                    let source_group = group(&expected);
+                    let new_group = group(&new);
+                    if new_group != source_group && new_group != group(&old) {
+                        worse.push(hash);
+                    }
+                }
+                result["worse_hashes"] = json!(worse);
+                result["same_values_styles_tags"] = json!(
+                    values(&unmarshal(&before).unwrap()) == values(&unmarshal(&after).unwrap())
+                );
+                result["source_owners"] = json!(expected.into_iter().collect::<Vec<_>>());
+                result["main_owners"] = json!(old.into_iter().collect::<Vec<_>>());
+                result["new_owners"] = json!(new.into_iter().collect::<Vec<_>>());
+                result["main"] = json!(String::from_utf8(before).unwrap());
+                result["new"] = json!(String::from_utf8(after).unwrap());
+            }
+            results.push(result);
+        }
+    }
+    std::fs::write(
+        std::env::var_os("FU_OWNERS_HISTORY_OUTPUT").unwrap(),
+        serde_json::to_vec(&results).unwrap(),
+    )
+    .unwrap();
+}
