@@ -187,7 +187,13 @@ fn effective_tier_keeps_the_tree_readers_depth_limit() {
                 close.repeat(depth)
             );
             let want = tree_tier(body.as_bytes());
-            assert_eq!(request_tier::read(body.as_bytes()), want, "depth {depth}");
+            let tier = request_tier::read(body.as_bytes());
+            if depth == 126 {
+                assert_eq!(tier, "priority", "root plus 126 containers");
+            } else if depth == 127 {
+                assert_eq!(tier, "", "root plus 127 containers");
+            }
+            assert_eq!(tier, want, "depth {depth}");
             assert_eq!(
                 outbound_tier(&body).unwrap_or_default(),
                 want,

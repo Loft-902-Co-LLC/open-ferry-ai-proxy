@@ -115,7 +115,9 @@
 //!   attempt's upstream format selects Vertex's parser, preserving its
 //!   `vertex` provider name; its Gemini bridge uses the Gemini parser.
 //!   Calls delegated to the Gemini executor are recorded as `gemini`'s.
-//! - `reasoning_effort` stays empty for compatibility with existing usage records.
+//! - `reasoning_effort` stays empty: upstream's capture
+//!   (`SetTranslatedRequestMetadata`, including c7b4d573) isn't ported;
+//!   see UPSTREAM.md.
 //! - A failure's body is the error's text, scrubbed of every secret the
 //!   attempts sent, the credential's own keys and tokens (also for a call
 //!   that failed before it sent anything) and the client's key, each
@@ -309,9 +311,7 @@ fn session_id(headers: &HeaderMap) -> String {
 
 /// Whether `haystack` holds `needle`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// How an executor call's answer is read.
