@@ -377,9 +377,13 @@ impl OpenAiCompatExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    ),
                 )
             })?;
         observe_send::response(tap, &mut response);
@@ -444,9 +448,12 @@ impl OpenAiCompatExecutor {
             )
             .await?;
         let response_headers = response.headers().clone();
-        let data = read_body(response, MAX_LINE)
-            .await
-            .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        let data = read_body(response, MAX_LINE).await.map_err(|error| {
+            crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, error.to_string()),
+            )
+        })?;
         // A model can echo a secret back in its output: the answer is
         // redacted whole, before it is translated, as for a client.
         let data = match prepared.secrets.bytes(&data, Policy::Client) {

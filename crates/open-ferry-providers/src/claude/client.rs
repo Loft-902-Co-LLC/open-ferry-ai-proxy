@@ -224,27 +224,6 @@ pub(crate) fn error_chain(error: &dyn StdError) -> String {
     text
 }
 
-/// Whether `error` or a source of it is hyper's "channel closed": the
-/// connection's dispatcher had already exited when the call was handed to it,
-/// as when an HTTP/2 peer closes the connection right after it is set up
-/// (hyper's `Error::new_closed`, which hyper-util's readiness check returns
-/// as the connect error). Go reports that as a closed HTTP/2 client
-/// connection, which upstream treats as a lifecycle drop, not a credential
-/// failure.
-pub(crate) fn is_closed_connection(error: &(dyn StdError + 'static)) -> bool {
-    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
-    while let Some(err) = current {
-        if err
-            .downcast_ref::<hyper::Error>()
-            .is_some_and(hyper::Error::is_closed)
-        {
-            return true;
-        }
-        current = err.source();
-    }
-    false
-}
-
 /// Why a body couldn't be read.
 #[derive(Debug)]
 pub(crate) enum ReadError {
@@ -263,7 +242,14 @@ impl std::fmt::Display for ReadError {
     }
 }
 
-impl std::error::Error for ReadError {}
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::TooLarge(_) => None,
+        }
+    }
+}
 
 /// Reads a whole body, failing past `limit` bytes.
 pub(crate) async fn read_body(
@@ -383,54 +369,5 @@ mod tests {
             keys
         };
         assert_eq!(keys, ["direct", "ftp://bad", "http://global.invalid:8080"]);
-    }
-
-    /// A real hyper "channel closed", made the way the connect path makes it:
-    /// an HTTP/2 connection whose peer is gone before the first request is
-    /// handed over (hyper's `SendRequest::ready`, which hyper-util calls
-    /// before it declares a new connection usable).
-    async fn readiness_close() -> hyper::Error {
-        use hyper_util::rt::{TokioExecutor, TokioIo};
-
-        let (client, server) = tokio::io::duplex(1024);
-        let (mut sender, connection) =
-            hyper::client::conn::http2::handshake::<_, _, reqwest::Body>(
-                TokioExecutor::new(),
-                TokioIo::new(client),
-            )
-            .await
-            .expect("handshake");
-        drop(server);
-        // The dispatcher has exited once the connection future ends.
-        tokio::spawn(connection).await.expect("join").ok();
-        sender
-            .ready()
-            .await
-            .expect_err("a closed connection is not ready")
-    }
-
-    #[tokio::test]
-    async fn a_connection_closed_before_the_request_is_recognized_through_its_chain() {
-        #[derive(Debug)]
-        struct Wrapped(hyper::Error);
-        impl std::fmt::Display for Wrapped {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("client error (Connect)")
-            }
-        }
-        impl StdError for Wrapped {
-            fn source(&self) -> Option<&(dyn StdError + 'static)> {
-                Some(&self.0)
-            }
-        }
-
-        let closed = readiness_close().await;
-        assert_eq!(closed.to_string(), "channel closed");
-        assert!(is_closed_connection(&closed));
-        assert!(is_closed_connection(&Wrapped(closed)));
-        // Text alone isn't enough: only the typed hyper error counts.
-        assert!(!is_closed_connection(&std::io::Error::other(
-            "channel closed"
-        )));
     }
 }

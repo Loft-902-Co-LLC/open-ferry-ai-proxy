@@ -161,9 +161,12 @@ impl State {
                 tracing::debug!("xai: stream read failed: {error}");
                 self.reader.report(&error);
                 self.finish().await?;
-                return Err(ExecError::new(
-                    ErrorKind::Upstream,
-                    self.secrets.text(error.to_string(), Policy::Client),
+                return Err(crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        self.secrets.text(error.to_string(), Policy::Client),
+                    ),
                 ));
             }
             None => return self.finish().await,

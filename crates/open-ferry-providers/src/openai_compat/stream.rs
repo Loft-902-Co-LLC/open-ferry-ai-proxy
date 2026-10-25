@@ -347,8 +347,10 @@ impl State {
         if let Some(error) = error {
             tracing::debug!("openai compat executor: stream read failed: {error}");
             self.reader.report(&error);
-            self.pending
-                .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
+            self.pending.push_back(Err(crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, error.to_string()),
+            )));
         } else if !self.seen_done {
             if self.setup.response_format == Format::OPENAI_RESPONSE
                 || (self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason)

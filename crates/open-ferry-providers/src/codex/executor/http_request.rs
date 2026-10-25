@@ -149,9 +149,13 @@ impl CodexExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    ),
                 )
             })?;
         observe_send::response(tap, &mut response);

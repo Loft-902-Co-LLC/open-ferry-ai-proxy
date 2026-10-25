@@ -257,7 +257,14 @@ impl std::fmt::Display for ReadError {
     }
 }
 
-impl std::error::Error for ReadError {}
+impl std::error::Error for ReadError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::TooLarge(_) => None,
+        }
+    }
+}
 
 /// Reads a whole body, failing past `limit` bytes.
 pub(crate) async fn read_body(

@@ -818,9 +818,12 @@ impl CodexExecutor {
             }
             let headers = response.headers().clone();
             let data = read_body(response, MAX_LINE).await.map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error.to_string(), Policy::Client),
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error.to_string(), Policy::Client),
+                    ),
                 )
             })?;
             return Ok(Response {
@@ -845,9 +848,12 @@ impl CodexExecutor {
                 Ok(line) => line,
                 Err(error) => {
                     reader.report(&error);
-                    return Err(ExecError::new(
-                        ErrorKind::Upstream,
-                        secrets.text(error.to_string(), Policy::Client),
+                    return Err(crate::transport::classify(
+                        &error,
+                        ExecError::new(
+                            ErrorKind::Upstream,
+                            secrets.text(error.to_string(), Policy::Client),
+                        ),
                     ));
                 }
             };
@@ -1066,10 +1072,16 @@ impl CodexExecutor {
         let tap = BodyTap::of(&response);
         let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
         if let Some(error) = error {
-            let error = ExecError::new(
-                ErrorKind::Upstream,
-                secrets.text(error_chain(&error.without_url()), Policy::Client),
-            );
+            let error = {
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    ),
+                )
+            };
             observe_send::attempt_error(tap.as_ref(), &error);
             return error;
         }
@@ -1147,9 +1159,12 @@ fn tool_stream(state: ToolStream) -> ChunkStream {
                 Some(Err(error)) => {
                     state.reader.report(&error);
                     state.done = true;
-                    let error = ExecError::new(
-                        ErrorKind::Upstream,
-                        state.secrets.text(error.to_string(), Policy::Client),
+                    let error = crate::transport::classify(
+                        &error,
+                        ExecError::new(
+                            ErrorKind::Upstream,
+                            state.secrets.text(error.to_string(), Policy::Client),
+                        ),
                     );
                     return Some((Err(error), state));
                 }

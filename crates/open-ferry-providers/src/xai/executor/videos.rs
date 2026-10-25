@@ -301,9 +301,13 @@ impl XaiExecutor {
             call = call.body(body);
         }
         let mut response = call.send().await.map_err(|error| {
-            ExecError::new(
-                ErrorKind::Upstream,
-                secrets.text(error_chain(&error.without_url()), Policy::Client),
+            let error = error.without_url();
+            crate::transport::classify(
+                &error,
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error), Policy::Client),
+                ),
             )
         })?;
         observe_send::response(tap, &mut response);
@@ -317,9 +321,12 @@ impl XaiExecutor {
         }
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            ExecError::new(
-                ErrorKind::Upstream,
-                secrets.text(error.to_string(), Policy::Client),
+            crate::transport::classify(
+                &error,
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error.to_string(), Policy::Client),
+                ),
             )
         })?;
         let data = secrets.bytes(&data, Policy::Client).into_owned();
@@ -353,11 +360,15 @@ impl XaiExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(
-                    ErrorKind::Upstream,
-                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                let error = error.without_url();
+                crate::transport::classify(
+                    &error,
+                    ExecError::new(
+                        ErrorKind::Upstream,
+                        secrets.text(error_chain(&error), Policy::Client),
+                    )
+                    .with_status(502),
                 )
-                .with_status(502)
             })?;
         let status = response.status();
         let headers = response.headers().clone();
@@ -380,9 +391,13 @@ impl XaiExecutor {
             .bytes_stream()
             .map(move |chunk| {
                 chunk.map_err(|error| {
-                    ExecError::new(
-                        ErrorKind::Upstream,
-                        secrets.text(error_chain(&error.without_url()), Policy::Client),
+                    let error = error.without_url();
+                    crate::transport::classify(
+                        &error,
+                        ExecError::new(
+                            ErrorKind::Upstream,
+                            secrets.text(error_chain(&error), Policy::Client),
+                        ),
                     )
                 })
             })

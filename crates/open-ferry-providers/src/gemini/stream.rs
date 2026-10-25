@@ -227,9 +227,10 @@ impl State {
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
             self.reader.report(&error);
-            self.pending.push_back(Err(
-                ExecError::new(ErrorKind::Upstream, error.to_string()).with_usage_kept()
-            ));
+            self.pending.push_back(Err(crate::transport::classify(
+                &error,
+                ExecError::new(ErrorKind::Upstream, error.to_string()).with_usage_kept(),
+            )));
             return;
         }
         if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {

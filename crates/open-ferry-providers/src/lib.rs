@@ -38,6 +38,7 @@ mod redirect;
 #[cfg(test)]
 mod secret_echo;
 mod thinking;
+mod transport;
 #[cfg(test)]
 mod unsupported_part_tests;
 pub mod xai;

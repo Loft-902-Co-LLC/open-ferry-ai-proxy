@@ -375,7 +375,7 @@ impl State {
             return;
         }
         let error = match error {
-            Some(error) => plain_error(error.to_string()),
+            Some(error) => crate::transport::classify(&error, plain_error(error.to_string())),
             None => ExecError::upstream(
                 502,
                 self.stream_error
