@@ -745,6 +745,39 @@ async fn a_second_authentication_header_on_the_probe_never_ends_a_cooldown() {
     }
 }
 
+// A probe header whose value is not a string may be expanded by the fetch
+// into anything, so it cannot be shown to leave the identity alone: the read
+// is shown and ends nothing.
+#[tokio::test]
+async fn a_non_string_probe_header_value_never_ends_a_cooldown() {
+    for (name, value) in [
+        ("X-Count", json!(7)),
+        ("X-Flag", json!(true)),
+        ("X-List", json!(["a"])),
+        ("X-Object", json!({"k": "v"})),
+        ("X-Null", Value::Null),
+    ] {
+        let upstream = Upstream::start(|_, _| usage_response(&healthy_usage(), &[])).await;
+        let api = Api::new();
+        let mut auth = credential(ID, &upstream.url, true);
+        match auth.metadata.get_mut("quota_probe") {
+            Some(Value::Object(probe)) => match probe.get_mut("header") {
+                Some(Value::Object(headers)) => {
+                    headers.insert(name.into(), value);
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+        let index = api.register(auth);
+        api.manager
+            .mark_result(&credential_429(SONNET, weekly_headers(), SEVEN_DAYS));
+        let answer = fetch(&api, &index).await;
+        assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.body);
+        assert!(blocked(&api), "{name:?} on the probe ended the cooldown");
+    }
+}
+
 // An unrelated custom header does not stop a recovery.
 #[tokio::test]
 async fn an_unrelated_custom_header_still_allows_a_recovery() {

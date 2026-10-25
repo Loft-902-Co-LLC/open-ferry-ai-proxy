@@ -421,10 +421,10 @@ fn other_failure(model: &str, status: u16, retry: Duration) -> CallResult {
 }
 
 /// A recognized quota 429 of Opus, then an independent 429 that names no
-/// model and holds the whole credential longer: the model's recovery must
-/// not take the unproven hold with it.
+/// model and holds the whole credential longer: the model's recovery is
+/// refused while the unproven hold lives, and changes nothing.
 #[tokio::test(start_paused = true)]
-async fn an_independent_no_model_429_stays_when_a_model_recovers() {
+async fn an_independent_no_model_429_refuses_a_model_recovery() {
     let h = Harness::new(Settings::default());
     h.add(auth(ID, "claude"), &[OPUS, SONNET]);
     h.manager.mark_result(&failure(OPUS, opus_headers(), false));
@@ -436,8 +436,9 @@ async fn an_independent_no_model_429_stays_when_a_model_recovers() {
 
     h.clock.advance(Duration::from_secs(5));
     let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
-    assert!(recover(&h, &reading(h.now(), &healthy)));
-    assert!(!blocked(&h, OPUS), "the model's own quota is over");
+    // Was: recovered, and the model came free.
+    assert!(!recover(&h, &reading(h.now(), &healthy)));
+    assert!(blocked(&h, OPUS), "the model stays in cooldown");
     let current = h.get(ID);
     assert!(
         current.quota.exceeded,
@@ -447,9 +448,9 @@ async fn an_independent_no_model_429_stays_when_a_model_recovers() {
     assert_eq!(current.quota.next_recover_at, until);
 }
 
-/// The same, with the cooldown storage turned off, the recovery, and turned
-/// on again: the credential's independent record is not taken for a derived
-/// one.
+/// The same, with the cooldown storage turned off, the refused read, and
+/// turned on again: the credential's independent record is not taken for a
+/// derived one.
 #[tokio::test(start_paused = true)]
 async fn turning_saving_off_and_on_keeps_an_independent_no_model_hold() {
     let dir = temp_dir();
@@ -470,7 +471,8 @@ async fn turning_saving_off_and_on_keeps_an_independent_no_model_hold() {
 
     reconfigure(&h.manager, Some(&on), &off);
     h.clock.advance(Duration::from_secs(5));
-    assert!(recover(
+    // Was: recovered.
+    assert!(!recover(
         &h,
         &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
     ));
@@ -670,11 +672,12 @@ fn no_model_blocked(h: &Harness) -> bool {
 }
 
 /// A 429 naming no model holds the credential for 14 days; a recognized 429
-/// of Opus comes after it, and a read ends Opus's. The independent hold must
-/// still keep a request that names no model off the credential, and the
-/// saved cooldowns must still carry it into a new manager.
+/// of Opus comes after it, and a read that would end Opus's is refused. The
+/// independent hold keeps a request that names no model off the credential,
+/// and the saved cooldowns still carry it into a new manager.
 #[tokio::test(start_paused = true)]
-async fn an_independent_no_model_hold_still_blocks_selection_and_storage_after_a_model_recovers() {
+async fn an_independent_no_model_hold_still_blocks_selection_and_storage_after_a_refused_model_read()
+ {
     let dir = temp_dir();
     let h = Harness::new(Settings::default());
     set_debounce(&h.manager, Duration::from_secs(3600));
@@ -692,11 +695,12 @@ async fn an_independent_no_model_hold_still_blocks_selection_and_storage_after_a
     assert!(no_model_blocked(&h));
 
     h.clock.advance(Duration::from_secs(5));
-    assert!(recover(
+    // Was: recovered, and Opus came free.
+    assert!(!recover(
         &h,
         &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
     ));
-    assert!(!blocked(&h, OPUS), "the model's own quota is over");
+    assert!(blocked(&h, OPUS), "the model stays in cooldown");
     let current = h.get(ID);
     assert!(
         no_model_blocked(&h),
@@ -969,20 +973,14 @@ async fn reached_by_two_calls(h: &Harness) -> usize {
 /// An unrecognized no-model 429 holds the credential for 14 days under a one
 /// hour check cap; a recognized Opus 429 follows; a read proves Opus, either
 /// before the cap's check time or two hours on with no result in between. The
-/// 14 day hold, which no read proved, comes out as it went in: the quota
-/// fields, the check rest, the saved record.
+/// read is refused while the 14 day hold lives: the credential's fields, the
+/// check rests (the hold's and Opus's), the selection and the saved record
+/// stay as they were.
 #[tokio::test(start_paused = true)]
-async fn a_capped_no_model_hold_comes_out_of_a_model_recovery_as_it_went_in() {
+async fn a_capped_no_model_hold_is_left_as_it_was_by_a_model_read() {
     for (wait, passed) in [(Duration::from_secs(20 * 60), false), (2 * HOUR, true)] {
         let dir = temp_dir();
-        let h = saving(
-            dir.path(),
-            Settings {
-                quota_check_after: HOUR,
-                ..Settings::default()
-            },
-            &[OPUS, SONNET],
-        );
+        let h = saving(dir.path(), capped_hour(), &[OPUS, SONNET]);
         h.manager
             .mark_result(&other_failure("", 429, FOURTEEN_DAYS));
         let reset = h.now() + TimeDelta::days(14);
@@ -992,25 +990,30 @@ async fn a_capped_no_model_hold_comes_out_of_a_model_recovery_as_it_went_in() {
         assert_eq!(rested(&h), [String::new(), OPUS.to_owned()]);
 
         h.clock.advance(wait);
+        let before = h.get(ID);
         assert!(
-            recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
-            "passed {passed}: the read proves Opus"
+            !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+            "passed {passed}: the read recovered under the 14 day hold"
         );
         let current = h.get(ID);
-        assert!(!blocked(&h, OPUS), "passed {passed}: Opus is over");
         assert!(
-            current.quota.exceeded && current.quota.reason == "quota",
-            "passed {passed}: the hold's quota fields are gone: {:?}",
-            current.quota
+            current.model_states[OPUS].quota.exceeded,
+            "passed {passed}: Opus is still held"
         );
+        assert_eq!(
+            format!("{:?} {:?}", current.quota, current.model_states),
+            format!("{:?} {:?}", before.quota, before.model_states),
+            "passed {passed}"
+        );
+        assert_eq!(current.next_retry_after, before.next_retry_after);
         let checks = h.manager.quota_checks(ID);
         assert_eq!(
             checks
                 .iter()
                 .map(|c| c.model_key.as_str())
                 .collect::<Vec<_>>(),
-            [""],
-            "passed {passed}: the hold's check rest: {checks:?}"
+            ["", OPUS],
+            "passed {passed}: the check rests: {checks:?}"
         );
         assert_eq!(checks[0].provider_reset_at, reset);
         assert_eq!(checks[0].wait, HOUR);
@@ -1035,32 +1038,15 @@ async fn a_capped_no_model_hold_comes_out_of_a_model_recovery_as_it_went_in() {
         });
         assert!(own.quota.exceeded && own.quota.reason == "quota", "{own:?}");
         assert_eq!(own.quota_check.map(|check| check.reset_at), Some(reset));
-
-        let next = Harness::new(Settings {
-            quota_check_after: HOUR,
-            ..Settings::default()
-        });
-        next.add(credential(dir.path()), &[OPUS, SONNET]);
-        let on = config(dir.path(), true);
-        reconfigure(&next.manager, None, &on);
-        restore(&next.manager, &on);
-        assert!(no_model_blocked(&next), "the restored hold is selectable");
-        assert_eq!(
-            next.manager
-                .quota_checks(ID)
-                .iter()
-                .map(|c| c.provider_reset_at)
-                .collect::<Vec<_>>(),
-            [reset]
-        );
     }
 }
 
 /// A short no-model 503 hold, then a recognized Opus 429 of 5 days, then a
-/// read that proves Opus: the credential's hold is its own 600 seconds, not
-/// the model's 5 days.
+/// read that proves Opus: refused while the 600 seconds run (the hold is its
+/// own 600 seconds, not the model's 5 days), and recovered by a fresh read
+/// once they are over.
 #[tokio::test(start_paused = true)]
-async fn a_short_no_model_hold_does_not_inherit_the_recovered_models_deadline() {
+async fn a_short_no_model_hold_is_left_as_it_was_by_a_model_read() {
     let dir = temp_dir();
     let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
     h.manager
@@ -1070,35 +1056,35 @@ async fn a_short_no_model_hold_does_not_inherit_the_recovered_models_deadline() 
     h.manager
         .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
     h.clock.advance(Duration::from_secs(5));
-    assert!(recover(
-        &h,
-        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
-    ));
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    let before = h.get(ID);
+    assert!(!recover(&h, &reading(h.now(), &healthy)));
 
     let current = h.get(ID);
-    assert!(!blocked(&h, OPUS));
+    assert!(blocked(&h, OPUS));
     assert!(no_model_blocked(&h));
+    assert_eq!(current.next_retry_after, before.next_retry_after);
     assert_eq!(
-        current.next_retry_after,
-        Some(until),
-        "the transient hold took the model's deadline (quota {:?})",
-        current.quota
+        format!("{:?}", current.quota),
+        format!("{:?}", before.quota)
     );
-    assert!(!current.quota.exceeded, "{:?}", current.quota);
     flush(&h.manager);
-    let own = saved_own(dir.path()).expect("the hold is saved");
-    assert_eq!(own.next_retry_after, Some(until));
-    assert!(!own.quota.exceeded, "{:?}", own.quota);
+    let own = saved_own(dir.path()).expect("the credential is saved");
+    assert_eq!(own.next_retry_after, before.next_retry_after);
 
     h.clock.advance(Duration::from_secs(11 * 60));
-    assert!(!no_model_blocked(&h), "the 600 seconds are over");
+    assert!(h.now() > until, "the 600 seconds are over");
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+    assert!(!blocked(&h, OPUS));
+    assert!(!no_model_blocked(&h));
     assert!(h.manager.quota_checks(ID).is_empty());
 }
 
 /// A model's 1 hour quota hold, then a 2 hour no-model 503, then a read that
-/// proves the model: the credential keeps the 2 hours, not the model's hour.
+/// proves the model: refused while the 2 hours run, and the credential keeps
+/// them, in memory and on disk.
 #[tokio::test(start_paused = true)]
-async fn a_long_no_model_hold_is_not_shortened_by_a_model_recovery() {
+async fn a_long_no_model_hold_is_left_as_it_was_by_a_model_read() {
     let dir = temp_dir();
     let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
     h.manager
@@ -1107,24 +1093,22 @@ async fn a_long_no_model_hold_is_not_shortened_by_a_model_recovery() {
     h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
     let until = h.now() + TimeDelta::hours(2);
     h.clock.advance(Duration::from_secs(5));
-    assert!(recover(
+    assert!(!recover(
         &h,
         &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
     ));
 
     let current = h.get(ID);
-    assert!(!blocked(&h, OPUS));
+    assert!(blocked(&h, OPUS));
     assert_eq!(
         current.next_retry_after,
         Some(until),
-        "the hold was set to the model's hour (quota {:?})",
+        "the hold changed (quota {:?})",
         current.quota
     );
-    assert!(!current.quota.exceeded, "{:?}", current.quota);
     flush(&h.manager);
     let own = saved_own(dir.path()).expect("the hold is saved");
     assert_eq!(own.next_retry_after, Some(until));
-    assert!(!own.quota.exceeded, "{:?}", own.quota);
 
     h.clock.advance(Duration::from_secs(90 * 60));
     assert!(no_model_blocked(&h), "the 2 hours are not over");
@@ -1132,10 +1116,11 @@ async fn a_long_no_model_hold_is_not_shortened_by_a_model_recovery() {
     assert!(!no_model_blocked(&h));
 }
 
-/// A no-model 429 without a deadline hint backs off with its own level; the
-/// recovered model's level does not replace it.
+/// A no-model 429 without a deadline hint backs off with its own level. A
+/// read is refused while that hold lives and leaves its deadline and level;
+/// once it ends, a fresh read recovers the model.
 #[tokio::test(start_paused = true)]
-async fn a_no_model_429s_backoff_survives_a_model_recovery() {
+async fn a_no_model_429s_backoff_is_left_as_it_was_by_a_model_read() {
     let h = Harness::new(Settings::default());
     h.add(auth(ID, "claude"), &[OPUS, SONNET]);
     let unhinted = CallResult {
@@ -1149,26 +1134,25 @@ async fn a_no_model_429s_backoff_survives_a_model_recovery() {
             h.clock.advance(Duration::from_secs((1u64 << step) + 1));
         }
     }
-    let own = h.get(ID);
-    let (until, level) = (own.quota.next_recover_at, own.quota.backoff_level);
-    assert_eq!(level, 5);
+    assert_eq!(h.get(ID).quota.backoff_level, 5);
     h.clock.advance(Duration::from_secs(1));
     h.manager
         .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
     h.clock.advance(Duration::from_secs(1));
-    assert!(recover(
-        &h,
-        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
-    ));
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    let before = h.get(ID);
+    assert!(!recover(&h, &reading(h.now(), &healthy)));
 
     let current = h.get(ID);
-    assert!(!blocked(&h, OPUS));
+    assert!(blocked(&h, OPUS));
     assert_eq!(
-        (current.quota.next_recover_at, current.quota.backoff_level),
-        (until, level),
-        "the hold's own deadline and backoff: {:?}",
-        current.quota
+        format!("{:?} {:?}", current.quota, current.next_retry_after),
+        format!("{:?} {:?}", before.quota, before.next_retry_after),
+        "the credential's fields changed"
     );
+    h.clock.advance(Duration::from_secs(60));
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+    assert!(!blocked(&h, OPUS));
 }
 
 /// Known limitation: an Opus claim whose 10 second cooldown ran out is still
@@ -1187,7 +1171,8 @@ async fn an_expired_claims_window_stays_owed_through_a_later_429() {
     h.clock.advance(Duration::from_secs(5));
     assert!(
         !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
-        "the expired Opus window is not owed any more: the limitation is gone, drop the pin"
+        "the expired Opus window is owed again: this pins the known limitation (fail closed); \
+         if it is lifted on purpose, change this test"
     );
     assert!(blocked(&h, OPUS));
     assert!(recover(
@@ -1195,4 +1180,481 @@ async fn an_expired_claims_window_stays_owed_through_a_later_429() {
         &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
     ));
     assert!(!blocked(&h, OPUS));
+}
+
+// Round 6: a model recovery is refused while the credential's own hold
+// (a failure that named no model) lives. It changes nothing then: the
+// credential, its models, its quota-check rest and its saved record stay as
+// a run without the read leaves them.
+
+const TWENTY_DAYS: Duration = Duration::from_secs(20 * 24 * 60 * 60);
+
+fn capped_hour() -> Settings {
+    Settings {
+        quota_check_after: HOUR,
+        ..Settings::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Case {
+    /// Opus 429 (5 d), a credential-wide Sonnet 429 (1 h), a no-model 503 (2 h).
+    WrapLive503,
+    /// A capped 14 d no-model 429 whose check comes back as a recognized Opus
+    /// 429, which rewrites the credential rest's reset.
+    CappedLengthened,
+    /// A capped 14 d no-model 429, an Opus 429, then a no-model 503 (2 h).
+    CappedShortened,
+    /// A 2 h 503 restored from disk (no provenance), an Opus 429, then a
+    /// 10 minute no-model 503.
+    RestoredThen503,
+    /// A capped 14 d no-model 429 and an Opus 429, read 2 h on: the capped
+    /// check time is past and no check is leased.
+    CappedDue,
+    /// The same, read 20 minutes on, before the check time.
+    CappedEarly,
+    /// A 600 s no-model 503, then an Opus 429 (5 d).
+    ShortHold,
+    /// An Opus 1 h quota 429, then a 2 h no-model 503.
+    LongHold,
+}
+
+fn settings_of(case: Case) -> Settings {
+    match case {
+        Case::CappedLengthened | Case::CappedShortened | Case::CappedDue | Case::CappedEarly => {
+            capped_hour()
+        }
+        _ => Settings::default(),
+    }
+}
+
+/// The credential in `case`'s state, the clock at the moment of the read.
+async fn build(case: Case, dir: &Path) -> Harness {
+    if matches!(case, Case::RestoredThen503) {
+        let first = saving(dir, Settings::default(), &[OPUS, SONNET]);
+        first.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+        flush(&first.manager);
+    }
+    let h = saving(dir, settings_of(case), &[OPUS, SONNET]);
+    let five = Duration::from_secs(5);
+    match case {
+        Case::WrapLive503 => {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(five);
+            h.manager.mark_result(&CallResult {
+                retry_after: Some(HOUR),
+                ..failure(SONNET, sonnet_headers(), true)
+            });
+            h.clock.advance(five);
+            h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+            h.clock.advance(five);
+        }
+        Case::CappedLengthened => {
+            h.manager
+                .mark_result(&other_failure("", 429, FOURTEEN_DAYS));
+            h.clock.advance(HOUR + Duration::from_secs(60));
+            let executor = FakeExecutor::with("claude", |_: &Call| {
+                Reply::Err(rejection(opus_headers(), false, FIVE_DAYS))
+            });
+            h.executor(&executor);
+            let _ = call(&h, OPUS).await;
+            settle().await;
+            h.clock.advance(five);
+        }
+        Case::CappedShortened => {
+            h.manager
+                .mark_result(&other_failure("", 429, FOURTEEN_DAYS));
+            h.clock.advance(Duration::from_secs(10));
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(10));
+            h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+            h.clock.advance(five);
+        }
+        Case::RestoredThen503 => {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(10));
+            h.manager
+                .mark_result(&other_failure("", 503, Duration::from_secs(600)));
+            h.clock.advance(five);
+        }
+        Case::CappedDue | Case::CappedEarly => {
+            h.manager
+                .mark_result(&other_failure("", 429, FOURTEEN_DAYS));
+            h.clock.advance(Duration::from_secs(10));
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(if matches!(case, Case::CappedDue) {
+                2 * HOUR
+            } else {
+                Duration::from_secs(20 * 60)
+            });
+        }
+        Case::ShortHold => {
+            h.manager
+                .mark_result(&other_failure("", 503, Duration::from_secs(600)));
+            h.clock.advance(five);
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(five);
+        }
+        Case::LongHold => {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+            h.clock.advance(five);
+            h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+            h.clock.advance(five);
+        }
+    }
+    h
+}
+
+/// Everything a refused read must leave alone: the live credential, the
+/// selections, the check rests, the flushed record, the state restored from
+/// it, and how many of two calls in flight reach the provider, on both.
+async fn capture(h: &Harness, dir: &Path, settings: Settings) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let mut shape = |label: &str, h: &Harness| {
+        let current = h.get(ID);
+        let _ = writeln!(
+            out,
+            "{label}: unavailable {} retry {:?} status {:?}\n  quota {:?}\n  models {:?}\n  \
+             selection opus {} sonnet {} none {}\n  checks {:?}",
+            current.unavailable,
+            current.next_retry_after,
+            current.status,
+            current.quota,
+            current.model_states,
+            blocked(h, OPUS),
+            blocked(h, SONNET),
+            no_model_blocked(h),
+            h.manager.quota_checks(ID),
+        );
+    };
+    shape("live", h);
+    flush(&h.manager);
+    let saved = FileStore::new(dir.to_path_buf()).load().expect("load");
+    let next = Harness::new(settings);
+    next.add(credential(dir), &[OPUS, SONNET]);
+    next.clock
+        .advance((h.now() - next.now()).to_std().unwrap_or_default());
+    let on = config(dir, true);
+    reconfigure(&next.manager, None, &on);
+    restore(&next.manager, &on);
+    shape("restored", &next);
+    let live_reached = reached_by_two_calls(h).await;
+    let restored_reached = reached_by_two_calls(&next).await;
+    format!("{out}saved {saved:?}\nreached live {live_reached} restored {restored_reached}\n")
+}
+
+async fn run(case: Case, read: bool) -> (bool, String) {
+    let dir = temp_dir();
+    let h = build(case, dir.path()).await;
+    let recovered = read && recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]));
+    (recovered, capture(&h, dir.path(), settings_of(case)).await)
+}
+
+async fn refused(case: Case) {
+    let (recovered, with_read) = run(case, true).await;
+    let (_, control) = run(case, false).await;
+    assert!(
+        !recovered,
+        "{case:?}: a model recovered under the credential's own hold"
+    );
+    assert_eq!(
+        with_read, control,
+        "{case:?}: the read changed what a run without it leaves"
+    );
+}
+
+macro_rules! refusal {
+    ($name:ident, $case:expr) => {
+        #[tokio::test(start_paused = true)]
+        async fn $name() {
+            refused($case).await;
+        }
+    };
+}
+
+// Finding 1: a live credential-wide quota cooldown no longer shortens it.
+refusal!(
+    a_live_wrap_and_a_503_are_not_shortened_by_a_model_read,
+    Case::WrapLive503
+);
+// Finding 2, lengthening: the shared rest's reset rewritten by a check.
+refusal!(
+    a_rewritten_shared_rest_does_not_lengthen_the_hold_on_a_model_read,
+    Case::CappedLengthened
+);
+// Finding 2, shortening: a later 503 inside a capped 14 d hold.
+refusal!(
+    a_503_inside_a_capped_hold_is_not_shortened_by_a_model_read,
+    Case::CappedShortened
+);
+// Finding 3: a restored hold with no provenance, then a new failure.
+refusal!(
+    a_restored_hold_and_a_new_503_are_not_replaced_by_a_model_read,
+    Case::RestoredThen503
+);
+// Finding 6, and round 5's cases a, b and c.
+refusal!(
+    a_due_capped_rest_is_left_as_it_was_by_a_model_read,
+    Case::CappedDue
+);
+refusal!(
+    a_capped_hold_before_its_check_is_left_as_it_was_by_a_model_read,
+    Case::CappedEarly
+);
+refusal!(
+    a_short_hold_is_left_as_it_was_by_a_model_read,
+    Case::ShortHold
+);
+refusal!(
+    a_long_hold_is_left_as_it_was_by_a_model_read,
+    Case::LongHold
+);
+
+/// Once the 503 ends, a fresh read recovers the model; the other model's
+/// cooldown is untouched, and the refused read before it used nothing up.
+#[tokio::test(start_paused = true)]
+async fn a_model_recovers_once_the_credentials_503_hold_has_ended() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.manager
+        .mark_result(&quota_429(SONNET, sonnet_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+    h.clock.advance(Duration::from_secs(5));
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    assert!(!recover(&h, &reading(h.now(), &healthy)));
+    assert!(blocked(&h, OPUS));
+
+    h.clock.advance(2 * HOUR + Duration::from_secs(60));
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+    assert!(!blocked(&h, OPUS));
+    assert!(blocked(&h, SONNET), "the other model's cooldown was taken");
+    assert!(h.get(ID).model_states[SONNET].quota.exceeded);
+}
+
+/// The same for a capped 14 d no-model hold, ended by its own clock.
+#[tokio::test(start_paused = true)]
+async fn a_model_recovers_once_a_capped_14_day_hold_has_ended() {
+    let h = Harness::new(capped_hour());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&other_failure("", 429, FOURTEEN_DAYS));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), TWENTY_DAYS));
+    h.manager
+        .mark_result(&quota_429(SONNET, sonnet_headers(), TWENTY_DAYS));
+    h.clock.advance(2 * HOUR);
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    assert!(!recover(&h, &reading(h.now(), &healthy)));
+
+    h.clock.advance(FOURTEEN_DAYS);
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+    assert!(!blocked(&h, OPUS));
+    assert!(
+        h.get(ID).model_states[SONNET].quota.exceeded,
+        "the other model's cooldown was taken"
+    );
+}
+
+/// A no-model backoff that ran out must not come back: a model 429 and its
+/// recovery reset the live backoff, so a later unhinted no-model 429 is a
+/// first one (1 s) and a model recovery after it is not held longer.
+#[tokio::test(start_paused = true)]
+async fn an_expired_no_model_backoff_does_not_come_back_through_a_recovery() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    let unhinted = CallResult {
+        retry_after: None,
+        ..other_failure("", 429, Duration::ZERO)
+    };
+    for step in 0..5u32 {
+        h.manager.mark_result(&unhinted);
+        h.clock.advance(Duration::from_secs((1u64 << step) + 1));
+    }
+    h.clock.advance(Duration::from_secs(40));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(1));
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+
+    h.manager.mark_result(&unhinted);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(3));
+    assert!(recover(&h, &reading(h.now(), &healthy)));
+    assert!(!blocked(&h, OPUS));
+    assert!(
+        !no_model_blocked(&h),
+        "the old backoff was laid back on: {:?}",
+        h.get(ID).quota
+    );
+}
+
+// Finding 5: clearing cooldowns without a failure forgets what was noted.
+
+/// A no-model 503 (2 h), `disable_cooling` on and off, a new Opus 429, then a
+/// read that proves Opus: the 503 was cleared with everything else and must
+/// not be put back.
+#[tokio::test(start_paused = true)]
+async fn a_settings_toggle_forgets_the_hold_it_cleared() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+    h.manager.set_settings(Settings {
+        disable_cooling: true,
+        ..Settings::default()
+    });
+    assert!(!no_model_blocked(&h), "cooling off cleared the hold");
+    h.manager.set_settings(Settings::default());
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS));
+    assert!(
+        !no_model_blocked(&h),
+        "the cleared hold came back: {:?} retry {:?}",
+        h.get(ID).quota,
+        h.get(ID).next_retry_after
+    );
+}
+
+/// The same when the credential is disabled and enabled again by an edit.
+#[tokio::test(start_paused = true)]
+async fn disabling_and_enabling_a_credential_forgets_the_hold_it_cleared() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+    h.manager
+        .edit(ID, |auth| {
+            auth.disabled = true;
+            Ok::<_, ()>(true)
+        })
+        .expect("disable");
+    h.manager
+        .edit(ID, |auth| {
+            auth.disabled = false;
+            Ok::<_, ()>(true)
+        })
+        .expect("enable");
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(
+        !no_model_blocked(&h),
+        "the cleared hold came back: {:?} retry {:?}",
+        h.get(ID).quota,
+        h.get(ID).next_retry_after
+    );
+}
+
+/// A read in flight across the toggle is fenced: the cooldown it was taken
+/// for was cleared, and the one that follows is a new one.
+#[tokio::test(start_paused = true)]
+async fn a_read_in_flight_across_a_settings_toggle_is_fenced() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    let token = h.manager.quota_recovery_token(ID).expect("token");
+    h.clock.advance(Duration::from_secs(5));
+    let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+    h.manager.set_settings(Settings {
+        disable_cooling: true,
+        ..Settings::default()
+    });
+    h.manager.set_settings(Settings::default());
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    assert!(
+        h.manager
+            .apply_quota_usage_recovery(&token, &healthy)
+            .expect("apply")
+            .is_empty(),
+        "a read from before the toggle ended the new cooldown"
+    );
+    assert!(blocked(&h, OPUS));
+}
+
+/// Claude's executor picks its headers from which identity fields hold
+/// anything: adding or removing each one fences a read in flight.
+#[tokio::test(start_paused = true)]
+async fn each_identity_presence_flag_fences_a_read_in_flight() {
+    let keys: [(&str, serde_json::Value); 8] = [
+        ("access_token", "x".into()),
+        ("refresh_token", "x".into()),
+        ("id_token", "x".into()),
+        ("email", "a@b.c".into()),
+        ("token_type", "Bearer".into()),
+        ("expires_at", "2029-01-01T00:00:00Z".into()),
+        ("expired", "2029-01-01T00:00:00Z".into()),
+        ("token", serde_json::json!({"k": "v"})),
+    ];
+    for (key, value) in keys {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        let token = h.manager.quota_recovery_token(ID).expect("token");
+        h.clock.advance(Duration::from_secs(5));
+        let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+        h.manager
+            .edit(ID, |auth| {
+                if auth.metadata.remove(key).is_none() {
+                    auth.metadata.insert(key.into(), value.clone());
+                }
+                Ok::<_, ()>(true)
+            })
+            .expect("edit");
+        assert!(
+            h.manager
+                .apply_quota_usage_recovery(&token, &healthy)
+                .expect("apply")
+                .is_empty(),
+            "a read made before a {key} presence change ended a cooldown"
+        );
+        assert!(blocked(&h, OPUS), "{key}");
+        assert!(!token.matches(&h.get(ID)), "{key} change did not fence");
+    }
+}
+
+/// A hold restored from disk has no deadline of its own to go by, so it
+/// counts as live for good: a model read stays refused after its time has
+/// passed, the safe direction.
+#[tokio::test(start_paused = true)]
+async fn an_expired_restored_hold_still_refuses_a_model_read() {
+    let dir = temp_dir();
+    {
+        let first = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
+        first.manager.mark_result(&other_failure("", 503, 2 * HOUR));
+        flush(&first.manager);
+    }
+    let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
+    h.clock.advance(3 * HOUR);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "an unknown hold was taken for an ended one"
+    );
+    assert!(blocked(&h, OPUS));
 }
