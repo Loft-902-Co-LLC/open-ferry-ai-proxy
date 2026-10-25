@@ -63,6 +63,7 @@ use std::sync::Arc;
 
 use chrono::TimeDelta;
 use http::HeaderMap;
+use sha2::{Digest, Sha256};
 
 use super::classify::should_skip_credential_cooldown;
 use super::cooldown::{
@@ -115,6 +116,9 @@ pub struct QuotaRecoveryToken {
     auth_id: String,
     registration_epoch: u64,
     credential_version: u64,
+    /// What shapes the read's request (see [`shaping`]): an edit of it keeps
+    /// the credential version, and the read was made with the old one.
+    shaping: [u8; 32],
     era: u64,
     seq: u64,
     captured_at: Timestamp,
@@ -127,7 +131,31 @@ impl QuotaRecoveryToken {
         auth.id == self.auth_id
             && auth.registration_epoch == self.registration_epoch
             && auth.credential_version == self.credential_version
+            && shaping(auth) == self.shaping
     }
+}
+
+/// A digest of what shapes the requests made with `auth` beyond its keys and
+/// tokens, which the credential version covers: the proxy, the attributes
+/// (the base URL and the extra headers among them) and the quota probe. Only
+/// a digest is kept, as the token is logged and these hold secrets. The
+/// cooldowns, counts and the like are runtime state, not part of it.
+fn shaping(auth: &Auth) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    let mut field = |text: &[u8]| {
+        digest.update((text.len() as u64).to_le_bytes());
+        digest.update(text);
+    };
+    field(auth.proxy_url.as_bytes());
+    for (name, value) in &auth.attributes {
+        field(name.as_bytes());
+        field(value.as_bytes());
+    }
+    field(b"quota_probe");
+    if let Some(probe) = auth.metadata.get("quota_probe") {
+        field(probe.to_string().as_bytes());
+    }
+    digest.finalize().into()
 }
 
 /// What a reading ended.
@@ -582,6 +610,7 @@ impl Manager {
             auth_id: id.to_owned(),
             registration_epoch: auth.registration_epoch,
             credential_version: auth.credential_version,
+            shaping: shaping(auth),
             era: guard.quota_recovery.era,
             seq: guard.quota_recovery.seq,
             captured_at: now,
@@ -634,6 +663,7 @@ impl Manager {
                 let auth = &entry.auth;
                 if auth.registration_epoch != token.registration_epoch
                     || auth.credential_version != token.credential_version
+                    || shaping(auth) != token.shaping
                     || auth.disabled
                     || auth.status == Status::Disabled
                     || super::classify::has_unauthorized_auth_failure(auth)
