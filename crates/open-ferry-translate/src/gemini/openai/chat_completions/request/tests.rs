@@ -19,6 +19,52 @@ use crate::signature::{
 const CAPTURED_GEMINI_TOOL_CALL_THOUGHT_SIGNATURE: &str =
     "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA";
 
+#[test]
+fn mixed_builtin_tools_and_functions() {
+    let function = json!({"type":"function","function":{"name":"get_weather",
+        "parameters":{"type":"object","properties":{"city":{"type":"string"}}}}});
+    for (input, output) in [
+        ("google_search", "googleSearch"),
+        ("code_execution", "codeExecution"),
+        ("url_context", "urlContext"),
+    ] {
+        let builtin = object([(input, json!({}))]);
+        let out = convert_openai_request_to_gemini(
+            "gemini-3.8-flash",
+            &json!({
+                "messages":[{"role":"user","content":"hi"}],
+                "tools":[function, builtin], "tool_choice":"auto"
+            }),
+            false,
+        );
+        assert_eq!(out["toolConfig"]["includeServerSideToolInvocations"], true);
+        assert_eq!(function_calling_config(&out)["mode"], "AUTO");
+        assert_eq!(
+            out["tools"][0]["functionDeclarations"][0]["name"],
+            "get_weather"
+        );
+        assert_eq!(out["tools"][1][output], json!({}));
+        for tools in [json!([function]), json!([builtin])] {
+            let out = convert_openai_request_to_gemini(
+                "gemini-3.8-flash",
+                &json!({"tools":tools}),
+                false,
+            );
+            assert!(path(&out, "toolConfig.includeServerSideToolInvocations").is_none());
+        }
+        let out = convert_openai_request_to_gemini(
+            "gemini-3.8-flash",
+            &json!({
+                "tools":[function, builtin],
+                "tool_choice":{"type":"allowed_tools","allowed_tools":{"tools":[]}}
+            }),
+            false,
+        );
+        assert!(path(&out, "toolConfig.includeServerSideToolInvocations").is_none());
+        assert_eq!(function_calling_config(&out)["mode"], "NONE");
+    }
+}
+
 /// `ConvertOpenAIRequestToGemini`'s body, which must come without a refusal.
 fn convert_openai_request_to_gemini(model: &str, request: &Value, stream: bool) -> Value {
     let (body, err) = super::convert_openai_request_to_gemini(model, request, stream);
