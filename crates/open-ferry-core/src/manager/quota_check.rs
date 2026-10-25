@@ -454,10 +454,15 @@ impl QuotaChecks {
     /// credential-wide one (its shadow) from the next check to the provider's
     /// reset its rest holds, so that bringing the model out from under the
     /// wrap doesn't take a capped layer for an ended one.
-    pub(crate) fn uncap_shadows(&self, auth: &mut Auth, now: Timestamp) {
+    ///
+    /// Returns the models whose layer it lifted, for [`Self::recap_shadows`]
+    /// to cap again once the wrap is off.
+    pub(crate) fn uncap_shadows(&self, auth: &mut Auth, now: Timestamp) -> Vec<String> {
         let id = auth.id.clone();
+        let mut lifted = Vec::new();
         for (name, state) in &mut auth.model_states {
-            let Some(rest) = self.rests.get(&Self::key(&id, &canonical_model_key(name))) else {
+            let scope = canonical_model_key(name);
+            let Some(rest) = self.rests.get(&Self::key(&id, &scope)) else {
                 continue;
             };
             let reset = rest.reset_at;
@@ -474,7 +479,28 @@ impl QuotaChecks {
                 };
                 lift(&mut own.next_retry_after);
                 lift(&mut own.quota.next_recover_at);
+                if !lifted.contains(&scope) {
+                    lifted.push(scope);
+                }
             }
+        }
+        lifted
+    }
+
+    /// Caps the rests of `scopes` of `auth` again, which [`Self::uncap_shadows`]
+    /// lifted to the provider's reset while a credential-wide cooldown wrapped
+    /// them, now that their layers are out from under it: the times between a
+    /// rest's check and its reset go back to the check, as a restore puts
+    /// them, so the check is due then in memory as after a restart.
+    pub(crate) fn recap_shadows(&self, auth: &mut Auth, scopes: &[String], now: Timestamp) {
+        for scope in scopes {
+            let Some(rest) = self.rests.get(&Self::key(&auth.id, scope)) else {
+                continue;
+            };
+            if rest.reset_at <= now || rest.check_at >= rest.reset_at {
+                continue;
+            }
+            retime(auth, scope, rest.check_at, rest.reset_at);
         }
     }
 
