@@ -546,10 +546,8 @@ value or list item by a number, never by matching comment text. A Go transfer
 defines the comment's place only at its own node or the key now holding it.
 If Go drops it or attaches it elsewhere, the fallback keeps its original
 above/on/below position at its own node's new place. Saved proofs distinguish
-the two paths. Every moved line must remain there in order; a partly kept
-block fails. The eight seed-30 cases accepted by the incomplete check now
-stay Different because their relocated comments are lost or misplaced. A
-complete block can still be proved: `random-32-223` keeps all 23 moved source
+the two paths. Every moved line must remain there in order. Keeping part of a
+moved block stays Different. A complete block can still be proved: `random-32-223` keeps all 23 moved source
 lines, including two-line blocks. Deleted data cannot justify a move, and
 unchanged keys keep the existing checks. The relocation replay runs the edits
 on the parsed tree
@@ -565,6 +563,9 @@ another place or a re-encode that loses values still fails. The other checks
 of values, counts, order, exact file bytes and the smallest set of necessary
 writer changes remain in force.
 Rust must also keep comments in a loadable Go result at the places Go wrote them.
+If a fallback move has the same text as a comment Go kept at that destination,
+or any line in an unloadable step’s written trace, the strict check applies.
+Equal text cannot prove that two source copies survived.
 
 Generated-comment identities are rebound at the parsed comment's own position,
 including wrapped scalars. A canonical-version multipart head gets a separating
@@ -1464,9 +1465,9 @@ refresh incrementally without lowering the bound or changing the exact PR set.
 The measured calibration has 13 kinds and a bound of 75 Different per 1,000.
 Seeds 30 and 38 have 267 and 249 Different out of 5,109 cases; the ten
 nightly-sized counts range from 249 to 307. The PR run has zero Different.
-The selected historical sets have 168/170 and 161/164 Different and add kinds
-only. Requiring each relocated block in full restores cases the incomplete
-check accepted. Complete blocks can still be proved, as in `random-32-223`;
+The selected historical sets have 168/170 and 161/164 Different and count
+toward the kinds, not the rate. Keeping part of a moved block stays Different.
+Complete blocks can still be proved, as in `random-32-223`;
 the measurements include that retained proof.
 The earlier false-alarm and new-kind estimates were not recomputed and remain
 omitted here and in the parity README. Future fixes need measured evidence

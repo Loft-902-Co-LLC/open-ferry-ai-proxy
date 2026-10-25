@@ -42,6 +42,8 @@ struct Occurrence {
     sequences: Vec<Value>,
     /// Exact source identity destinations bypass only sequence-index stability.
     relocated: bool,
+    /// A fallback has no observed transfer separating it from Go-kept text.
+    fallback_relocated: bool,
 }
 fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
     if !super::single_document(text) {
@@ -91,6 +93,7 @@ fn inventory(text: &str, expand: bool) -> Option<Vec<Occurrence>> {
                         && n.line_comment_line == key_line,
                     sequences: sequences.clone(),
                     relocated: false,
+                    fallback_relocated: false,
                 });
             }
         }
@@ -746,6 +749,7 @@ fn archive_inventory(source: &str, evidence: &Value) -> Option<Vec<Occurrence>> 
             entry_line: false,
             sequences: vec![],
             relocated: false,
+            fallback_relocated: false,
         });
     }
     Some(out)
@@ -800,6 +804,7 @@ fn relocated_source(
         if owner.path != c.owner.path {
             c.owner = owner;
             c.relocated = true;
+            c.fallback_relocated = matching.iter().any(|m| m["via"] == "fallback");
         }
     }
     Some(result)
@@ -859,6 +864,31 @@ pub fn comment_ownership_with_provenance(
         || evidence.get("unavailable").is_some()
         || !evidence["moves"].is_array()
     {
+        return strict;
+    }
+    let Some(source_items) = inventory(source, true) else {
+        return strict;
+    };
+    let Some(relocated) = relocated_source(source, operation, evidence, &source_items) else {
+        return strict;
+    };
+    let go_items = match go {
+        Some(text) => match inventory(text, false) {
+            Some(items) => Some(items),
+            None => return strict,
+        },
+        None => None,
+    };
+    // A fallback line and a separate Go-kept line must not share one output
+    // occurrence. Their equal text cannot prove two copies survived. Without
+    // parsed Go owners, any equal written line is ambiguous; keep strict.
+    if relocated.iter().any(|c| {
+        c.fallback_relocated
+            && match &go_items {
+                Some(items) => items.iter().any(|g| g.owner == c.owner && g.text == c.text),
+                None => written.contains(&c.text),
+            }
+    }) {
         return strict;
     }
     let refined = analyze_comments(
@@ -1052,6 +1082,94 @@ mod tests {
         assert!(!proves(
             &complete.replace("# first\n# second", "# second\n# first")
         ));
+    }
+
+    fn fallback_collision_fixture() -> (&'static str, &'static str, Value, Value) {
+        let source = "config-version: 8\nopenai-compatibility:\n  - name: fixture\n    base-url: https://example.invalid/v1\n    # first\n    keys: old\n    # first\n    # second\n    api-key-entries:\n      - api-key: fixture\n";
+        let go = "config-version: 8\napi-keys:\n    openai-compatibility:\n        - name: fixture\n          base-url: https://example.invalid/v1\n          # first\n          keys:\n            - api-key: fixture\n";
+        let operation = json!({"op":"write","body":source});
+        let from = json!({"path":[{"key":"openai-compatibility","tag":"!!str"},{"index":0},{"key":"api-key-entries","tag":"!!str"}],"node":"key","slot":"head"});
+        let to = json!({"path":[{"key":"api-keys","tag":"!!str"},{"key":"openai-compatibility","tag":"!!str"},{"index":0},{"key":"keys","tag":"!!str"}],"node":"key","slot":"head"});
+        let evidence = json!({"source":source,"operation":operation,"moves":[
+            {"source":from,"ordinal":0,"text":"# first","via":"fallback","destination":to},
+            {"source":from,"ordinal":1,"text":"# second","via":"fallback","destination":to}
+        ]});
+        (source, go, operation, evidence)
+    }
+
+    #[test]
+    fn fallback_equal_text_at_go_destination_keeps_strict_result() {
+        let (source, go, operation, evidence) = fallback_collision_fixture();
+        for block in [
+            "# first\n          # second",
+            "# first\n          # first\n          # second",
+        ] {
+            let protected = go.replace("# first", block);
+            let strict = comment_ownership_analysis(source, Some(go), &protected, &[]);
+            let actual = comment_ownership_with_provenance(
+                source,
+                Some(go),
+                &protected,
+                &[],
+                &operation,
+                &evidence,
+                false,
+            );
+            assert!(
+                !actual.accepted(),
+                "fallback collision accepted a shared Go occurrence"
+            );
+            assert_eq!(actual.failure, strict.failure);
+            assert!(actual.rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn fallback_equal_text_in_written_trace_keeps_strict_result() {
+        let (source, go, operation, evidence) = fallback_collision_fixture();
+        let written = vec!["# first".to_owned()];
+        for block in [
+            "# first\n          # second",
+            "# first\n          # first\n          # second",
+        ] {
+            let protected = go.replace("# first", block);
+            let strict = comment_ownership_analysis(source, None, &protected, &written);
+            let actual = comment_ownership_with_provenance(
+                source, None, &protected, &written, &operation, &evidence, true,
+            );
+            assert!(
+                !actual.accepted(),
+                "fallback collision accepted a shared written occurrence"
+            );
+            assert_eq!(actual.failure, strict.failure);
+            assert!(actual.rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn fallback_distinct_text_keeps_complete_block_provable() {
+        let (source, go, _, mut evidence) = fallback_collision_fixture();
+        let source = source.replacen("# first", "# kept", 1);
+        let go = go.replace("# first", "# kept");
+        let operation = json!({"op":"write","body":source});
+        evidence["source"] = source.clone().into();
+        evidence["operation"] = operation.clone();
+        let protected = go.replace("# kept", "# kept\n          # first\n          # second");
+        let actual = comment_ownership_with_provenance(
+            &source,
+            Some(&go),
+            &protected,
+            &[],
+            &operation,
+            &evidence,
+            false,
+        );
+        assert!(actual.accepted());
+        assert!(
+            actual
+                .rules
+                .contains(&"upstream-source-identity-relocation")
+        );
     }
 
     #[test]

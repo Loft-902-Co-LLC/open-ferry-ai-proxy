@@ -273,7 +273,9 @@ To check a retained comment's place, the tool parses the exact input for one
 write and reruns the pinned Go implementation's edits on a separate copy.
 It numbers the original parts of that tree so it can follow a particular
 key, value or list item through merges, reordering and v8 migration. Newly
-created parts get no original number. This replay never reads Rust's result.
+created parts get no original number. The replay never reads Rust's output for
+the step being checked. From the second step on, its input is Rust's previous
+output, the same input the check uses.
 
 A recorded Go transfer defines the comment's new place only if it lands on
 the comment's own node, or on the key that now holds that node. It may also
@@ -289,24 +291,27 @@ source line after its original place and position in the comment block
 selected the move.
 
 Every line of a moved comment block must be kept at its final place, in source
-order. Keeping only part of the block stays Different. The eight seed-30
-cases previously accepted by the incomplete check now stay Different because
-the writer loses or misplaces their relocated comments. Complete blocks can
+order. Keeping part of a moved block stays Different. Complete blocks can
 still pass: `random-32-223` keeps all 23 moved source lines, including two-line
 blocks.
 
-One existing correction can put comments written on a key's own physical line
+One correction can put comments written on a key's own physical line
 immediately above that
 same key after it moves, when Go's output can be loaded. It does not apply to
 a key that stays where it was.
 The relocation replay runs the edits on the parsed tree without the save's
 write-and-reload step, so a comment that step drops still has a destination;
 the archive replay includes that step.
-If the real Go run stopped before a later write, the tool still replays that
-write on Rust's previous output and requires every source comment at the
-computed place. There is no real Go output to cross-check that placement.
+If the real Go run stopped before a later write, no Go output can cross-check
+the computed place. The tool still requires every source comment there.
 When Go did write a loadable file, Rust must still keep every comment Go kept
 at the place Go wrote it; a replayed move does not remove that check.
+If Go writes a comment somewhere other than the replayed place, as in
+`random-30-947`, the case cannot be proved and stays Different, whatever the
+writer does.
+A fallback move also stays subject to the strict check when its text matches
+a comment Go kept at that destination, or any line in an unloadable step’s
+written trace. Equal text cannot prove that both source copies survived.
 
 When a list uses an alias, both sides are compared with the alias filled in,
 but comments are still counted where they are actually written. A comment on
@@ -375,9 +380,9 @@ per 1,000** config-save cases; the exact PR Different set is empty. The ten
 nightly-sized calibration seeds have 249 to 307 Different out of 5,109 cases
 each. Seed 30 has 267 and seed 38 has 249. The selected historical sets have
 168/170 and 161/164 Different; they contribute kinds, not rates.
-Every recorded calibration count comes from a measured observation. The
-complete-block requirement restores cases that the earlier incomplete check
-accepted. Complete retained blocks and faithful archives can still be proved,
+Every recorded calibration count comes from a measured observation. Keeping
+part of a moved block stays Different. Complete retained blocks and faithful
+archives can still be proved,
 as in `random-32-223`. The 20% margin above the maximum observed rate, rounded
 up to five, gives the bound.
 These counts describe the calibration sample; the separate kind check still
