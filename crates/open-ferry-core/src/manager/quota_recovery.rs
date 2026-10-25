@@ -39,16 +39,23 @@
 //! for and that is live, and once a merge of two models' cooldowns happened
 //! since its claim, and that refusal outlives the claim: a merge marks the
 //! credential, and a later credential-wide 429 under the same standing wrap
-//! records a fresh claim but keeps the mark. The mark goes only when nothing the
-//! merge could have touched is still live, which is told before the next result
-//! is applied: the credential's own deadlines, the provider's reset of every
+//! records a fresh claim but keeps the mark. The merge records a bound when it
+//! sets the mark: the latest end of everything the credential held then (its
+//! own deadlines, the provider's reset of every quota-check rest, and every
+//! model state's own deadline, quota deadline and wrap shadow), unknown if a
+//! layer blocked with no end. Later outcomes can erase the live state that bound
+//! came from (an unwrapping onto a shorter shadow, a quota check's answer
+//! ending a rest), but not the bound. The mark goes only once the bound has
+//! passed and, told before the next result is applied, nothing is live now
+//! either: the credential's own deadlines, the provider's reset of every
 //! quota-check rest (the capped check time is not the reset), and every model
 //! state's own deadline, quota deadline and wrap shadow, with an unknown end
-//! counting as live. No single field says it (a Cloudflare failure that names
-//! no model rewrites the credential's quota reason, a cap shortens its
-//! deadline), and no failure of any kind drops it. It also goes when the
-//! credential is forgotten. So it can outlive the wrap it was made under, for
-//! as long as the longest layer lasts: the credential is refused until its
+//! counting as live. A repeated merge keeps the later bound; an unknown bound
+//! lasts until the credential is forgotten or the saved cooldowns replace the
+//! live ones. No single field says it (a Cloudflare failure that names no model
+//! rewrites the credential's quota reason, a cap shortens its deadline), and no
+//! failure of any kind drops it. So it can outlive the wrap it was made under,
+//! for as long as the longest layer lasts: the credential is refused until its
 //! cooldowns end by themselves. Ending the wrap would otherwise have to rebuild
 //! what lay under it, and a rebuilt hold could come out shorter than the real
 //! one.
@@ -346,8 +353,10 @@ pub(crate) struct Recoveries {
     /// Credentials a merge happened under the standing credential-wide wrap
     /// of: the merge kept one model layer of two, so the wrap's deadline is
     /// no longer one a reading can speak for. A later credential-wide 429
-    /// does not lift it while that wrap stands.
-    merged_under: BTreeSet<String>,
+    /// does not lift it while that wrap stands. The value is the bound the
+    /// merge recorded: the latest end of every layer it could have touched,
+    /// which nothing later can erase (`None`: unknown, so never).
+    merged_under: BTreeMap<String, Hold>,
     /// When a scope was last recovered, against a restore of older records.
     recovered: BTreeMap<(String, String), Timestamp>,
     /// Moves when the saved cooldowns replace the live ones.
@@ -547,7 +556,9 @@ impl Recoveries {
     /// `target`. The credential's own claim goes as well, as the merge may
     /// have put a cooldown under its wrap that the claim knows nothing of,
     /// but its foreign record stays: its hold is still on the credential.
-    pub(crate) fn merged(&mut self, id: &str, alias: &str, target: &str) {
+    /// `bound` is the latest end of every layer the credential held when the
+    /// merge happened (see [`merge_bound`]); a repeated merge keeps the later.
+    pub(crate) fn merged(&mut self, id: &str, alias: &str, target: &str, bound: Hold) {
         let mut carried = Vec::new();
         for scope in [alias, target] {
             if scope.is_empty() {
@@ -569,7 +580,11 @@ impl Recoveries {
                 .insert((id.to_owned(), target.to_owned()), carried);
         }
         self.claims.remove(&(id.to_owned(), String::new()));
-        self.merged_under.insert(id.to_owned());
+        let kept = match self.merged_under.get(id) {
+            None => bound,
+            Some(earlier) => (*earlier).zip(bound).map(|(earlier, new)| earlier.max(new)),
+        };
+        self.merged_under.insert(id.to_owned(), kept);
         self.touch_wrapped(id);
         if !alias.is_empty()
             && !target.is_empty()
@@ -583,13 +598,18 @@ impl Recoveries {
     /// Before a result is applied to `auth`: ends the mark of a merge under
     /// its wrap once nothing the merge could have touched is still ahead. A
     /// merge may have kept the wrong layer of two, so the mark stays until
-    /// every deadline of the credential (its own fields, each model state's
-    /// own, quota and wrap layers, and a quota check's provider reset,
-    /// `rest_live`) has passed, and while any has an unknown end. One field
-    /// (the quota reason, or a deadline a quota check capped) is no proof
-    /// that the wrap ended.
+    /// the bound the merge recorded has passed (a later failure can take the
+    /// state that bound came from away: an unwrapping onto a shorter shadow,
+    /// a quota check's answer ending a rest) and every deadline of the
+    /// credential now (its own fields, each model state's own, quota and wrap
+    /// layers, and a quota check's provider reset, `rest_live`) has passed,
+    /// and while any has an unknown end. One field (the quota reason, or a
+    /// deadline a quota check capped) is no proof that the wrap ended.
     pub(crate) fn settle_merge_mark(&mut self, auth: &Auth, rest_live: bool, now: Timestamp) {
-        if !self.merged_under.contains(&auth.id) || rest_live {
+        let Some(bound) = self.merged_under.get(&auth.id) else {
+            return;
+        };
+        if rest_live || bound.is_none_or(|bound| bound > now) {
             return;
         }
         let credential = deadline_ahead(
@@ -658,6 +678,43 @@ impl Recoveries {
                 .is_some_and(|at| updated_at.is_none_or(|saved| saved <= *at))
         })
     }
+}
+
+/// The latest end of every layer `auth` holds at `now`, with `rest_reset` (the
+/// latest provider reset of its quota-check rests): the credential's own
+/// deadlines and every model state's own, quota and wrap-shadow deadlines. A
+/// layer that blocks with no end makes the bound unknown. Recorded when a merge
+/// sets its mark, from the state before the merge, so nothing a later outcome
+/// does to that state can lower it.
+pub(crate) fn merge_bound(auth: &Auth, rest_reset: Option<Timestamp>, now: Timestamp) -> Hold {
+    let mut latest = now;
+    let mut take = |blocking: bool, deadlines: [Option<Timestamp>; 2]| {
+        if blocking && deadlines.iter().all(Option::is_none) {
+            return false;
+        }
+        for end in deadlines.into_iter().flatten() {
+            latest = latest.max(end);
+        }
+        true
+    };
+    let mut known = take(
+        auth.unavailable || auth.quota.exceeded,
+        [auth.next_retry_after, auth.quota.next_recover_at],
+    );
+    for state in auth.model_states.values() {
+        let mut layer = Some(state);
+        while let Some(current) = layer {
+            known &= take(
+                current.unavailable || current.quota.exceeded,
+                [current.next_retry_after, current.quota.next_recover_at],
+            );
+            layer = current.credential_quota_shadow.as_deref();
+        }
+    }
+    if let Some(reset) = rest_reset {
+        latest = latest.max(reset);
+    }
+    known.then_some(latest)
 }
 
 /// Whether a cooldown with these `deadlines` is still ahead at `now`, or is
@@ -936,7 +993,7 @@ impl Manager {
                         // on a quota check or holds a cooldown of its own:
                         // their ends could not be told apart from the wrap's.
                         && (!scope.is_empty()
-                            || (!state.quota_recovery.merged_under.contains(id)
+                            || (!state.quota_recovery.merged_under.contains_key(id)
                                 && !state.quota_checks.rests_on_a_model(id)
                                 && !state.quota_recovery.model_hold_live(id, now)))
                         && claim.seq <= token.seq

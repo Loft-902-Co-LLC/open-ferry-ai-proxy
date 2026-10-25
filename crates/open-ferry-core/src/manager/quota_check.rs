@@ -460,6 +460,16 @@ impl QuotaChecks {
         })
     }
 
+    /// The latest provider reset of credential `id`'s rests, the credential's
+    /// and every model's, ended or not.
+    pub(crate) fn latest_reset(&self, id: &str) -> Option<Timestamp> {
+        self.scopes(id)
+            .iter()
+            .filter_map(|scope| self.rests.get(&Self::key(id, scope)))
+            .map(|rest| rest.reset_at)
+            .max()
+    }
+
     /// Whether credential `id` rests on a quota check of any model scope,
     /// under whatever key it was recorded (an alias's included, which a
     /// reconcile leaves behind when it merges the alias's state). A
