@@ -289,8 +289,14 @@ source line after its original place and position in the comment block
 selected the move.
 
 Every line of a moved comment block must be kept at its final place, in source
-order. Keeping only part of the block stays Different. One existing correction
-can put comments written on a key's own physical line immediately above that
+order. Keeping only part of the block stays Different. The eight seed-30
+cases previously accepted by the incomplete check now stay Different because
+the writer loses or misplaces their relocated comments. Complete blocks can
+still pass: `random-32-223` keeps all 23 moved source lines, including two-line
+blocks.
+
+One existing correction can put comments written on a key's own physical line
+immediately above that
 same key after it moves, when Go's output can be loaded. It does not apply to
 a key that stays where it was.
 The relocation replay runs the edits on the parsed tree without the save's
@@ -358,20 +364,25 @@ this refusal to the budget.
 
 The committed budget is the maximum final-certifier observed total rate plus 20%,
 rounded up to the next multiple of five per 1,000. It uses ten random-5000
-config sweeps (30–39), full random-500 runs (11, 12, 38, 39), and the exact PR
+config sweeps (30–39), random-500 config runs (11, 12, 38, 39), and the exact PR
 profile. The 170/164 saved scheduled failures for seeds 11/12 add kind coverage
 only: selected failures are not unbiased rate samples. The file records that
 distinction. An observation below its recorded seed/profile count (or
 with fewer PR case IDs) prints “Baseline can be lowered” and the refresh command.
 
-The refreshed budget retains **13 kinds** and a shared bound of **75 Different
+The measured budget has **13 kinds** and a shared bound of **75 Different
 per 1,000** config-save cases; the exact PR Different set is empty. The ten
-nightly-sized calibration seeds have 243 to 304 Different out of 5,109 cases
-each. The 20% margin above the maximum observed rate, rounded up to five,
-still gives the same bound. These counts describe the calibration sample;
-the separate kind check still rejects an unseen failure kind.
-Earlier false-alarm and new-kind estimates came from the old calibration and
-are omitted because this refresh did not recompute them.
+nightly-sized calibration seeds have 249 to 307 Different out of 5,109 cases
+each. Seed 30 has 267 and seed 38 has 249. The selected historical sets have
+168/170 and 161/164 Different; they contribute kinds, not rates.
+Every recorded calibration count comes from a measured observation. The
+complete-block requirement restores cases that the earlier incomplete check
+accepted. Complete retained blocks and faithful archives can still be proved,
+as in `random-32-223`. The 20% margin above the maximum observed rate, rounded
+up to five, gives the bound.
+These counts describe the calibration sample; the separate kind check still
+rejects an unseen failure kind. Earlier false-alarm and new-kind estimates
+came from an older calibration and were not recomputed, so they are omitted.
 
 ### When the nightly fails
 
