@@ -1,10 +1,11 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Gauge } from "lucide-react";
 import { useState } from "react";
 
 import { callProblem } from "../../api/access";
-import { QUOTA_FETCH, type Credential, type QuotaAnswer } from "../../api/credentials";
+import { AUTH_FILES, QUOTA_FETCH, type Credential, type QuotaAnswer } from "../../api/credentials";
 import { useApiCall } from "../../api/hooks";
+import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
 import { Dialog } from "../../components/Dialog";
 import { ProblemNotice } from "../../components/ProblemNotice";
@@ -71,9 +72,25 @@ export function QuotaView({ quota }: { quota: QuotaAnswer }) {
   );
 }
 
+/** Report capacity only for the buckets actually returned, not for unknown scopes. */
+export function quotaCooldownConflict(credential: Credential, quota: QuotaAnswer): boolean {
+  const buckets = (quota.groups ?? []).flatMap((group) => group.buckets ?? []);
+  const quotaRest =
+    (credential.cooldowns ?? []).some(
+      (cooldown) => cooldown.reason === "quota" || cooldown.reason === "credential_quota",
+    ) || (credential.quota_checks ?? []).length > 0;
+  return (
+    quotaRest && buckets.length > 0 && buckets.every(
+      (bucket) => Number.isFinite(bucket.remainingFraction) &&
+        bucket.remainingFraction > 0 && bucket.remainingFraction <= 1,
+    )
+  );
+}
+
 /** A button that asks the provider for a credential's quota, and shows it. */
 export function QuotaButton({ credential, name }: { credential: Credential; name: string }) {
   const call = useApiCall();
+  const client = useQueryClient();
   const [open, setOpen] = useState(false);
   const fetchQuota = useMutation({
     mutationFn: () =>
@@ -81,6 +98,8 @@ export function QuotaButton({ credential, name }: { credential: Credential; name
         method: "POST",
         json: { auth_index: credential.auth_index },
       }),
+    // Wait for reconciliation before comparing fresh capacity with cached cooldowns.
+    onSuccess: () => client.invalidateQueries({ queryKey: [AUTH_FILES] }),
   });
   return (
     <>
@@ -114,7 +133,21 @@ export function QuotaButton({ credential, name }: { credential: Credential; name
       >
         {fetchQuota.isPending && <Loading>Asking the provider…</Loading>}
         {fetchQuota.isError && <ProblemNotice problem={callProblem(fetchQuota.error)} live />}
-        {fetchQuota.isSuccess && <QuotaView quota={fetchQuota.data} />}
+        {fetchQuota.isSuccess && (
+          <>
+            <QuotaView quota={fetchQuota.data} />
+            {quotaCooldownConflict(credential, fetchQuota.data) && (
+              <Alert tone="warn" title="Proxy quota cooldown still cached">
+                <p>
+                  The quota check reports available capacity, but a proxy quota cooldown is still
+                  cached. The read may not confirm the limit that caused it. Clear proxy cooldown
+                  only if you have confirmed the affected limit has reset.
+                </p>
+                <p>Unknown or model-specific limits may not be included in this read.</p>
+              </Alert>
+            )}
+          </>
+        )}
       </Dialog>
     </>
   );

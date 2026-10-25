@@ -237,7 +237,7 @@ describe("the credential list", () => {
     expect(within(bob).getByRole("heading", { name: "Models resting" })).toBeVisible();
     expect(bob).toHaveTextContent("gpt-5.1-codex: Back in less than a minute");
     expect(bob).toHaveTextContent("Rate-limited");
-    expect(within(bob).getByRole("button", { name: "Stop resting bob@example.com" })).toBeVisible();
+    expect(within(bob).getByRole("button", { name: "Clear proxy cooldown bob@example.com" })).toBeVisible();
     expect(card).toHaveTextContent(/Checked at \d\d:\d\d:\d\d\./);
     expect(
       within(card)
@@ -269,7 +269,7 @@ describe("the credential list", () => {
     expect(ada).toHaveTextContent("In the last 20 min42 succeeded, 1 failed");
     expect(within(ada).getByRole("button", { name: "Turn off ada@example.com" })).toBeVisible();
     expect(within(ada).getByRole("button", { name: "Delete ada@example.com" })).toBeVisible();
-    expect(within(ada).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
+    expect(within(ada).queryByRole("button", { name: /^Clear proxy cooldown/ })).toBeNull();
     expect(within(ada).queryByRole("button", { name: /^Check quota/ })).toBeNull();
     // Its heading names the account, and nothing shown repeats it.
     expect(shownText(ada).split("ada@example.com")).toHaveLength(2);
@@ -481,17 +481,45 @@ describe("the credential list", () => {
     const { user } = renderApp("/credentials");
     const card = await screen.findByRole("region", { name: CREDENTIALS });
     const item = await within(card).findByRole("article", { name: "ada@example.com" });
-    await user.click(within(item).getByRole("button", { name: "Stop resting ada@example.com" }));
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown ada@example.com" }));
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(
+      within(screen.getByRole("dialog", { name: /^Clear proxy cooldown for/ })).getByRole(
+        "button", { name: "Clear proxy cooldown" },
+      ),
+    );
     const said =
       "ada@example.com and 1 model are no longer resting: the server tries them again with the next request.";
     expect(await within(card).findByRole("status")).toHaveTextContent(said);
     expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
       auth_index: "a1b2c3d4e5f60718",
     });
+    expect(state.api.callsTo("GET", AUTH_FILES).length).toBeGreaterThan(1);
     // Ready now, it folds away with the rest, and the notice stays.
     expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
     expect(within(card).queryByRole("article", { name: "ada@example.com" })).toBeNull();
     expect(within(card).getByRole("status")).toHaveTextContent(said);
+  });
+
+  it("cancels a cooldown reset without posting, and shows a failed reset on its credential", async () => {
+    const state = server([credential({ cooldowns: [cooldown("quota", 120)] })]);
+    state.api.use(route("POST", RESET_COOLDOWN, { status: 500, json: { error: "reset refused" } }));
+    const { user } = renderApp("/credentials");
+    const item = await screen.findByRole("article", { name: "ada@example.com" });
+    const button = within(item).getByRole("button", { name: "Clear proxy cooldown ada@example.com" });
+    await user.click(button);
+    let dialog = screen.getByRole("dialog", { name: "Clear proxy cooldown for ada@example.com?" });
+    expect(dialog).toHaveTextContent("It does not reset the provider's quota or sign in again");
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(button);
+    dialog = screen.getByRole("dialog", { name: "Clear proxy cooldown for ada@example.com?" });
+    await user.click(within(dialog).getByRole("button", { name: "Clear proxy cooldown" }));
+    expect(await within(item).findByText(/reset refused/)).toBeVisible();
+    expect(within(item).getByText("Resting")).toBeVisible();
+    expect(state.api.callsTo("POST", "/v8/management/routing/cooldown/reset")).toHaveLength(1);
+    expect(state.api.callsTo("POST", "/v0/management/reset-quota")).toHaveLength(0);
   });
 
   it("tries a failing credential again", async () => {
@@ -510,8 +538,13 @@ describe("the credential list", () => {
     expect(item).toHaveTextContent(
       "What to do: Check the account's billing and plan with the provider, then try it again now.",
     );
-    expect(within(item).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
-    await user.click(within(item).getByRole("button", { name: "Try again now ada@example.com" }));
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown ada@example.com" }));
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(
+      within(screen.getByRole("dialog", { name: /^Clear proxy cooldown for/ })).getByRole(
+        "button", { name: "Clear proxy cooldown" },
+      ),
+    );
     expect(await within(card).findByRole("status")).toHaveTextContent(
       "ada@example.com is back in use: the server tries it again with the next request.",
     );
@@ -603,7 +636,13 @@ describe("the credential list", () => {
     const card = await screen.findByRole("region", { name: CREDENTIALS });
     const item = await within(card).findByRole("article", { name: "ada@example.com" });
     down = true;
-    await user.click(within(item).getByRole("button", { name: "Stop resting ada@example.com" }));
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown ada@example.com" }));
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(
+      within(screen.getByRole("dialog", { name: /^Clear proxy cooldown for/ })).getByRole(
+        "button", { name: "Clear proxy cooldown" },
+      ),
+    );
     expect(await within(card).findByText("Couldn't check again")).toBeVisible();
     expect(card).toHaveTextContent(
       /The server failed \(HTTP 500\)\. This shows what the server said at \d\d:\d\d:\d\d, and the page keeps trying\./,
@@ -1676,7 +1715,7 @@ describe("the Claude Code accounts", () => {
     expect(first).toHaveTextContent("5-hour40% used.");
     expect(first).toHaveTextContent("WeeklyUsed up. This is the limit that stops it.");
     expect(first).toHaveTextContent("214 succeeded, 3 failed");
-    expect(within(first).getByRole("button", { name: "Stop resting claude-max-1" })).toBeVisible();
+    expect(within(first).getByRole("button", { name: "Clear proxy cooldown claude-max-1" })).toBeVisible();
 
     const second = await openFolded(user, card, "1 ready, 1 off", "claude-max-2");
     expect(within(second).getByText("Ready")).toBeVisible();
@@ -1686,7 +1725,7 @@ describe("the Claude Code accounts", () => {
     );
     expect(within(second).queryByRole("heading", { name: "Last error" })).toBeNull();
     expect(within(second).queryByRole("heading", { name: "Quota" })).toBeNull();
-    expect(within(second).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
+    expect(within(second).queryByRole("button", { name: /^Clear proxy cooldown/ })).toBeNull();
 
     const spare = within(card).getByRole("article", { name: "spare" });
     await user.click(within(spare).getByRole("button", { name: "Details spare" }));
@@ -1819,7 +1858,20 @@ describe("the Claude Code accounts", () => {
     const card = await screen.findByRole("region", { name: CLAUDE_CLI });
     const item = await within(card).findByRole("article", { name: "claude-max-1" });
     expect(within(item).getByText("Resting")).toBeVisible();
-    await user.click(within(item).getByRole("button", { name: "Stop resting claude-max-1" }));
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown claude-max-1" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Clear proxy cooldown for claude-max-1?" })).getByRole(
+        "button", { name: "Cancel" },
+      ),
+    );
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown claude-max-1" }));
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(
+      within(screen.getByRole("dialog", { name: /^Clear proxy cooldown for/ })).getByRole(
+        "button", { name: "Clear proxy cooldown" },
+      ),
+    );
     expect(await within(card).findByRole("status")).toHaveTextContent(
       "claude-max-1 is no longer resting: the server tries it again with the next request.",
     );
