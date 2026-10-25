@@ -12,6 +12,10 @@ open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/
 
 When we move the pin, we update this table, bring every ported file's header to the new version, and note behaviour changes in the commit or PR. Every upstream commit between the old and the new pin is ported, unless it is listed under the move below with the reason.
 
+### Changes ported ahead of the pin
+
+- **Request-log file names** (`observe::request_log::names`) follow upstream `179d43dc` from v8.0.42 ahead of the v8.0.38 pin: both path separators are replaced, dot runs are normalized and unsafe names are rejected before creation. Each file is checked to stay directly inside the log directory, and client-supplied request ID tails are sanitized. Open Ferry keeps its 120-character path bound, redaction and Unix mode 0600.
+
 ### What moving from v8.0.36 to v8.0.38 left out
 
 | Upstream commits | What isn't ported | Why |
@@ -932,7 +936,7 @@ Deviations, each also noted in its module:
 - **A client that leaves before the answer's head** is logged with status 499; one that leaves during the body, with what was sent.
 - **The trace ID is the latest selection's**, taken when the answer's head is ready.
 - **Not ported**: the client's own WebSocket timeline (only the upstream one is written), the handshake event and `Stage` line of an upstream WebSocket error, the Codex quota headers' merge into the answer, and the context values that override the bodies logged.
-- **Names** also turn `\` into `-`, and keep at most 120 characters of the path. Headers are written sorted, in Go's canonical form.
+- **Names** keep at most 120 characters of the path and sanitize client-supplied request ID tails. Separator and dot normalization and unsafe-name rejection follow upstream `179d43dc` from v8.0.42 ahead of the pin; every file is checked to stay directly inside the log directory. Headers are written sorted, in Go's canonical form.
 - **The routes** send a log read whole as `text/plain; charset=utf-8`, with its `Last-Modified`, without Go's type sniffing or range and conditional requests. Error logs with the same change time are listed in name order.
 - **The routes refuse a log that is a link**: a symbolic link or other reparse point, anything but a plain file, or a file with another hard link, which may be outside the log directory, answers upstream's 400 for a directory, `invalid log file`. The checks are of the handle the log is then read from. Upstream's follow links.
 - **Errors** are worded as Rust words them, for the files.
