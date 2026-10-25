@@ -9,7 +9,7 @@ pub(super) fn legacy_enabled() -> bool {
     LEGACY.get()
 }
 
-fn with_legacy<T>(operation: impl FnOnce() -> T) -> T {
+pub(super) fn with_legacy<T>(operation: impl FnOnce() -> T) -> T {
     struct Reset(bool);
     impl Drop for Reset {
         fn drop(&mut self) {
