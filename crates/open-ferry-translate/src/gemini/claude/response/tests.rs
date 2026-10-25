@@ -1243,7 +1243,6 @@ fn implicit_open_tool_continuation_ordering() {
 }
 
 #[test]
-#[ignore = "needs the p42 argument helper"]
 fn implicit_open_final_empty_chunk() {
     let request =
         json!({"tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]});
