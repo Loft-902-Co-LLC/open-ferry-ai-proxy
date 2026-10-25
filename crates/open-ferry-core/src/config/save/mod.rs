@@ -62,6 +62,11 @@
 //!   migrated config: ...`; the load check covers it, with its own wording.
 //! - Each submodule lists its own deviations.
 
+#![allow(
+    clippy::mutable_key_type,
+    reason = "CommentId lookup hints do not participate in equality or hashing"
+)]
+
 mod generate;
 mod merge;
 #[cfg(any(feature = "parity", test))]
@@ -568,13 +573,15 @@ fn generated_root(cfg: &Config, plugin_configs: Option<&Node>) -> Result<Node, S
     // Re-parsing generated YAML changes ownership/positions. Rebind only an
     // actual emitted occurrence with the exact output line and full comment.
     rebind_generated_comments(&mut generated, &identities);
-    tree::rebind_comment_receipts(
-        &mut generated,
-        &tree::ReceiptedYaml {
-            bytes: receipt_bytes,
-            receipts,
-        },
-    );
+    if !receipts.owners.is_empty() || !receipts.comments.is_empty() {
+        tree::rebind_comment_receipts(
+            &mut generated,
+            &tree::ReceiptedYaml {
+                bytes: receipt_bytes,
+                receipts,
+            },
+        );
+    }
     if generated.kind != Kind::Document {
         return Err(invalid("invalid generated yaml structure"));
     }
@@ -690,8 +697,8 @@ fn candidate_preserving_comments(
         return Err(invalid("expected root mapping node"));
     }
     check_layout(data)?;
-    let flat = v8::flatten_v8(first)?;
     let layout = expand_config_aliases(first)?;
+    let flat = v8::flatten_v8(&layout)?;
     *first = flat;
     let root = first;
     let migrating = migrate_v8 || is_v8_config_layout(&layout)?;

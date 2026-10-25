@@ -767,3 +767,52 @@ fn owner_scalar_header_groups_commit_only_after_their_headers_validate() {
         "the incomplete group must remain outside the complete gate"
     );
 }
+
+#[test]
+fn owner_receipt_cannot_retarget_its_source_owner() {
+    use super::super::yaml3::CommentId;
+    let (mut document, source) =
+        tree::read_comment_source(b"first: one # keep\nsecond: two\n").unwrap();
+    assert!(source.holds(&document));
+    let root = document.content.first_mut().unwrap();
+    let text = std::mem::take(&mut root.content[1].line_comment);
+    let mut spans = std::mem::take(&mut root.content[1].comment_receipts.line);
+    let other = CommentId::fresh();
+    root.content[3].comment_receipts.owner = Some(other.clone());
+    for span in &mut spans {
+        span.receipt.owner = other.clone();
+    }
+    root.content[3].line_comment = text;
+    root.content[3].comment_receipts.line = spans;
+    assert!(
+        !source.holds(&document),
+        "a rewritten receipt replaced its original source owner"
+    );
+}
+
+#[test]
+fn owner_lookup_hints_cannot_change_receipt_identity() {
+    let (document, mut source) =
+        tree::read_comment_source(b"first: one # first\nsecond: two # second\n").unwrap();
+    assert!(source.holds(&document));
+    let identities: std::collections::HashMap<_, _> = source
+        .comments
+        .iter()
+        .enumerate()
+        .map(|(index, comment)| (comment.receipt.id.clone(), index))
+        .collect();
+    // Cloned sources and subsets can retain stale hints. They must still use
+    // the original identities, including when two hints name the same slot.
+    for comment in &source.comments {
+        comment.receipt.id.assign_comment_index(0);
+    }
+    for (index, comment) in source.comments.iter().enumerate() {
+        assert_eq!(identities.get(&comment.receipt.id), Some(&index));
+    }
+    assert!(source.holds(&document));
+    let mut subset = source.clone();
+    subset.comments.remove(0);
+    assert!(subset.holds(&document));
+    source.comments.push(source.comments[0].clone());
+    assert!(!source.holds(&document));
+}

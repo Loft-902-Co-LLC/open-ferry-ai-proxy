@@ -253,7 +253,8 @@ fn owner_disabled_matches_persisted_base_outputs() {
                         Protection::DroppedSingleKeyComment,
                         Protection::InlineEmptyNullComment,
                         Protection::EffectiveBlockScalarComment,
-                        Protection::BlockScalarCommentIndentation
+                        Protection::BlockScalarCommentIndentation,
+                        Protection::MultipleFlowItemFeet
                     ]
                     .into_iter()
                     .all(enabled)
