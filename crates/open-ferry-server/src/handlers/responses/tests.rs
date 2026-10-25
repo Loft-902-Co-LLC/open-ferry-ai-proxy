@@ -1554,3 +1554,107 @@ async fn failed_response_keeps_envelope_and_long_output_while_sanitizing_error()
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn prompt_overflow_after_pre_first_token_keepalive_keeps_http_200_and_error_code() {
+    use futures_util::future::BoxFuture;
+    use open_ferry_core::exec::{
+        Dispatcher, Options, ProviderId, Request as ExecRequest, Response as ExecResponse,
+        StreamResponse,
+    };
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct PromptOverflow(Notify);
+
+    impl Dispatcher for PromptOverflow {
+        fn execute<'a>(
+            &'a self,
+            _: &'a [ProviderId],
+            _: ExecRequest,
+            _: Options,
+        ) -> BoxFuture<'a, Result<ExecResponse, ExecError>> {
+            Box::pin(async { unreachable!("streaming test") })
+        }
+        fn count_tokens<'a>(
+            &'a self,
+            _: &'a [ProviderId],
+            _: ExecRequest,
+            _: Options,
+        ) -> BoxFuture<'a, Result<ExecResponse, ExecError>> {
+            Box::pin(async { unreachable!("streaming test") })
+        }
+        fn execute_stream<'a>(
+            &'a self,
+            _: &'a [ProviderId],
+            _: ExecRequest,
+            _: Options,
+        ) -> BoxFuture<'a, Result<StreamResponse, ExecError>> {
+            Box::pin(async move {
+                self.0.notified().await;
+                Err(ExecError::upstream(
+                    400,
+                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}"#,
+                ))
+            })
+        }
+    }
+
+    for codex in [false, true] {
+        let dispatcher = Arc::new(PromptOverflow::default());
+        let config = ServerConfig {
+            api_keys: vec!["sk-test".into()],
+            streaming: StreamingConfig {
+                keepalive: Some(Duration::from_millis(10)),
+                keepalive_before_first_token: true,
+                ..StreamingConfig::default()
+            },
+            ..ServerConfig::default()
+        };
+        let catalog = FakeCatalog::new().serve("gpt-5", &["claude"]);
+        let app = router(crate::state::AppState::new(
+            config,
+            dispatcher.clone(),
+            Arc::new(catalog),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let ua = if codex {
+                Some("codex_cli_rs/0.1.0")
+            } else {
+                None
+            };
+            let response = app
+                .oneshot(post("/v1/responses", STREAM, ua))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            let mut body = response.into_body();
+            assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                ": keep-alive\n\n"
+            );
+            dispatcher.0.notify_one();
+            let bytes = body.collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            let terminal = if codex { "response.failed" } else { "error" };
+            assert_eq!(
+                text.matches(&format!("event: {terminal}\n")).count(),
+                1,
+                "{text}"
+            );
+            assert!(
+                text.contains("\"code\":\"context_length_exceeded\""),
+                "{text}"
+            );
+            assert!(text.contains("\"type\":\"invalid_request_error\""));
+            assert!(text.contains("prompt is too long: 210000 tokens"));
+            assert!(!text.contains("[DONE]"));
+        })
+        .await
+        .expect("keepalive commits the stream before the mock error is released");
+    }
+}

@@ -259,14 +259,14 @@ fn error_detail(
     let mut message = message.to_owned();
     if let Some(payload) = payload {
         if let Some(node @ Value::Object(_)) = payload.get("error") {
-            return sorted(node);
+            return nested_error_detail(node);
         }
         if let Some(node @ Value::Object(_)) = payload
             .get("response")
             .filter(|response| response.is_object())
             .and_then(|response| response.get("error"))
         {
-            return sorted(node);
+            return nested_error_detail(node);
         }
         if let Some(Value::String(m)) = payload.get("message")
             && !m.trim().is_empty()
@@ -297,6 +297,24 @@ fn error_detail(
         }
     }
     Value::Object(detail)
+}
+
+fn nested_error_detail(node: &Value) -> Value {
+    let mut detail = sorted(node);
+    if detail
+        .get("code")
+        .is_some_and(|code| !code.is_null() && !go_sprint(code).trim().is_empty())
+    {
+        return detail;
+    }
+    if detail["type"] == "invalid_request_error"
+        && detail["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("prompt is too long"))
+    {
+        detail["code"] = "context_length_exceeded".into();
+    }
+    detail
 }
 
 /// The `error` event for a stream error
@@ -646,5 +664,74 @@ mod tests {
             parse(&error_chunk(302, "moved", 0))["error"]["code"],
             "unknown_error"
         );
+    }
+}
+
+#[cfg(test)]
+mod prompt_overflow_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_overflow_adds_only_missing_or_blank_nested_codes() {
+        for nested in [false, true] {
+            for code in [
+                None,
+                Some(json!(null)),
+                Some(json!("")),
+                Some(json!(" \t ")),
+                Some(json!("custom_code")),
+                Some(json!(" custom_code ")),
+                Some(json!(42)),
+                Some(json!(false)),
+                Some(json!({})),
+            ] {
+                let mut error = json!({"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"});
+                if let Some(code) = &code {
+                    error["code"] = code.clone();
+                }
+                let payload = if nested {
+                    json!({"response":{"error":error}})
+                } else {
+                    json!({"type":"error","error":error})
+                };
+                let text = payload.to_string();
+                let expected = code
+                    .filter(|code| !code.is_null() && !go_sprint(code).trim().is_empty())
+                    .unwrap_or(json!("context_length_exceeded"));
+                for chunk in [error_chunk(400, &text, 3), failed_chunk(400, &text, 3)] {
+                    let chunk: Value = serde_json::from_str(&chunk).unwrap();
+                    let error = chunk.get("error").unwrap_or(&chunk["response"]["error"]);
+                    assert_eq!(error["code"], expected, "{chunk}");
+                    assert_eq!(error["type"], "invalid_request_error");
+                    assert_eq!(
+                        error["message"],
+                        "prompt is too long: 210000 tokens > 200000 maximum"
+                    );
+                    assert_eq!(chunk["sequence_number"], 3);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_overflow_does_not_classify_unrelated_errors() {
+        for error in [
+            json!({"type":"invalid_request_error","message":"messages.0.content: Field required"}),
+            json!({"type":"server_error","message":"prompt is too long"}),
+            json!({"type":"invalid_request_error","message":"Prompt is too long"}),
+            json!({"type":"invalid_request_error","message":" prompt is too long"}),
+            json!({"type":"invalid_request_error","message":42}),
+        ] {
+            let text = json!({"error":error}).to_string();
+            for chunk in [error_chunk(400, &text, 0), failed_chunk(400, &text, 0)] {
+                let chunk: Value = serde_json::from_str(&chunk).unwrap();
+                let actual = chunk.get("error").unwrap_or(&chunk["response"]["error"]);
+                assert_eq!(actual, &error);
+            }
+        }
+        let text =
+            json!({"type":"invalid_request_error","message":"prompt is too long"}).to_string();
+        let chunk: Value = serde_json::from_str(&error_chunk(400, &text, 0)).unwrap();
+        assert_eq!(chunk["error"]["code"], "invalid_request_error");
     }
 }
