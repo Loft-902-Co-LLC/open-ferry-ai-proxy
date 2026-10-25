@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { AUTH_FILES, type Credential, type CredentialList as List } from "../../api/credentials";
 import { useApiQuery } from "../../api/hooks";
@@ -8,6 +8,7 @@ import { credentialAnchor } from "./anchors";
 import { CredentialItem, credentialNames } from "./CredentialItem";
 import { credentialHealth, secondsUntilBack } from "./credentialStates";
 import { CheckedAt, PolledState } from "./PolledState";
+import { useQuotaDialog } from "./QuotaDialog";
 import { SignInDialog, type BindTarget } from "./SignInDialog";
 import { TriageList, type TriageEntry } from "./TriageList";
 import { useUpload } from "./upload";
@@ -56,6 +57,8 @@ function readAt(list: List, fetched: number): number {
 export function CredentialList() {
   const list = useApiQuery<List>(AUTH_FILES, undefined, { refetchInterval: pollWhileRead });
   const upload = useUpload();
+  const focusFallback = useRef<HTMLDivElement>(null);
+  const quota = useQuotaDialog(list.data?.files ?? [], () => { focusFallback.current?.focus(); });
   const [notice, setNotice] = useState<ReactNode>(null);
   // The credential a bind of Sign in with ChatGPT is running for.
   const [binding, setBinding] = useState<BindTarget | null>(null);
@@ -77,42 +80,50 @@ export function CredentialList() {
           <p>{notice}</p>
         </Alert>
       )}
-      <PolledState query={list} loading="Loading the credentials…">
-        {(data) => {
-          const files = data.files ?? [];
-          if (files.length === 0) {
+      <div ref={focusFallback} tabIndex={-1} role="group" aria-label="Credential list">
+        <PolledState query={list} loading="Loading the credentials…">
+          {(data) => {
+            const files = data.files ?? [];
+            if (files.length === 0) {
+              return (
+                <p className="text-muted">
+                  None yet. Sign in with Claude or ChatGPT, upload credential files, or add a
+                  provider API key below.
+                </p>
+              );
+            }
+            const names = credentialNames(files);
             return (
-              <p className="text-muted">
-                None yet. Sign in with Claude or ChatGPT, upload credential files, or add a
-                provider API key below.
-              </p>
+              <TriageList
+                entries={files.map((credential, index) =>
+                  entryOf(credential, names[index] ?? credential.name),
+                )}
+                render={(entry, view) => (
+                  <CredentialItem
+                    credential={entry.credential}
+                    name={entry.name}
+                    anchor={entry.anchor}
+                    compact={view.compact}
+                    targeted={view.targeted}
+                    readAt={readAt(data, list.dataUpdatedAt)}
+                    onDone={setNotice}
+                    quotaPending={quota.pending}
+                    quotaChecking={quota.checkingId === entry.credential.id}
+                    onQuota={() => {
+                      quota.openQuota(entry.credential, entry.name);
+                    }}
+                    onBind={() => {
+                      setBinding({ file: entry.credential.name, name: entry.name });
+                    }}
+                  />
+                )}
+              />
             );
-          }
-          const names = credentialNames(files);
-          return (
-            <TriageList
-              entries={files.map((credential, index) =>
-                entryOf(credential, names[index] ?? credential.name),
-              )}
-              render={(entry, view) => (
-                <CredentialItem
-                  credential={entry.credential}
-                  name={entry.name}
-                  anchor={entry.anchor}
-                  compact={view.compact}
-                  targeted={view.targeted}
-                  readAt={readAt(data, list.dataUpdatedAt)}
-                  onDone={setNotice}
-                  onBind={() => {
-                    setBinding({ file: entry.credential.name, name: entry.name });
-                  }}
-                />
-              )}
-            />
-          );
-        }}
-      </PolledState>
+          }}
+        </PolledState>
+      </div>
       {/* Here, not in a row: a row moves between groups, or goes, as its health changes. */}
+      {quota.dialog}
       {binding !== null && (
         <SignInDialog
           provider="codex"

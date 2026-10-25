@@ -71,14 +71,14 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     meaning:
       "The provider says this account has used its whole allowance, so the server rests it for every model until the allowance comes back.",
     action:
-      "Wait until then, or add another account to share the load. If you know the allowance is back, stop it resting.",
+      "Wait until then, or add another account to share the load. Use Clear proxy cooldown only if you have confirmed the affected allowance is back.",
   },
   quota: {
     title: "Rate-limited",
     meaning:
       "The provider answered 429 Too Many Requests: a rate limit or a quota ran out. The server rests the credential, longer each time it happens again.",
     action:
-      "Wait, or add another credential to share the load. Stop it resting if you know the limit has lifted.",
+      "Wait, or add another credential to share the load. Use Clear proxy cooldown only if you have confirmed the affected limit has reset.",
   },
   cloudflare_challenge: {
     title: "Stopped by a Cloudflare check",
@@ -109,13 +109,13 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     title: "The account needs payment or permission",
     meaning:
       "The provider answered 402 or 403: the account may be out of credit, its plan may have lapsed, or it may not be allowed this request.",
-    action: "Check the account's billing and plan with the provider, then stop it resting.",
+    action: "Check the account's billing and plan with the provider, then use Clear proxy cooldown.",
   },
   not_found: {
     title: "The provider couldn't find what was asked for",
     meaning:
       "The provider answered 404 Not Found, often for a model or an endpoint it doesn't have. The server rests the credential for up to 12 hours.",
-    action: "Check the model's name and the credential's base URL, then stop it resting.",
+    action: "Check the model's name and the credential's base URL, then use Clear proxy cooldown.",
   },
   transient_error: {
     title: "The provider failed for a moment",
@@ -127,7 +127,7 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     title: "Resting after a failure",
     meaning: "The server is resting the credential after a failure it doesn't name.",
     action:
-      "The server log around the time it started says more. Stop it resting to try it again now.",
+      "The server log around the time it started says more. Use Clear proxy cooldown to let the next request try it again.",
   },
 };
 
@@ -347,9 +347,9 @@ export function resetRetries(health: Health): boolean {
  */
 const FAILING_ACTIONS: Partial<Record<CooldownReason, string>> = {
   quota:
-    "Wait, or add another credential to share the load. Try it again now if you know the limit has lifted.",
-  payment_required: "Check the account's billing and plan with the provider, then try it again now.",
-  not_found: "Check the model's name and the credential's base URL, then try it again now.",
+    "Wait, or add another credential to share the load. Use Clear proxy cooldown only if you have confirmed the affected limit has reset.",
+  payment_required: "Check the account's billing and plan with the provider, then use Clear proxy cooldown.",
+  not_found: "Check the model's name and the credential's base URL, then use Clear proxy cooldown.",
 };
 
 /** The credential's state, in words, with what to do about it. */
@@ -392,7 +392,7 @@ export function credentialHealth(credential: Credential): Health {
         tone: "danger",
         label: "Failing",
         summary: message === "" ? "Its last request failed." : `Its last request failed: ${message}`,
-        action: "The server log says more. Once it's fixed, try it again now.",
+        action: "The server log says more. Once it's fixed, use Clear proxy cooldown.",
         triage: "failing",
       };
     }
@@ -418,7 +418,7 @@ export function credentialHealth(credential: Credential): Health {
           tone: "warn",
           label: "Resting",
           summary: "The server is resting it after a failure.",
-          action: "It's tried again when the time is up. Stop it resting to try it again now.",
+          action: "It's tried again when the time is up. Use Clear proxy cooldown to let the next request try it again.",
           triage: "resting",
         };
       }

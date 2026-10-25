@@ -325,8 +325,8 @@ describe("the credential list", () => {
       "gpt-5.1: A check is due: the next request finds out whether the quota is back.",
     );
     // Nothing counts down out loud.
-    expect(within(bob).getByText(/Next check in/).closest("[role], [aria-live]")).toBeNull();
-    expect(within(bob).getByText(/A check is due/).closest("[role], [aria-live]")).toBeNull();
+    expect(within(bob).getByText(/Next check in/).closest('[role="status"], [role="alert"], [aria-live]')).toBeNull();
+    expect(within(bob).getByText(/A check is due/).closest('[role="status"], [role="alert"], [aria-live]')).toBeNull();
   });
 
   it("says so in one line when nothing needs attention", async () => {
@@ -501,7 +501,7 @@ describe("the credential list", () => {
     expect(within(card).getByRole("status")).toHaveTextContent(said);
   });
 
-  it("cancels a cooldown reset without posting, and shows a failed reset on its credential", async () => {
+  it.each(["button", "Escape"])("cancels a cooldown reset with %s without posting, and shows a failed reset on its credential", async (cancel) => {
     const state = server([credential({ cooldowns: [cooldown("quota", 120)] })]);
     state.api.use(route("POST", RESET_COOLDOWN, { status: 500, json: { error: "reset refused" } }));
     const { user } = renderApp("/credentials");
@@ -511,7 +511,14 @@ describe("the credential list", () => {
     let dialog = screen.getByRole("dialog", { name: "Clear proxy cooldown for ada@example.com?" });
     expect(dialog).toHaveTextContent("It does not reset the provider's quota or sign in again");
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    if (cancel === "Escape") {
+      // jsdom lacks Escape's default action: simulate the browser closing the dialog.
+      expect(fireEvent(dialog, new Event("cancel", { cancelable: true }))).toBe(true);
+      act(() => { (dialog as HTMLDialogElement).close(); });
+    } else {
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    }
+    expect(screen.queryByRole("dialog", { name: "Clear proxy cooldown for ada@example.com?" })).toBeNull();
     expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
     await user.click(button);
     dialog = screen.getByRole("dialog", { name: "Clear proxy cooldown for ada@example.com?" });
@@ -536,7 +543,7 @@ describe("the credential list", () => {
     const item = await within(card).findByRole("article", { name: "ada@example.com" });
     expect(within(item).getByText("Failing")).toBeVisible();
     expect(item).toHaveTextContent(
-      "What to do: Check the account's billing and plan with the provider, then try it again now.",
+      "What to do: Check the account's billing and plan with the provider, then use Clear proxy cooldown.",
     );
     await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown ada@example.com" }));
     expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
@@ -1880,6 +1887,26 @@ describe("the Claude Code accounts", () => {
     });
     expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
     expect(state.api.callsTo("GET", CLAUDE_CLI_ENTRIES).length).toBeGreaterThan(1);
+  });
+
+  it("shows a reset failure on the targeted claude-cli entry", async () => {
+    const state = server([], {}, [claudeCliEntry({
+      credential: claudeCliCredential({ unavailable: true, cooldowns: [cooldown("quota", 120)] }),
+    })]);
+    state.api.use(route("POST", RESET_COOLDOWN, {
+      status: 500, json: { error: "entry reset refused" },
+    }));
+    const { user } = renderApp("/credentials");
+    const item = await screen.findByRole("article", { name: "claude-max-1" });
+    await user.click(within(item).getByRole("button", { name: "Clear proxy cooldown claude-max-1" }));
+    const dialog = screen.getByRole("dialog", { name: "Clear proxy cooldown for claude-max-1?" });
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Clear proxy cooldown" }));
+    expect(await within(item).findByText(/entry reset refused/)).toBeVisible();
+    expect(within(item).getByText("Resting")).toBeVisible();
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
+      auth_index: "3734a62b508f0029",
+    });
   });
 
   /** Renders the page from `api`, and expects no Claude Code accounts card. */
