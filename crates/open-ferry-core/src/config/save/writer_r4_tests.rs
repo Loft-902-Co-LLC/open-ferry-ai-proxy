@@ -169,6 +169,13 @@ fn writer_r4_physical_head_witness_does_not_cross_other_yaml_breaks() {
     let emitted =
         String::from_utf8(crate::config::yaml3::encode::marshal_node(&source, 2).unwrap()).unwrap();
     for separator in ["\u{85}", "\u{2028}", "\u{2029}", "\r"] {
+        let data = format!("{emitted}# guard{separator}# next\n");
+        let actual =
+            super::super::super::tree::source_flow_item_heads(&source, data.as_bytes().to_vec());
+        assert!(
+            actual == data.as_bytes(),
+            "non-LF source repair changed the previous bytes"
+        );
         for count in 1..=12 {
             let data = format!("# guard{}\n{emitted}", separator.repeat(count));
             let actual = super::super::super::tree::source_flow_item_heads(
