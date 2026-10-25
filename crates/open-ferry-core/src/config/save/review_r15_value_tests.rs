@@ -419,6 +419,22 @@ fn review_r15_value_check_accepts_shadowed_legacy_structs() {
 }
 
 #[test]
+fn review_r15_value_check_preserves_omitted_source_settings() {
+    let source = b"port: 8317\nrouting: {strategy: round-robin}\n";
+    let config = Config::parse("port: 8317\n").unwrap();
+    let intended = IntendedValues::settings(source, &config, false).unwrap();
+    check_values(source, &intended).unwrap();
+    let error = check_values(b"port: 8317\nrouting: {strategy: fill-first}\n", &intended)
+        .expect_err("a source setting preserved by the merge must still be checked");
+    assert!(error.to_string().contains("$.routing.strategy"));
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    assert!(save_preserving_comments(&path, &config, false).is_ok());
+    assert_eq!(Config::load(&path).unwrap().routing.strategy, "round-robin");
+}
+
+#[test]
 fn review_r15_safety_net_preserves_values_or_refuses_without_writing() {
     for mapping in [true, false] {
         let source = if mapping {
