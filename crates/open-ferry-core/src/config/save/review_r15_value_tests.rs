@@ -149,6 +149,12 @@ fn review_r15_replaced_mapping_tab_scalar_survives() {
             "the replacement was refused"
         );
         assert!(Config::load(&path).unwrap().auth_dir == "\tx");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("auth-dir: \""),
+            "a replaced tab value must use double quotes"
+        );
     }
 }
 
