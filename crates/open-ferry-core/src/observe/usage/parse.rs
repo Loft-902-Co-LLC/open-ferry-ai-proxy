@@ -33,7 +33,7 @@
 //! - Antigravity's counts, and the plugin executors', aren't parsed: those
 //!   aren't ported yet.
 
-use super::accounting::{Detail, TokenBreakdown, non_negative_sum};
+use super::accounting::{Detail, Quality, TokenBreakdown, non_negative_sum};
 use super::json::{self, Doc, Node};
 use super::response_model::{
     extract_claude_response_model_event, extract_generic_response_model_event,
@@ -534,9 +534,14 @@ pub fn parse_interactions_stream_usage(line: &[u8]) -> Option<Detail> {
 }
 
 /// `update` with what `existing` knew and it lacks, its total at least
-/// their sum, and its breakdown rebuilt with Claude's semantics (upstream's
+/// their sum, preserving the breakdown's cache and reasoning semantics (upstream's
 /// `MergeStreamUsageDetail`).
 pub fn merge_stream_usage_detail(existing: &Detail, update: Detail) -> Detail {
+    let output_excludes_reasoning = detail_output_excludes_reasoning(&update)
+        .or_else(|| detail_output_excludes_reasoning(existing));
+    let input_includes_cache = detail_input_includes_cache(&update)
+        .or_else(|| detail_input_includes_cache(existing))
+        .unwrap_or(false);
     let mut merged = update;
     let keep = |merged: &mut i64, existing: i64| {
         if *merged == 0 && existing > 0 {
@@ -556,6 +561,49 @@ pub fn merge_stream_usage_detail(existing: &Detail, update: Detail) -> Detail {
         merged
             .response_service_tier
             .clone_from(&existing.response_service_tier);
+    }
+    if output_excludes_reasoning == Some(true)
+        || (input_includes_cache && output_excludes_reasoning.is_none())
+    {
+        let Some(calculated) = non_negative_sum(&[
+            merged.input_tokens,
+            merged.output_tokens,
+            merged.reasoning_tokens,
+        ]) else {
+            merged.token_breakdown = TokenBreakdown::invalid(merged.total_tokens);
+            return merged;
+        };
+        if merged.total_tokens == 0 || merged.total_tokens < calculated {
+            merged.total_tokens = calculated;
+        }
+        merged.token_breakdown = TokenBreakdown::separate_reasoning(
+            merged.input_tokens,
+            merged.cache_read_tokens,
+            merged.cache_creation_tokens,
+            merged.output_tokens,
+            merged.reasoning_tokens,
+            merged.total_tokens,
+        );
+        return merged;
+    }
+    if input_includes_cache {
+        let Some(calculated) = non_negative_sum(&[merged.input_tokens, merged.output_tokens])
+        else {
+            merged.token_breakdown = TokenBreakdown::invalid(merged.total_tokens);
+            return merged;
+        };
+        if merged.total_tokens == 0 || merged.total_tokens < calculated {
+            merged.total_tokens = calculated;
+        }
+        merged.token_breakdown = TokenBreakdown::subset(
+            merged.input_tokens,
+            merged.cache_read_tokens,
+            merged.cache_creation_tokens,
+            merged.output_tokens,
+            merged.reasoning_tokens,
+            merged.total_tokens,
+        );
+        return merged;
     }
     let mut cached = merged
         .cache_read_tokens
@@ -583,6 +631,62 @@ pub fn merge_stream_usage_detail(existing: &Detail, update: Detail) -> Detail {
         merged.total_tokens,
     );
     merged
+}
+
+/// Cache overlap established by a complete breakdown, otherwise unknown.
+fn detail_input_includes_cache(detail: &Detail) -> Option<bool> {
+    let mut cache = non_negative_sum(&[detail.cache_read_tokens, detail.cache_creation_tokens])?;
+    if cache == 0 {
+        cache = detail.cached_tokens;
+    }
+    let breakdown = &detail.token_breakdown;
+    if cache <= 0 || !breakdown.is_valid() || breakdown.quality != Quality::Complete {
+        return None;
+    }
+    if breakdown.input.total_tokens == detail.input_tokens
+        && breakdown.input.uncached_tokens == detail.input_tokens - cache
+    {
+        return Some(true);
+    }
+    if non_negative_sum(&[detail.input_tokens, cache]) == Some(breakdown.input.total_tokens)
+        && breakdown.input.uncached_tokens == detail.input_tokens
+    {
+        return Some(false);
+    }
+    None
+}
+
+/// Reasoning overlap established by a complete breakdown, otherwise unknown.
+fn detail_output_excludes_reasoning(detail: &Detail) -> Option<bool> {
+    let breakdown = &detail.token_breakdown;
+    if detail.reasoning_tokens <= 0
+        || !breakdown.is_valid()
+        || breakdown.quality != Quality::Complete
+        || breakdown.output.reasoning_tokens != detail.reasoning_tokens
+    {
+        return None;
+    }
+    if detail.output_tokens > 0 {
+        if non_negative_sum(&[detail.output_tokens, detail.reasoning_tokens])
+            == Some(breakdown.output.total_tokens)
+            && breakdown.output.non_reasoning_tokens == detail.output_tokens
+        {
+            return Some(true);
+        }
+        if breakdown.output.total_tokens == detail.output_tokens
+            && breakdown.output.non_reasoning_tokens
+                == detail.output_tokens - detail.reasoning_tokens
+        {
+            return Some(false);
+        }
+    } else if detail.output_tokens == 0
+        && breakdown.output.total_tokens == detail.reasoning_tokens
+        && breakdown.output.non_reasoning_tokens == 0
+        && detail.total_tokens == breakdown.total_tokens
+    {
+        return Some(true);
+    }
+    None
 }
 
 /// The latest token counts a stream gave, and the model it named
