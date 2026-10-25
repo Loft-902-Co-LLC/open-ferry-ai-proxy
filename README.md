@@ -215,7 +215,7 @@ cargo build --release --locked -p open-ferry
 
 The binary is `target/release/open-ferry`. `rust-toolchain.toml` picks the toolchain. The example config, [`config.example.yaml`](config.example.yaml), is at the root of the repository; set it up as [above](#download-a-release).
 
-To build the [dashboard](#dashboard) in, build its app first, with [Node.js](https://nodejs.org/) 22.22.2 or newer. Then build Open Ferry:
+To build the [dashboard](#dashboard) in, build its app first, with [Node.js](https://nodejs.org/) 22.22.2 or a later 22.x, 24.15.0 or a later 24.x, or 26 and newer. Then build Open Ferry:
 
 ```sh
 cd dashboard
