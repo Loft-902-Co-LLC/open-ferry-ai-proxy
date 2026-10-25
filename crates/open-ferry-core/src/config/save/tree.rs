@@ -861,12 +861,19 @@ pub(crate) fn marshal_config(node: &Node) -> Result<Vec<u8>, YamlError> {
 /// One save call's original occurrences. It never enters a global cache.
 #[derive(Clone, Default)]
 pub(crate) struct CommentSource {
+    originals: Vec<OriginalComments>,
     #[cfg(test)]
     pub(crate) original_locations: HashMap<super::super::yaml3::CommentId, String>,
     pub(crate) comments: Vec<SourceComment>,
     pub(crate) indexed_comments: bool,
     pub(crate) repair_key_feet: bool,
     pub(crate) complete: bool,
+}
+
+#[derive(Clone)]
+struct OriginalComments {
+    bytes: std::sync::Arc<[u8]>,
+    comments: std::sync::Arc<[std::sync::Arc<[u8]>]>,
 }
 
 #[derive(Clone)]
@@ -918,6 +925,10 @@ pub(crate) fn identify_comment_source(data: &[u8], node: &mut Node) -> CommentSo
     let count = comment_count(node);
     if count == 0 {
         return CommentSource {
+            originals: vec![OriginalComments {
+                bytes: data.into(),
+                comments: Vec::new().into(),
+            }],
             complete: true,
             ..Default::default()
         };
@@ -1033,6 +1044,15 @@ pub(crate) fn identify_comment_source(data: &[u8], node: &mut Node) -> CommentSo
         ..Default::default()
     };
     identify(node, &positions, data, &starts, &mut source, false);
+    source.originals.push(OriginalComments {
+        bytes: data.into(),
+        comments: source
+            .comments
+            .iter()
+            .map(|comment| comment.bytes.clone())
+            .collect::<Vec<_>>()
+            .into(),
+    });
     for (index, comment) in source.comments.iter().enumerate() {
         comment.receipt.id.assign_comment_index(index);
     }
@@ -1311,6 +1331,7 @@ impl CommentSource {
     }
 
     pub(crate) fn append(&mut self, other: Self) {
+        self.originals.extend(other.originals);
         self.complete &= other.complete;
         self.indexed_comments &= other.indexed_comments || other.comments.is_empty();
         for (index, comment) in other.comments.iter().enumerate() {
@@ -2232,6 +2253,30 @@ fn comment_multiset_matches(source: &CommentSource, bytes: &[u8]) -> bool {
     let mut expected = HashMap::new();
     for comment in &source.comments {
         *expected.entry(comment.bytes.as_ref()).or_insert(0usize) += 1;
+    }
+    // Parsed comments may omit stream-level text or later documents. A repair
+    // must also account for every physical comment in the original file.
+    for original in &source.originals {
+        let Some(lines) = super::super::yaml3::parser::physical_comment_lines(&original.bytes)
+        else {
+            return false;
+        };
+        if lines.len() != original.comments.len() {
+            return false;
+        }
+        let mut available = HashMap::new();
+        for comment in original.comments.iter() {
+            *available.entry(comment.as_ref()).or_insert(0usize) += 1;
+        }
+        for (offset, length) in lines {
+            let Some(count) = available.get_mut(&original.bytes[offset..offset + length]) else {
+                return false;
+            };
+            let Some(left) = count.checked_sub(1) else {
+                return false;
+            };
+            *count = left;
+        }
     }
     let Some(lines) = super::super::yaml3::parser::physical_comment_lines(bytes) else {
         return false;

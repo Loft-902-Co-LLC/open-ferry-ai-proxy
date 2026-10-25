@@ -1,0 +1,4 @@
+[
+{"case":"incoming-later-document","body":"\"/x\"\n---\n# incoming unparsed\nignored: true\n","unparsed":true},
+{"case":"incoming-complete-scalar","body":"\"/x\"\n","unparsed":false}
+]

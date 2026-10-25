@@ -350,6 +350,23 @@ fn owner_diagnosed_a2_and_a3_cases_preserve_each_source_node_and_slot() {
         let expected = independent_owners(data);
         let (prior, source) = candidate_nested_scalar(data, &["auth-dir"], "/x").unwrap();
         let output = render_nested_scalar(data, &["auth-dir"], "/x").unwrap();
+        if let Some(physical) = case.get("physical_source") {
+            assert!(sha256_hex(data) == physical["source_sha256"]);
+            assert!(sha256_hex(&prior.bytes) == physical["main_sha256"]);
+            assert!(expected.values().sum::<usize>() == physical["parsed_comments"]);
+            for span in physical["unparsed"].as_array().unwrap() {
+                let offset = span["offset"].as_u64().unwrap() as usize;
+                let length = span["length"].as_u64().unwrap() as usize;
+                assert!(sha256_hex(&data[offset..offset + length]) == span["sha256"]);
+                assert!(expected.keys().all(|key| key.4 != span["sha256"]));
+            }
+            assert!(expected != independent_owners(&prior.bytes));
+            assert!(
+                output == prior.bytes,
+                "unparsed source must keep writer bytes"
+            );
+            continue;
+        }
         assert!(
             output != prior.bytes,
             "{} did not exercise repair",

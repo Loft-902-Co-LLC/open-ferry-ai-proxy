@@ -1,0 +1,4 @@
+[
+{"case":"later-document","suffix":"\n---\n# later document header\nignored: true # later document line\n"},
+{"case":"later-document-after-end","suffix":"\n...\n---\nignored: true # later document line\n"}
+]
