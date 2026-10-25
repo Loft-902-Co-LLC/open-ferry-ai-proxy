@@ -1625,11 +1625,27 @@ pub(crate) fn source_yaml(data: &[u8], node: &Node) -> ReceiptedYaml {
     }
 }
 
+/// An empty source inventory needs only bytes; keep the tracked emitter for
+/// sources whose original occurrences still need to be checked.
+pub(crate) fn marshal_config_for_source(
+    node: &Node,
+    source: &CommentSource,
+) -> Result<ReceiptedYaml, YamlError> {
+    if source.comments.is_empty() {
+        return Ok(ReceiptedYaml {
+            bytes: marshal_config(node)?,
+            receipts: super::super::yaml3::EmissionReceipts::default(),
+        });
+    }
+    marshal_config_receipted(node)
+}
+
 /// Quote Unicode once before the single authoritative tracked emission.
 pub(crate) fn marshal_config_receipted(node: &Node) -> Result<ReceiptedYaml, YamlError> {
     let mut node = node.clone();
     super::encode::quote_config_unicode(&mut node);
-    marshal_receipted(&node, CONFIG_INDENT)
+    let emitted = marshal_receipted(&node, CONFIG_INDENT)?;
+    Ok(source_flow_item_heads_receipted(&node, emitted))
 }
 
 struct ExpectedComment<'a> {

@@ -101,7 +101,16 @@ pub(crate) fn flatten_v8(node: &Node) -> Result<Node, SaveError> {
             }
         }
     }
-    let mut root = node.clone();
+    // Only these groups are read from the original after root edits. Keep
+    // their snapshots instead of cloning every unrelated setting as well.
+    let key_groups: Vec<_> = V8_KEY_FAMILIES
+        .iter()
+        .filter_map(|&(old, current)| {
+            yaml_path(&node, &format!("api-keys.{current}"))
+                .map(|groups| (old, current, groups.clone()))
+        })
+        .collect();
+    let mut root = node;
     for &(old, current) in v8_aliases() {
         let Some(value) = copy_yaml_path_value(&root, old) else {
             continue;
@@ -146,11 +155,9 @@ pub(crate) fn flatten_v8(node: &Node) -> Result<Node, SaveError> {
             set_yaml_path_with_comments(&mut root, old, &copy);
         }
     }
-    for &(old, current) in V8_KEY_FAMILIES {
-        if let Some(groups) = yaml_path(&node, &format!("api-keys.{current}")) {
-            let keys = expand_v8_groups(groups, current)?;
-            set_yaml_path(&mut root, old, &keys);
-        }
+    for (old, current, groups) in key_groups {
+        let keys = expand_v8_groups(&groups, current)?;
+        set_yaml_path(&mut root, old, &keys);
     }
     Ok(root)
 }
