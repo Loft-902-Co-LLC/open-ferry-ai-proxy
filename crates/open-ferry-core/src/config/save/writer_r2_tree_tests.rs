@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn writer_r2_other_yaml_breaks_do_not_enable_foot_indentation() {
     let cases: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("writer_cases.json")).unwrap();
+        serde_json::from_str(include_str!("../testdata/writer/writer_cases.json")).unwrap();
     let base = cases.iter().find(|c| c["case"] == "flow_two_feet").unwrap()["source"]
         .as_str()
         .unwrap();

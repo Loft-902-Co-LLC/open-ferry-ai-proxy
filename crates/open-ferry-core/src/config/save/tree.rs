@@ -600,20 +600,7 @@ fn flow_item_feet_enabled() -> bool {
 
 /// A trailing sequence with multiple flow-item foot comments.
 fn pending_flow_item_feet(node: &Node) -> Option<&Node> {
-    match node.kind {
-        Kind::Mapping => node.content.last().and_then(pending_flow_item_feet),
-        Kind::Sequence => {
-            let footed = |item: &&Node| {
-                item.kind == Kind::Mapping
-                    && item.style.has(super::super::yaml3::Style::FLOW)
-                    && !item.foot_comment.is_empty()
-            };
-            (node.content.last().is_some_and(|last| footed(&last))
-                && node.content.iter().filter(footed).count() > 1)
-                .then_some(node)
-        }
-        _ => None,
-    }
+    super::super::yaml3::encode::pending_flow_item_feet(node)
 }
 
 /// Both the preflight and paragraph search use this emitted-tree boundary.

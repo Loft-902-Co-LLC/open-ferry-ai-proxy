@@ -1,4 +1,5 @@
 use super::super::*;
+use super::writer_r2_tests::{main_rows, receipt};
 use crate::config::testing::TempDir;
 use crate::config::v8_edit::{V8Edit, V8Method, edit_v8};
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ const OPS: [&str; 14] = [
 ];
 
 fn cases() -> Vec<Value> {
-    serde_json::from_str(include_str!("writer_cases.json")).unwrap()
+    serde_json::from_str(include_str!("../testdata/writer/writer_cases.json")).unwrap()
 }
 
 fn operation(source: &str, op: &str) -> Value {
@@ -89,9 +90,9 @@ fn operation_with_updates(source: &str, op: &str, update_second_pass: bool) -> V
             }
             _ => unreachable!(),
         };
-        if result.is_err() {
+        if let Err(error) = result {
             assert_eq!(std::fs::read(&path).unwrap(), current);
-            return json!({"files": files, "refused": true});
+            return json!({"files": files, "refused": true, "error": error});
         }
         files.push(std::fs::read_to_string(&path).unwrap());
     }
@@ -100,24 +101,23 @@ fn operation_with_updates(source: &str, op: &str, update_second_pass: bool) -> V
 
 #[test]
 fn writer_byte_controls_stay_identical_on_every_operation() {
-    let before: Vec<Value> = serde_json::from_str(include_str!("writer_before.json")).unwrap();
-    let go: Vec<Value> = serde_json::from_str(include_str!("writer_go.json")).unwrap();
+    let before = main_rows();
+    let go: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_go.json")).unwrap();
     for case in cases()
         .iter()
         .filter(|case| case["case"] != "flow_two_feet")
     {
         for op in OPS {
-            let expected = if case["case"] == "C8_crlf" {
-                &go
-            } else {
-                &before
-            };
+            let go_crlf = case["case"] == "C8_crlf"
+                && ["raw", "raw2", "normalize", "normalize2"].contains(&op);
+            let expected = if go_crlf { &go } else { &before };
             let expected = &expected
                 .iter()
                 .find(|row| row["case"] == case["case"] && row["op"] == op)
-                .unwrap()["result"];
+                .unwrap()[if go_crlf { "receipt" } else { "normal" }];
             let result = review_operation(case["source"].as_str().unwrap(), op);
-            assert_eq!(result, *expected, "{} {op}", case["case"]);
+            assert_eq!(receipt(&result), *expected, "{} {op}", case["case"]);
             if ["C8_dashes_comment", "C8_crlf"].contains(&case["case"].as_str().unwrap())
                 && result["files"].as_array().unwrap().len() == 2
             {
@@ -141,7 +141,8 @@ fn writer_document_marker_paragraph_protection_keeps_the_version_owner() {
         .as_str()
         .unwrap()
         .to_owned();
-    let go: Vec<Value> = serde_json::from_str(include_str!("writer_go.json")).unwrap();
+    let go: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_go.json")).unwrap();
     for op in ["save", "migrate", "raw", "normalize", "patch", "put"] {
         let result = operation(&source, op);
         let output = result["files"][0].as_str().unwrap();
@@ -184,13 +185,16 @@ fn writer_two_flow_feet_save_reload_at_each_item_and_stay_stable() {
         ]
         .contains(&op)
         {
-            let before: Vec<Value> =
-                serde_json::from_str(include_str!("writer_before.json")).unwrap();
+            let before = main_rows();
             let expected = &before
                 .iter()
                 .find(|r| r["case"] == "flow_two_feet" && r["op"] == op)
-                .unwrap()["result"];
-            assert_eq!(&result, expected, "{op} retains the original refusal");
+                .unwrap()["normal"];
+            assert_eq!(
+                &receipt(&result),
+                expected,
+                "{op} retains the original refusal"
+            );
             continue;
         }
         assert!(result.get("refused").is_none(), "{op}");
@@ -256,23 +260,27 @@ fn writer_flow_feet_counterfactual_has_exact_go_outcomes_and_bytes() {
         .as_str()
         .unwrap()
         .to_owned();
-    let go: Vec<Value> = serde_json::from_str(include_str!("writer_go.json")).unwrap();
+    let go: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_go.json")).unwrap();
     for op in OPS {
         let expected = &go
             .iter()
             .find(|row| row["case"] == "flow_two_feet" && row["op"] == op)
-            .unwrap()["result"];
-        let result = parity::ablation::with_disabled(
+            .unwrap()["receipt"];
+        let mut result = parity::ablation::with_disabled(
             &[parity::ablation::Protection::MultipleFlowItemFeet],
             || review_operation(&source, op),
         );
-        assert_eq!(result, *expected, "{op}");
+        result.as_object_mut().unwrap().remove("error");
+        assert_eq!(receipt(&result), *expected, "{op}");
     }
 }
 
 #[test]
 fn writer_parent_foot_does_not_gain_an_item_owner() {
-    let fixture: Value = serde_json::from_str(include_str!("writer_parent_foot.json")).unwrap();
+    let fixtures: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_parent_foot.json")).unwrap();
+    let fixture = &fixtures[0];
     let dir = TempDir::new();
     let path = dir.join("config.yaml");
     std::fs::write(&path, fixture["options"]["file"].as_str().unwrap()).unwrap();
