@@ -126,6 +126,26 @@ impl Value {
     }
 }
 
+fn node_has_receipts(node: &Node) -> bool {
+    node.comment_receipts.owner.is_some()
+        || !node.comment_receipts.head.is_empty()
+        || !node.comment_receipts.line.is_empty()
+        || !node.comment_receipts.foot.is_empty()
+        || !node.comment_receipts.tail.is_empty()
+        || node.content.iter().any(node_has_receipts)
+}
+fn value_has_receipts(value: &Value) -> bool {
+    match value {
+        Value::Node(node) => node_has_receipts(node),
+        Value::Seq(items) => items.iter().any(value_has_receipts),
+        Value::Map(items) => items
+            .iter()
+            .any(|(k, v)| value_has_receipts(k) || value_has_receipts(v)),
+        Value::Struct(fields) => fields.iter().any(|f| value_has_receipts(&f.value)),
+        _ => false,
+    }
+}
+
 /// `yaml.Marshal`: `value` as a YAML document, indented by 4.
 pub(crate) fn marshal(value: &Value) -> Result<Vec<u8>, YamlError> {
     let mut encoder = Encoder::new();
@@ -157,20 +177,18 @@ pub(crate) fn marshal_with_receipts(
     ),
     YamlError,
 > {
-    let (bytes, ids) = marshal_with_comment_ids(value)?;
-    let mut encoder = Encoder::new();
-    if encoder
-        .encode(value)
-        .and_then(|()| encoder.finish())
-        .is_err()
-    {
+    if !value_has_receipts(value) {
+        let (bytes, ids) = marshal_with_comment_ids(value)?;
         return Ok((bytes, ids, super::EmissionReceipts::default()));
     }
-    let mut receipts = encoder.emitter.take_receipts();
-    if encoder.emitter.into_output() != bytes {
-        receipts = super::EmissionReceipts::default();
-    }
-    Ok((bytes, ids, receipts))
+    let mut encoder = Encoder::new();
+    encoder.emitter.record_comments = true;
+    encoder.protect_generated_unicode = true;
+    encoder.encode(value)?;
+    encoder.finish()?;
+    let ids = std::mem::take(&mut encoder.emitter.emitted_comments);
+    let receipts = encoder.emitter.take_receipts();
+    Ok((encoder.emitter.into_output(), ids, receipts))
 }
 
 /// Keep only pending key comments whose faithful recipient is the canonical
@@ -197,11 +215,15 @@ pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), Ya
     encoder.encode_node(root)?;
     encoder.finish()?;
     let emitted = encoder.emitter.emitted_comments;
+    let pending: std::collections::HashSet<_> = emitted
+        .iter()
+        .filter(|c| c.recipient == version_id)
+        .filter_map(|c| c.pending_key.map(|key| (key, &c.id, c.text.as_slice())))
+        .collect();
     fn transfer(
         n: &mut Node,
         serial: &mut usize,
-        version_id: usize,
-        emitted: &[super::CommentEmission],
+        pending: &std::collections::HashSet<(usize, &super::CommentId, &[u8])>,
     ) {
         *serial += 1;
         if n.kind == Kind::Mapping {
@@ -209,11 +231,8 @@ pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), Ya
             for [key, value] in n.content.as_chunks_mut::<2>().0 {
                 let value_serial = key_serial + size(key);
                 let is_pending = |node: &Node, id| {
-                    emitted.iter().any(|c| {
-                        c.pending_key == Some(id)
-                            && c.recipient == version_id
-                            && node.line_comment_id.as_ref() == Some(&c.id)
-                            && c.text == node.line_comment.as_bytes()
+                    node.line_comment_id.as_ref().is_some_and(|comment| {
+                        pending.contains(&(id, comment, node.line_comment.as_bytes()))
                     })
                 };
                 let key_pending = is_pending(key, key_serial);
@@ -248,10 +267,10 @@ pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), Ya
             }
         }
         for c in &mut n.content {
-            transfer(c, serial, version_id, emitted);
+            transfer(c, serial, pending);
         }
     }
-    transfer(root, &mut 0, version_id, &emitted);
+    transfer(root, &mut 0, &pending);
     Ok(())
 }
 
@@ -450,13 +469,22 @@ pub(crate) fn protect_conflicting_key_comments(
     encoder.set_indent(indent);
     encoder.encode_node(node)?;
     encoder.finish()?;
-    let hazardous = encoder.emitter.hazardous_key_comments;
+    let hazardous: std::collections::HashSet<_> =
+        encoder.emitter.hazardous_key_comments.into_iter().collect();
     let emitted = encoder.emitter.emitted_comments;
+    let mut retained: std::collections::HashMap<_, std::collections::HashSet<&[u8]>> =
+        std::collections::HashMap::new();
+    for comment in &emitted {
+        retained
+            .entry(&comment.id)
+            .or_default()
+            .insert(&comment.text);
+    }
     fn transfer(
         node: &mut Node,
         serial: &mut usize,
-        hazardous: &[usize],
-        emitted: &[super::CommentEmission],
+        hazardous: &std::collections::HashSet<usize>,
+        retained: &std::collections::HashMap<&super::CommentId, std::collections::HashSet<&[u8]>>,
         output_complete: bool,
     ) {
         *serial += 1;
@@ -467,10 +495,11 @@ pub(crate) fn protect_conflicting_key_comments(
             }
             for [key, value] in node.content.as_chunks_mut::<2>().0 {
                 let retained_elsewhere = !key.line_comment.contains('\n')
-                    && emitted.iter().any(|comment| {
-                        key.line_comment_id.as_ref() == Some(&comment.id)
-                            && comment.text == key.line_comment.as_bytes()
-                    });
+                    && key
+                        .line_comment_id
+                        .as_ref()
+                        .and_then(|id| retained.get(id))
+                        .is_some_and(|texts| texts.contains(key.line_comment.as_bytes()));
                 if candidate(key, value, output_complete)
                     && hazardous.contains(&key_serial)
                     && !retained_elsewhere
@@ -491,10 +520,10 @@ pub(crate) fn protect_conflicting_key_comments(
             }
         }
         for child in &mut node.content {
-            transfer(child, serial, hazardous, emitted, output_complete);
+            transfer(child, serial, hazardous, retained, output_complete);
         }
     }
-    transfer(node, &mut 0, &hazardous, &emitted, output_complete);
+    transfer(node, &mut 0, &hazardous, &retained, output_complete);
     Ok(())
 }
 
@@ -576,6 +605,7 @@ impl Encoder {
     }
 
     pub(crate) fn encode_node(&mut self, node: &Node) -> Result<(), YamlError> {
+        self.emitter.record_receipt_paths = node_has_receipts(node);
         self.init()?;
         if node.kind == Kind::Document {
             return self.node(node, "", &[], false, 0);
@@ -590,6 +620,7 @@ impl Encoder {
         if let Value::Node(node) = value {
             return self.encode_node(node);
         }
+        self.emitter.record_receipt_paths = value_has_receipts(value);
         self.init()?;
         self.emit(Event::document_start(None, Vec::new(), true))?;
         self.marshal(value, 0)?;
@@ -756,6 +787,29 @@ impl Encoder {
         self.emit_receipted(event, receipts)
     }
 
+    fn end_receipts(
+        node: &Node,
+        tail: &[super::ReceiptSpan],
+        drop_foot: bool,
+        alias: bool,
+    ) -> super::CommentReceipts {
+        super::CommentReceipts {
+            owner: node.comment_receipts.owner.clone(),
+            head: if alias {
+                node.comment_receipts.head.clone()
+            } else {
+                Vec::new()
+            },
+            line: node.comment_receipts.line.clone(),
+            foot: if drop_foot {
+                Vec::new()
+            } else {
+                node.comment_receipts.foot.clone()
+            },
+            tail: tail.to_vec(),
+        }
+    }
+
     /// `encoder.node`. With `drop_foot`, the node is written without its
     /// foot comment, as yaml.v3 writes a copy of a mapping key whose foot
     /// it moves to the next key's tail.
@@ -842,21 +896,7 @@ impl Encoder {
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit_receipted(
                     event,
-                    super::CommentReceipts {
-                        owner: node.comment_receipts.owner.clone(),
-                        head: if node.kind == Kind::Alias {
-                            node.comment_receipts.head.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        line: node.comment_receipts.line.clone(),
-                        foot: if drop_foot {
-                            Vec::new()
-                        } else {
-                            node.comment_receipts.foot.clone()
-                        },
-                        tail: tail_receipts.to_vec(),
-                    },
+                    Self::end_receipts(node, tail_receipts, drop_foot, false),
                 )
             }
             Kind::Sequence => {
@@ -893,21 +933,7 @@ impl Encoder {
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit_receipted(
                     event,
-                    super::CommentReceipts {
-                        owner: node.comment_receipts.owner.clone(),
-                        head: if node.kind == Kind::Alias {
-                            node.comment_receipts.head.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        line: node.comment_receipts.line.clone(),
-                        foot: if drop_foot {
-                            Vec::new()
-                        } else {
-                            node.comment_receipts.foot.clone()
-                        },
-                        tail: tail_receipts.to_vec(),
-                    },
+                    Self::end_receipts(node, tail_receipts, drop_foot, false),
                 )
             }
             Kind::Mapping => {
@@ -989,24 +1015,7 @@ impl Encoder {
                 event.line_comment = node.line_comment.as_bytes().to_vec();
                 event.line_comment_id = node.line_comment_id.clone();
                 event.foot_comment = foot.as_bytes().to_vec();
-                self.emit_receipted(
-                    event,
-                    super::CommentReceipts {
-                        owner: node.comment_receipts.owner.clone(),
-                        head: if node.kind == Kind::Alias {
-                            node.comment_receipts.head.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        line: node.comment_receipts.line.clone(),
-                        foot: if drop_foot {
-                            Vec::new()
-                        } else {
-                            node.comment_receipts.foot.clone()
-                        },
-                        tail: tail_ids.to_vec(),
-                    },
-                )
+                self.emit_receipted(event, Self::end_receipts(node, tail_ids, drop_foot, false))
             }
             Kind::Alias => {
                 let mut event = Event::alias(node.value.as_bytes().to_vec());
@@ -1016,21 +1025,7 @@ impl Encoder {
                 event.foot_comment = foot.as_bytes().to_vec();
                 self.emit_receipted(
                     event,
-                    super::CommentReceipts {
-                        owner: node.comment_receipts.owner.clone(),
-                        head: if node.kind == Kind::Alias {
-                            node.comment_receipts.head.clone()
-                        } else {
-                            Vec::new()
-                        },
-                        line: node.comment_receipts.line.clone(),
-                        foot: if drop_foot {
-                            Vec::new()
-                        } else {
-                            node.comment_receipts.foot.clone()
-                        },
-                        tail: tail_receipts.to_vec(),
-                    },
+                    Self::end_receipts(node, tail_receipts, drop_foot, true),
                 )
             }
             Kind::Scalar => {

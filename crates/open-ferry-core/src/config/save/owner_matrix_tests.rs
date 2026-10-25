@@ -97,7 +97,8 @@ fn operation_with_updates(source: &str, op: &str, update_second_pass: bool) -> V
 #[cfg(feature = "parity")]
 #[test]
 fn owner_switch_reproduces_the_base_matrix() {
-    let before: Vec<Value> = serde_json::from_str(include_str!("owner_before.json")).unwrap();
+    let before: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/owner_before.json")).unwrap();
     assert_eq!(before.len(), cases().len() * OPS.len());
     for row in before {
         let case = cases()
@@ -114,7 +115,7 @@ fn owner_switch_reproduces_the_base_matrix() {
             },
         );
         assert!(
-            result == row["result"],
+            receipt(&result) == row["result"],
             "{} {} disabled bytes changed",
             row["case"],
             row["op"]
@@ -124,7 +125,8 @@ fn owner_switch_reproduces_the_base_matrix() {
 
 #[test]
 fn owner_protection_keeps_all_faithful_writer_control_bytes() {
-    let before: Vec<Value> = serde_json::from_str(include_str!("owner_before.json")).unwrap();
+    let before: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/owner_before.json")).unwrap();
     assert_eq!(before.len(), cases().len() * OPS.len());
     for row in before {
         let case = cases()
@@ -141,13 +143,14 @@ fn owner_protection_keeps_all_faithful_writer_control_bytes() {
                 "nested" | "nested2" | "raw" | "raw2"
             );
         if repaired {
-            let after: Vec<Value> = serde_json::from_str(include_str!("owner_after.json")).unwrap();
+            let after: Vec<Value> =
+                serde_json::from_str(include_str!("../testdata/writer/owner_after.json")).unwrap();
             let expected = &after
                 .iter()
                 .find(|r| r["case"] == row["case"] && r["op"] == row["op"])
                 .unwrap()["result"];
             assert!(
-                result == *expected,
+                receipt(&result) == *expected,
                 "{} {} repaired bytes",
                 row["case"],
                 row["op"]
@@ -167,7 +170,7 @@ fn owner_protection_keeps_all_faithful_writer_control_bytes() {
             }
         } else {
             assert!(
-                result == row["result"],
+                receipt(&result) == row["result"],
                 "{} {} bytes changed",
                 row["case"],
                 row["op"]
@@ -191,11 +194,33 @@ fn owner_final_gate_returns_faithful_bytes_even_if_a_proposal_differs() {
             continue;
         }
         let before = candidate.bytes.clone();
+        let mut slow = candidate.clone();
         let proposal = tree::repair_comment_candidate(&source, candidate);
         if proposal.bytes == before {
             continue;
         }
         exercised += 1;
+        // A zero-length companion makes the position-only fast check defer to
+        // the complete node gate, without changing any physical occurrence.
+        let mut empty = slow.receipts.comments.first().unwrap().clone();
+        empty.length = 0;
+        slow.receipts.comments.push(empty);
+        assert!(source.holds(&tree::read_receipted(&slow).unwrap()));
+        let reached_replay = std::cell::Cell::new(false);
+        let output = tree::finish_comment_owners(&source, slow, |bytes| {
+            reached_replay.set(true);
+            Some(bytes.to_vec())
+        });
+        assert!(
+            !reached_replay.get(),
+            "faithful slow gate reached replay for {}",
+            case["case"]
+        );
+        assert!(
+            output == before,
+            "faithful slow gate changed {}",
+            case["case"]
+        );
         assert!(
             render_nested_scalar(data, &["auth-dir"], "/x").unwrap() == before,
             "faithful gate changed {}",
@@ -222,4 +247,60 @@ fn owner_four_repaired_controls_repeat_without_changes() {
         );
         assert!(!result["files"][0].as_str().unwrap().is_empty());
     }
+}
+
+#[test]
+#[ignore = "offline re-derived writer matrix capture"]
+fn owner_capture_current_matrix() {
+    let mut rows = Vec::new();
+    for case in cases() {
+        for op in OPS {
+            let run = || review_operation(case["source"].as_str().unwrap(), op);
+            let result = if std::env::var_os("FU_OWNERS_MATRIX_OFF").is_some() {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            };
+            rows.push(json!({"case":case["case"],"op":op,"result":result}));
+        }
+    }
+    std::fs::write(
+        std::env::var_os("FU_OWNERS_MATRIX_OUTPUT").unwrap(),
+        serde_json::to_vec(&rows).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Writer-format outcome digest; caller histories retain all contract fields.
+pub(super) fn receipt(result: &Value) -> Value {
+    fn hash_fields(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in map {
+                    out.insert(
+                        k.clone(),
+                        if matches!(k.as_str(), "file" | "error") {
+                            v.as_str()
+                                .map(|s| json!(sha256_hex(s.as_bytes())))
+                                .unwrap_or_else(|| hash_fields(v))
+                        } else {
+                            hash_fields(v)
+                        },
+                    );
+                }
+                out.sort_keys();
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(hash_fields).collect()),
+            other => other.clone(),
+        }
+    }
+    let summary = if let Some(files) = result["files"].as_array() {
+        json!({"error":result["error"].as_str().map(|s|sha256_hex(s.as_bytes())),"files":files.iter().map(|s|sha256_hex(s.as_str().unwrap().as_bytes())).collect::<Vec<_>>(),"refused":result["refused"].as_bool().unwrap_or(false)})
+    } else {
+        hash_fields(result)
+    };
+    let ordered: std::collections::BTreeMap<_, _> = summary.as_object().unwrap().iter().collect();
+    json!(&sha256_hex(&serde_json::to_vec(&ordered).unwrap())[..16])
 }

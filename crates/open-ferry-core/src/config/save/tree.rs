@@ -28,6 +28,8 @@
 //! - Where upstream would index past the end of a node's content (a path
 //!   it assumes exists), nothing happens.
 
+use std::collections::{HashMap, HashSet};
+
 use super::super::yaml3::compose::{MAX_ALIAS_COPIES, MAX_ALIAS_COPY_TEXT, YamlError};
 use super::super::yaml3::encode::marshal_node;
 use super::super::yaml3::{AliasTarget, Kind, MAP_TAG, MAX_DEPTH, MERGE_TAG, Node, STR_TAG};
@@ -863,10 +865,9 @@ pub(crate) fn marshal_config(node: &Node) -> Result<Vec<u8>, YamlError> {
 #[derive(Clone, Default)]
 pub(crate) struct CommentSource {
     #[cfg(test)]
-    pub(crate) original_sources: Vec<Node>,
-    #[cfg(test)]
-    pub(crate) original_inputs: Vec<Node>,
+    pub(crate) original_locations: HashMap<super::super::yaml3::CommentId, String>,
     pub(crate) comments: Vec<SourceComment>,
+    explicit_keys: HashSet<usize>,
     pub(crate) complete: bool,
 }
 
@@ -882,6 +883,7 @@ pub(crate) struct SourceComment {
 }
 
 /// A complete emission and its explicitly carried physical/structural bindings.
+#[derive(Clone)]
 pub(crate) struct ReceiptedYaml {
     pub(crate) bytes: Vec<u8>,
     pub(crate) receipts: super::super::yaml3::EmissionReceipts,
@@ -903,252 +905,405 @@ pub(crate) fn read_comment_source(data: &[u8]) -> Result<(Node, CommentSource), 
 pub(crate) fn identify_comment_source(data: &[u8], node: &mut Node) -> CommentSource {
     use super::super::yaml3::parser::CommentNode;
     use super::super::yaml3::{CommentId, CommentReceipt, CommentSlot, ReceiptSpan};
-    fn identify(node: &mut Node, positions: &CommentNode, data: &[u8], source: &mut CommentSource) {
-        if node.kind != positions.kind || node.content.len() != positions.content.len() {
-            source.complete = false;
-            return;
+    fn has_alias(n: &Node) -> bool {
+        n.kind == Kind::Alias || n.content.iter().any(has_alias)
+    }
+    let aliases_present = has_alias(node);
+    fn comment_count(n: &Node) -> usize {
+        [&n.head_comment, &n.line_comment, &n.foot_comment]
+            .into_iter()
+            .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+            .sum::<usize>()
+            + n.content.iter().map(comment_count).sum::<usize>()
+    }
+    let count = comment_count(node);
+    if count == 0 {
+        return CommentSource {
+            complete: true,
+            ..Default::default()
+        };
+    }
+    let Ok(positions) = super::super::yaml3::parser::comment_positions(data) else {
+        return CommentSource::default();
+    };
+    let mut starts = vec![0];
+    starts.extend(
+        data.iter()
+            .enumerate()
+            .filter_map(|(i, b)| (*b == b'\n').then_some(i + 1)),
+    );
+    fn identify(
+        n: &mut Node,
+        p: &CommentNode,
+        data: &[u8],
+        starts: &[usize],
+        out: &mut CommentSource,
+        mapping_key: bool,
+    ) -> bool {
+        comment_work(1);
+        if n.kind != p.kind || n.content.len() != p.content.len() {
+            out.complete = false;
+            return false;
+        }
+        let mut needed =
+            !n.head_comment.is_empty() || !n.line_comment.is_empty() || !n.foot_comment.is_empty();
+        let mapping = n.kind == Kind::Mapping;
+        for (i, (child, pos)) in n.content.iter_mut().zip(&p.content).enumerate() {
+            needed |= identify(child, pos, data, starts, out, mapping && i % 2 == 0);
+        }
+        if !needed {
+            return false;
         }
         let owner = CommentId::fresh();
-        node.comment_receipts.owner = Some(owner.clone());
-        for (slot, text, positions, spans) in [
-            (
-                CommentSlot::Head,
-                &node.head_comment,
-                &positions.positions.head,
-                &mut node.comment_receipts.head,
-            ),
-            (
-                CommentSlot::Line,
-                &node.line_comment,
-                &positions.positions.line,
-                &mut node.comment_receipts.line,
-            ),
-            (
-                CommentSlot::Foot,
-                &node.foot_comment,
-                &positions.positions.foot,
-                &mut node.comment_receipts.foot,
-            ),
-        ] {
-            let lines: Vec<_> = text.split('\n').filter(|part| !part.is_empty()).collect();
-            if positions.len() != lines.len() {
-                source.complete = false;
+        n.comment_receipts.owner = Some(owner.clone());
+        if mapping_key && n.kind == Kind::Scalar {
+            let start = data[..p.start]
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |i| i + 1);
+            if data[start..p.start].trim_ascii() == b"?" {
+                out.explicit_keys.insert(owner.source_key());
             }
-            for (position, line) in positions.iter().zip(lines) {
-                if data.get(position.offset) != Some(&b'#')
-                    || text.as_bytes().get(position.at) != Some(&b'#')
+        }
+        if n.kind == Kind::Mapping {
+            for pair in n.content.as_chunks_mut::<2>().0 {
+                if pair[1].comment_receipts.owner.is_some()
+                    && pair[0].comment_receipts.owner.is_none()
                 {
-                    source.complete = false;
+                    pair[0].comment_receipts.owner = Some(CommentId::fresh());
+                }
+            }
+        }
+        for (slot, text, positions) in [
+            (CommentSlot::Head, &n.head_comment, &p.positions.head),
+            (CommentSlot::Line, &n.line_comment, &p.positions.line),
+            (CommentSlot::Foot, &n.foot_comment, &p.positions.foot),
+        ] {
+            let mut at = 0;
+            let mut parts = Vec::new();
+            for (ordinal, line) in text.split('\n').enumerate() {
+                if !line.is_empty() {
+                    parts.push((at, ordinal, line));
+                }
+                at += line.len() + 1;
+            }
+            if parts.len() != positions.len() {
+                out.complete = false;
+            }
+            let mut spans = Vec::with_capacity(parts.len());
+            for (pos, (at, ordinal, line)) in positions.iter().zip(parts) {
+                if pos.at != at
+                    || data.get(pos.offset..pos.offset + line.len()) != Some(line.as_bytes())
+                {
+                    out.complete = false;
                     continue;
                 }
                 let receipt = CommentReceipt {
                     id: CommentId::fresh(),
                     owner: owner.clone(),
                     slot,
-                    ordinal: text.as_bytes()[..position.at]
-                        .iter()
-                        .filter(|b| **b == b'\n')
-                        .count(),
+                    ordinal,
                 };
                 spans.push(ReceiptSpan {
-                    at: position.at,
+                    at,
                     receipt: receipt.clone(),
                 });
-                let start = data[..position.offset]
-                    .iter()
-                    .rposition(|b| *b == b'\n')
-                    .map_or(0, |p| p + 1);
-                source.comments.push(SourceComment {
+                let line_index = starts
+                    .partition_point(|start| *start <= pos.offset)
+                    .saturating_sub(1);
+                out.comments.push(SourceComment {
                     receipt,
                     bytes: line.as_bytes().to_vec(),
-                    column: position.offset - start,
-                    owner_column: node.column.saturating_sub(1),
-                    source_line: data[..position.offset]
-                        .iter()
-                        .filter(|b| **b == b'\n')
-                        .count()
-                        + 1,
-                    owner_line: node.line,
+                    column: pos.offset - starts[line_index],
+                    owner_column: n.column.saturating_sub(1),
+                    source_line: line_index + 1,
+                    owner_line: n.line,
                     placement: None,
                 });
             }
+            match slot {
+                CommentSlot::Head => n.comment_receipts.head = spans,
+                CommentSlot::Line => n.comment_receipts.line = spans,
+                CommentSlot::Foot => n.comment_receipts.foot = spans,
+            }
         }
-        for (child, position) in node.content.iter_mut().zip(&positions.content) {
-            identify(child, position, data, source);
-        }
+        true
     }
     let mut source = CommentSource {
         complete: true,
-        ..CommentSource::default()
+        comments: Vec::with_capacity(count),
+        ..Default::default()
     };
-    let Ok(positions) = super::super::yaml3::parser::comment_positions(data) else {
-        return CommentSource::default();
-    };
-    identify(node, &positions, data, &mut source);
-    // The composer resolves aliases before this wrapper is called. Bind those
-    // copies by their source node coordinates, never by comment text.
-    fn snapshots(
-        node: &Node,
-        out: &mut Vec<(usize, usize, Kind, super::super::yaml3::CommentReceipts)>,
-    ) {
-        out.push((
-            node.line,
-            node.column,
-            node.kind,
-            node.comment_receipts.clone(),
-        ));
-        for child in &node.content {
-            snapshots(child, out);
+    identify(node, &positions, data, &starts, &mut source, false);
+    let mut containers: HashMap<usize, Vec<(usize, CommentId)>> = HashMap::new();
+    fn collect(n: &Node, out: &mut HashMap<usize, Vec<(usize, CommentId)>>) {
+        if matches!(n.kind, Kind::Mapping | Kind::Sequence)
+            && let Some(id) = &n.comment_receipts.owner
+        {
+            out.entry(n.line).or_default().push((n.column, id.clone()));
+        }
+        for c in &n.content {
+            collect(c, out);
         }
     }
-    fn aliases(
-        node: &mut Node,
-        original: &[(usize, usize, Kind, super::super::yaml3::CommentReceipts)],
-        copy: bool,
-        complete: &mut bool,
-        depth: usize,
-    ) {
-        if depth > MAX_DEPTH {
-            *complete = false;
-            return;
-        }
-        if copy {
-            let matches: Vec<_> = original
-                .iter()
-                .filter(|(line, column, kind, _)| {
-                    *line == node.line && *column == node.column && *kind == node.kind
+    collect(node, &mut containers);
+    let mut early: HashMap<CommentId, Vec<usize>> = HashMap::new();
+    for (i, c) in source.comments.iter_mut().enumerate() {
+        if c.source_line < c.owner_line {
+            c.placement = containers
+                .get(&c.source_line)
+                .and_then(|v| {
+                    v.iter()
+                        .filter(|(column, _)| *column <= c.column + 1)
+                        .max_by_key(|(column, _)| *column)
                 })
-                .collect();
-            if let [(_, _, _, receipts)] = matches.as_slice() {
-                node.comment_receipts = receipts.clone();
-            } else {
-                *complete = false;
+                .map(|(_, id)| id.clone());
+            if c.placement.is_none() {
+                early.entry(c.receipt.owner.clone()).or_default().push(i);
             }
         }
-        if let Some(AliasTarget::Node(target)) = &node.alias {
-            let mut target = (**target).clone();
-            aliases(&mut target, original, true, complete, depth + 1);
-            node.alias = Some(AliasTarget::Node(std::sync::Arc::new(target)));
+    }
+    fn ancestors(
+        n: &Node,
+        stack: &mut Vec<(CommentId, Kind, usize)>,
+        early: &HashMap<CommentId, Vec<usize>>,
+        comments: &mut [SourceComment],
+    ) {
+        if let Some(id) = &n.comment_receipts.owner {
+            if let Some(indices) = early.get(id) {
+                for i in indices {
+                    let c = &mut comments[*i];
+                    c.placement = stack
+                        .iter()
+                        .rev()
+                        .find(|(_, kind, line)| {
+                            matches!(kind, Kind::Mapping | Kind::Sequence) && *line >= c.source_line
+                        })
+                        .map(|(id, _, _)| id.clone());
+                }
+            }
+            stack.push((id.clone(), n.kind, n.line));
         }
-        for child in &mut node.content {
-            aliases(child, original, copy, complete, depth + 1);
+        for child in &n.content {
+            ancestors(child, stack, early, comments);
+        }
+        if n.comment_receipts.owner.is_some() {
+            stack.pop();
         }
     }
-    let mut original = Vec::new();
-    snapshots(node, &mut original);
-    for comment in &mut source.comments {
-        if comment.source_line < comment.owner_line {
-            comment.placement = original
-                .iter()
-                .filter(|(line, column, kind, _)| {
-                    *line == comment.source_line
-                        && *column <= comment.column + 1
-                        && matches!(kind, Kind::Mapping | Kind::Sequence)
-                })
-                .max_by_key(|(_, column, _, _)| column)
-                .and_then(|(_, _, _, receipts)| receipts.owner.clone());
+    ancestors(node, &mut Vec::new(), &early, &mut source.comments);
+    if aliases_present {
+        // Composer aliases already share each anchor snapshot. Annotate each
+        // distinct snapshot once, and preserve that sharing across aliases.
+        type Key = (usize, usize, u8);
+        fn snapshots(n: &Node, out: &mut HashMap<Key, super::super::yaml3::SparseReceipts>) {
+            if n.comment_receipts.owner.is_some() {
+                out.insert((n.line, n.column, n.kind as u8), n.comment_receipts.clone());
+            }
+            for c in &n.content {
+                snapshots(c, out);
+            }
         }
+        fn bind_aliases(
+            n: &mut Node,
+            original: &HashMap<Key, super::super::yaml3::SparseReceipts>,
+            copies: &mut HashMap<usize, std::sync::Arc<Node>>,
+            copy: bool,
+            depth: usize,
+        ) -> bool {
+            comment_work(1);
+            if depth > MAX_DEPTH {
+                return false;
+            }
+            if copy {
+                n.comment_receipts = original
+                    .get(&(n.line, n.column, n.kind as u8))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            if let Some(AliasTarget::Node(target)) = &n.alias {
+                let key = std::sync::Arc::as_ptr(target) as usize;
+                let annotated = if let Some(existing) = copies.get(&key) {
+                    existing.clone()
+                } else {
+                    let mut annotated = (**target).clone();
+                    if !bind_aliases(&mut annotated, original, copies, true, depth + 1) {
+                        return false;
+                    }
+                    let annotated = std::sync::Arc::new(annotated);
+                    copies.insert(key, annotated.clone());
+                    annotated
+                };
+                n.alias = Some(AliasTarget::Node(annotated));
+            }
+            n.content
+                .iter_mut()
+                .all(|c| bind_aliases(c, original, copies, copy, depth + 1))
+        }
+        let mut original = HashMap::new();
+        snapshots(node, &mut original);
+        source.complete &= bind_aliases(node, &original, &mut HashMap::new(), false, 0);
     }
-    fn ancestor_placement(
-        node: &Node,
-        wanted: &CommentId,
-        line: usize,
-        ancestors: &mut Vec<(CommentId, Kind, usize)>,
-    ) -> Option<CommentId> {
-        if node.comment_receipts.owner.as_ref() == Some(wanted) {
-            return ancestors
-                .iter()
-                .rev()
-                .find(|(_, kind, at)| matches!(kind, Kind::Mapping | Kind::Sequence) && *at >= line)
-                .map(|(id, _, _)| id.clone());
-        }
-        if let Some(id) = &node.comment_receipts.owner {
-            ancestors.push((id.clone(), node.kind, node.line));
-        }
-        let found = node
-            .content
-            .iter()
-            .find_map(|child| ancestor_placement(child, wanted, line, ancestors));
-        if node.comment_receipts.owner.is_some() {
-            ancestors.pop();
-        }
-        found
-    }
-    for comment in &mut source.comments {
-        if comment.placement.is_none() && comment.source_line < comment.owner_line {
-            comment.placement = ancestor_placement(
-                node,
-                &comment.receipt.owner,
-                comment.source_line,
-                &mut Vec::new(),
-            );
-        }
-    }
-    aliases(node, &original, false, &mut source.complete, 0);
     #[cfg(test)]
-    {
-        source.original_inputs.push(node.clone());
-        let mut original = node.clone();
-        if let Some(root) = original.content.first_mut()
-            && let Ok(expanded) = expand_config_aliases(root)
-        {
-            *root = expanded;
+    if CAPTURE_LOCATIONS.get() {
+        fn labels(n: &Node, path: &str, out: &mut HashMap<CommentId, String>) {
+            if let Some(id) = &n.comment_receipts.owner {
+                out.insert(id.clone(), path.into());
+            }
+            match n.kind {
+                Kind::Mapping => {
+                    for (k, v) in n.pairs() {
+                        let p = format!("{path}.{}", k.value);
+                        labels(k, &format!("{p}:key"), out);
+                        labels(v, &p, out);
+                    }
+                }
+                Kind::Document => {
+                    for c in &n.content {
+                        labels(c, path, out);
+                    }
+                }
+                _ => {
+                    for (i, c) in n.content.iter().enumerate() {
+                        labels(c, &format!("{path}[{i}]"), out);
+                    }
+                }
+            }
         }
-        source.original_sources.push(original);
+        labels(node, "$", &mut source.original_locations);
+        if aliases_present {
+            let mut expanded = node.clone();
+            if let Some(root) = expanded.content.first_mut()
+                && let Ok(copy) = expand_config_aliases(root)
+            {
+                *root = copy;
+            }
+            labels(&expanded, "$", &mut source.original_locations);
+        }
     }
     source
+}
+
+#[cfg(test)]
+thread_local! { static CAPTURE_LOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_owner_locations<T>(call: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CAPTURE_LOCATIONS.set(self.0);
+        }
+    }
+    let _reset = Reset(CAPTURE_LOCATIONS.replace(true));
+    call()
+}
+#[cfg(test)]
+thread_local! { static COMMENT_WORK: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn comment_work(n: usize) {
+    COMMENT_WORK.with(|c| {
+        if let Some(old) = c.get() {
+            c.set(Some(old + n));
+        }
+    });
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn comment_work(_: usize) {}
+#[cfg(test)]
+pub(crate) fn count_comment_work<T>(call: impl FnOnce() -> T) -> (T, usize) {
+    struct Reset(Option<usize>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            COMMENT_WORK.set(self.0);
+        }
+    }
+    let _reset = Reset(COMMENT_WORK.replace(Some(0)));
+    let value = call();
+    let count = COMMENT_WORK.get().unwrap();
+    (value, count)
 }
 
 impl CommentSource {
     /// Intentional alias copies have distinct identities and the same original
     /// occurrence bytes. Register them before the next emission can defer them.
     pub(crate) fn include_copies(&mut self, node: &Node) {
-        let mut additions = Vec::new();
-        fn walk(source: &CommentSource, node: &Node, additions: &mut Vec<SourceComment>) {
-            for span in node
+        if !self.complete || self.comments.is_empty() {
+            return;
+        }
+        fn scoped(n: &Node) -> bool {
+            n.comment_receipts
+                .head
+                .iter()
+                .chain(&n.comment_receipts.line)
+                .chain(&n.comment_receipts.foot)
+                .any(|s| s.receipt.id.is_scoped())
+                || n.content.iter().any(scoped)
+        }
+        if !scoped(node) {
+            return;
+        }
+        fn copied_spans(n: &Node) -> usize {
+            n.comment_receipts
+                .head
+                .iter()
+                .chain(&n.comment_receipts.line)
+                .chain(&n.comment_receipts.foot)
+                .filter(|s| s.receipt.id.is_scoped())
+                .count()
+                + n.content.iter().map(copied_spans).sum::<usize>()
+        }
+        let copy_count = copied_spans(node);
+        let mut known = HashSet::with_capacity(self.comments.len() + copy_count);
+        known.extend(self.comments.iter().map(|c| c.receipt.id.clone()));
+        let mut originals = HashMap::new();
+        for comment in &self.comments {
+            originals
+                .entry(comment.receipt.id.source_key())
+                .or_insert(comment);
+        }
+        let mut additions = Vec::with_capacity(copy_count);
+        fn walk(
+            n: &Node,
+            known: &mut HashSet<super::super::yaml3::CommentId>,
+            originals: &HashMap<usize, &SourceComment>,
+            out: &mut Vec<SourceComment>,
+        ) {
+            for span in n
                 .comment_receipts
                 .head
                 .iter()
-                .chain(&node.comment_receipts.line)
-                .chain(&node.comment_receipts.foot)
+                .chain(&n.comment_receipts.line)
+                .chain(&n.comment_receipts.foot)
             {
-                if source
-                    .comments
-                    .iter()
-                    .any(|c| c.receipt.id == span.receipt.id)
-                    || additions.iter().any(|c| c.receipt.id == span.receipt.id)
-                {
+                if !known.insert(span.receipt.id.clone()) {
                     continue;
                 }
-                if let Some(original) = source
-                    .comments
-                    .iter()
-                    .find(|c| c.receipt.id.same_source(&span.receipt.id))
-                {
-                    let mut copy = original.clone();
+                if let Some(original) = originals.get(&span.receipt.id.source_key()) {
+                    let mut copy = (*original).clone();
                     copy.receipt = span.receipt.clone();
                     copy.placement = copy
                         .placement
                         .as_ref()
                         .map(|id| id.in_scope_of(&copy.receipt.id));
-                    additions.push(copy);
+                    out.push(copy);
                 }
             }
-            for child in &node.content {
-                walk(source, child, additions);
+            for c in &n.content {
+                walk(c, known, originals, out);
             }
         }
-        walk(self, node, &mut additions);
+        walk(node, &mut known, &originals, &mut additions);
         self.comments.extend(additions);
     }
 
     pub(crate) fn append(&mut self, other: Self) {
         self.complete &= other.complete;
         self.comments.extend(other.comments);
+        self.explicit_keys.extend(other.explicit_keys);
         #[cfg(test)]
         {
-            self.original_sources.extend(other.original_sources);
-            self.original_inputs.extend(other.original_inputs);
+            self.original_locations.extend(other.original_locations);
         }
     }
 }
@@ -1170,81 +1325,130 @@ pub(crate) fn read_receipted(rendered: &ReceiptedYaml) -> Result<Node, super::Sa
 
 pub(crate) fn rebind_comment_receipts(node: &mut Node, rendered: &ReceiptedYaml) {
     use super::super::yaml3::parser::CommentNode;
-    use super::super::yaml3::{CommentReceipts, ReceiptSpan};
+    use super::super::yaml3::{CommentId, CommentReceipts, ReceiptEmission, ReceiptSpan};
     let Ok(positions) = super::super::yaml3::parser::comment_positions(&rendered.bytes) else {
         return;
     };
+    let owners: HashMap<&[usize], &CommentId> = rendered
+        .receipts
+        .owners
+        .iter()
+        .map(|o| (o.path.as_slice(), &o.owner))
+        .collect();
+    let mut emissions: HashMap<usize, Vec<&ReceiptEmission>> = HashMap::new();
+    for e in &rendered.receipts.comments {
+        emissions.entry(e.offset).or_default().push(e);
+    }
     fn bind(
-        node: &mut Node,
-        positions: &CommentNode,
+        n: &mut Node,
+        p: &CommentNode,
         path: &mut Vec<usize>,
-        rendered: &ReceiptedYaml,
+        owners: &HashMap<&[usize], &CommentId>,
+        emissions: &HashMap<usize, Vec<&ReceiptEmission>>,
+        bytes: &[u8],
     ) {
-        if node.kind != positions.kind || node.content.len() != positions.content.len() {
+        comment_work(1);
+        if n.kind != p.kind || n.content.len() != p.content.len() {
             return;
         }
-        node.comment_receipts = CommentReceipts {
-            owner: rendered
-                .receipts
-                .owners
-                .iter()
-                .find(|owner| owner.path == *path)
-                .map(|owner| owner.owner.clone()),
-            ..CommentReceipts::default()
+        let mut receipts = CommentReceipts {
+            owner: owners.get(path.as_slice()).map(|id| (*id).clone()),
+            ..Default::default()
         };
-        for (positions, spans) in [
-            (&positions.positions.head, &mut node.comment_receipts.head),
-            (&positions.positions.line, &mut node.comment_receipts.line),
-            (&positions.positions.foot, &mut node.comment_receipts.foot),
+        for (text, positions, spans) in [
+            (&n.head_comment, &p.positions.head, &mut receipts.head),
+            (&n.line_comment, &p.positions.line, &mut receipts.line),
+            (&n.foot_comment, &p.positions.foot, &mut receipts.foot),
         ] {
-            for position in positions {
-                if let Some(emission) = rendered
-                    .receipts
-                    .comments
-                    .iter()
-                    .find(|emission| emission.offset == position.offset && emission.length > 0)
-                {
-                    spans.push(ReceiptSpan {
-                        at: position.at,
-                        receipt: emission.receipt.clone(),
-                    });
+            for pos in positions {
+                if let Some(writes) = emissions.get(&pos.offset) {
+                    for e in writes {
+                        if e.length == 0 {
+                            continue;
+                        }
+                        let line = text
+                            .as_bytes()
+                            .get(pos.at..)
+                            .and_then(|tail| tail.split(|b| *b == b'\n').next());
+                        let emitted = bytes.get(e.offset..e.offset + e.length);
+                        assert!(
+                            emitted == line,
+                            "comment receipt bytes must equal the parsed line"
+                        );
+                        spans.push(ReceiptSpan {
+                            at: pos.at,
+                            receipt: e.receipt.clone(),
+                        });
+                    }
                 }
             }
         }
-        for (i, (child, position)) in node.content.iter_mut().zip(&positions.content).enumerate() {
+        n.comment_receipts = receipts.into();
+        for (i, (child, pos)) in n.content.iter_mut().zip(&p.content).enumerate() {
             path.push(i);
-            bind(child, position, path, rendered);
+            bind(child, pos, path, owners, emissions, bytes);
             path.pop();
         }
     }
-    bind(node, &positions, &mut Vec::new(), rendered);
+    bind(
+        node,
+        &positions,
+        &mut Vec::new(),
+        &owners,
+        &emissions,
+        &rendered.bytes,
+    );
+}
+
+/// Preserve the writer's first actual emission when a generated copy shares
+/// a source identity. Later copies keep their existing physical bytes.
+fn first_emissions(
+    rendered: &ReceiptedYaml,
+) -> HashMap<&super::super::yaml3::CommentId, &super::super::yaml3::ReceiptEmission> {
+    let mut index = HashMap::new();
+    for emission in &rendered.receipts.comments {
+        index.entry(&emission.receipt.id).or_insert(emission);
+    }
+    index
 }
 
 /// Normalize the same byte vector while updating each actual write's offset.
 pub(crate) fn normalize_receipted(mut rendered: ReceiptedYaml) -> ReceiptedYaml {
     let bytes = normalize_comment_indentation(&rendered.bytes);
+    if rendered.receipts.comments.is_empty() {
+        rendered.bytes = bytes;
+        return rendered;
+    }
     let old: Vec<_> = rendered.bytes.split_inclusive(|b| *b == b'\n').collect();
     let new: Vec<_> = bytes.split_inclusive(|b| *b == b'\n').collect();
     if old.len() != new.len() {
         rendered.receipts.comments.clear();
     } else {
-        let (mut old_at, mut new_at) = (0, 0);
-        for (old, new) in old.into_iter().zip(new) {
-            if let Some(removed) = old
-                .len()
-                .checked_sub(new.len())
-                .filter(|n| old.get(*n..) == Some(new))
-            {
-                for receipt in &mut rendered.receipts.comments {
-                    if receipt.offset >= old_at && receipt.offset < old_at + old.len() {
-                        receipt.offset = new_at + receipt.offset.saturating_sub(old_at + removed);
-                    }
-                }
+        let (mut before, mut after) = (0, 0);
+        let mut lines = Vec::with_capacity(old.len());
+        let mut valid = true;
+        for (a, b) in old.into_iter().zip(new) {
+            let a_indent = a.iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+            let b_indent = b.iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+            if a[a_indent..] == b[b_indent..] {
+                lines.push((before, after, a_indent, b_indent));
             } else {
-                rendered.receipts.comments.clear();
+                valid = false;
+                break;
             }
-            old_at += old.len();
-            new_at += new.len();
+            before += a.len();
+            after += b.len();
+        }
+        if !valid {
+            rendered.receipts.comments.clear();
+        } else {
+            for receipt in &mut rendered.receipts.comments {
+                let i = lines
+                    .partition_point(|(at, _, _, _)| *at <= receipt.offset)
+                    .saturating_sub(1);
+                let (a, b, old_indent, new_indent) = lines[i];
+                receipt.offset = b + new_indent + receipt.offset.saturating_sub(a + old_indent);
+            }
         }
     }
     rendered.bytes = bytes;
@@ -1351,8 +1555,22 @@ pub(crate) fn source_yaml(data: &[u8], node: &Node) -> ReceiptedYaml {
                 &positions.positions.foot,
             ),
         ] {
+            if spans.is_empty() {
+                continue;
+            }
+            let mut by_at = HashMap::new();
+            if positions.len() > 1 {
+                for position in positions {
+                    by_at.entry(position.at).or_insert(position);
+                }
+            }
             for span in spans {
-                if let Some(position) = positions.iter().find(|p| p.at == span.at) {
+                let position = if positions.len() == 1 {
+                    positions.first().filter(|p| p.at == span.at)
+                } else {
+                    by_at.get(&span.at).copied()
+                };
+                if let Some(position) = position {
                     let length = text.as_bytes()[span.at..]
                         .iter()
                         .position(|b| *b == b'\n')
@@ -1387,107 +1605,317 @@ pub(crate) fn source_yaml(data: &[u8], node: &Node) -> ReceiptedYaml {
     }
 }
 
-/// Keep the existing Unicode-quoting entry point authoritative. If its output
-/// differs from the tracked raw emission, no guessed offsets are transported.
+/// Quote Unicode once before the single authoritative tracked emission.
 pub(crate) fn marshal_config_receipted(node: &Node) -> Result<ReceiptedYaml, YamlError> {
-    let bytes = marshal_config(node)?;
-    if !owner_protection_enabled() || node.comment_receipts.owner.is_none() {
-        return Ok(ReceiptedYaml {
-            bytes,
-            receipts: Default::default(),
-        });
-    }
-    let Ok(mut rendered) = marshal_receipted(node, CONFIG_INDENT) else {
-        return Ok(ReceiptedYaml {
-            bytes,
-            receipts: Default::default(),
-        });
-    };
-    if rendered.bytes != bytes {
-        rendered.receipts = super::super::yaml3::EmissionReceipts::default();
-    }
-    rendered.bytes = bytes;
-    Ok(rendered)
+    let mut node = node.clone();
+    super::encode::quote_config_unicode(&mut node);
+    marshal_receipted(&node, CONFIG_INDENT)
 }
 
 impl CommentSource {
     pub(crate) fn holds(&self, node: &Node) -> bool {
-        use super::super::yaml3::CommentSlot;
-        fn locations(
-            node: &Node,
-            wanted: &super::super::yaml3::CommentReceipt,
-            found: &mut usize,
-            owners: &mut usize,
-            holds: &mut bool,
+        use super::super::yaml3::{CommentId, CommentSlot};
+        let mut owners: HashMap<CommentId, usize> = HashMap::new();
+        let mut found: HashMap<CommentId, (usize, bool)> = HashMap::new();
+        fn visit(
+            n: &Node,
+            owners: &mut HashMap<CommentId, usize>,
+            found: &mut HashMap<CommentId, (usize, bool)>,
         ) {
-            *owners += usize::from(node.comment_receipts.owner.as_ref() == Some(&wanted.owner));
+            comment_work(1);
+            if let Some(id) = &n.comment_receipts.owner {
+                *owners.entry(id.clone()).or_default() += 1;
+            }
             for (slot, text, spans) in [
-                (
-                    CommentSlot::Head,
-                    &node.head_comment,
-                    &node.comment_receipts.head,
-                ),
-                (
-                    CommentSlot::Line,
-                    &node.line_comment,
-                    &node.comment_receipts.line,
-                ),
-                (
-                    CommentSlot::Foot,
-                    &node.foot_comment,
-                    &node.comment_receipts.foot,
-                ),
+                (CommentSlot::Head, &n.head_comment, &n.comment_receipts.head),
+                (CommentSlot::Line, &n.line_comment, &n.comment_receipts.line),
+                (CommentSlot::Foot, &n.foot_comment, &n.comment_receipts.foot),
             ] {
+                if spans.is_empty() {
+                    continue;
+                }
+                let (mut at, mut part) = (0, 0);
                 for span in spans {
-                    if span.receipt.id == wanted.id {
-                        *found += 1;
-                        let part = text
-                            .as_bytes()
-                            .get(..span.at)
-                            .map(|prefix| prefix.iter().filter(|b| **b == b'\n').count());
-                        *holds &= node.comment_receipts.owner.as_ref() == Some(&wanted.owner)
-                            && slot == wanted.slot
-                            && part == Some(wanted.ordinal);
+                    let entry = found.entry(span.receipt.id.clone()).or_insert((0, true));
+                    entry.0 += 1;
+                    let valid = span.at >= at && span.at <= text.len();
+                    if valid {
+                        part += text.as_bytes()[at..span.at]
+                            .iter()
+                            .filter(|b| **b == b'\n')
+                            .count();
+                        at = span.at;
                     }
+                    entry.1 &= valid
+                        && n.comment_receipts.owner.as_ref() == Some(&span.receipt.owner)
+                        && slot == span.receipt.slot
+                        && part == span.receipt.ordinal;
                 }
             }
-            for child in &node.content {
-                locations(child, wanted, found, owners, holds);
+            for c in &n.content {
+                visit(c, owners, found);
             }
         }
+        visit(node, &mut owners, &mut found);
         self.complete
-            && self.comments.iter().all(|comment| {
-                let (mut found, mut owners, mut holds) = (0, 0, true);
-                locations(node, &comment.receipt, &mut found, &mut owners, &mut holds);
-                found == 1 && owners == 1 && holds
+            && self.comments.iter().all(|c| {
+                owners.get(&c.receipt.owner) == Some(&1)
+                    && found.get(&c.receipt.id) == Some(&(1, true))
             })
     }
 }
 
-/// Apply a byte edit and keep every unaffected occurrence's exact offset.
-fn edit_receipted(rendered: &mut ReceiptedYaml, start: usize, end: usize, bytes: &[u8]) -> bool {
-    if start > end
-        || end > rendered.bytes.len()
-        || rendered
-            .receipts
-            .comments
-            .iter()
-            .any(|r| r.offset < end && r.offset + r.length > start)
-    {
-        return false;
+/// A batch is validated before any byte or emission is changed. Offsets are
+/// transported once while rebuilding the output, rather than splicing per comment.
+struct ReceiptEdit {
+    start: usize,
+    end: usize,
+    bytes: Vec<u8>,
+    added: Vec<(usize, super::super::yaml3::CommentReceipt, usize)>,
+}
+fn apply_receipt_edits(
+    candidate: &ReceiptedYaml,
+    mut edits: Vec<ReceiptEdit>,
+    removed: &HashSet<super::super::yaml3::CommentId>,
+) -> Option<ReceiptedYaml> {
+    if edits.is_empty() {
+        return None;
     }
-    let difference = bytes.len() as isize - (end - start) as isize;
-    for receipt in &mut rendered.receipts.comments {
-        if receipt.offset >= end {
-            receipt.offset = receipt.offset.saturating_add_signed(difference);
+    edits.sort_by_key(|e| (e.start, e.end));
+    let mut previous = 0;
+    for e in &edits {
+        if e.start < previous || e.start > e.end || e.end > candidate.bytes.len() {
+            return None;
+        }
+        previous = e.end;
+    }
+    let retained: Vec<_> = candidate
+        .receipts
+        .comments
+        .iter()
+        .filter(|e| !removed.contains(&e.receipt.id))
+        .collect();
+    for emission in &retained {
+        let at = edits.partition_point(|e| e.end <= emission.offset);
+        if edits
+            .get(at)
+            .is_some_and(|e| e.start < emission.offset + emission.length && e.end > emission.offset)
+        {
+            return None;
         }
     }
-    rendered.bytes.splice(start..end, bytes.iter().copied());
-    true
+    let mut output = candidate.clone();
+    output.bytes.clear();
+    output.receipts.comments.clear();
+    let mut cursor = 0;
+    let mut shifts = Vec::with_capacity(edits.len());
+    let mut delta = 0isize;
+    for e in edits {
+        output
+            .bytes
+            .extend_from_slice(&candidate.bytes[cursor..e.start]);
+        let base = output.bytes.len();
+        output.bytes.extend_from_slice(&e.bytes);
+        for (relative, receipt, length) in e.added {
+            output
+                .receipts
+                .comments
+                .push(super::super::yaml3::ReceiptEmission {
+                    offset: base + relative,
+                    length,
+                    receipt,
+                });
+        }
+        delta += e.bytes.len() as isize - (e.end - e.start) as isize;
+        shifts.push((e.end, delta));
+        cursor = e.end;
+    }
+    output.bytes.extend_from_slice(&candidate.bytes[cursor..]);
+    for emission in retained {
+        let mut emission = emission.clone();
+        let at = shifts.partition_point(|(end, _)| *end <= emission.offset);
+        if at > 0 {
+            emission.offset = emission.offset.saturating_add_signed(shifts[at - 1].1);
+        }
+        output.receipts.comments.push(emission);
+    }
+    output.receipts.comments.sort_by_key(|e| e.offset);
+    Some(output)
+}
+
+/// A separate key line can carry a mapping key's own line comment without a
+/// collection tag. The ordinary complete gate still checks the whole result.
+fn repair_key_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) {
+    use super::super::yaml3::{CommentId, CommentSlot, Style};
+    fn at<'a>(n: &'a Node, path: &[usize]) -> Option<&'a Node> {
+        path.iter().try_fold(n, |n, i| n.content.get(*i))
+    }
+    fn position<'a>(
+        n: &'a super::super::yaml3::parser::CommentNode,
+        path: &[usize],
+    ) -> Option<&'a super::super::yaml3::parser::CommentNode> {
+        path.iter().try_fold(n, |n, i| n.content.get(*i))
+    }
+    fn held(n: &Node, ids: &mut HashSet<CommentId>) {
+        for (slot, text, spans) in [
+            (CommentSlot::Head, &n.head_comment, &n.comment_receipts.head),
+            (CommentSlot::Line, &n.line_comment, &n.comment_receipts.line),
+            (CommentSlot::Foot, &n.foot_comment, &n.comment_receipts.foot),
+        ] {
+            let (mut at, mut part) = (0, 0);
+            for span in spans {
+                if span.at < at || span.at > text.len() {
+                    continue;
+                }
+                part += text.as_bytes()[at..span.at]
+                    .iter()
+                    .filter(|b| **b == b'\n')
+                    .count();
+                at = span.at;
+                if n.comment_receipts.owner.as_ref() == Some(&span.receipt.owner)
+                    && slot == span.receipt.slot
+                    && part == span.receipt.ordinal
+                {
+                    ids.insert(span.receipt.id.clone());
+                }
+            }
+        }
+        for c in &n.content {
+            held(c, ids);
+        }
+    }
+    let Ok(parsed) = read_receipted(candidate) else {
+        return;
+    };
+    let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
+        return;
+    };
+    let mut held_ids = HashSet::new();
+    held(&parsed, &mut held_ids);
+    let owners: HashMap<_, _> = candidate
+        .receipts
+        .owners
+        .iter()
+        .map(|o| (&o.owner, o.path.as_slice()))
+        .collect();
+    let emissions = first_emissions(candidate);
+    let mut counts = HashMap::new();
+    for c in &source.comments {
+        if c.receipt.slot == CommentSlot::Line {
+            *counts.entry(&c.receipt.owner).or_insert(0usize) += 1;
+        }
+    }
+    let mut removed = HashSet::new();
+    let mut edits = Vec::new();
+    for comment in &source.comments {
+        let receipt = &comment.receipt;
+        if !(comment.source_line < comment.owner_line && comment.placement.is_some())
+            && !source.explicit_keys.contains(&receipt.owner.source_key())
+        {
+            continue;
+        }
+        if receipt.slot != CommentSlot::Line
+            || held_ids.contains(&receipt.id)
+            || counts.get(&receipt.owner) != Some(&1)
+        {
+            continue;
+        }
+        let Some(path) = owners.get(&receipt.owner) else {
+            continue;
+        };
+        let Some((&index, parent_path)) = path.split_last() else {
+            continue;
+        };
+        if index % 2 != 0
+            || at(&parsed, parent_path)
+                .is_none_or(|n| n.kind != Kind::Mapping || n.style.has(Style::FLOW))
+        {
+            continue;
+        }
+        if at(&parsed, path).is_none_or(|n| n.kind != Kind::Scalar || n.short_tag() != STR_TAG) {
+            continue;
+        }
+        let mut value_path = path.to_vec();
+        *value_path.last_mut().unwrap() += 1;
+        if at(&parsed, &value_path).is_none_or(|n| n.kind != Kind::Scalar) {
+            continue;
+        }
+        let (Some(key_span), Some(value_span), Some(write)) = (
+            position(&positions, path),
+            position(&positions, &value_path),
+            emissions.get(&receipt.id),
+        ) else {
+            continue;
+        };
+        if key_span.end > value_span.start {
+            continue;
+        }
+        let delimiter = &candidate.bytes[key_span.end..value_span.start];
+        if !delimiter.starts_with(b":") || delimiter[1..].iter().any(|b| *b != b' ') {
+            continue;
+        }
+        let start = candidate.bytes[..key_span.start]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        let indent = key_span.start - start;
+        if indent > 256
+            || candidate.bytes[start..key_span.start]
+                .iter()
+                .any(|b| *b != b' ')
+        {
+            continue;
+        }
+        let mut header = Vec::new();
+        header.push(b' ');
+        header.extend_from_slice(&comment.bytes);
+        header.push(b'\n');
+        header.resize(header.len() + indent, b' ');
+        header.extend_from_slice(b": ");
+        edits.push(ReceiptEdit {
+            start: key_span.start,
+            end: key_span.start,
+            bytes: b"? ".to_vec(),
+            added: Vec::new(),
+        });
+        edits.push(ReceiptEdit {
+            start: key_span.end,
+            end: value_span.start,
+            bytes: header,
+            added: vec![(1, receipt.clone(), comment.bytes.len())],
+        });
+        edits.push(ReceiptEdit {
+            start: write.offset,
+            end: write.offset + write.length,
+            bytes: Vec::new(),
+            added: Vec::new(),
+        });
+        removed.insert(receipt.id.clone());
+    }
+    let Some(proposal) = apply_receipt_edits(candidate, edits, &removed) else {
+        return;
+    };
+    let Ok(reparsed) = read_receipted(&proposal) else {
+        return;
+    };
+    let required = CommentSource {
+        complete: source.complete,
+        comments: source
+            .comments
+            .iter()
+            .filter(|c| held_ids.contains(&c.receipt.id) || removed.contains(&c.receipt.id))
+            .cloned()
+            .collect(),
+        ..Default::default()
+    };
+    if same_node_values(&parsed, &reparsed) && required.holds(&reparsed) {
+        *candidate = proposal;
+    }
 }
 
 fn same_node_values(a: &Node, b: &Node) -> bool {
     a.kind == b.kind
+        && a.style == b.style
         && a.short_tag() == b.short_tag()
         && a.value == b.value
         && a.content.len() == b.content.len()
@@ -1509,45 +1937,54 @@ pub(crate) fn repair_comment_candidate(
     };
     let faithful = source.holds(&parsed);
     if !faithful {
+        repair_key_lines(source, &mut candidate);
+        if read_receipted(&candidate).is_ok_and(|n| source.holds(&n)) {
+            return candidate;
+        }
         repair_scalar_headers(source, &mut candidate);
         repair_deferred_lines(source, &mut candidate);
     }
     let Ok(parsed) = read_receipted(&candidate) else {
         return candidate;
     };
-    fn owner<'a>(node: &'a Node, id: &super::super::yaml3::CommentId) -> Option<&'a Node> {
-        if node.comment_receipts.owner.as_ref() == Some(id) {
-            return Some(node);
+    fn index<'a>(
+        node: &'a Node,
+        owners: &mut HashMap<&'a super::super::yaml3::CommentId, &'a Node>,
+        held: &mut HashSet<&'a super::super::yaml3::CommentId>,
+    ) {
+        if let Some(id) = &node.comment_receipts.owner {
+            owners.insert(id, node);
         }
-        node.content.iter().find_map(|n| owner(n, id))
-    }
-    fn actual_holds(node: &Node, receipt: &super::super::yaml3::CommentReceipt) -> bool {
-        [
+        for (slot, spans) in [
             (CommentSlot::Head, &node.comment_receipts.head),
             (CommentSlot::Line, &node.comment_receipts.line),
             (CommentSlot::Foot, &node.comment_receipts.foot),
-        ]
-        .into_iter()
-        .any(|(slot, spans)| {
-            slot == receipt.slot
-                && node.comment_receipts.owner.as_ref() == Some(&receipt.owner)
-                && spans.iter().any(|s| s.receipt.id == receipt.id)
-        }) || node.content.iter().any(|n| actual_holds(n, receipt))
+        ] {
+            for span in spans {
+                if slot == span.receipt.slot
+                    && node.comment_receipts.owner.as_ref() == Some(&span.receipt.owner)
+                {
+                    held.insert(&span.receipt.id);
+                }
+            }
+        }
+        for c in &node.content {
+            index(c, owners, held);
+        }
     }
+    let mut owners = HashMap::new();
+    let mut held = HashSet::new();
+    index(&parsed, &mut owners, &mut held);
+    let emissions = first_emissions(&candidate);
     let mut edits = Vec::new();
     for comment in &source.comments {
-        if !faithful && actual_holds(&parsed, &comment.receipt) {
+        if !faithful && held.contains(&comment.receipt.id) {
             continue;
         }
-        let Some(node) = owner(&parsed, &comment.receipt.owner) else {
+        let Some(node) = owners.get(&comment.receipt.owner) else {
             continue;
         };
-        let Some(emission) = candidate
-            .receipts
-            .comments
-            .iter()
-            .find(|e| e.receipt.id == comment.receipt.id)
-        else {
+        let Some(emission) = emissions.get(&comment.receipt.id) else {
             continue;
         };
         let start = candidate.bytes[..emission.offset]
@@ -1569,11 +2006,99 @@ pub(crate) fn repair_comment_candidate(
             edits.push((start, emission.offset, vec![b' '; indent]));
         }
     }
-    edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
-    for (start, end, bytes) in edits {
-        edit_receipted(&mut candidate, start, end, &bytes);
+    let edits = edits
+        .into_iter()
+        .map(|(start, end, bytes)| ReceiptEdit {
+            start,
+            end,
+            bytes,
+            added: Vec::new(),
+        })
+        .collect();
+    apply_receipt_edits(&candidate, edits, &HashSet::new()).unwrap_or(candidate)
+}
+
+/// Check actual parsed owners directly from the parser's position tree. The
+/// ordinary node gate below remains authoritative for every proposed repair.
+fn receipts_hold(source: &CommentSource, candidate: &ReceiptedYaml) -> bool {
+    use super::super::yaml3::{CommentId, CommentSlot, ReceiptEmission};
+    let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
+        return false;
+    };
+    let owner_paths: HashMap<&[usize], &CommentId> = candidate
+        .receipts
+        .owners
+        .iter()
+        .map(|o| (o.path.as_slice(), &o.owner))
+        .collect();
+    let mut emissions: HashMap<usize, &ReceiptEmission> =
+        HashMap::with_capacity(candidate.receipts.comments.len());
+    for e in &candidate.receipts.comments {
+        if emissions.insert(e.offset, e).is_some() {
+            return false;
+        }
     }
-    candidate
+    let mut owners: HashMap<CommentId, usize> = HashMap::new();
+    let mut found: HashMap<CommentId, (usize, bool)> = HashMap::new();
+    fn visit(
+        p: &super::super::yaml3::parser::CommentNode,
+        path: &mut Vec<usize>,
+        paths: &HashMap<&[usize], &CommentId>,
+        emissions: &HashMap<usize, &ReceiptEmission>,
+        bytes: &[u8],
+        owners: &mut HashMap<CommentId, usize>,
+        found: &mut HashMap<CommentId, (usize, bool)>,
+    ) {
+        comment_work(1);
+        let owner = paths.get(path.as_slice());
+        if let Some(id) = owner {
+            *owners.entry((*id).clone()).or_default() += 1;
+        }
+        for (slot, positions) in [
+            (CommentSlot::Head, &p.positions.head),
+            (CommentSlot::Line, &p.positions.line),
+            (CommentSlot::Foot, &p.positions.foot),
+        ] {
+            let mut text_bytes = 0;
+            for pos in positions {
+                let line = bytes
+                    .get(pos.offset..)
+                    .and_then(|tail| tail.split(|b| matches!(b, b'\n' | b'\r')).next())
+                    .unwrap_or_default();
+                let part = pos.at.saturating_sub(text_bytes);
+                text_bytes += line.len();
+                if let Some(e) = emissions.get(&pos.offset) {
+                    if e.length == 0 {
+                        continue;
+                    }
+                    let record = found.entry(e.receipt.id.clone()).or_insert((0, true));
+                    record.0 += 1;
+                    record.1 &= owner.copied() == Some(&e.receipt.owner)
+                        && slot == e.receipt.slot
+                        && part == e.receipt.ordinal
+                        && line.len() == e.length;
+                }
+            }
+        }
+        for (i, c) in p.content.iter().enumerate() {
+            path.push(i);
+            visit(c, path, paths, emissions, bytes, owners, found);
+            path.pop();
+        }
+    }
+    visit(
+        &positions,
+        &mut Vec::new(),
+        &owner_paths,
+        &emissions,
+        &candidate.bytes,
+        &mut owners,
+        &mut found,
+    );
+    source.complete
+        && source.comments.iter().all(|c| {
+            owners.get(&c.receipt.owner) == Some(&1) && found.get(&c.receipt.id) == Some(&(1, true))
+        })
 }
 
 pub(crate) fn finish_comment_owners(
@@ -1584,12 +2109,46 @@ pub(crate) fn finish_comment_owners(
     if !owner_protection_enabled() || !source.complete || source.comments.is_empty() {
         return candidate.bytes;
     }
-    if candidate.receipts.overwritten.iter().any(|span| {
-        !source
+    if !candidate.receipts.overwritten.is_empty() {
+        let source_ids: HashSet<_> = source.comments.iter().map(|c| &c.receipt.id).collect();
+        if candidate
+            .receipts
+            .overwritten
+            .iter()
+            .any(|span| !source_ids.contains(&span.receipt.id))
+        {
+            return candidate.bytes;
+        }
+    }
+    // Formatting cannot restore a node or occurrence the writer did not emit.
+    // Release each preflight index before parsing the complete candidate.
+    {
+        let owners: HashSet<_> = candidate.receipts.owners.iter().map(|o| &o.owner).collect();
+        if source
             .comments
             .iter()
-            .any(|c| c.receipt.id == span.receipt.id)
-    }) {
+            .any(|c| !owners.contains(&c.receipt.owner))
+        {
+            return candidate.bytes;
+        }
+    }
+    {
+        let emitted: HashSet<_> = candidate
+            .receipts
+            .comments
+            .iter()
+            .filter(|e| e.length > 0)
+            .map(|e| &e.receipt.id)
+            .collect();
+        if source
+            .comments
+            .iter()
+            .any(|c| !emitted.contains(&c.receipt.id))
+        {
+            return candidate.bytes;
+        }
+    }
+    if receipts_hold(source, &candidate) {
         return candidate.bytes;
     }
     let Ok(original) = read_receipted(&candidate) else {
@@ -1605,13 +2164,12 @@ pub(crate) fn finish_comment_owners(
     let Ok(parsed) = read_receipted(&proposed) else {
         return original_bytes;
     };
+    let emissions = first_emissions(&proposed);
     if !source.holds(&parsed)
         || !source.comments.iter().all(|comment| {
-            proposed
-                .receipts
-                .comments
-                .iter()
-                .find(|e| e.receipt.id == comment.receipt.id)
+            emissions
+                .get(&comment.receipt.id)
+                .copied()
                 .is_some_and(|e| {
                     proposed.bytes.get(e.offset..e.offset + e.length)
                         == Some(comment.bytes.as_slice())
@@ -1648,102 +2206,102 @@ fn same_loader_values(a: &[u8], b: &[u8]) -> bool {
 /// belonged to the first block scalar of a mapping's sequence. The key header
 /// and scalar header are separate YAML positions; quoting both onto one header
 /// cannot retain their common parsed line owner.
-fn repair_scalar_headers(source: &CommentSource, candidate: &mut ReceiptedYaml) {
-    use super::super::yaml3::{CommentReceipts, CommentSlot, ReceiptEmission, ReceiptSpan, Style};
+pub(super) fn repair_scalar_headers(source: &CommentSource, candidate: &mut ReceiptedYaml) {
+    use super::super::yaml3::{CommentReceipts, CommentSlot, ReceiptSpan};
     fn at<'a>(node: &'a Node, path: &[usize]) -> Option<&'a Node> {
-        path.iter().try_fold(node, |node, i| node.content.get(*i))
+        path.iter().try_fold(node, |n, i| n.content.get(*i))
     }
     fn position<'a>(
         node: &'a super::super::yaml3::parser::CommentNode,
         path: &[usize],
     ) -> Option<&'a super::super::yaml3::parser::CommentNode> {
-        path.iter().try_fold(node, |node, i| node.content.get(*i))
+        path.iter().try_fold(node, |n, i| n.content.get(*i))
     }
-    let ids: Vec<_> = source
-        .comments
-        .iter()
-        .filter(|c| c.receipt.slot == CommentSlot::Line && c.receipt.ordinal == 0)
-        .map(|c| c.receipt.owner.clone())
-        .collect();
-    for id in ids {
-        let group: Vec<_> = source
-            .comments
-            .iter()
-            .filter(|c| c.receipt.owner == id && c.receipt.slot == CommentSlot::Line)
-            .collect();
-        if group.len() != 2
-            || group[0].source_line >= group[0].owner_line
-            || group[1].source_line != group[1].owner_line
-        {
-            continue;
+    let mut groups: HashMap<_, Vec<_>> = HashMap::new();
+    for comment in &source.comments {
+        if comment.receipt.slot == CommentSlot::Line {
+            groups
+                .entry(&comment.receipt.owner)
+                .or_default()
+                .push(comment);
         }
-        let Ok(parsed) = read_receipted(candidate) else {
+    }
+    let mut groups: Vec<_> = groups
+        .into_values()
+        .filter(|g| {
+            g.len() == 2
+                && g[0].source_line < g[0].owner_line
+                && g[1].source_line == g[1].owner_line
+        })
+        .collect();
+    if groups.is_empty() {
+        return;
+    }
+    groups.sort_by_key(|g| g[0].source_line);
+    let Ok(parsed) = read_receipted(candidate) else {
+        return;
+    };
+    let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
+        return;
+    };
+    let owners: HashMap<_, _> = candidate
+        .receipts
+        .owners
+        .iter()
+        .map(|o| (&o.owner, o.path.as_slice()))
+        .collect();
+    let emissions = first_emissions(candidate);
+    let mut ordered: Vec<_> = candidate.receipts.comments.iter().collect();
+    ordered.sort_by_key(|e| e.offset);
+    let mut edits = Vec::new();
+    let mut removed = HashSet::new();
+    for group in groups {
+        let id = &group[0].receipt.owner;
+        let Some(path) = owners.get(id) else {
             continue;
         };
-        let Some(owner) = candidate
-            .receipts
-            .owners
-            .iter()
-            .find(|owner| owner.owner == id)
-        else {
-            continue;
-        };
-        let path = owner.path.clone();
         if path.len() < 3 || path.last() != Some(&0) {
             continue;
         }
-        let Some(scalar) = at(&parsed, &path) else {
+        let Some(scalar) = at(&parsed, path)
+            .filter(|n| n.kind == Kind::Scalar && n.short_tag() == STR_TAG && !n.value.is_empty())
+        else {
             continue;
         };
-        if scalar.kind != Kind::Scalar || scalar.short_tag() != STR_TAG || scalar.value.is_empty() {
-            continue;
-        }
         let parent_path = &path[..path.len() - 1];
         if at(&parsed, parent_path).is_none_or(|n| n.kind != Kind::Sequence) {
             continue;
         }
-        let Some(value_index) = parent_path.last().copied().filter(|i| i % 2 == 1) else {
+        let Some(index) = parent_path.last().copied().filter(|i| i % 2 == 1) else {
             continue;
         };
         let mut key_path = parent_path[..parent_path.len() - 1].to_vec();
-        key_path.push(value_index - 1);
-        let Some(key) = at(&parsed, &key_path) else {
-            continue;
-        };
-        if !key.line_comment.is_empty() {
+        key_path.push(index - 1);
+        if at(&parsed, &key_path).is_none_or(|n| !n.line_comment.is_empty()) {
             continue;
         }
-        let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
-            continue;
-        };
-        let (Some(span), Some(key_span)) =
-            (position(&positions, &path), position(&positions, &key_path))
+        let (Some(span), Some(key)) = (position(&positions, path), position(&positions, &key_path))
         else {
             continue;
         };
-        let mut writes: Vec<_> = group
-            .iter()
-            .filter_map(|c| {
-                candidate
-                    .receipts
-                    .comments
-                    .iter()
-                    .find(|e| e.receipt.id == c.receipt.id)
-            })
-            .collect();
-        if writes.len() != 2 {
+        let (Some(first), Some(second)) = (
+            emissions.get(&group[0].receipt.id),
+            emissions.get(&group[1].receipt.id),
+        ) else {
             continue;
-        }
+        };
+        let mut writes = [*first, *second];
         writes.sort_by_key(|e| e.offset);
         let end = writes[1].offset + writes[1].length;
         if span.end > writes[0].offset || end > candidate.bytes.len() {
             continue;
         }
-        if candidate.receipts.comments.iter().any(|e| {
-            e.offset >= span.start
-                && e.offset < end
-                && !group.iter().any(|c| c.receipt.id == e.receipt.id)
-        }) {
+        let first = ordered.partition_point(|e| e.offset < span.start);
+        let last = ordered.partition_point(|e| e.offset < end);
+        if ordered[first..last]
+            .iter()
+            .any(|e| !group.iter().any(|c| c.receipt.id == e.receipt.id))
+        {
             continue;
         }
         if candidate.bytes[span.end..writes[0].offset]
@@ -1753,20 +2311,18 @@ fn repair_scalar_headers(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         {
             continue;
         }
-        let key_end = candidate.bytes[key_span.end..]
+        let Some(key_end) = candidate.bytes[key.end..]
             .iter()
             .position(|b| *b == b'\n')
-            .map(|p| key_span.end + p);
-        let Some(key_end) = key_end.filter(|end| *end < span.start) else {
+            .map(|i| key.end + i)
+            .filter(|end| *end < span.start)
+        else {
             continue;
         };
-        if !candidate.bytes[key_span.end..key_end].contains(&b':')
-            || candidate.bytes[key_span.end..key_end].contains(&b'#')
-        {
+        let Some(header) = collection_header_edit(candidate, key, key_end, group[0]) else {
             continue;
-        }
+        };
         let mut local = scalar.clone();
-        local.style = Style::LITERAL;
         local.head_comment.clear();
         local.foot_comment.clear();
         local.line_comment = String::from_utf8_lossy(&group[1].bytes).into_owned();
@@ -1776,16 +2332,17 @@ fn repair_scalar_headers(source: &CommentSource, candidate: &mut ReceiptedYaml) 
                 at: 0,
                 receipt: group[1].receipt.clone(),
             }],
-            ..CommentReceipts::default()
-        };
-        let Ok((bytes, local_receipts)) = super::encode::faithful_node_receipted(&local, 2) else {
+            ..Default::default()
+        }
+        .into();
+        let Ok((bytes, receipts)) = super::encode::faithful_node_receipted(&local, 2) else {
             continue;
         };
-        if local_receipts.comments.len() != 1 {
+        if receipts.comments.len() != 1 {
             continue;
         }
-        let mut replacement = Vec::new();
         let shift = scalar.column.saturating_sub(3);
+        let mut replacement = Vec::new();
         for (i, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
             if i > 0 {
                 replacement.resize(replacement.len() + shift, b' ');
@@ -1795,20 +2352,24 @@ fn repair_scalar_headers(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         if replacement.last() == Some(&b'\n') {
             replacement.pop();
         }
-        let last_offset = span.start + local_receipts.comments[0].offset;
-        candidate
-            .receipts
-            .comments
-            .retain(|e| !group.iter().any(|c| c.receipt.id == e.receipt.id));
-        if !edit_receipted(candidate, span.start, end, &replacement) {
-            continue;
-        }
-        candidate.receipts.comments.push(ReceiptEmission {
-            offset: last_offset,
-            length: group[1].bytes.len(),
-            receipt: group[1].receipt.clone(),
+        let local_offset = receipts.comments[0].offset;
+        let offset = local_offset
+            + shift
+                * bytes[..local_offset]
+                    .iter()
+                    .filter(|b| **b == b'\n')
+                    .count();
+        edits.push(header);
+        edits.push(ReceiptEdit {
+            start: span.start,
+            end,
+            bytes: replacement,
+            added: vec![(offset, group[1].receipt.clone(), group[1].bytes.len())],
         });
-        restore_collection_header(candidate, key_span, key_end, group[0]);
+        removed.extend(group.iter().map(|c| c.receipt.id.clone()));
+    }
+    if let Some(proposal) = apply_receipt_edits(candidate, edits, &removed) {
+        *candidate = proposal;
     }
 }
 
@@ -1823,6 +2384,29 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
     ) -> Option<&'a super::super::yaml3::parser::CommentNode> {
         path.iter().try_fold(node, |n, i| n.content.get(*i))
     }
+    if !source
+        .comments
+        .iter()
+        .any(|c| c.receipt.slot == CommentSlot::Line && c.placement.is_some())
+    {
+        return;
+    }
+    let Ok(parsed) = read_receipted(candidate) else {
+        return;
+    };
+    let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
+        return;
+    };
+    let owners: HashMap<_, _> = candidate
+        .receipts
+        .owners
+        .iter()
+        .map(|o| (&o.owner, o.path.as_slice()))
+        .collect();
+    let emissions = first_emissions(candidate);
+    let mut edits = Vec::new();
+    let mut removed = HashSet::new();
+    let mut headers = HashSet::new();
     for comment in &source.comments {
         if comment.receipt.slot != CommentSlot::Line {
             continue;
@@ -1830,19 +2414,10 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         let Some(placement) = &comment.placement else {
             continue;
         };
-        let Ok(parsed) = read_receipted(candidate) else {
+        let Some(owner) = owners.get(&comment.receipt.owner) else {
             continue;
         };
-        // Do not move an occurrence whose source owner already holds.
-        let Some(owner) = candidate
-            .receipts
-            .owners
-            .iter()
-            .find(|o| o.owner == comment.receipt.owner)
-        else {
-            continue;
-        };
-        if at(&parsed, &owner.path).is_some_and(|n| {
+        if at(&parsed, owner).is_some_and(|n| {
             n.comment_receipts
                 .line
                 .iter()
@@ -1850,97 +2425,77 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         }) {
             continue;
         }
-        let Some(physical) = candidate
-            .receipts
-            .owners
-            .iter()
-            .find(|o| o.owner == *placement)
-        else {
+        let Some(path) = owners.get(placement) else {
             continue;
         };
-        let path = physical.path.clone();
-        let Some(node) = at(&parsed, &path) else {
-            continue;
-        };
-        if !matches!(node.kind, Kind::Mapping | Kind::Sequence) {
+        if at(&parsed, path).is_none_or(|n| !matches!(n.kind, Kind::Mapping | Kind::Sequence))
+            || path.last().is_none_or(|i| i % 2 == 0)
+        {
             continue;
         }
-        if path.last().is_none_or(|i| i % 2 == 0) {
-            continue;
-        }
-        let mut key_path = path.clone();
+        let mut key_path = path.to_vec();
         *key_path.last_mut().unwrap() -= 1;
-        let Ok(positions) = super::super::yaml3::parser::comment_positions(&candidate.bytes) else {
-            continue;
-        };
         let Some(key) = position(&positions, &key_path) else {
             continue;
         };
         let Some(end) = candidate.bytes[key.end..]
             .iter()
             .position(|b| *b == b'\n')
-            .map(|p| key.end + p)
+            .map(|i| key.end + i)
         else {
             continue;
         };
-        if !candidate.bytes[key.end..end].contains(&b':')
-            || candidate.bytes[key.end..end].contains(&b'#')
-        {
-            continue;
-        }
-        let Some(write) = candidate
-            .receipts
-            .comments
-            .iter()
-            .find(|e| e.receipt.id == comment.receipt.id)
-            .cloned()
-        else {
+        let Some(write) = emissions.get(&comment.receipt.id) else {
             continue;
         };
-        if write.offset < end {
+        if write.offset < end || headers.contains(&end) {
             continue;
         }
-        candidate
-            .receipts
-            .comments
-            .retain(|e| e.receipt.id != comment.receipt.id);
-        let mut remove_start = write.offset;
-        while remove_start > 0 && candidate.bytes[remove_start - 1] == b' ' {
-            remove_start -= 1;
-        }
-        if !edit_receipted(candidate, remove_start, write.offset + write.length, &[]) {
+        let Some(header) = collection_header_edit(candidate, key, end, comment) else {
             continue;
+        };
+        let mut start = write.offset;
+        while start > 0 && candidate.bytes[start - 1] == b' ' {
+            start -= 1;
         }
-        restore_collection_header(candidate, key, end, comment);
+        edits.push(header);
+        edits.push(ReceiptEdit {
+            start,
+            end: write.offset + write.length,
+            bytes: Vec::new(),
+            added: Vec::new(),
+        });
+        removed.insert(comment.receipt.id.clone());
+        headers.insert(end);
+    }
+    if let Some(proposal) = apply_receipt_edits(candidate, edits, &removed) {
+        *candidate = proposal;
     }
 }
 
 /// A non-specific YAML tag supplies the same parser boundary as an anchor,
 /// without retaining a tag or style flag in the parsed collection. Removing
 /// comments and faithfully re-emitting therefore recovers the existing bytes.
-fn restore_collection_header(
-    candidate: &mut ReceiptedYaml,
+fn collection_header_edit(
+    candidate: &ReceiptedYaml,
     key: &super::super::yaml3::parser::CommentNode,
     end: usize,
     comment: &SourceComment,
-) -> bool {
-    use super::super::yaml3::ReceiptEmission;
-    if candidate.bytes[key.end..end]
-        .iter()
-        .any(|b| !matches!(b, b':' | b' '))
+) -> Option<ReceiptEdit> {
+    if key.end > end
+        || end > candidate.bytes.len()
+        || candidate.bytes[key.end..end]
+            .iter()
+            .any(|b| !matches!(b, b':' | b' '))
     {
-        return false;
+        return None;
     }
-    let header = [b" ! ".as_slice(), comment.bytes.as_slice()].concat();
-    if !edit_receipted(candidate, end, end, &header) {
-        return false;
-    }
-    candidate.receipts.comments.push(ReceiptEmission {
-        offset: end + 3,
-        length: comment.bytes.len(),
-        receipt: comment.receipt.clone(),
-    });
-    true
+    Some(ReceiptEdit {
+        start: end,
+        end,
+        bytes: [b" ! ".as_slice(), comment.bytes.as_slice()].concat(),
+        added: vec![(3, comment.receipt.clone(), comment.bytes.len())],
+    })
 }
 
 /// A bounded replay used only by an outer final-candidate stability check.
@@ -2056,6 +2611,22 @@ mod tests {
             b"a:\n# note\n  b: 1 # kept\n#tab\n"
         );
         assert_eq!(normalize_comment_indentation(b"x: 1"), b"x: 1");
+    }
+
+    #[test]
+    fn owner_gate_rejects_changes_to_scalar_style_or_explicit_tags() {
+        for (before, after) in [
+            (b"x: plain\n".as_slice(), b"x: 'plain'\n".as_slice()),
+            (b"x: plain\n".as_slice(), b"x: !!str plain\n".as_slice()),
+            (b"x: [plain]\n".as_slice(), b"x: !!seq [plain]\n".as_slice()),
+        ] {
+            let a = super::super::unmarshal(before).unwrap();
+            let b = super::super::unmarshal(after).unwrap();
+            assert!(
+                !same_node_values(&a, &b),
+                "owner gate accepted a style or explicit-tag change"
+            );
+        }
     }
 
     #[test]

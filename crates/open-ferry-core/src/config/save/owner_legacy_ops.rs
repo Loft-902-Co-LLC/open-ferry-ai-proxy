@@ -131,18 +131,18 @@ pub(crate) fn operation(data: &[u8], row: &Value, pass: usize) -> Result<Operati
 pub(crate) fn old_scope<T>(row: &Value, call: impl FnOnce() -> T) -> T {
     #[cfg(feature = "parity")]
     {
+        let mut disabled = Vec::new();
         if row["disable_empty"] == true {
-            parity::ablation::with_disabled(
-                &[parity::ablation::Protection::EmptyMappingPendingComment],
-                call,
-            )
-        } else {
-            call()
+            disabled.push(parity::ablation::Protection::EmptyMappingPendingComment);
         }
+        if row["disable_flow_feet"] == true {
+            disabled.push(parity::ablation::Protection::MultipleFlowItemFeet);
+        }
+        parity::ablation::with_disabled(&disabled, call)
     }
     #[cfg(not(feature = "parity"))]
     {
-        assert!(row["disable_empty"] != true);
+        assert!(row["disable_empty"] != true && row["disable_flow_feet"] != true);
         call()
     }
 }
@@ -250,11 +250,36 @@ fn owner_capture_main_callers() {
     .unwrap();
     let result: Vec<_> = rows
         .iter()
-        .map(|row| json!({"recipe":row,"main":caller_history(row)}))
+        .map(|row| {
+            let run = || caller_history(row);
+            let main = if std::env::var_os("FU_OWNERS_CALLER_OFF").is_some() {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            };
+            json!({"recipe":row,"main":main})
+        })
         .collect();
     std::fs::write(
         std::env::var_os("FU_OWNERS_CALLER_OUTPUT").unwrap(),
         serde_json::to_vec_pretty(&result).unwrap(),
     )
     .unwrap();
+}
+
+/// Compact fixture rows refer only to an earlier, byte-identical source.
+pub(super) fn resolve_sources(mut rows: Vec<Value>) -> Vec<Value> {
+    let mut sources = std::collections::HashMap::new();
+    for row in &mut rows {
+        let recipe = &mut row["recipe"];
+        if let Some(source) = recipe["source"].as_str() {
+            sources.insert(recipe["id"].as_str().unwrap().to_owned(), source.to_owned());
+        } else {
+            let source = sources
+                .get(recipe["source_ref"].as_str().unwrap())
+                .expect("fixture source reference must name an earlier source");
+            recipe["source"] = Value::String(source.clone());
+        }
+    }
+    rows
 }

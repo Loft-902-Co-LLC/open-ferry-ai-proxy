@@ -432,8 +432,8 @@ fn normalize_layout_tree(
             if !previous.line_comment.is_empty() {
                 super::encode::protect_pending_version_comments(&mut root)?;
             }
-            version.comment_receipts.owner = previous.comment_receipts.owner;
-            version.comment_receipts.line = previous.comment_receipts.line;
+            version.comment_receipts.owner = previous.comment_receipts.owner.clone();
+            version.comment_receipts.line = previous.comment_receipts.line.clone();
             version.line_comment = previous.line_comment;
             version.line_comment_id = previous.line_comment_id;
         }

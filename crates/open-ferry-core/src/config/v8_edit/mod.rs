@@ -424,9 +424,9 @@ fn render_candidate(
         && parts.is_empty()
         && let Some(replacement) = replacement
     {
-        doc.comment_receipts.owner = replacement.comment_receipts.owner;
-        doc.comment_receipts.head = replacement.comment_receipts.head;
-        doc.comment_receipts.foot = replacement.comment_receipts.foot;
+        doc.comment_receipts.owner = replacement.comment_receipts.owner.clone();
+        doc.comment_receipts.head = replacement.comment_receipts.head.clone();
+        doc.comment_receipts.foot = replacement.comment_receipts.foot.clone();
         doc.head_comment = replacement.head_comment;
         doc.foot_comment = replacement.foot_comment;
     }

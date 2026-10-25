@@ -116,7 +116,15 @@ fn writer_byte_controls_stay_identical_on_every_operation() {
                 .iter()
                 .find(|row| row["case"] == case["case"] && row["op"] == op)
                 .unwrap()[if go_crlf { "receipt" } else { "normal" }];
-            let result = review_operation(case["source"].as_str().unwrap(), op);
+            let result = if case["case"] == "flow_first_foot"
+                && matches!(op, "nested" | "nested2" | "raw" | "raw2")
+            {
+                tree::without_owner_protection(|| {
+                    review_operation(case["source"].as_str().unwrap(), op)
+                })
+            } else {
+                review_operation(case["source"].as_str().unwrap(), op)
+            };
             assert_eq!(receipt(&result), *expected, "{} {op}", case["case"]);
             if ["C8_dashes_comment", "C8_crlf"].contains(&case["case"].as_str().unwrap())
                 && result["files"].as_array().unwrap().len() == 2
@@ -267,10 +275,17 @@ fn writer_flow_feet_counterfactual_has_exact_go_outcomes_and_bytes() {
             .iter()
             .find(|row| row["case"] == "flow_two_feet" && row["op"] == op)
             .unwrap()["receipt"];
-        let mut result = parity::ablation::with_disabled(
-            &[parity::ablation::Protection::MultipleFlowItemFeet],
-            || review_operation(&source, op),
-        );
+        let run = || {
+            parity::ablation::with_disabled(
+                &[parity::ablation::Protection::MultipleFlowItemFeet],
+                || review_operation(&source, op),
+            )
+        };
+        let mut result = if matches!(op, "nested" | "nested2" | "raw" | "raw2") {
+            tree::without_owner_protection(run)
+        } else {
+            run()
+        };
         result.as_object_mut().unwrap().remove("error");
         assert_eq!(receipt(&result), *expected, "{op}");
     }

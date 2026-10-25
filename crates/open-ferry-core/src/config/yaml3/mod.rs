@@ -195,7 +195,7 @@ pub(crate) struct Node {
     /// values in turn.
     pub(crate) content: Vec<Node>,
     /// Per-occurrence source receipts, independent of the current recipient.
-    pub(crate) comment_receipts: CommentReceipts,
+    pub(crate) comment_receipts: SparseReceipts,
     /// A moved setting carries its mapping key correspondence as well.
     pub(crate) comment_key_owner: Option<CommentId>,
     /// The comments before the node.
@@ -218,49 +218,93 @@ pub(crate) struct Node {
 
 /// Identity of one source comment, including its alias-expansion occurrence.
 #[derive(Clone, Debug)]
-pub(crate) struct CommentId {
-    source: Arc<()>,
+pub(crate) struct CommentId(Arc<CommentIdentity>);
+
+#[derive(Debug)]
+struct CommentIdentity {
+    source: Option<CommentId>,
     aliases: Vec<Arc<()>>,
 }
 
 impl CommentId {
     pub(crate) fn fresh() -> Self {
-        Self {
-            source: Arc::new(()),
+        Self(Arc::new(CommentIdentity {
+            source: None,
             aliases: Vec::new(),
-        }
+        }))
+    }
+
+    fn origin(&self) -> &Self {
+        self.0.source.as_ref().unwrap_or(self)
     }
 
     pub(crate) fn in_scope_of(&self, other: &Self) -> Self {
-        Self {
-            source: self.source.clone(),
-            aliases: other.aliases.clone(),
+        if self.0.aliases.len() == other.0.aliases.len()
+            && self
+                .0
+                .aliases
+                .iter()
+                .zip(&other.0.aliases)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            return self.clone();
         }
+        Self(Arc::new(CommentIdentity {
+            source: Some(self.origin().clone()),
+            aliases: other.0.aliases.clone(),
+        }))
+    }
+
+    pub(crate) fn is_scoped(&self) -> bool {
+        !self.0.aliases.is_empty()
+    }
+
+    pub(crate) fn source_key(&self) -> usize {
+        Arc::as_ptr(&self.origin().0) as usize
     }
 
     pub(crate) fn same_source(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.source, &other.source)
+        Arc::ptr_eq(&self.origin().0, &other.origin().0)
     }
 
     pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
-        let mut copy = self.clone();
-        copy.aliases.extend_from_slice(scopes);
-        copy
+        if scopes.is_empty() {
+            return self.clone();
+        }
+        let mut aliases = self.0.aliases.clone();
+        aliases.extend_from_slice(scopes);
+        Self(Arc::new(CommentIdentity {
+            source: Some(self.origin().clone()),
+            aliases,
+        }))
     }
 }
 
 impl PartialEq for CommentId {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.source, &other.source)
-            && self.aliases.len() == other.aliases.len()
+        #[cfg(test)]
+        crate::config::save::tree::comment_work(1);
+        self.same_source(other)
+            && self.0.aliases.len() == other.0.aliases.len()
             && self
+                .0
                 .aliases
                 .iter()
-                .zip(&other.aliases)
+                .zip(&other.0.aliases)
                 .all(|(a, b)| Arc::ptr_eq(a, b))
     }
 }
 impl Eq for CommentId {}
+
+impl std::hash::Hash for CommentId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.origin().0) as usize).hash(state);
+        self.0.aliases.len().hash(state);
+        for scope in &self.0.aliases {
+            (Arc::as_ptr(scope) as usize).hash(state);
+        }
+    }
+}
 
 /// The source slot of a physical comment occurrence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,28 +340,87 @@ pub(crate) struct CommentReceipts {
     pub(crate) tail: Vec<ReceiptSpan>,
 }
 
+/// Unannotated nodes pay one pointer, rather than four empty vectors and an ID.
+/// Clones share immutable metadata until an edit. Source receipts remain call-scoped.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SparseReceipts(Option<Arc<CommentReceipts>>);
+
+static EMPTY_RECEIPTS: CommentReceipts = CommentReceipts {
+    owner: None,
+    head: Vec::new(),
+    line: Vec::new(),
+    foot: Vec::new(),
+    tail: Vec::new(),
+};
+
+impl std::ops::Deref for SparseReceipts {
+    type Target = CommentReceipts;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().unwrap_or(&EMPTY_RECEIPTS)
+    }
+}
+impl std::ops::DerefMut for SparseReceipts {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(self.0.get_or_insert_with(Default::default))
+    }
+}
+impl From<CommentReceipts> for SparseReceipts {
+    fn from(value: CommentReceipts) -> Self {
+        if value.owner.is_none()
+            && value.head.is_empty()
+            && value.line.is_empty()
+            && value.foot.is_empty()
+            && value.tail.is_empty()
+        {
+            Self::default()
+        } else {
+            Self(Some(Arc::new(value)))
+        }
+    }
+}
+impl SparseReceipts {
+    pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
+        if scopes.is_empty() {
+            return self.clone();
+        }
+        self.0
+            .as_deref()
+            .map(|r| r.in_aliases(scopes).into())
+            .unwrap_or_default()
+    }
+}
+
 impl CommentReceipts {
     pub(crate) fn in_aliases(&self, scopes: &[Arc<()>]) -> Self {
-        fn copies(spans: &[ReceiptSpan], scopes: &[Arc<()>]) -> Vec<ReceiptSpan> {
+        fn copies(
+            spans: &[ReceiptSpan],
+            scopes: &[Arc<()>],
+            original_owner: Option<&CommentId>,
+            scoped_owner: Option<&CommentId>,
+        ) -> Vec<ReceiptSpan> {
             spans
                 .iter()
                 .map(|span| ReceiptSpan {
                     at: span.at,
                     receipt: CommentReceipt {
                         id: span.receipt.id.in_aliases(scopes),
-                        owner: span.receipt.owner.in_aliases(scopes),
+                        owner: match (original_owner, scoped_owner) {
+                            (Some(old), Some(new)) if span.receipt.owner == *old => new.clone(),
+                            _ => span.receipt.owner.in_aliases(scopes),
+                        },
                         slot: span.receipt.slot,
                         ordinal: span.receipt.ordinal,
                     },
                 })
                 .collect()
         }
+        let owner = self.owner.as_ref().map(|id| id.in_aliases(scopes));
         Self {
-            owner: self.owner.as_ref().map(|id| id.in_aliases(scopes)),
-            head: copies(&self.head, scopes),
-            line: copies(&self.line, scopes),
-            foot: copies(&self.foot, scopes),
-            tail: copies(&self.tail, scopes),
+            head: copies(&self.head, scopes, self.owner.as_ref(), owner.as_ref()),
+            line: copies(&self.line, scopes, self.owner.as_ref(), owner.as_ref()),
+            foot: copies(&self.foot, scopes, self.owner.as_ref(), owner.as_ref()),
+            tail: copies(&self.tail, scopes, self.owner.as_ref(), owner.as_ref()),
+            owner,
         }
     }
 }
