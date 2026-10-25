@@ -1401,4 +1401,105 @@ fn open_schema_regressions_match_uncached_analysis() {
             check();
         }
     }
+
+    let mut shared_reference_hits = 0;
+    for additional_properties in [None, Some(true), Some(false)] {
+        let closed = additional_properties == Some(false);
+        let mut definition = json!({"type":"object","properties":{}});
+        if let Some(value) = additional_properties {
+            definition["additionalProperties"] = json!(value);
+        }
+        for keyword in ["allOf", "anyOf"] {
+            let mut repeated = json!({});
+            repeated[keyword] = json!([
+                {"$ref":"#/$defs/Empty"},
+                {"$ref":"#/$defs/Empty","description":"second reference"}
+            ]);
+            for location in ["root", "property", "array"] {
+                let mut schema = match location {
+                    "root" => repeated.clone(),
+                    "property" => json!({"type":"object","properties":{"value":repeated}}),
+                    "array" => json!({"type":"object","properties":{
+                        "value":{"type":"array","items":repeated}
+                    }}),
+                    _ => unreachable!(),
+                };
+                schema["$defs"] = json!({"Empty":definition});
+                let context = format!("{additional_properties:?}, {keyword}, {location}");
+                let mut memo = AnalysisMemo::default();
+                let actual = analyze_depth_memo(
+                    &repeated,
+                    &schema,
+                    0,
+                    &mut BTreeSet::new(),
+                    &mut memo,
+                    &mut AnalysisReferences::default(),
+                );
+                let expected = super::analysis_memo_tests::legacy_analyze_depth(
+                    &repeated,
+                    &schema,
+                    0,
+                    &mut BTreeSet::new(),
+                );
+                assert!(memo.cache_hits > 0, "{context}");
+                assert_eq!(
+                    super::analysis_memo_tests::snapshot(&actual),
+                    super::analysis_memo_tests::snapshot(&expected),
+                    "{context}"
+                );
+
+                let previous_hits = memo.cache_hits;
+                let hit = memo.resolve(
+                    &schema["$defs"]["Empty"],
+                    &schema,
+                    2,
+                    &mut BTreeSet::new(),
+                    &mut AnalysisReferences::default(),
+                );
+                assert_eq!(memo.cache_hits, previous_hits + 1, "{context}");
+                assert_eq!(hit.forbids, closed, "{context}");
+                assert_eq!(hit.parameterless(), closed, "{context}");
+                shared_reference_hits += memo.cache_hits;
+
+                let original = json!({"tools":[{"name":"echo","input_schema":schema}]});
+                let no_args = parameterless(&original, "echo");
+                assert_eq!(no_args, location == "root" && keyword == "allOf" && closed);
+                assert_eq!(
+                    no_args,
+                    super::analysis_memo_tests::with_legacy(|| parameterless(&original, "echo")),
+                    "{context}"
+                );
+                let cleaned = crate::gemini_schema::clean_json_schema_for_gemini_json_schema(
+                    &schema,
+                    &mut crate::gemini_schema::SchemaCopyBudget::default(),
+                );
+                let sent = json!({"tools":[{"functionDeclarations":[{
+                    "name":"echo","parametersJsonSchema":cleaned
+                }]}]});
+                let args = match location {
+                    "root" => json!({"user":"v"}),
+                    "property" => json!({"value":{"user":"v"}}),
+                    "array" => json!({"value":[{"user":"v"}]}),
+                    _ => unreachable!(),
+                };
+                for translated in [&Value::Null, &sent] {
+                    let actual = clean_arguments(&args, "echo", &original, translated);
+                    let expected = super::analysis_memo_tests::with_legacy(|| {
+                        clean_arguments(&args, "echo", &original, translated)
+                    });
+                    assert_eq!(actual, expected, "{context}");
+                    if keyword == "allOf" && translated.is_null() {
+                        let expected = match (closed, location) {
+                            (true, "root") => json!({}),
+                            (true, "property") => json!({"value":{}}),
+                            (true, "array") => json!({"value":[{}]}),
+                            _ => args.clone(),
+                        };
+                        assert_eq!(actual, expected, "{context}");
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("shared-reference analysis cache hits: {shared_reference_hits}");
 }
