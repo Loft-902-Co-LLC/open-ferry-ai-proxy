@@ -94,7 +94,7 @@ fn mapping_values(op: &str) {
             let dir = TempDir::new();
             let path = dir.join("config.yaml");
             std::fs::write(&path, source).unwrap();
-            save_operation(&path, op).unwrap_or_else(|_| panic!("{label} {op} refused"));
+            assert!(save_operation(&path, op).is_ok(), "{label} {op} refused");
             let output = std::fs::read_to_string(&path).unwrap();
             let actual = AnyValue::parse_yaml(&output).unwrap();
             assert!(
@@ -144,7 +144,10 @@ fn review_r15_replaced_mapping_tab_scalar_survives() {
         std::fs::write(&path, format!("auth-dir: {style}\n  x\n")).unwrap();
         let mut config = Config::load(&path).unwrap();
         config.auth_dir = "\tx".into();
-        save_preserving_comments(&path, &config, false).unwrap();
+        assert!(
+            save_preserving_comments(&path, &config, false).is_ok(),
+            "the replacement was refused"
+        );
         assert!(Config::load(&path).unwrap().auth_dir == "\tx");
     }
 }
@@ -298,14 +301,15 @@ fn review_r15_value_check_refuses_changed_typed_values_before_backup() {
     config.auth_dir = "synthetic-intended-text".into();
     let intended = IntendedValues::settings(source.as_bytes(), &config, false).unwrap();
     let lock = WriteLock::acquire(&path).unwrap();
-    let error = write::commit_locked_values(
+    let result = write::commit_locked_values(
         &lock,
         &path,
         b"auth-dir: synthetic-other-text\n",
         None,
         &intended,
-    )
-    .expect_err("a changed value must be refused");
+    );
+    assert!(result.is_err(), "a changed value must be refused");
+    let error = result.unwrap_err();
     assert_eq!(error.kind(), SaveErrorKind::Check);
     assert_eq!(
         error.to_string(),
