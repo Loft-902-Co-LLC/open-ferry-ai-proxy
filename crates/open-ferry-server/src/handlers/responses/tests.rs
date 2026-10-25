@@ -1658,3 +1658,45 @@ async fn prompt_overflow_after_pre_first_token_keepalive_keeps_http_200_and_erro
         .expect("keepalive commits the stream before the mock error is released");
     }
 }
+
+#[tokio::test]
+async fn prompt_overflow_as_stream_chunk_after_created_keeps_http_200_and_error_code() {
+    for codex in [false, true] {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Stream(
+                HeaderMap::new(),
+                vec![
+                    Ok(Bytes::from_static(CREATED.as_bytes())),
+                    Err(ExecError::upstream(
+                        400,
+                        r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: input overflow"}}"#,
+                    )),
+                ],
+            )],
+        );
+        let ua = if codex {
+            Some("codex_cli_rs/0.1.0")
+        } else {
+            None
+        };
+        let (status, headers, body) = send(&app, post("/v1/responses", STREAM, ua)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
+        assert!(body.starts_with(CREATED), "{body}");
+        let terminal = if codex { "response.failed" } else { "error" };
+        assert_eq!(
+            body.matches(&format!("event: {terminal}\n")).count(),
+            1,
+            "{body}"
+        );
+        assert!(
+            body.contains("\"code\":\"context_length_exceeded\""),
+            "{body}"
+        );
+        assert!(body.contains("\"type\":\"invalid_request_error\""));
+        assert!(body.contains("prompt is too long: input overflow"));
+        assert!(!body.contains("[DONE]"));
+        assert_eq!(dispatcher.calls().len(), 1);
+    }
+}
