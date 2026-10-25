@@ -2010,6 +2010,19 @@ async fn refused_credential_read(
     setup: impl Fn(&Harness),
     wait: Duration,
 ) {
+    refused_read(initial, finally, models, setup, wait, 100.0).await;
+}
+
+/// [`refused_credential_read`] with Opus shown at `opus` percent: a read that
+/// proves a model's claim as well when it is low.
+async fn refused_read(
+    initial: Settings,
+    finally: Settings,
+    models: &[&str],
+    setup: impl Fn(&Harness),
+    wait: Duration,
+    opus: f64,
+) {
     let mut seen = Vec::new();
     for read in [true, false] {
         let dir = temp_dir();
@@ -2018,7 +2031,7 @@ async fn refused_credential_read(
         h.clock.advance(wait);
         if read {
             assert!(
-                !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+                !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, opus)])),
                 "the credential's recovery went ahead"
             );
         }
@@ -2310,49 +2323,309 @@ async fn a_failures_own_hold_is_the_deadline_application_set() {
                 for code in codes {
                     for message in ["failed", "cloudflare challenge"] {
                         for hint in hints {
-                            let id = format!(
-                                "parity-{index}-{scoped}-{status}-{code}-{message}-{hint:?}"
-                            );
-                            h.add(auth(&id, "claude"), &[OPUS]);
-                            let now = h.now();
-                            let mut result = other_failure(
-                                if scoped { OPUS } else { "" },
-                                status,
-                                Duration::ZERO,
-                            );
-                            result.auth_id = id.clone();
-                            result.retry_after = hint;
-                            if let Some(error) = result.error.as_mut() {
-                                error.code = code.into();
-                                error.message = message.into();
-                            }
-                            h.manager.mark_result(&result);
-                            let scope = if scoped { OPUS } else { "" };
-                            let deadline = scope_deadline(&h.get(&id), scope);
-                            let live = |at: Timestamp| {
-                                h.manager.lock().quota_recovery.foreign_live(&id, scope, at)
-                            };
-                            let case = format!(
-                                "{status} code {code:?} {message:?} hint {hint:?} scoped {scoped} \
-                                 settings {index}: deadline {deadline:?}"
-                            );
-                            match deadline {
-                                Some(end) if end > now => {
-                                    assert!(live(now), "{case}: not held now");
-                                    assert!(
-                                        live(end - TimeDelta::milliseconds(1)),
-                                        "{case}: held less than application did"
+                            for recognised in [false, true] {
+                                // The control: the failure alone on a fresh
+                                // credential, which says where application
+                                // puts its own deadline.
+                                let mut control_end = None;
+                                for existing in [false, true] {
+                                    let id = format!(
+                                        "parity-{index}-{scoped}-{status}-{code}-{message}-\
+                                         {hint:?}-{recognised}-{existing}"
                                     );
-                                    assert!(!live(end), "{case}: held longer than application did");
+                                    h.add(auth(&id, "claude"), &[OPUS, SONNET]);
+                                    let scope = if scoped { OPUS } else { "" };
+                                    if existing {
+                                        // A recognised five day quota cooldown
+                                        // of the scope, with its claim.
+                                        let mut prior = if scoped {
+                                            quota_429(OPUS, opus_headers(), FIVE_DAYS)
+                                        } else {
+                                            CallResult {
+                                                retry_after: Some(FIVE_DAYS),
+                                                ..failure(SONNET, weekly(h.now()), true)
+                                            }
+                                        };
+                                        prior.auth_id = id.clone();
+                                        h.manager.mark_result(&prior);
+                                        h.clock.advance(Duration::from_secs(1));
+                                    }
+                                    let now = h.now();
+                                    let mut result = other_failure(scope, status, Duration::ZERO);
+                                    result.auth_id = id.clone();
+                                    result.retry_after = hint;
+                                    result.credential_scope = !scoped;
+                                    if recognised {
+                                        result.response_headers =
+                                            if scoped { opus_headers() } else { weekly(now) };
+                                    }
+                                    if let Some(error) = result.error.as_mut() {
+                                        error.code = code.into();
+                                        error.message = message.into();
+                                    }
+                                    h.manager.mark_result(&result);
+                                    let deadline = scope_deadline(&h.get(&id), scope);
+                                    let live = |at: Timestamp| {
+                                        h.manager.lock().quota_recovery.foreign_live(&id, scope, at)
+                                    };
+                                    // A 429 application took for a quota
+                                    // cooldown records a claim; every other
+                                    // failure, a 429 it classified as
+                                    // something else (model support,
+                                    // Cloudflare) included, records a hold.
+                                    let classified = status == 429
+                                        && ((scoped && code == "model_not_found")
+                                            || message == "cloudflare challenge");
+                                    let quota = status == 429 && !classified;
+                                    let case = format!(
+                                        "{status} code {code:?} {message:?} hint {hint:?} \
+                                         scoped {scoped} recognised {recognised} existing \
+                                         {existing} settings {index}: deadline {deadline:?}"
+                                    );
+                                    if !existing {
+                                        control_end = deadline;
+                                    }
+                                    if !quota || (!recognised && !existing) {
+                                        match control_end {
+                                            Some(end) if end > now => {
+                                                assert!(live(now), "{case}: not held now");
+                                                // The end of a backed-off
+                                                // cooldown (Cloudflare) depends
+                                                // on the earlier 429, so the
+                                                // control's end is exact only
+                                                // for a credential with
+                                                // nothing earlier.
+                                                if !existing {
+                                                    assert!(
+                                                        live(end - TimeDelta::milliseconds(1)),
+                                                        "{case}: held less than application did"
+                                                    );
+                                                    assert!(
+                                                        !live(end),
+                                                        "{case}: held longer than application did"
+                                                    );
+                                                }
+                                            }
+                                            _ => {
+                                                assert!(!live(now), "{case}: held with no cooldown")
+                                            }
+                                        }
+                                    }
+                                    checked += 1;
                                 }
-                                _ => assert!(!live(now), "{case}: held with no cooldown"),
                             }
-                            checked += 1;
                         }
                     }
                 }
             }
         }
     }
-    assert!(checked > 1000, "the table ran {checked} cases");
+    assert!(checked > 4000, "the table ran {checked} cases");
+}
+
+// Round 9: a merge stays refused under its wrap whatever the wrap's later 429s
+// do; a 429 application classified as something else is a hold, not a quota
+// claim; and a credential registered with cooldowns has no provenance for them.
+
+/// A recognised Opus 429 that application takes for something else.
+fn classified_429(model: &str, code: &str, message: &str, retry: Duration) -> CallResult {
+    let mut result = quota_429(model, opus_headers(), retry);
+    if let Some(error) = result.error.as_mut() {
+        error.code = code.into();
+        error.message = message.into();
+    }
+    result
+}
+
+/// Finding 1: an alias with a 5 day quota cooldown, a target with a newer 1
+/// hour one, and a credential-wide 5 day 429 over both. The reconcile keeps
+/// only the target's layer under the wrap. A call that was in flight then
+/// returns another recognised credential-wide 429, which records a fresh claim
+/// after the merge. Opus's window is shown full at 70 minutes: the wrap still
+/// stands, so the read must not lift it to the expired hour.
+#[tokio::test(start_paused = true)]
+async fn a_later_credential_429_does_not_lift_the_refusal_of_a_merge_under_its_wrap() {
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, FIVE_DAYS);
+            h.clock.advance(Duration::from_secs(5));
+            merge_with(h, route_alias());
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, FIVE_DAYS);
+        },
+        Duration::from_secs(70 * 60),
+    )
+    .await;
+}
+
+/// The same, with the second credential-wide 429 landing after the first wrap
+/// has run out: that is a new wrap, which no merge touched, and the credential
+/// may recover. (The mark ends with the wrap it was made under.)
+#[tokio::test(start_paused = true)]
+async fn a_credential_429_after_the_merged_wrap_ran_out_starts_a_wrap_that_can_recover() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE, SONNET]);
+    h.manager
+        .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+    h.clock.advance(Duration::from_secs(5));
+    wrap(&h, 2 * HOUR);
+    h.clock.advance(Duration::from_secs(5));
+    merge_with(&h, route_alias());
+    h.clock.advance(3 * HOUR);
+    wrap(&h, 2 * HOUR);
+    h.clock.advance(Duration::from_secs(20 * 60));
+    assert!(
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+        "a new wrap, made after the merged one ran out"
+    );
+    assert!(!blocked(&h, SONNET), "the new wrap is gone");
+}
+
+/// Finding 2: Opus has a recognised 5 day cooldown with a claim. A 429 with
+/// recognised headers and the code `model_not_found` and a 12 hour hint is
+/// application's 12 hour model-support hold, whatever its headers say. A read
+/// showing the windows healthy must not clear it.
+#[tokio::test(start_paused = true)]
+async fn a_429_taken_for_a_model_support_failure_is_a_hold_not_a_claim() {
+    refused_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&classified_429(
+                OPUS,
+                "model_not_found",
+                "no such model",
+                12 * HOUR,
+            ));
+            h.clock.advance(Duration::from_secs(60));
+        },
+        Duration::from_secs(60),
+        2.0,
+    )
+    .await;
+}
+
+/// A recognised 429 that is a Cloudflare challenge holds the model for the
+/// challenge's own short time. Within it a read is refused, and changes
+/// nothing.
+#[tokio::test(start_paused = true)]
+async fn a_429_taken_for_a_cloudflare_challenge_is_a_hold_not_a_claim() {
+    refused_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&classified_429(
+                OPUS,
+                "",
+                "cloudflare challenge",
+                Duration::from_secs(90),
+            ));
+        },
+        Duration::from_secs(1),
+        2.0,
+    )
+    .await;
+}
+
+/// The credential-scope equivalent: a credential-wide wrap with its claim, and
+/// a credential-wide 429 with recognised headers that is a Cloudflare
+/// challenge.
+#[tokio::test(start_paused = true)]
+async fn a_credential_wide_429_taken_for_a_cloudflare_challenge_is_a_hold_not_a_claim() {
+    refused_credential_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            wrap(h, 2 * HOUR);
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&CallResult {
+                retry_after: Some(Duration::from_secs(90)),
+                error: Some(AuthError {
+                    http_status: 429,
+                    message: "cloudflare challenge".into(),
+                    ..AuthError::default()
+                }),
+                ..failure(SONNET, weekly(h.now()), true)
+            });
+        },
+        Duration::from_secs(1),
+    )
+    .await;
+}
+
+/// Finding 3: Opus has a 5 day quota cooldown. A clone of the live credential
+/// is registered again: its provenance goes, its cooldown stays. A recognised
+/// Opus 429 naming only the 5 hour window then leaves the longer deadline
+/// standing, and a read showing that window healthy must not clear the 5 days.
+#[tokio::test(start_paused = true)]
+async fn registering_a_credential_that_carries_a_cooldown_gives_it_no_provenance() {
+    refused_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            let live = (*h.get(ID)).clone();
+            h.manager.register(live).expect("register");
+            h.clock.advance(Duration::from_secs(5));
+            h.manager
+                .mark_result(&as_of_now(h, quota_429(OPUS, five_hour_headers(), HOUR)));
+        },
+        Duration::from_secs(60),
+        2.0,
+    )
+    .await;
+}
+
+/// `result` as a call made after the latest registration would report it: a
+/// result carrying an older credential version is dropped as stale.
+fn as_of_now(h: &Harness, result: CallResult) -> CallResult {
+    let live = h.get(ID);
+    CallResult {
+        credential_version: live.credential_version,
+        registration_epoch: live.registration_epoch,
+        ..result
+    }
+}
+
+/// A credential registered with no cooldowns is unaffected: the normal
+/// recovery works after it.
+#[tokio::test(start_paused = true)]
+async fn a_clean_registration_still_lets_the_normal_recovery_work() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    let clean = (*h.get(ID)).clone();
+    h.manager.register(clean).expect("register");
+    h.manager
+        .mark_result(&as_of_now(&h, quota_429(OPUS, opus_headers(), FIVE_DAYS)));
+    h.clock.advance(Duration::from_secs(60));
+    assert!(blocked(&h, OPUS));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS));
 }

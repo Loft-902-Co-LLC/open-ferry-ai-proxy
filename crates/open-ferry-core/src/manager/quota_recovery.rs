@@ -37,8 +37,13 @@
 //! credential rests on a quota check (under any key, an orphaned alias's
 //! included), while a model has a cooldown of its own that no read can speak
 //! for and that is live, and once a merge of two models' cooldowns happened
-//! since its claim. Ending the wrap would otherwise have to rebuild what lay
-//! under it, and a rebuilt hold could come out shorter than the real one.
+//! since its claim, and that refusal outlives the claim: a merge marks the
+//! credential, and a later credential-wide 429 under the same standing wrap
+//! records a fresh claim but keeps the mark. The mark goes only when that wrap
+//! has run out and a new one starts, when the wrap is no longer recorded, or
+//! when the credential is forgotten. Ending the wrap would otherwise have to
+//! rebuild what lay under it, and a rebuilt hold could come out shorter than
+//! the real one.
 //! Merging two models keeps the windows both claims named: they are carried
 //! to the target as debt, and the target's next recognised 429 must have a
 //! reading prove them too.
@@ -46,6 +51,14 @@
 //! A failure's own deadline (what a hold of its own lasts) is the one
 //! cooldown application computed for it, with its precedence of rules, before
 //! it kept a longer earlier hold; it is passed in, not worked out again here.
+//! The same value says what kind of failure it was: a 429 that application
+//! took for a model-support, Cloudflare or invalid-grant failure set a hold of
+//! its own, and is recorded as a hold whatever quota headers it carries; only
+//! a 429 application took for a quota cooldown records or extends a claim.
+//!
+//! A credential registered again keeps the cooldowns it arrives with but none
+//! of the provenance: each scope that carries one is held with an unknown end,
+//! as a restored cooldown is. A credential registered with none is unaffected.
 //!
 //! Independent holds, including a no-model 429 or 503, stay separate from a
 //! model-derived credential aggregate. Each keeps its own deadline, not the
@@ -313,6 +326,11 @@ pub(crate) struct Recoveries {
     /// Windows a merge carried to a model's scope from another's claim: owed
     /// by the next recognised 429 of that scope, which must prove them too.
     owed: BTreeMap<(String, String), Vec<UsageWindow>>,
+    /// Credentials a merge happened under the standing credential-wide wrap
+    /// of: the merge kept one model layer of two, so the wrap's deadline is
+    /// no longer one a reading can speak for. A later credential-wide 429
+    /// does not lift it while that wrap stands.
+    merged_under: BTreeSet<String>,
     /// When a scope was last recovered, against a restore of older records.
     recovered: BTreeMap<(String, String), Timestamp>,
     /// Moves when the saved cooldowns replace the live ones.
@@ -415,6 +433,9 @@ impl Recoveries {
             .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
         self.owed
             .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
+        if !recorded(auth, "", true) {
+            self.merged_under.remove(&auth.id);
+        }
         // The same for a cooldown nothing could have recovered.
         self.foreign
             .retain(|(id, scope), _| id != &auth.id || blocked(auth, scope));
@@ -426,6 +447,12 @@ impl Recoveries {
         }
         let status = result.error.as_ref().map_or(0, |error| error.http_status);
         let (credential, scope) = scope_of(result, model_key);
+        // A credential-wide failure on top of a wrap that has run out starts
+        // a new one, which no merge touched; on top of a standing wrap it
+        // keeps the mark.
+        if credential && !before.is_some_and(|before| before > now) {
+            self.merged_under.remove(&auth.id);
+        }
         // A rejected token touches every scope, a credential-wide cooldown
         // fences the reads in flight; another failure touches its model's
         // alone.
@@ -437,12 +464,16 @@ impl Recoveries {
             self.touch(&auth.id, &scope)
         };
         let key = (auth.id.clone(), scope.clone());
+        // Application classifies before it looks at the status: a 429 it
+        // took for a model-support, Cloudflare or invalid-grant failure set a
+        // hold of its own, not a quota cooldown, whatever its headers say.
+        let classified = matches!(own, OwnDeadline::Set(_));
         let own = || own_hold(own, now, before, after);
         // A claim stays through a failure it can't be told apart from: its
         // cooldown layer stands (the retain above ends it when it doesn't),
         // and the windows it names stay owed. The failure's sequence number
         // fences it until a later recognized 429 merges its windows in.
-        if status != 429 {
+        if status != 429 || classified {
             self.hold(key, own());
             return;
         }
@@ -484,6 +515,7 @@ impl Recoveries {
     pub(crate) fn forget(&mut self, id: &str) {
         self.claims.retain(|(claim_id, _), _| claim_id != id);
         self.owed.retain(|(owed_id, _), _| owed_id != id);
+        self.merged_under.remove(id);
         self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
     }
@@ -520,6 +552,7 @@ impl Recoveries {
                 .insert((id.to_owned(), target.to_owned()), carried);
         }
         self.claims.remove(&(id.to_owned(), String::new()));
+        self.merged_under.insert(id.to_owned());
         self.touch_wrapped(id);
         if !alias.is_empty()
             && !target.is_empty()
@@ -552,6 +585,7 @@ impl Recoveries {
     pub(crate) fn clear(&mut self) {
         self.claims.clear();
         self.owed.clear();
+        self.merged_under.clear();
         self.foreign.clear();
         self.recovered.clear();
         self.era = self.era.saturating_add(1);
@@ -597,6 +631,23 @@ fn blocked(auth: &Auth, scope: &str) -> bool {
                 || state.last_error.is_some()
                 || state.credential_quota_shadow.is_some()
         })
+}
+
+/// The scopes of `auth` that carry a cooldown (the credential's as the empty
+/// scope), whatever its cause. A credential registered with such state has no
+/// provenance for it.
+pub(crate) fn cooldown_scopes(auth: &Auth) -> Vec<String> {
+    let mut scopes = Vec::new();
+    if blocked(auth, "") {
+        scopes.push(String::new());
+    }
+    for name in auth.model_states.keys() {
+        let scope = canonical_model_key(name);
+        if !scopes.contains(&scope) && blocked(auth, &scope) {
+            scopes.push(scope);
+        }
+    }
+    scopes
 }
 
 /// Whether the cooldown `result` should have recorded is on `auth`.
@@ -802,7 +853,8 @@ impl Manager {
                         // on a quota check or holds a cooldown of its own:
                         // their ends could not be told apart from the wrap's.
                         && (!scope.is_empty()
-                            || (!state.quota_checks.rests_on_a_model(id)
+                            || (!state.quota_recovery.merged_under.contains(id)
+                                && !state.quota_checks.rests_on_a_model(id)
                                 && !state.quota_recovery.model_hold_live(id, now)))
                         && claim.seq <= token.seq
                         && state.quota_recovery.untouched_since(id, scope, claim)

@@ -526,6 +526,10 @@ impl Manager {
         // open-ferry's capped quota rests go with the state replaced.
         state.quota_checks.forget(&auth.id);
         state.quota_recovery.forget(&auth.id);
+        // The incoming credential's own cooldowns have no provenance, as
+        // when saved ones are restored: holds of unknown end.
+        let carried = super::quota_recovery::cooldown_scopes(&auth);
+        state.quota_recovery.restored(&auth.id, &carried);
         let snapshot = Arc::new(auth);
         state.auths.insert(
             snapshot.id.clone(),
