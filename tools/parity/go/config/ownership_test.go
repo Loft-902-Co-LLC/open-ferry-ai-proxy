@@ -4,10 +4,45 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestParitySourceIdentityBindsPhysicalOwnersAndChangesOnlyTheirComments(t *testing.T) {
+	const source = "# head\nauth-dir: fixture # c1\n# c10\nnext: fixture\n"
+	op := map[string]any{"op": "nested", "keys": []any{"auth-dir"}, "value": "fixture"}
+	proof := ParitySourceIdentity(source, op)
+	if proof["unavailable"] != nil {
+		t.Fatal("unique source occurrences were not bound")
+	}
+	masked := proof["masked_source"].(string)
+	seen := map[string]bool{}
+	for _, raw := range proof["occurrences"].([]any) {
+		occurrence := raw.(map[string]any)
+		id := occurrence["id"].(string)
+		if seen[id] || !strings.Contains(masked, id) || occurrence["source"].(ParityOwner).Slot == "" {
+			t.Fatal("source occurrence lost its opaque identity or owner")
+		}
+		seen[id] = true
+		masked = strings.ReplaceAll(masked, id, occurrence["text"].(string))
+	}
+	if masked != source || len(seen) != 3 {
+		t.Fatal("unmasking changed non-comment bytes or missed an occurrence")
+	}
+}
+
+func TestParitySourceIdentityRefusesEqualTextAndAmbiguousPhysicalSpans(t *testing.T) {
+	for _, source := range []string{
+		"auth-dir: fixture # repeated\nnext: fixture # repeated\n",
+		"auth-dir: fixture # repeated\nnotes: |-\n  # repeated\n",
+	} {
+		if ParitySourceIdentity(source, map[string]any{"op": "write", "body": source})["unavailable"] != true {
+			t.Fatal("ambiguous equal text supplied a source occurrence identity")
+		}
+	}
+}
 
 const parityFallbackCollisionSource = "config-version: 8\nopenai-compatibility:\n  - name: fixture\n    base-url: https://example.invalid/v1\n    # first\n    keys: old\n    # first\n    # second\n    api-key-entries:\n      - api-key: fixture\n"
 

@@ -1,4 +1,36 @@
 use super::*;
+
+#[test]
+fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
+    // Pinned Go receipts were captured on these exact first-step sources and
+    // operations. Even a generously granted stable-repeat witness cannot
+    // excuse their lost, duplicated or misplaced source occurrences.
+    let fixtures: Value =
+        serde_json::from_str(include_str!("../testdata/source-owner-gaps.json")).unwrap();
+    let fixtures = fixtures.as_array().unwrap();
+    assert_eq!(fixtures.len(), 4);
+    for fixture in fixtures {
+        let name = fixture["case"].as_str().unwrap();
+        let source = fixture["source"].as_str().unwrap();
+        let protected = fixture["protected"].as_str().unwrap();
+        let operation = &fixture["operation"];
+        let evidence = &fixture["evidence"];
+        assert!(evidence["retained_source_owner"]["identity"]["occurrences"].is_array());
+        assert!(evidence["retained_source_owner"]["go_inventory"]["comments"].is_array());
+        assert!(
+            !core::retained_source_owner(source, protected, operation, evidence).accepted(),
+            "{name}: a measured writer gap passed the new proof"
+        );
+        let case = Case::new(name, "", "").with_options(json!({
+            "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+        }));
+        let go = evidence["retained_source_owner"]["go"]["files"][0].as_str();
+        assert!(
+            !ownership::analyze(&case, 0, source, go, protected, &[], true).accepted(),
+            "{name}: a measured writer gap became certified"
+        );
+    }
+}
 use crate::translator::Translator;
 
 #[test]
@@ -111,8 +143,8 @@ fn evaluate_boundary(
     protected: &Value,
     oracle: &Value,
     replay: &Replay,
-    mask: u8,
-    matches: &[(u8, bool)],
+    mask: u16,
+    matches: &[(u16, bool)],
 ) -> [bool; 5] {
     checks(Proof {
         case,
@@ -447,7 +479,10 @@ fn saved_certifier_cases_use_independent_go_expectations() {
     .unwrap();
     let mut results = Vec::new();
     for row in rows {
-        let case = from_fixture(&row);
+        let mut case = from_fixture(&row);
+        // Replay files are inputs, not proof authorities. This receipt must
+        // disappear before either oracle request construction or certification.
+        case.options["_ownership_evidence"] = json!([{"untrusted-replay-receipt":true}]);
         let go = &row["probes"]
             .as_array()
             .unwrap()
@@ -469,6 +504,7 @@ fn saved_certifier_cases_use_independent_go_expectations() {
             assert_eq!(&protected, expected);
         }
         let result = certify(&case, go, &protected, |candidate| {
+            assert!(candidate.options.get("_ownership_evidence").is_none());
             // Historical fixtures contain no independent identity replay.
             // Refuse that optional oracle instead of inventing provenance;
             // all of their original strict negative assertions stay active.

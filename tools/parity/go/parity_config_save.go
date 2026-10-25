@@ -66,8 +66,10 @@ type configSaveOptions struct {
 	Trace     bool             `json:"_ablation_trace"`
 	Steps     []configSaveStep `json:"steps"`
 	Ownership *struct {
-		Source    string         `json:"source"`
-		Operation map[string]any `json:"operation"`
+		Source      string         `json:"source"`
+		Operation   map[string]any `json:"operation"`
+		SourceOwner bool           `json:"source_owner"`
+		Protected   *string        `json:"protected"`
 	} `json:"_ownership_request"`
 }
 
@@ -87,7 +89,45 @@ func configSaveSteps(in input) []byte {
 		panic(err)
 	}
 	if options.Ownership != nil {
-		return configSaveJSON(config.ParityOwnership(options.Ownership.Source, options.Ownership.Operation))
+		proof := config.ParityOwnership(options.Ownership.Source, options.Ownership.Operation)
+		if options.Ownership.SourceOwner {
+			identity := config.ParitySourceIdentity(options.Ownership.Source, options.Ownership.Operation)
+			frame := map[string]any{"identity": identity}
+			proof["retained_source_owner"] = frame
+			if identity["unavailable"] == nil {
+				run := func(source string, marked bool) any {
+					op := map[string]any{}
+					for k, v := range options.Ownership.Operation {
+						op[k] = v
+					}
+					if marked && op["op"] == "write" {
+						op["body"] = source
+					}
+					next := in
+					next.Options = configSaveJSON(map[string]any{"file": source, "steps": []any{op}})
+					var reply any
+					if json.Unmarshal(configSaveSteps(next), &reply) != nil {
+						return nil
+					}
+					return reply
+				}
+				frame["go"] = run(options.Ownership.Source, false)
+				frame["marked_go"] = run(identity["masked_source"].(string), true)
+				for _, name := range []string{"go", "marked_go"} {
+					if reply, ok := frame[name].(map[string]any); ok {
+						if files, ok := reply["files"].([]any); ok && len(files) == 1 {
+							if text, ok := files[0].(string); ok {
+								frame[name+"_inventory"] = config.ParityDocumentInventory(text)
+							}
+						}
+					}
+				}
+				if options.Ownership.Protected != nil {
+					frame["protected_inventory"] = config.ParityDocumentInventory(*options.Ownership.Protected)
+				}
+			}
+		}
+		return configSaveJSON(proof)
 	}
 	dir, err := os.MkdirTemp("", "open-ferry-parity-config-save-")
 	if err != nil {

@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -9,6 +11,94 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// ParitySourceIdentity changes only uniquely located parsed comment occurrences.
+// The caller runs the real writer on both inputs and must reproduce its exact
+// original output after removing these opaque IDs. No Rust output enters here.
+func ParitySourceIdentity(source string, operation map[string]any) map[string]any {
+	result := map[string]any{"source": source, "operation": operation}
+	fail := func() map[string]any { result["unavailable"] = true; return result }
+	var doc yaml.Node
+	if yaml.Unmarshal([]byte(source), &doc) != nil || len(doc.Content) != 1 {
+		return fail()
+	}
+	op, err := json.Marshal(operation)
+	if err != nil {
+		return fail()
+	}
+	digest := sha256.Sum256(append(append([]byte(source), 0), op...))
+	prefix := fmt.Sprintf("# parity-source-%x-", digest[:8])
+	if strings.Contains(source, prefix) || strings.Contains(string(op), prefix) {
+		return fail()
+	}
+	type span struct {
+		start, end int
+		id         string
+	}
+	spans := []span{}
+	occurrences := []any{}
+	seen := map[string]bool{}
+	valid := true
+	visit := func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
+		for _, field := range []struct{ slot, text string }{{"head", n.HeadComment}, {"line", n.LineComment}, {"foot", n.FootComment}} {
+			ordinal := 0
+			for _, text := range strings.Split(field.text, "\n") {
+				text = strings.TrimLeft(text, " \t")
+				if text == "" {
+					continue
+				}
+				if seen[text] || !strings.HasPrefix(text, "#") || strings.ContainsAny(text, "\r\u0085\u2028\u2029") {
+					valid = false
+					continue
+				}
+				seen[text] = true
+				positions := []int{}
+				for from := 0; from < len(source); {
+					rel := strings.Index(source[from:], text)
+					if rel < 0 {
+						break
+					}
+					at := from + rel
+					tail := source[at+len(text):]
+					if end := strings.IndexByte(tail, '\n'); end >= 0 {
+						tail = tail[:end]
+					}
+					if strings.Trim(tail, " \t\r") == "" {
+						positions = append(positions, at)
+					}
+					from = at + 1
+				}
+				if len(positions) != 1 {
+					valid = false
+					continue
+				}
+				id := fmt.Sprintf("%s%08x", prefix, len(occurrences))
+				spans = append(spans, span{positions[0], positions[0] + len(text), id})
+				occurrences = append(occurrences, map[string]any{"source": ParityOwner{path, side, field.slot}, "ordinal": ordinal, "text": text, "id": id})
+				ordinal++
+			}
+		}
+	}
+	parityWalk(&doc, []any{}, "document", visit)
+	parityWalk(doc.Content[0], []any{}, "root", visit)
+	if !valid || len(occurrences) == 0 {
+		return fail()
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	var masked strings.Builder
+	previous := 0
+	for _, s := range spans {
+		if s.start < previous {
+			return fail()
+		}
+		masked.WriteString(source[previous:s.start])
+		masked.WriteString(s.id)
+		previous = s.end
+	}
+	masked.WriteString(source[previous:])
+	result["masked_source"], result["occurrences"] = masked.String(), occurrences
+	return result
+}
 
 type ParityOwner struct {
 	Path []any  `json:"path"`
@@ -21,6 +111,50 @@ type parityOrigin struct {
 	Ordinal  int
 	Identity int
 	Text     string
+}
+
+// ParityDocumentInventory is the certifier's pinned-parser cross-check, not a
+// writer receipt. Decode validates aliases before the independent tag walk.
+func ParityDocumentInventory(source string) map[string]any {
+	result := map[string]any{"source": source}
+	fail := func() map[string]any { result["unavailable"] = true; return result }
+	var doc yaml.Node
+	if yaml.Unmarshal([]byte(source), &doc) != nil || len(doc.Content) != 1 {
+		return fail()
+	}
+	var decoded any
+	if doc.Decode(&decoded) != nil {
+		return fail()
+	}
+	comments := []any{}
+	visit := func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
+		for _, field := range []struct{ slot, text string }{{"head", n.HeadComment}, {"line", n.LineComment}, {"foot", n.FootComment}} {
+			ordinal := 0
+			for _, text := range strings.Split(field.text, "\n") {
+				text = strings.TrimLeft(text, " \t")
+				if text == "" {
+					continue
+				}
+				comments = append(comments, map[string]any{"source": ParityOwner{path, side, field.slot}, "ordinal": ordinal, "text": text})
+				ordinal++
+			}
+		}
+	}
+	parityWalk(&doc, []any{}, "document", visit)
+	parityWalk(doc.Content[0], []any{}, "root", visit)
+	root := expandConfigAliases(doc.Content[0])
+	tags := []string{}
+	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
+		encoded, _ := json.Marshal([]any{path, side, n.ShortTag()})
+		tags = append(tags, string(encoded))
+	})
+	if len(tags) > 30000 {
+		return fail()
+	}
+	sort.Strings(tags)
+	result["comments"] = comments
+	result["values"] = map[string]any{"decoded": fmt.Sprintf("%#v", decoded), "tags": tags}
+	return result
 }
 
 // ParityOwnership runs tree edits extracted from the pinned implementation at

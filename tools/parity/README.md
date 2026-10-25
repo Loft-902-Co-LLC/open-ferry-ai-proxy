@@ -290,6 +290,8 @@ never finds the destination; it only checks that both parsers meant the same
 source line after its original place and position in the comment block
 selected the move.
 
+The `retained-source-owner` rule accepts a deliberate comment difference only when an independent inventory finds every uniquely identified source occurrence exactly once at its own node, key/value/item side and head/line/foot slot, following bound node moves through the edit. A replay of the exact input and operation through pinned Go, with opaque comment identities, must show that Go moved or dropped the occurrence; comments Go kept retain their existing owner checks. Every decoded value and tag must equal Go, the output must load and repeat without changing bytes, and extra comments need the existing bound Go archive or migration proof. Lost, duplicated, misplaced, ambiguous, value-changing or unstable outputs stay Different. Proofs record the rule and the minimal registered protections needed for the complete case.
+
 Every line of a moved comment block must be kept at its final place, in source
 order. Keeping part of a moved block stays Different. Complete blocks can
 still pass: `random-32-223` keeps all 23 moved source lines, including two-line
@@ -304,11 +306,11 @@ write-and-reload step, so a comment that step drops still has a destination;
 the archive replay includes that step.
 If the real Go run stopped before a later write, no Go output can cross-check
 the computed place. The tool still requires every source comment there.
-When Go did write a loadable file, Rust must still keep every comment Go kept
-at the place Go wrote it; a replayed move does not remove that check.
-If Go writes a comment somewhere other than the replayed place, as in
-`random-30-947`, the case cannot be proved and stays Different, whatever the
-writer does.
+When Go did write a loadable file, the existing relocation rule still requires
+every comment Go kept at the place Go wrote it. Only the separate
+`retained-source-owner` proof above can excuse Go moving or dropping a source
+occurrence. The measured output in `random-30-947` still loses or misplaces
+source occurrences and remains Different.
 A fallback move also stays subject to the strict check when its text matches
 a comment Go kept at that destination, or any line in an unloadable step’s
 written trace. Equal text cannot prove that both source copies survived.
