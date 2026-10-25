@@ -1,0 +1,6 @@
+[
+{"case":"w_dup_moved_eq_head","source":"plugins:\n  configs:\n    demo:\n      items:\n        - {value: a}\n        # f0\n\n        - {value: b}\n        # f1\n\n        # r1\n\n        # r2\n      # r2\n      empty: {}\n"},
+{"case":"w_dup_first_eq_head","source":"plugins:\n  configs:\n    demo:\n      items:\n        - {value: a}\n        # f0\n\n        - {value: b}\n        # f1\n\n        # h\n\n        # r2\n      # h\n      empty: {}\n"},
+{"case":"w_head_eq_written","source":"plugins:\n  configs:\n    demo:\n      items:\n        - {value: a}\n        # f0\n\n        - {value: b}\n        # f1\n\n        # r1\n\n        # r2\n      # r1\n      empty: {}\n"},
+{"case":"legacy_root_col1","source":"items:\n  - {value: a}\n  # f0\n\n  - {value: b}\n  # f1\n\n # r1\n\n # r2\nempty: {}\n"}
+]

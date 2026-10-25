@@ -1,7 +1,13 @@
 use super::*;
 
 fn cases() -> Vec<Value> {
-    serde_json::from_str(include_str!("../testdata/writer/writer_r4_cases.json")).unwrap()
+    let mut cases: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_r4_cases.json")).unwrap();
+    cases.extend(
+        serde_json::from_str::<Vec<Value>>(include_str!("../testdata/writer/writer_r5_cases.json"))
+            .unwrap(),
+    );
+    cases
 }
 
 fn rows() -> Vec<Value> {
@@ -70,34 +76,59 @@ fn writer_r4_root_key_foot_stays_a_foot_after_normalization() {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    // Legacy raw writes can reach indentation normalization without emitting
-    // a tree. Their root-key feet remain an existing partial repair; this
-    // control proves the source-aware emission used by nested writes.
-    let result = op_run(&source, "nested2", false);
-    assert!(
-        !result["refused"].as_bool().unwrap_or(false),
-        "root foot nested2 refuses"
-    );
-    assert_eq!(result["files"].as_array().unwrap().len(), 2);
-    let mut expected = values(&unmarshal(source.as_bytes()).unwrap());
-    expected
-        .as_object_mut()
-        .unwrap()
-        .insert("auth-dir".into(), json!("/x"));
-    for file in result["files"].as_array().unwrap() {
+    let legacy = input("legacy_root_col1");
+    for (op, source) in [
+        ("nested2", source),
+        ("raw", legacy.clone()),
+        ("raw2", legacy),
+    ] {
+        let doc = unmarshal(source.as_bytes()).unwrap();
         assert!(
-            values(&unmarshal(file.as_str().unwrap().as_bytes()).unwrap()) == expected,
-            "root foot nested2 changed a value"
+            yaml_path(&doc.content[0], "config-version").is_none()
+                && !is_v8_config_layout(&doc.content[0]).unwrap(),
+            "root foot {op} must exercise a legacy file"
         );
+        let result = op_run(&source, op, false);
         assert!(
-            inventory(file.as_str().unwrap()) == inventory(&source),
-            "root foot nested2 moved a comment"
+            !result["refused"].as_bool().unwrap_or(false),
+            "root foot {op} refuses"
+        );
+        assert_eq!(
+            result["files"].as_array().unwrap().len(),
+            if op.ends_with('2') { 2 } else { 1 }
+        );
+        let mut expected = values(&doc);
+        if op == "nested2" {
+            expected
+                .as_object_mut()
+                .unwrap()
+                .insert("auth-dir".into(), json!("/x"));
+        }
+        for file in result["files"].as_array().unwrap() {
+            assert!(
+                values(&unmarshal(file.as_str().unwrap().as_bytes()).unwrap()) == expected,
+                "root foot {op} changed a value"
+            );
+            let mut expected_config = Config::parse(&source).unwrap();
+            if op == "nested2" {
+                expected_config.auth_dir = "/x".into();
+            }
+            assert!(
+                config_values(&Config::parse(file.as_str().unwrap()).unwrap())
+                    == config_values(&expected_config),
+                "root foot {op} changed a config value"
+            );
+            assert!(
+                inventory(file.as_str().unwrap()) == inventory(&source),
+                "root foot {op} moved a comment"
+            );
+        }
+        let repeat = op_run(&source, &format!("{}2", op.trim_end_matches('2')), false);
+        assert!(
+            result["files"][0] == repeat["files"][0] && repeat["files"][0] == repeat["files"][1],
+            "root foot {op} did not settle"
         );
     }
-    assert!(
-        result["files"][0] == result["files"][1],
-        "root foot nested2 did not settle"
-    );
 }
 
 #[test]
@@ -294,3 +325,6 @@ fn writer_r4_non_lf_normalization_keeps_the_emitted_bytes() {
 
 #[path = "writer_r4_scope_tests.rs"]
 mod writer_r4_scope_tests;
+
+#[path = "writer_r5_tests.rs"]
+mod writer_r5_tests;

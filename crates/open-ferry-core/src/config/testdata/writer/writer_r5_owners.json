@@ -1,0 +1,54 @@
+{
+  "nested2": [
+    [
+      "[0].models#key",
+      "head",
+      "# r2",
+      1
+    ],
+    [
+      "[0].plugins#key",
+      "foot",
+      "# r1",
+      1
+    ],
+    [
+      "[0].plugins.configs.demo.items[0]",
+      "foot",
+      "# f0",
+      1
+    ],
+    [
+      "[0].plugins.configs.demo.items[1]",
+      "foot",
+      "# f1",
+      1
+    ]
+  ],
+  "raw2": [
+    [
+      "[0].models#key",
+      "head",
+      "# r2",
+      1
+    ],
+    [
+      "[0].plugins#key",
+      "foot",
+      "# r1",
+      1
+    ],
+    [
+      "[0].plugins.configs.demo.items[0]",
+      "foot",
+      "# f0",
+      1
+    ],
+    [
+      "[0].plugins.configs.demo.items[1]",
+      "foot",
+      "# f1",
+      1
+    ]
+  ]
+}
