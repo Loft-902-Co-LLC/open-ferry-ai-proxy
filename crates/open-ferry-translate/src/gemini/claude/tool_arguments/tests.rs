@@ -1218,3 +1218,171 @@ fn cached_name_policy_matches_legacy_scanning() {
         }
     }
 }
+
+#[test]
+fn implicit_open_objects_preserve_arguments() {
+    let cases = [
+        (
+            "additionalProperties_omitted",
+            r##"{"type":"object","properties":{}}"##,
+            r##"{"user":"v"}"##,
+            r##"{"user":"v"}"##,
+            false,
+        ),
+        (
+            "additionalProperties_omitted_no_properties",
+            r##"{"type":"object"}"##,
+            r##"{"user":"v"}"##,
+            r##"{"user":"v"}"##,
+            false,
+        ),
+        (
+            "additionalProperties_true",
+            r##"{"type":"object","properties":{},"additionalProperties":true}"##,
+            r##"{"user":"v"}"##,
+            r##"{"user":"v"}"##,
+            false,
+        ),
+        (
+            "additionalProperties_false",
+            r##"{"type":"object","properties":{},"additionalProperties":false}"##,
+            r##"{"user":"v"}"##,
+            r##"{}"##,
+            true,
+        ),
+        (
+            "additionalProperties_false_no_properties",
+            r##"{"type":"object","additionalProperties":false}"##,
+            r##"{"user":"v"}"##,
+            r##"{}"##,
+            true,
+        ),
+        (
+            "nested_implicit_open_preserves_user_arg",
+            r##"{"type":"object","properties":{"opts":{"type":"object","properties":{}}}}"##,
+            r##"{"opts":{"user":"v"}}"##,
+            r##"{"opts":{"user":"v"}}"##,
+            false,
+        ),
+        (
+            "nested_explicit_closed_erases_user_arg",
+            r##"{"type":"object","properties":{"opts":{"type":"object","properties":{},"additionalProperties":false}}}"##,
+            r##"{"opts":{"user":"v"}}"##,
+            r##"{"opts":{}}"##,
+            false,
+        ),
+        (
+            "array_item_implicit_open_preserves_user_arg",
+            r##"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{}}}}}"##,
+            r##"{"items":[{"user":"v"}]}"##,
+            r##"{"items":[{"user":"v"}]}"##,
+            false,
+        ),
+        (
+            "array_item_explicit_closed_erases_user_arg",
+            r##"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{},"additionalProperties":false}}}}"##,
+            r##"{"items":[{"user":"v"}]}"##,
+            r##"{"items":[{}]}"##,
+            false,
+        ),
+        (
+            "allOf_implicit_open_preserves_user_arg",
+            r##"{"type":"object","allOf":[{"type":"object","properties":{}}]}"##,
+            r##"{"user":"v"}"##,
+            r##"{"user":"v"}"##,
+            false,
+        ),
+        (
+            "allOf_explicit_closed_erases_user_arg",
+            r##"{"type":"object","allOf":[{"type":"object","properties":{},"additionalProperties":false}]}"##,
+            r##"{"user":"v"}"##,
+            r##"{}"##,
+            true,
+        ),
+        (
+            "local_ref_implicit_open_preserves_user_arg",
+            r##"{"$ref":"#/$defs/open","$defs":{"open":{"type":"object","properties":{}}}}"##,
+            r##"{"user":"v"}"##,
+            r##"{"user":"v"}"##,
+            false,
+        ),
+        (
+            "local_ref_explicit_closed_erases_user_arg",
+            r##"{"$ref":"#/$defs/closed","$defs":{"closed":{"type":"object","properties":{},"additionalProperties":false}}}"##,
+            r##"{"user":"v"}"##,
+            r##"{}"##,
+            true,
+        ),
+    ];
+    for (name, schema, args, want, no_args) in cases {
+        let schema: Value = serde_json::from_str(schema).unwrap();
+        let original = json!({"tools":[{"name":"echo","input_schema":schema}]});
+        let cleaned = crate::gemini_schema::clean_json_schema_for_gemini_json_schema(
+            &schema,
+            &mut crate::gemini_schema::SchemaCopyBudget::default(),
+        );
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":cleaned}]}]});
+        let args = serde_json::from_str(args).unwrap();
+        let want: Value = serde_json::from_str(want).unwrap();
+        for translated in [&Value::Null, &sent] {
+            assert_eq!(
+                clean_arguments(&args, "echo", &original, translated),
+                want,
+                "{name}"
+            );
+        }
+        assert_eq!(parameterless(&original, "echo"), no_args, "{name}");
+    }
+}
+
+#[test]
+fn open_objects_remove_only_proven_translated_placeholders() {
+    let original =
+        json!({"tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]});
+    let args = json!({"user":"v","reason":"Brief explanation"});
+    let injected = json!({"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":{
+        "type":"object","properties":{"reason":{"type":"string","description":"Brief explanation of why you are calling this tool"}},"required":["reason"]}}]}]});
+    assert_eq!(
+        clean_arguments(&args, "echo", &original, &Value::Null),
+        json!({"user":"v"})
+    );
+    assert_eq!(
+        clean_arguments(&args, "echo", &original, &injected),
+        json!({"user":"v"})
+    );
+    let unproven = json!({"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":{
+        "type":"object","properties":{"reason":{"type":"string"}}}}]}]});
+    assert_eq!(clean_arguments(&args, "echo", &original, &unproven), args);
+}
+
+#[test]
+fn implicit_open_union_and_reclean_paths_preserve_unproven_placeholders() {
+    let original = json!({"tools":[{"name":"echo","input_schema":{
+    "type":"object","properties":{"cfg":{"anyOf":[
+        {"type":"object","properties":{}},
+        {"type":"object","properties":{"mode":{"type":"string"}},"required":["mode"],"additionalProperties":false}
+    ]}}}}]});
+    let sent = json!({"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":{
+    "type":"object","properties":{"cfg":{"anyOf":[
+        {"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]},
+        {"type":"object","properties":{"mode":{"type":"string"}},"required":["mode"]}
+    ]}}}}]}]});
+    let args = json!({"cfg":{"user":"v","reason":"business","_":true}});
+    assert_eq!(clean_arguments(&args, "echo", &original, &sent), args);
+    for closed in [false, true] {
+        let mut schema = json!({"type":"object","properties":{"flag":{"type":"string"}}});
+        if closed {
+            schema["additionalProperties"] = json!(false);
+        }
+        let original = json!({"tools":[{"name":"echo","input_schema":schema}]});
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":{
+            "type":"object","properties":{"flag":{"type":"string"}}}}]}]});
+        let args = json!({"flag":"x","_":true,"user":"v"});
+        let expected = if closed {
+            json!({"flag":"x","user":"v"})
+        } else {
+            args.clone()
+        };
+        assert_eq!(clean_arguments(&args, "echo", &original, &sent), expected);
+    }
+}
