@@ -603,6 +603,13 @@ fn convert_tools(out: &mut Value, tools: Option<&Value>, allowed: Option<&Allowe
     if !converted.declarations.is_empty() {
         let declarations = Value::Array(converted.declarations.clone());
         items.push(object([("functionDeclarations", declarations)]));
+        if builtin.iter().any(|tools| !tools.is_empty()) {
+            set_path(
+                out,
+                "toolConfig.includeServerSideToolInvocations",
+                json!(true),
+            );
+        }
     }
     items.extend(builtin.into_iter().flatten());
     if !items.is_empty() {

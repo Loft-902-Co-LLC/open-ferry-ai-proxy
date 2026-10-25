@@ -130,10 +130,10 @@ pub fn convert_openai_responses_request_to_gemini(
 
     let declarations = build_gemini_function_declarations(root);
     let mut tool_blocks = Vec::new();
-    if has_web_search_tool(root)
+    let has_google_search = has_web_search_tool(root)
         && model_supports_web_search(model)
-        && allows_web_search_tool_choice(root)
-    {
+        && allows_web_search_tool_choice(root);
+    if has_google_search {
         let mut search = Map::new();
         let domains = extract_allowed_domains(root);
         if !domains.is_empty() {
@@ -159,6 +159,13 @@ pub fn convert_openai_responses_request_to_gemini(
             convert_responses_tool_choice_to_gemini(Some(choice), &declarations.forward)
     {
         set_path(&mut out, "toolConfig.functionCallingConfig", config);
+    }
+    if has_google_search && !declarations.declarations.is_empty() {
+        set_path(
+            &mut out,
+            "toolConfig.includeServerSideToolInvocations",
+            Value::Bool(true),
+        );
     }
 
     let mut system_parts = Vec::new();
