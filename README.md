@@ -19,7 +19,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 Coming from CLIProxyAPI? Install Open Ferry, then run `open-ferry migrate`, which switches your setup over on its config and credentials, and `open-ferry migrate -undo` switches back. The install scripts offer to run it when they find CLIProxyAPI. The [migration guide](docs/migrating-from-cliproxyapi.md) covers what carries over and what doesn't.
 
-The first release, 0.1.0, isn't out yet. The releases before it are candidates for it, published to test updating from one signed release to the next. They install and update like any release, or you can [build from source](#build-from-source).
+The first release, 0.1.0, isn't out yet. Candidates 0.0.3 and 0.0.4 are published to test updating from one signed release to the next. They install and update like any release, or you can [build from source](#build-from-source).
 
 ### Install script
 
@@ -65,11 +65,11 @@ Windows PowerShell runs no script files by default; `-ExecutionPolicy Bypass` le
 The scripts take options. Piped to `sh`, pass them after `sh -s --`; in PowerShell, make the script a script block and pass them after it:
 
 ```sh
-curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh -s -- --version 0.1.0
+curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh -s -- --version 0.0.4
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1))) -Version 0.1.0
+& ([scriptblock]::Create((irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1))) -Version 0.0.4
 ```
 
 | `install.sh` | `install.ps1` | What it does |
@@ -102,7 +102,7 @@ For an unprivileged install, to download from a mirror instead of GitHub, set `O
 
 ### Run it in a container
 
-Each release has a container image for linux/amd64 and linux/arm64, `ghcr.io/loft-902-co-llc/open-ferry`, tagged with the version, such as `0.1.0`, and, unless the release is a pre-release, `latest`. It holds the release's static binary on Alpine, at the paths of CLIProxyAPI's image: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. The image has a build provenance attestation too:
+Each release has a container image for linux/amd64 and linux/arm64, `ghcr.io/loft-902-co-llc/open-ferry`, tagged with the version, such as `0.0.4`, and, unless the release is a pre-release, `latest`. It holds the release's static binary on Alpine, at the paths of CLIProxyAPI's image: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. The image has a build provenance attestation too:
 
 ```sh
 gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:<version> --repo Loft-902-Co-LLC/open-ferry-ai-proxy
