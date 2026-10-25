@@ -1060,10 +1060,7 @@ fn stream_carriers_in_detail() {
             + &block(
                 4,
                 r#"{"type":"tool_use","id":"h-N","name":"h","input":{}}"#,
-                &[
-                    r#"{"type":"input_json_delta","partial_json":"{}"}"#,
-                    r#"{"type":"input_json_delta","partial_json":"{\"k\":1}"}"#,
-                ],
+                &[r#"{"type":"input_json_delta","partial_json":"{\"k\":1}"}"#],
             )
             + &block(
                 5,
@@ -1145,8 +1142,8 @@ fn input_deltas(output: &str) -> String {
 #[test]
 fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
     let request = json!({"tools": [
-        {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}},
-        {"name":"Read","input_schema":{"type":"object","properties":{}}},
+        {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"Read","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
         {"name":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}},
         {"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
     ]});
@@ -1184,12 +1181,98 @@ fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
 // Ported from TestConvertGeminiResponseToClaude_ParameterlessToolContinuationDoesNotDuplicateEmptyObject.
 #[test]
 fn parameterless_continuation_emits_one_empty_object() {
-    let request = json!({"tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}}]});
+    let request = json!({"tools":[{"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]});
     let output = stream(&request, &[
         r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"EnterPlanMode","args":{"reason":"switch"}}}]}}]}"#,
         r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"reason":"more"}}}]},"finishReason":"STOP"}]}"#,
     ]).concat();
     assert_eq!(input_deltas(&output), "{}");
+}
+
+#[test]
+fn deferred_empty_tool_input_preserves_real_arguments_once() {
+    let request = json!({"tools":[{"name":"echo","input_schema":{
+        "type":"object","properties":{"user":{"type":"string"}}
+    }}]});
+    check_empty_tool_continuations(&request);
+}
+
+// Ported from TestConvertGeminiResponseToClaude_ImplicitOpenToolContinuationOrdering.
+#[test]
+#[ignore = "needs the p42 argument helper"]
+fn implicit_open_tool_continuation_ordering() {
+    let request =
+        json!({"tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]});
+    check_empty_tool_continuations(&request);
+}
+
+fn check_empty_tool_continuations(request: &Value) {
+    for (first, continuation) in [
+        (json!({}), json!({"user":"v"})),
+        (json!({"reason":"thinking"}), json!({"user":"v"})),
+        (json!({"user":"v"}), json!({})),
+        (json!({"user":"v"}), json!({"reason":"done"})),
+    ] {
+        // The translated schema proves that reason is a normalizer placeholder.
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"echo",
+            "parametersJsonSchema":{"type":"object","properties":{
+                "user":{"type":"string"},"reason":{"type":"string","description":"Brief explanation of why you are calling this tool"}}}}]}]});
+        let mut translator = GeminiToClaudeStream::new(request).with_translated_request(&sent);
+        let first_chunk = json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":first}}]}}]});
+        let first_out = translator.translate(first_chunk.to_string().as_bytes());
+        let continuation_chunk = json!({"candidates":[{"content":{"parts":[{"functionCall":{"args":continuation}}]},"finishReason":"STOP"}]});
+        let output = first_out
+            + &translator.translate(continuation_chunk.to_string().as_bytes())
+            + &translator.translate(b"[DONE]");
+        let input = input_deltas(&output);
+        assert_eq!(
+            serde_json::from_str::<Value>(&input).unwrap(),
+            json!({"user":"v"}),
+            "{output}"
+        );
+        assert_eq!(input, r#"{"user":"v"}"#);
+    }
+}
+
+#[test]
+fn deferred_empty_tool_input_flushes_before_each_completion() {
+    for ending in [
+        "[DONE]",
+        r#"{"candidates":[{"finishReason":"STOP"}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig"}]}}]}"#,
+        r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"next","args":{"x":1}}}]}}]}"#,
+    ] {
+        let mut translator = GeminiToClaudeStream::new(&Value::Null);
+        let first = translator.translate(br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":{}}}]}}]}"#);
+        assert!(!first.contains("input_json_delta"), "{first}");
+        let out = translator.translate(ending.as_bytes());
+        let events: Vec<Value> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap())
+            .collect();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|e| e["index"] == 0 && e["delta"]["type"] == "input_json_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "{ending}: {out}");
+        assert_eq!(deltas[0]["delta"]["partial_json"], "{}");
+        if let Some(stop) = events
+            .iter()
+            .position(|e| e["index"] == 0 && e["type"] == "content_block_stop")
+        {
+            assert!(
+                events
+                    .iter()
+                    .position(|e| e["delta"]["type"] == "input_json_delta")
+                    .unwrap()
+                    < stop
+            );
+        }
+        assert!(!translator.translate(b"[DONE]").contains("input_json_delta"));
+    }
 }
 
 // Ported from TestConvertGeminiResponseToClaudeStream_MalformedFunctionCallAfterThinkingEmitsError
