@@ -12,7 +12,7 @@ export const AUTH_FILES = `${MANAGEMENT}/auth-files`;
 /** `PATCH {"name", "auth_index"?, "disabled"}`: turn one off or on. */
 export const AUTH_FILE_STATUS = `${MANAGEMENT}/auth-files/status`;
 /** `POST {"auth_index"}`: clear one credential's cooldowns. */
-export const RESET_COOLDOWN = `${MANAGEMENT}/reset-quota`;
+export const RESET_COOLDOWN = "/v8/management/routing/cooldown/reset";
 /** `POST {"auth_index"}`: ask the provider for one credential's quota. */
 export const QUOTA_FETCH = `${MANAGEMENT}/quota/fetch`;
 
@@ -164,7 +164,7 @@ export interface UploadAnswer {
   failed?: { name: string; error: string }[];
 }
 
-/** `POST reset-quota`. */
+/** `POST routing/cooldown/reset`. */
 export interface ResetAnswer {
   status: "ok";
   auth_index: string;

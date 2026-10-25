@@ -23,6 +23,7 @@ import { ProblemNotice } from "../../components/ProblemNotice";
 import { Spinner } from "../../components/Spinner";
 import { claudeCliAnchor } from "./anchors";
 import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
+import { ClearCooldownDialog } from "./ClearCooldownDialog";
 import { pollWhileRead } from "./CredentialList";
 import { ModelCooldowns, QuotaWindows, Requests, RestText, resetNotice } from "./CredentialItem";
 import {
@@ -30,7 +31,6 @@ import {
   credentialCooldowns,
   lastUsed,
   modelCooldowns,
-  resetLabel,
   resetRetries,
   secondsUntilBack,
 } from "./credentialStates";
@@ -141,6 +141,7 @@ function EntryItem({ entry, anchor, compact, targeted, readAt, onDone }: EntryIt
   const detailsId = useId();
   const call = useApiCall();
   const client = useQueryClient();
+  const [confirmReset, setConfirmReset] = useState(false);
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [open, setOpen] = useOpenWhenTargeted(targeted);
   const credential = entry.credential;
@@ -156,10 +157,12 @@ function EntryItem({ entry, anchor, compact, targeted, readAt, onDone }: EntryIt
     mutationFn: ({ authIndex }: { authIndex: string; retried: boolean }) =>
       call<ResetAnswer>(RESET_COOLDOWN, { method: "POST", json: { auth_index: authIndex } }),
     onSuccess: (answer, { retried }) => {
+      setConfirmReset(false);
       const named = <span className="font-medium break-all">{entry.name}</span>;
       onDone(resetNotice(named, answer.models?.length ?? 0, retried));
     },
     onError: (failure) => {
+      setConfirmReset(false);
       setProblem(callProblem(failure));
     },
     onSettled: () => client.invalidateQueries({ queryKey: [CLAUDE_CLI_ENTRIES] }),
@@ -275,14 +278,11 @@ function EntryItem({ entry, anchor, compact, targeted, readAt, onDone }: EntryIt
               disabled={reset.isPending}
               onClick={() => {
                 setProblem(null);
-                reset.mutate({
-                  authIndex: credential.auth_index,
-                  retried: resetRetries(health),
-                });
+                setConfirmReset(true);
               }}
             >
               {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
-              {resetLabel(health)}
+              Clear proxy cooldown
               {itemName}
             </Button>
           )}
@@ -292,6 +292,19 @@ function EntryItem({ entry, anchor, compact, targeted, readAt, onDone }: EntryIt
         {check.isError && <CheckFailed entry={entry} error={check.error} />}
         {problem !== null && <ProblemNotice problem={problem} live />}
       </div>
+      <ClearCooldownDialog
+        name={entry.name}
+        open={confirmReset}
+        pending={reset.isPending}
+        onConfirm={() => {
+          if (credential !== null) {
+            reset.mutate({ authIndex: credential.auth_index, retried: resetRetries(health) });
+          }
+        }}
+        onCancel={() => {
+          setConfirmReset(false);
+        }}
+      />
     </article>
   );
 }

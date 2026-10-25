@@ -325,6 +325,7 @@ export function quotaCheckText(check: QuotaCheck, readAt: number): string {
 export function canReset(credential: Credential): boolean {
   return (
     (credential.cooldowns ?? []).length > 0 ||
+    (credential.quota_checks ?? []).length > 0 ||
     credential.unavailable ||
     credential.next_retry_after !== undefined
   );
@@ -339,15 +340,10 @@ export function resetRetries(health: Health): boolean {
   return health.triage === "failing";
 }
 
-/** What the button that resets a credential in `health` says. */
-export function resetLabel(health: Health): string {
-  return resetRetries(health) ? "Try again now" : "Stop resting";
-}
-
 /**
  * What a reason says to do when a credential fails for it, where that
  * differs from what to do when it rests for it: the button that resets a
- * failing one tries it again (see resetLabel).
+ * failing one tries it again (see resetRetries).
  */
 const FAILING_ACTIONS: Partial<Record<CooldownReason, string>> = {
   quota:

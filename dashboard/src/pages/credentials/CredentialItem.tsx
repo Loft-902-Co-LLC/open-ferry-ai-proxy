@@ -26,6 +26,7 @@ import {
   formatSeconds,
   formatShortDateTime,
 } from "../../lib/format";
+import { ClearCooldownDialog } from "./ClearCooldownDialog";
 import { QuotaButton } from "./QuotaDialog";
 import { DetailsButton, useOpenWhenTargeted } from "./TriageList";
 import {
@@ -38,7 +39,6 @@ import {
   providerName,
   quotaCheckOf,
   quotaCheckText,
-  resetLabel,
   resetRetries,
   timeLeft,
   unlistedQuotaChecks,
@@ -394,6 +394,7 @@ export function CredentialItem({
     enabled: configKey,
   });
   const client = useQueryClient();
+  const [confirmReset, setConfirmReset] = useState(false);
   const [problem, setProblem] = useState<CallProblem | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [open, setOpen] = useOpenWhenTargeted(targeted);
@@ -437,9 +438,13 @@ export function CredentialItem({
         json: { auth_index: credential.auth_index },
       }),
     onSuccess: (answer, retried) => {
+      setConfirmReset(false);
       onDone(resetNotice(named, answer.models?.length ?? 0, retried));
     },
-    onError: failed,
+    onError: (error) => {
+      setConfirmReset(false);
+      failed(error);
+    },
     onSettled: refresh,
   });
 
@@ -525,11 +530,11 @@ export function CredentialItem({
               disabled={busy}
               onClick={() => {
                 setProblem(null);
-                reset.mutate(resetRetries(health));
+                setConfirmReset(true);
               }}
             >
               {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
-              {resetLabel(health)}
+              Clear proxy cooldown
               {itemName}
             </Button>
           )}
@@ -568,6 +573,17 @@ export function CredentialItem({
         {problem !== null && <ProblemNotice problem={problem} live onReloadConfig={editor.reload} />}
       </div>
 
+      <ClearCooldownDialog
+        name={name}
+        open={confirmReset}
+        pending={reset.isPending}
+        onConfirm={() => {
+          reset.mutate(resetRetries(health));
+        }}
+        onCancel={() => {
+          setConfirmReset(false);
+        }}
+      />
       <ConfirmDialog
         open={confirmDelete}
         title={`Delete ${credential.name}?`}
