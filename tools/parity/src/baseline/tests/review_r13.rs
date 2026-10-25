@@ -21,26 +21,32 @@ fn classify(case: &Case, go: &Value, oracle: Option<&[u8]>) -> (Value, Option<BT
 
 #[test]
 fn review_r13_rust_only_parse_failure_is_fatal() {
-    let case = Case::new("flow-ls", "", "")
-        .with_options(json!({"file":"a: [1, # c\u{2028} 2]\n","steps":[{"op":"save"}]}));
-    let (proof, kinds) = classify(&case, &json!({"files":["a:\n  - 1 # c\n  - 2\n"]}), None);
+    // Go accepts a tab after the colon; the saphyr reader still refuses it.
+    let case = Case::new("tab-after-colon", "", "")
+        .with_options(json!({"file":"debug:\ttrue\n","steps":[{"op":"save"}]}));
+    assert!(open_ferry_core::config::Config::parse("debug:\ttrue\n").is_err());
+    let (proof, kinds) = classify(&case, &json!({"files":["debug: true\n"]}), None);
     assert_eq!(proof["reason"], "check 1: no reproducing subset");
     assert!(kinds.is_none(), "{kinds:?}");
 }
 
 #[test]
-fn review_r13_unicode_guard_refusal_has_a_distinct_unbaselined_kind() {
-    let case = Case::new("guard-ls", "", "")
-        .with_options(json!({"file":"# c\u{2028}debug: true\n","steps":[{"op":"save"}]}));
-    let (proof, kinds) = classify(&case, &json!({"files":["# c\ndebug: true\n"]}), None);
-    assert_eq!(proof["reason"], "check 1: no reproducing subset");
+fn review_r13_flow_comment_ls_saves_its_values_and_comment() {
+    use open_ferry_core::config::AnyValue;
+
+    let case = Case::new("flow-ls", "", "")
+        .with_options(json!({"file":"a: [1, # c\u{2028} 2]\n","steps":[{"op":"save"}]}));
+    let protected = Translator::ConfigSave.run_rust(&case).unwrap();
+    assert!(protected.get("error").is_none(), "{protected}");
+    let output = protected["files"][0].as_str().unwrap();
+    let AnyValue::Map(saved) = AnyValue::parse_yaml(output).unwrap() else {
+        panic!("saved config is not a mapping");
+    };
     assert_eq!(
-        kinds.unwrap(),
-        BTreeSet::from(["rust-refusal/unicode-guard/save".into()])
+        saved.get("a"),
+        Some(&AnyValue::Seq(vec![AnyValue::Int(1), AnyValue::Int(2)]))
     );
-    let baseline: Baseline =
-        serde_json::from_str(include_str!("../../../baseline/config-save.json")).unwrap();
-    assert!(!baseline.kinds.contains("rust-refusal/unicode-guard/save"));
+    assert_eq!(output.matches("# c").count(), 1, "comment text stays once");
 }
 
 #[test]
@@ -163,21 +169,5 @@ fn review_r13_rust_refusal_requires_go_to_stop_no_later() {
         assert!(difference_kinds(&options, &proof, &later, Some(&protected)).is_none());
         let completed = json!({"files":["x: 1\n","x: 2\n"]});
         assert!(difference_kinds(&options, &proof, &completed, Some(&protected)).is_none());
-    }
-}
-
-#[test]
-fn review_r13_guard_recognition_requires_the_complete_message() {
-    let exact = "config value at line 1, path $.debug, is read differently by the saphyr loader and writer in input containing U+2028 (LINE SEPARATOR); write refused, file unchanged";
-    assert!(unicode_guard_refusal(exact));
-    assert!(unicode_guard_refusal(&exact.replace("value", "scalar")));
-    for changed in [
-        format!("prefix {exact}"),
-        format!("{exact} suffix"),
-        exact.replace("line 1", "line 0"),
-        exact.replace("U+2028 (LINE SEPARATOR)", "unknown"),
-        exact.replace("; write refused, file unchanged", ""),
-    ] {
-        assert!(!unicode_guard_refusal(&changed), "{changed}");
     }
 }
