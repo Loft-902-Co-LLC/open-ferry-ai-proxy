@@ -3111,8 +3111,7 @@ impl Manager {
                 auth,
                 result,
                 &model_key,
-                scope_before,
-                scope_after,
+                (scope_before, scope_after),
                 now,
             );
             auth.updated_at = Some(now);
