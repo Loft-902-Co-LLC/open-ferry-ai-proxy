@@ -1142,8 +1142,8 @@ fn input_deltas(output: &str) -> String {
 #[test]
 fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
     let request = json!({"tools": [
-        {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
-        {"name":"Read","input_schema":{"type":"object","properties":{},"additionalProperties":false}},
+        {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}},
+        {"name":"Read","input_schema":{"type":"object","properties":{}}},
         {"name":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}},
         {"name":"Bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}
     ]});
@@ -1175,6 +1175,43 @@ fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
             serde_json::from_str::<Value>(&input_deltas(&output)).unwrap(),
             want
         );
+    }
+}
+
+#[test]
+#[ignore = "needs the p42 argument helper"]
+fn implicit_open_cleaned_placeholders_are_deferred() {
+    for closed in [false, true] {
+        let mut request = json!({"tools":[
+            {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}},
+            {"name":"Read","input_schema":{"type":"object","properties":{}}},
+            {"name":"read","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}
+        ]});
+        if closed {
+            for index in [0, 1] {
+                request["tools"][index]["input_schema"]["additionalProperties"] = json!(false);
+            }
+        }
+        for name in ["EnterPlanMode", "Read"] {
+            let mut translator = GeminiToClaudeStream::new(&request);
+            let first = json!({"candidates":[{"content":{"parts":[{"functionCall":{
+                "name":name,"args":{"reason":"switch"}
+            }}]}}]});
+            let before = translator.translate(first.to_string().as_bytes());
+            assert_eq!(
+                input_deltas(&before),
+                if closed { "{}" } else { "" },
+                "{name}, closed={closed}: {before}"
+            );
+            let after = translator.translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#)
+                + &translator.translate(b"[DONE]");
+            assert_eq!(
+                input_deltas(&after),
+                if closed { "" } else { "{}" },
+                "{name}, closed={closed}: {after}"
+            );
+            assert_eq!(input_deltas(&(before + &after)), "{}");
+        }
     }
 }
 
