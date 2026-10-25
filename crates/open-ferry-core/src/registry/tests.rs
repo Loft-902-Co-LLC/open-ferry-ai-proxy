@@ -36,6 +36,70 @@ fn ids(maps: &[Map<String, Value>]) -> Vec<&str> {
 }
 
 #[test]
+fn gemini_catalog_token_limits_prefer_explicit_then_positive_fallback() {
+    let registry = ModelRegistry::new();
+    for (input, output, context, completion, expected_input, expected_output) in [
+        (123, 45, 1000, 500, Some(123), Some(45)),
+        (0, 0, 1_048_576, 65_536, Some(1_048_576), Some(65_536)),
+        (123, 0, 1000, 500, Some(123), Some(500)),
+        (0, 45, 1000, 500, Some(1000), Some(45)),
+        (0, 0, 0, 0, None, None),
+    ] {
+        registry.register_client(
+            "client",
+            "gemini",
+            &[ModelInfo {
+                input_token_limit: input,
+                output_token_limit: output,
+                context_length: context,
+                max_completion_tokens: completion,
+                ..model("gemini-limits")
+            }],
+        );
+        let maps = registry.available_model_maps("gemini");
+        assert_eq!(
+            maps[0].get("inputTokenLimit").and_then(Value::as_u64),
+            expected_input
+        );
+        assert_eq!(
+            maps[0].get("outputTokenLimit").and_then(Value::as_u64),
+            expected_output
+        );
+    }
+}
+
+#[test]
+fn gemini_catalog_token_limits_refresh_after_duplicate_registrations() {
+    let registry = ModelRegistry::new();
+    let first = ModelInfo {
+        context_length: 1000,
+        max_completion_tokens: 100,
+        ..model("gemini-limits")
+    };
+    registry.register_client("client", "gemini", &[first.clone(), model("gemini-limits")]);
+    let initial = registry.available_model_maps("gemini");
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0]["inputTokenLimit"], 1000);
+    assert_eq!(initial[0]["outputTokenLimit"], 100);
+    assert_eq!(registry.model_count("gemini-limits"), 2);
+    let generation = registry.generation();
+    let updated = ModelInfo {
+        context_length: 2000,
+        max_completion_tokens: 200,
+        ..first
+    };
+    registry.register_client("client", "gemini", &[updated.clone(), updated]);
+    assert_ne!(registry.generation(), generation);
+    let refreshed = registry.available_model_maps("gemini");
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0]["inputTokenLimit"], 2000);
+    assert_eq!(refreshed[0]["outputTokenLimit"], 200);
+    assert_eq!(initial[0]["inputTokenLimit"], 1000);
+    registry.unregister_client("client");
+    assert!(registry.available_model_maps("gemini").is_empty());
+}
+
+#[test]
 fn get_model_info_returns_clone() {
     let registry = ModelRegistry::new();
     registry.register_client(

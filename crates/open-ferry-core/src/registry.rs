@@ -1100,10 +1100,19 @@ fn model_to_map(model: &ModelInfo, handler_type: &str) -> Map<String, Value> {
                     map.insert(key, value.clone().into());
                 }
             }
-            for (key, value) in [
-                ("inputTokenLimit", model.input_token_limit),
-                ("outputTokenLimit", model.output_token_limit),
+            for (key, value, fallback) in [
+                (
+                    "inputTokenLimit",
+                    model.input_token_limit,
+                    model.context_length,
+                ),
+                (
+                    "outputTokenLimit",
+                    model.output_token_limit,
+                    model.max_completion_tokens,
+                ),
             ] {
+                let value = if value > 0 { value } else { fallback };
                 if value > 0 {
                     map.insert(key, value.into());
                 }
