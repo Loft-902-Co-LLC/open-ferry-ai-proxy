@@ -589,3 +589,14 @@ fn nested_refs_chat_to_gemini_fit_two_mib_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn root_conjunction_transfers_sibling_literals_without_recopies() {
+    let literal = "x".repeat(sibling_allocations::BYTES);
+    let schema = json!({"$ref":"#/$defs/A","minLength":1,"default":literal,
+        "$defs":{"A":{"type":"string","minLength":5}}});
+    let (out, copies) = sibling_allocations::measure(|| inline_for_clean(&schema));
+    assert_eq!(out["allOf"][0]["minLength"], 5);
+    assert_eq!(out["default"], literal);
+    assert_eq!(copies, 1);
+}
