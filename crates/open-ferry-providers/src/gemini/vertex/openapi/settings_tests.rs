@@ -293,6 +293,29 @@ fn config_resolution_checks_index_then_prefix_and_proxy() {
 
 #[test]
 fn location_rewrites_hosts_resources_and_keeps_full_urls_without_overrides() {
+    for base in [
+        "",
+        "https://us-central1-aiplatform.googleapis.com",
+        "https://aiplatform.us.rep.googleapis.com",
+        "https://aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/endpoints/openapi",
+    ] {
+        for (location, host) in [
+            ("us", "aiplatform.us.rep.googleapis.com"),
+            ("eu", "aiplatform.eu.rep.googleapis.com"),
+            ("GLOBAL", "aiplatform.googleapis.com"),
+            ("us-central1", "us-central1-aiplatform.googleapis.com"),
+        ] {
+            assert_eq!(
+                base_url(base, "p", location),
+                format!("https://{host}/v1/projects/p/locations/{location}/endpoints/openapi"),
+                "{base}/{location}"
+            );
+        }
+    }
+    assert_eq!(
+        base_url("https://relay.test", "p", "eu"),
+        "https://relay.test/v1/projects/p/locations/eu/endpoints/openapi"
+    );
     for tail in ["", "/publishers/google/models", "/endpoints/openapi"] {
         let base = format!(
             "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1{tail}"
@@ -609,6 +632,8 @@ fn location_rewrite_keeps_host_only_openapi_paths_single_slashed() {
         for (location, host) in [
             ("europe-west4", "europe-west4-aiplatform.googleapis.com"),
             ("global", "aiplatform.googleapis.com"),
+            ("us", "aiplatform.us.rep.googleapis.com"),
+            ("eu", "aiplatform.eu.rep.googleapis.com"),
         ] {
             assert_eq!(
                 base_url(
