@@ -1,3 +1,7 @@
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_commentary_phase_test.go
+// (v8.0.42, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
 use super::*;
 
 fn blocks(events: &[Value]) -> Vec<Value> {
