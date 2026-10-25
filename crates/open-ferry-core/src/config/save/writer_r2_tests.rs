@@ -418,8 +418,14 @@ fn writer_r2_nonboundary_and_excluded_model_saves_keep_main_bytes() {
         let reordered_save = case == "two_empty_seq_after"
             && ["save", "migrate", "patch", "put"].contains(&op.trim_end_matches('2'));
         if nonboundary || reordered_save {
+            let run = || op_run(&source(case), op, true);
+            let result = if nonboundary && matches!(op, "nested" | "nested2" | "raw" | "raw2") {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            };
             assert_eq!(
-                receipt(&op_run(&source(case), op, true)),
+                receipt(&result),
                 row["normal"],
                 "{case} {op}"
             );
