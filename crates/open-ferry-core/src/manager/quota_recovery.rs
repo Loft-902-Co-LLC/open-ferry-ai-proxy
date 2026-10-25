@@ -342,8 +342,11 @@ impl Recoveries {
             let after = scope_deadline(auth, &scope);
             own_hold(settings, result, status, now, before, after)
         };
+        // A claim stays through a failure it can't be told apart from: its
+        // cooldown layer stands (the retain above ends it when it doesn't),
+        // and the windows it names stay owed. The failure's sequence number
+        // fences it until a later recognized 429 merges its windows in.
         if status != 429 {
-            self.claims.remove(&key);
             self.hold(key, own());
             return;
         }
@@ -370,10 +373,7 @@ impl Recoveries {
                     },
                 );
             }
-            None => {
-                self.claims.remove(&key);
-                self.hold(key, own());
-            }
+            None => self.hold(key, own()),
         }
     }
 

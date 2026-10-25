@@ -534,8 +534,30 @@ async fn an_expired_foreign_hold_stops_blocking_a_claim() {
     assert!(!blocked(&h, OPUS));
 }
 
+/// The headers of a 429 that rejects the 5-hour window alone.
+fn five_hour_headers() -> HeaderMap {
+    headers(&[
+        ("anthropic-ratelimit-unified-status", "rejected"),
+        ("anthropic-ratelimit-unified-5h-status", "rejected"),
+        ("anthropic-ratelimit-unified-7d-status", "allowed"),
+        (
+            "anthropic-ratelimit-unified-representative-claim",
+            "five_hour",
+        ),
+    ])
+}
+
+/// A recognized quota 429 of `model` holding it for `retry`.
+fn quota_429(model: &str, response_headers: HeaderMap, retry: Duration) -> CallResult {
+    CallResult {
+        retry_after: Some(retry),
+        ..failure(model, response_headers, false)
+    }
+}
+
 /// The 503 comes after the quota 429 and keeps the 7-day deadline: its own
-/// contribution is its own 10 minutes, not the merged one.
+/// contribution is its own 10 minutes, not the merged one. The 429 after it
+/// names another window, so the first one's stays owed.
 #[tokio::test(start_paused = true)]
 async fn a_foreign_hold_counts_its_own_deadline_not_the_merged_one() {
     let h = Harness::new(Settings::default());
@@ -545,14 +567,78 @@ async fn a_foreign_hold_counts_its_own_deadline_not_the_merged_one() {
     h.manager
         .mark_result(&other_failure(OPUS, 503, Duration::from_secs(600)));
     h.clock.advance(Duration::from_secs(10));
-    h.manager.mark_result(&failure(OPUS, opus_headers(), false));
+    h.manager
+        .mark_result(&quota_429(OPUS, five_hour_headers(), HOUR));
     let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
 
     h.clock.advance(Duration::from_secs(5 * 60));
     assert!(!recover(&h, &reading(h.now(), &healthy)));
     h.clock.advance(Duration::from_secs(6 * 60));
+    let opus_full = [(UsageWindow::SevenDayOpus, 100.0)];
+    assert!(
+        !recover(&h, &reading(h.now(), &opus_full)),
+        "the earlier Opus window is still owed"
+    );
+    assert!(blocked(&h, OPUS));
     assert!(
         recover(&h, &reading(h.now(), &healthy)),
         "the 503 ended 11 minutes in; a 7-day merged deadline blocks the claim"
     );
 }
+
+/// A 503 between two recognized 429s of a model must not drop the windows the
+/// first one rejected: the second names another window, and a read that
+/// shows the first still full must not end the longer cooldown.
+#[tokio::test(start_paused = true)]
+async fn an_intervening_503_keeps_an_earlier_window_owed() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&other_failure(OPUS, 503, Duration::from_secs(600)));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&quota_429(OPUS, five_hour_headers(), HOUR));
+
+    h.clock.advance(Duration::from_secs(11 * 60));
+    let opus_full = [(UsageWindow::SevenDayOpus, 100.0)];
+    assert!(
+        !recover(&h, &reading(h.now(), &opus_full)),
+        "the five-day Opus cooldown was cleared by a read showing Opus full"
+    );
+    assert!(blocked(&h, OPUS));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS));
+}
+
+/// The same with a 429 no usage read can speak for between them. Its length
+/// is hidden behind the longer cooldown, so it stays unknown and fails
+/// closed whatever the read shows.
+#[tokio::test(start_paused = true)]
+async fn an_unrecognized_429_between_keeps_windows_owed_and_fails_closed() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&other_failure(OPUS, 429, Duration::from_secs(600)));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&quota_429(OPUS, five_hour_headers(), HOUR));
+
+    h.clock.advance(Duration::from_secs(11 * 60));
+    let healthy = [(UsageWindow::SevenDayOpus, 2.0)];
+    assert!(
+        !recover(&h, &reading(h.now(), &healthy)),
+        "a hold of unknown length was taken for an ended one"
+    );
+    assert!(blocked(&h, OPUS));
+}
+
+/
