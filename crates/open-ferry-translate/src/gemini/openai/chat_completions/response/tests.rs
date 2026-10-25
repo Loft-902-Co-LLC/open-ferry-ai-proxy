@@ -10,6 +10,74 @@ use serde_json::{Value, json};
 
 use super::*;
 
+#[test]
+fn parallel_tool_calls_keep_supplied_ids_and_cross_chunk_indices() {
+    let mut stream = GeminiToOpenAIStream::new(&Value::Null);
+    let first = stream.translate(br#"{"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"id":"call_utc","name":"get_time","args":{"tz":"UTC"}}}]}},{"index":3,"content":{"parts":[{"functionCall":{"id":"other-1234567890123-7","name":"lookup","args":{}}}]}}]}"#);
+    let second = stream.translate(br#"{"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"id":"call_scl","name":"get_time","args":{"tz":"America/Santiago"}}},{"functionCall":{"id":"call_tyo","name":"get_time","args":{"tz":"Asia/Tokyo"}}}]},"finishReason":"STOP"},{"index":3,"content":{"parts":[{"functionCall":{"id":"other-2","name":"lookup"}}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}"#);
+    let calls: Vec<_> = first
+        .iter()
+        .chain(&second)
+        .flat_map(|chunk| {
+            chunk["choices"][0]["delta"]["tool_calls"]
+                .as_array()
+                .unwrap()
+        })
+        .map(|call| {
+            (
+                call["id"].as_str().unwrap(),
+                call["index"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("call_utc", 0),
+            ("other-1234567890123-7", 0),
+            ("call_scl", 1),
+            ("call_tyo", 2),
+            ("other-2", 1)
+        ]
+    );
+}
+
+#[test]
+fn supplied_call_ids_survive_stream_and_non_stream_translation() {
+    for id in [
+        json!("call_client"),
+        json!("  call_client  "),
+        json!("supplied-1234567890123-7"),
+        json!(""),
+        json!(" \t"),
+        Value::Null,
+    ] {
+        let response = json!({"candidates":[{"content":{"parts":[{"functionCall":{
+            "id":id,"name":"lookup","args":{"key":"v"}
+        }}]},"finishReason":"STOP"}]});
+        let mut stream = GeminiToOpenAIStream::new(&Value::Null);
+        let chunks = stream.translate(response.to_string().as_bytes());
+        let out = convert_gemini_response_to_openai_non_stream(&Value::Null, &response);
+        let stream_id = chunks[0]["choices"][0]["delta"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap();
+        let non_stream_id = out["choices"][0]["message"]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap();
+        let expected = id.as_str().unwrap_or("").trim();
+        for actual in [stream_id, non_stream_id] {
+            if expected.is_empty() {
+                assert!(actual.starts_with("lookup-"));
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+        if expected.is_empty() {
+            assert_ne!(stream_id, non_stream_id);
+        }
+    }
+}
+
 // Not upstream's: Raw keeps the exponent's spelling inside argument strings.
 #[test]
 fn tool_arguments_keep_number_text() {
