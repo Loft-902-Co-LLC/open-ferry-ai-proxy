@@ -6,6 +6,45 @@ fn cases() -> Vec<Value> {
     serde_json::from_str(include_str!("../testdata/writer/owner_round5.json")).unwrap()
 }
 
+#[test]
+fn owner_round5_unparsed_source_comments_keep_writer_bytes() {
+    let base = cases()
+        .into_iter()
+        .find(|row| row["case"] == "ek-base")
+        .unwrap()["source"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let boundaries: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/writer/owner_round5_source_boundaries.json"
+    ))
+    .unwrap();
+    for boundary in boundaries {
+        let name = boundary["case"].as_str().unwrap();
+        let data = format!("{base}{}", boundary["suffix"].as_str().unwrap());
+        let (candidate, source) =
+            candidate_nested_scalar(data.as_bytes(), &["auth-dir"], "/x").unwrap();
+        let proposed = tree::repair_comment_candidate(&source, candidate.clone());
+        assert!(candidate.bytes != proposed.bytes, "{name}: no owner repair");
+        assert!(
+            source.holds(&tree::read_receipted(&proposed).unwrap()),
+            "{name}: parsed comments did not keep their owners"
+        );
+        assert!(
+            super::super::super::yaml3::parser::physical_comment_lines(data.as_bytes())
+                .unwrap()
+                .len()
+                > source.comments.len(),
+            "{name}: fixture has no unparsed physical source comment"
+        );
+        let main = tree::without_owner_protection(|| try_run(data.as_bytes(), "nested"));
+        assert!(
+            try_run(data.as_bytes(), "nested") == main,
+            "{name}: repair lost a physical source comment"
+        );
+    }
+}
+
 fn run(source: &[u8], op: &str) -> Vec<u8> {
     try_run(source, op).unwrap()
 }
@@ -344,4 +383,45 @@ fn owner_round5_repairs_count_unreceipted_duplicates() {
     let text = b"x: '# scalar'\ny: |\n  # scalar content\n# actual\n";
     let lines = super::super::super::yaml3::parser::physical_comment_lines(text).unwrap();
     assert_eq!(lines.len(), 1, "scalar contents were counted as comments");
+}
+
+#[test]
+fn owner_round5_incoming_unparsed_comments_keep_writer_bytes() {
+    use crate::config::v8_edit::{V8Edit, V8Method, preview_v8};
+    let source = cases()
+        .into_iter()
+        .find(|row| row["case"] == "ek-base")
+        .unwrap()["source"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inputs: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/writer/owner_round5_incoming_source.json"
+    ))
+    .unwrap();
+    for input in inputs {
+        let edit = V8Edit {
+            method: V8Method::Put,
+            path: vec!["oauth".into(), "auth-dir".into()],
+            body: input["body"].as_str().unwrap().as_bytes().to_vec(),
+            yaml: true,
+        };
+        let main = tree::without_owner_protection(|| preview_v8(source.as_bytes(), &edit)).unwrap();
+        let output = preview_v8(source.as_bytes(), &edit).unwrap();
+        if input["unparsed"] == true {
+            assert!(
+                output == main,
+                "unparsed incoming source comment was lost by a repair"
+            );
+        } else {
+            assert!(
+                output != main,
+                "complete incoming source did not exercise repair"
+            );
+            assert!(
+                preview_v8(&output, &edit).unwrap() == output,
+                "complete incoming source changed on repeat"
+            );
+        }
+    }
 }
