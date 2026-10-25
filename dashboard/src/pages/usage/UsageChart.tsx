@@ -40,15 +40,14 @@ export function metricValue(metrics: Metrics, metric: ChartMetric): number {
   }
 }
 
-function bucketLabel(iso: string, bucket: Bucket): string {
-  const date = new Date(iso);
+function bucketFormatter(bucket: Bucket): Intl.DateTimeFormat {
   const options: Intl.DateTimeFormatOptions =
     bucket === "day"
       ? { month: "short", day: "numeric" }
       : bucket === "hour"
         ? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }
         : { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
-  return new Intl.DateTimeFormat("en", options).format(date);
+  return new Intl.DateTimeFormat("en", options);
 }
 
 /** A series' name: its group's label, or what it stands for. */
@@ -96,7 +95,11 @@ export function chartData(data: UsageSeries, metric: ChartMetric): ChartData {
     return { series: [], rows: [] };
   }
   const ungrouped = data.group_by === null && data.series.length === 1;
-  const label = (start: string) => bucketLabel(start, data.bucket);
+  let formatter: Intl.DateTimeFormat | undefined;
+  const label = (start: string) => {
+    formatter ??= bucketFormatter(data.bucket);
+    return formatter.format(new Date(start));
+  };
   if (ungrouped && metric === "requests") {
     return {
       series: [
