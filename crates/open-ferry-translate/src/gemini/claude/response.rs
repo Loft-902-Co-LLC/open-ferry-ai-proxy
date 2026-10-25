@@ -421,12 +421,11 @@ impl GeminiToClaudeStream {
             &self.current_tool,
             &self.original_request,
             &self.translated_request,
-        );
+        )
+        .to_string();
         let partial = if self.current_parameterless && self.current_input_emitted {
             String::new()
-        } else if !self.current_parameterless
-            && cleaned.as_object().is_some_and(|fields| fields.is_empty())
-        {
+        } else if !self.current_parameterless && cleaned == "{}" {
             if !self.current_input_emitted {
                 self.current_pending_empty = true;
                 return;
@@ -435,7 +434,7 @@ impl GeminiToClaudeStream {
         } else {
             self.current_input_emitted = true;
             self.current_pending_empty = false;
-            cleaned.to_string()
+            cleaned
         };
         self.push_delta(
             json!({"type": "input_json_delta", "partial_json": partial}),
