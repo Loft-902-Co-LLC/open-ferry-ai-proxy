@@ -403,6 +403,7 @@ mod tests {
 mod stop_reason_tests {
     use super::*;
     use http_body_util::BodyExt;
+    use serde_json::json;
 
     #[tokio::test]
     async fn length_finish_preserves_content_tools_and_trailing_usage() {
