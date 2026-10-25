@@ -11,7 +11,7 @@
 //! calls, and inline data becomes `images`, as `data:` URLs. A candidate's
 //! finish reason is sent once a chunk carries usage; a candidate that called
 //! a tool finishes with `tool_calls`. Without inline usage, a cached finish
-//! reason is sent with later usage or on `[DONE]`, once per candidate. Tool
+//! reason is sent with later usage or on `[DONE]`. Tool
 //! names are mapped back from their sanitized form
 //! ([`restore_sanitized_tool_name`]) using the tools the client
 //! declared, which upstream reads from `tools[].name`, so Chat Completions
@@ -106,6 +106,9 @@ impl GeminiToOpenAIStream {
             self.response_id = str_of(Some(id)).into_owned();
         }
         let mut base = self.base_chunk();
+        if response.get("modelVersion").is_some() {
+            base["model"] = Value::String(self.model_version.clone());
+        }
         let usage = response.get("usageMetadata");
         if let Some(usage) = usage {
             base["usage"] = usage_of(usage);
@@ -115,17 +118,15 @@ impl GeminiToOpenAIStream {
         }
 
         match response.get("candidates") {
-            Some(Value::Array(candidates)) if !candidates.is_empty() => candidates
+            Some(Value::Array(candidates)) => candidates
                 .iter()
                 .map(|candidate| self.candidate_chunk(&base, candidate, usage.is_some()))
                 .collect(),
             _ if usage.is_some() => {
-                let chunks = self.pending_finish_chunks(&base);
-                if chunks.is_empty() {
-                    vec![base]
-                } else {
-                    chunks
+                if !self.sent_finish_reason.contains(&0) {
+                    self.apply_finish_reason(&mut base["choices"][0], 0);
                 }
+                vec![base]
             }
             _ => Vec::new(),
         }
@@ -136,7 +137,7 @@ impl GeminiToOpenAIStream {
             "id": self.response_id,
             "object": "chat.completion.chunk",
             "created": self.unix_timestamp,
-            "model": self.model_version,
+            "model": if self.model_version.is_empty() { "model" } else { &self.model_version },
             "choices": [{
                 "index": 0,
                 "delta": {"role": null, "content": null, "reasoning_content": null, "tool_calls": null},
@@ -169,7 +170,8 @@ impl GeminiToOpenAIStream {
 
     fn apply_finish_reason(&mut self, choice: &mut Value, index: i64) {
         let reason = self.finish_reason.get(&index).map_or("", String::as_str);
-        if !reason.is_empty() && self.sent_finish_reason.insert(index) {
+        if !reason.is_empty() {
+            self.sent_finish_reason.insert(index);
             let finish = if self.saw_tool_call.contains(&index) {
                 "tool_calls"
             } else if reason == "MAX_TOKENS" {
