@@ -3094,7 +3094,7 @@ impl Manager {
             let dispatched = self.current_execution_seq();
             let (_, recovery_scope) = super::quota_recovery::scope_of(result, &model_key);
             let scope_before = super::quota_recovery::scope_deadline(auth, &recovery_scope);
-            let stale = apply_result(
+            let (stale, own) = apply_result(
                 &state.settings,
                 auth,
                 result,
@@ -3114,10 +3114,10 @@ impl Manager {
                 .after_result(cap, auth, result, &model_key, now, stale);
             // What a later usage read may end (see `quota_recovery`).
             state.quota_recovery.observe(
-                &state.settings,
                 auth,
                 result,
                 &model_key,
+                own,
                 (scope_before, scope_after),
                 now,
             );

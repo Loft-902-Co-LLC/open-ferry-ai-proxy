@@ -212,23 +212,6 @@ pub(crate) fn forced_cooldown_end(now: Timestamp) -> Timestamp {
     add(now, TRANSIENT_ERROR_COOLDOWN)
 }
 
-/// When the cooldown a transient failure (a 408, 5xx or the like) puts on its
-/// scope ends, by itself: [`recoverable_failure_retry_after`], else, for a
-/// forced cooldown, [`forced_cooldown_end`]. `disable_cooling` comes from
-/// [`failure_cooling_disabled`]. Applying a failure builds this deadline from
-/// the same parts (then keeps a longer one standing), and `quota_recovery`
-/// counts it for the failure's own hold, so that they can't drift.
-pub(crate) fn transient_failure_end(
-    settings: &Settings,
-    now: Timestamp,
-    retry_after: Option<Duration>,
-    disable_cooling: bool,
-    force_cooldown: bool,
-) -> Option<Timestamp> {
-    recoverable_failure_retry_after(settings, now, retry_after, disable_cooling)
-        .or_else(|| force_cooldown.then(|| forced_cooldown_end(now)))
-}
-
 /// Whether a forced cooldown's error, the one that no cooling setting
 /// overrides.
 pub(crate) fn is_forced_cooldown(err: Option<&AuthError>) -> bool {
@@ -655,6 +638,8 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
 /// ([`Manager::current_execution_seq`](super::Manager)): the watermark a
 /// cooldown recorded now takes, so a success from a call dispatched at or
 /// before it leaves that cooldown be.
+///
+/// Also returns the failure's own deadline (see [`OwnDeadline`]).
 pub(crate) fn apply_result(
     settings: &Settings,
     auth: &mut Auth,
@@ -663,7 +648,7 @@ pub(crate) fn apply_result(
     now: Timestamp,
     dispatched: u64,
     rests: LiveRests,
-) -> StaleSuccess {
+) -> (StaleSuccess, OwnDeadline) {
     let was_terminal_unauthorized = has_unauthorized_auth_failure(auth);
     let stale = stale_success(
         auth,
@@ -673,7 +658,7 @@ pub(crate) fn apply_result(
         was_terminal_unauthorized,
         rests,
     );
-    apply_outcome(
+    let own = apply_outcome(
         settings,
         auth,
         result,
@@ -692,7 +677,27 @@ pub(crate) fn apply_result(
     if !result.skip_quota_observation {
         observe_quota(auth, result, model_key, now);
     }
-    stale
+    (stale, own)
+}
+
+/// The deadline a failure's own cooldown gave its scope, as application sets
+/// it, before a longer earlier cooldown is kept standing over it. The
+/// `quota_recovery` counts exactly this for a cooldown no usage read can
+/// speak for, so that it can't drift from the classifiers (model support,
+/// Cloudflare), the hints and the cooling overrides applied here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnDeadline {
+    /// Not told apart here (a quota 429, whose deadline mixes the earlier
+    /// quota's in, or a failure that applied nothing): the scope's deadline
+    /// before and after the outcome speaks for it.
+    Derived,
+    /// The failure's own deadline: none when cooling left it without one.
+    Set(Option<Timestamp>),
+}
+
+/// `time` unless it is unset or zero.
+fn set_end(time: Option<Timestamp>) -> Option<Timestamp> {
+    if is_zero(time) { None } else { time }
 }
 
 /// Which cooldown a success left be because it proved nothing about
@@ -792,7 +797,7 @@ fn apply_outcome(
     was_terminal_unauthorized: bool,
     dispatched: u64,
     stale: StaleSuccess,
-) {
+) -> OwnDeadline {
     if result.success {
         // A success from a call dispatched before a still-live cooldown was
         // recorded predates the failure and proves nothing about recovery,
@@ -823,15 +828,15 @@ fn apply_outcome(
         } else {
             clear_auth_state_on_success(auth, now);
         }
-        return;
+        return OwnDeadline::Derived;
     }
     let force_cooldown = is_forced_cooldown(result.error.as_ref());
     if model_key.is_empty() {
         if was_terminal_unauthorized {
-            return;
+            return OwnDeadline::Derived;
         }
         let disable_cooling = failure_cooling_disabled(settings, auth, force_cooldown);
-        apply_auth_failure_state(
+        let own = apply_failure_to_credential(
             settings,
             auth,
             result.error.as_ref(),
@@ -840,18 +845,21 @@ fn apply_outcome(
             disable_cooling,
         );
         auth.cooldown_recorded_seq = dispatched;
-        return;
+        return own;
     }
     if should_skip_credential_cooldown(result.error.as_ref()) {
-        return;
+        return OwnDeadline::Derived;
     }
     let disable_cooling = failure_cooling_disabled(settings, auth, force_cooldown);
     let Some(key) = ensure_model_state(auth, model_key) else {
-        return;
+        return OwnDeadline::Derived;
     };
     let Some(mut state) = auth.model_states.remove(&key) else {
-        return;
+        return OwnDeadline::Derived;
     };
+    // Whether the arm below leaves the failure's deadline to the scope's
+    // before and after (a quota 429).
+    let mut own_derived = false;
     // A credential-wide quota cooldown still in force, as this call finds it.
     let wrap_live =
         auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now);
@@ -929,6 +937,7 @@ fn apply_outcome(
                 };
             }
             429 => {
+                own_derived = true;
                 let mut next: Option<Timestamp> = None;
                 let mut credential_next: Option<Timestamp> = None;
                 let mut level = state.quota.backoff_level;
@@ -1080,6 +1089,12 @@ fn apply_outcome(
         state.next_retry_after = Some(forced_cooldown_end(now));
         state.unavailable = true;
     }
+    // What the failure itself set, before a longer earlier hold is kept.
+    let own = if own_derived {
+        OwnDeadline::Derived
+    } else {
+        OwnDeadline::Set(set_end(state.next_retry_after))
+    };
     if !is_zero(state.next_retry_after)
         && prev_retry_after > state.next_retry_after
         && after(prev_retry_after, now)
@@ -1135,10 +1150,13 @@ fn apply_outcome(
     auth.model_states.insert(key, state);
     auth.status = Status::Error;
     update_aggregated_availability(auth, now);
+    own
 }
 
 /// Cools the whole credential down after a failure with no model (upstream's
-/// `applyAuthFailureState`).
+/// `applyAuthFailureState`); application itself goes through
+/// [`apply_failure_to_credential`], so only the tests call this.
+#[cfg(test)]
 pub(crate) fn apply_auth_failure_state(
     settings: &Settings,
     auth: &mut Auth,
@@ -1147,10 +1165,23 @@ pub(crate) fn apply_auth_failure_state(
     now: Timestamp,
     disable_cooling: bool,
 ) {
+    apply_failure_to_credential(settings, auth, err, retry_after, now, disable_cooling);
+}
+
+/// [`apply_auth_failure_state`], which also says the failure's own deadline.
+fn apply_failure_to_credential(
+    settings: &Settings,
+    auth: &mut Auth,
+    err: Option<&AuthError>,
+    retry_after: Option<Duration>,
+    now: Timestamp,
+    disable_cooling: bool,
+) -> OwnDeadline {
     let prev_retry_after = auth.next_retry_after;
     if should_skip_credential_cooldown(err) {
-        return;
+        return OwnDeadline::Derived;
     }
+    let mut own_derived = false;
     auth.unavailable = true;
     auth.status = Status::Error;
     auth.updated_at = Some(now);
@@ -1199,6 +1230,7 @@ pub(crate) fn apply_auth_failure_state(
                 };
             }
             429 => {
+                own_derived = true;
                 auth.status_message = "quota exhausted".into();
                 auth.quota.exceeded = true;
                 auth.quota.reason = "quota".into();
@@ -1234,6 +1266,10 @@ pub(crate) fn apply_auth_failure_state(
             }
         }
     }
+    // The failure's own deadline: what it set, else the forced minute, before
+    // a longer earlier hold is kept.
+    let own_end = set_end(auth.next_retry_after)
+        .or_else(|| is_forced_cooldown(err).then(|| forced_cooldown_end(now)));
     if !is_zero(auth.next_retry_after)
         && prev_retry_after > auth.next_retry_after
         && after(prev_retry_after, now)
@@ -1247,6 +1283,11 @@ pub(crate) fn apply_auth_failure_state(
     if disable_cooling && is_zero(auth.next_retry_after) && is_zero(auth.quota.next_recover_at) {
         auth.unavailable = false;
         auth.quota.exceeded = false;
+    }
+    if own_derived {
+        OwnDeadline::Derived
+    } else {
+        OwnDeadline::Set(own_end)
     }
 }
 
