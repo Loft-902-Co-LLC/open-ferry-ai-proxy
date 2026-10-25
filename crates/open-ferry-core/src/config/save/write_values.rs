@@ -20,10 +20,8 @@ pub(crate) struct IntendedValues {
 }
 
 struct Snapshot {
-    typed: Option<Semantic>,
     document: Node,
     generated: Option<Node>,
-    schema: Schema,
     migrate: bool,
 }
 
@@ -80,7 +78,6 @@ impl IntendedValues {
         migrate: bool,
         allow_opaque: bool,
     ) -> Result<Self, SaveError> {
-        let raw = generated_node(cfg);
         let mut normalized = cfg.clone();
         post_process(&mut normalized).map_err(check_error)?;
         let generated = match generated_node(&normalized) {
@@ -88,24 +85,11 @@ impl IntendedValues {
             Err(_) if allow_opaque => None,
             Err(error) => return Err(error),
         };
-        let mut schema = Schema::default();
-        if let Ok(raw) = &raw {
-            schema.include(raw);
-        }
-        if let Some(generated) = &generated {
-            schema.include(generated);
-        }
-        if let Ok(source) = config_from_node(&doc).and_then(|cfg| generated_node(&cfg)) {
-            schema.include(&source);
-        }
-        let typed = generated.as_ref().map(semantic).transpose()?;
         Ok(Self {
             input: None,
             values: Some(Snapshot {
-                typed,
                 document: doc,
                 generated,
-                schema,
                 migrate,
             }),
             raw: None,
@@ -144,28 +128,15 @@ impl IntendedValues {
         } else {
             None
         };
-        if let (Some(wanted), Some(generated)) = (&expected.typed, &actual_generated)
-            && let Some(path) = wanted.difference(&semantic(generated)?, "$")
-        {
-            return Ok(Some(path));
-        }
-        let mut schema = expected.schema.clone();
-        if let Some(generated) = &actual_generated {
-            schema.include(generated);
-        }
+        // Compare the safe merged intent: omitted defaults and unmodeled
+        // source fields follow the same preservation rules as the writer.
         let wanted = canonical(
             &expected.document,
             expected.generated.as_ref(),
-            &schema,
             expected.migrate,
         )?;
         let actual_doc = save::unmarshal(data)?;
-        let got = canonical(
-            &actual_doc,
-            actual_generated.as_ref(),
-            &schema,
-            expected.migrate,
-        )?;
+        let got = canonical(&actual_doc, actual_generated.as_ref(), expected.migrate)?;
         Ok(wanted.difference(&got, "$"))
     }
 }
@@ -239,64 +210,6 @@ fn generated_node(cfg: &Config) -> Result<Node, SaveError> {
     Ok(doc.content.pop().unwrap_or_else(Node::mapping))
 }
 
-#[derive(Clone, Default)]
-struct Schema {
-    keys: BTreeMap<String, Schema>,
-    item: Option<Box<Schema>>,
-}
-
-impl Schema {
-    fn include(&mut self, node: &Node) {
-        if node.kind == Kind::Mapping {
-            for (key, value) in node.pairs() {
-                self.keys
-                    .entry(key.value.clone())
-                    .or_default()
-                    .include(value);
-            }
-        } else if node.kind == Kind::Sequence {
-            let item = self.item.get_or_insert_with(Default::default);
-            for child in &node.content {
-                item.include(child);
-            }
-        }
-    }
-}
-
-fn prune_normalized(dst: &mut Node, src: Option<&Node>, schema: &Schema, path: &mut Vec<String>) {
-    if dst.kind == Kind::Mapping {
-        let mut index = 0;
-        while index + 1 < dst.content.len() {
-            let key = dst.content[index].value.clone();
-            let generated = src.and_then(|src| {
-                tree::find_map_key_index(src, &key).and_then(|i| src.content.get(i + 1))
-            });
-            if generated.is_none() && schema.keys.contains_key(&key) {
-                // Only a field seen in the typed serialization can disappear
-                // here. Ignored source fields never enter this schema; the
-                // generator's untyped defaults stay present on both sides.
-                dst.content.drain(index..index + 2);
-                continue;
-            }
-            path.push(key.clone());
-            prune_normalized(
-                &mut dst.content[index + 1],
-                generated,
-                schema.keys.get(&key).unwrap_or(&Schema::default()),
-                path,
-            );
-            path.pop();
-            index += 2;
-        }
-    } else if dst.kind == Kind::Sequence
-        && let Some(item) = &schema.item
-    {
-        for (i, child) in dst.content.iter_mut().enumerate() {
-            prune_normalized(child, src.and_then(|src| src.content.get(i)), item, path);
-        }
-    }
-}
-
 fn normalized_document(doc: &Node, migrate: bool) -> Result<Node, SaveError> {
     let mut doc = doc.clone();
     if doc.kind == Kind::Document
@@ -312,12 +225,7 @@ fn normalized_document(doc: &Node, migrate: bool) -> Result<Node, SaveError> {
     Ok(doc)
 }
 
-fn canonical(
-    doc: &Node,
-    generated: Option<&Node>,
-    schema: &Schema,
-    migrate: bool,
-) -> Result<Semantic, SaveError> {
+fn canonical(doc: &Node, generated: Option<&Node>, migrate: bool) -> Result<Semantic, SaveError> {
     let doc = normalized_document(doc, migrate)?;
     let first = doc
         .content
@@ -344,7 +252,6 @@ fn canonical(
     merge::prune_routing_quota(&mut root, generated);
     merge::prune_mapping_to_generated_keys(&mut root, generated, "self-update");
     merge::merge_mapping_preserve(&mut root, generated, &mut Vec::new());
-    prune_normalized(&mut root, Some(generated), schema, &mut Vec::new());
     semantic(&root)
 }
 
