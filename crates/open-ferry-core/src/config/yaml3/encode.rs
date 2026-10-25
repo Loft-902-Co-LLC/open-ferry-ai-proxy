@@ -258,8 +258,10 @@ pub(crate) fn quote_config_unicode(node: &mut Node) {
                 Style::DOUBLE_QUOTED
             };
         }
-        let seq_item = node.kind == Kind::Sequence;
-        for child in &mut node.content {
+        let sequence = node.kind == Kind::Sequence;
+        let mapping = node.kind == Kind::Mapping && seq_item;
+        for (index, child) in node.content.iter_mut().enumerate() {
+            let seq_item = sequence || (mapping && index % 2 == 1 && child.kind == Kind::Scalar);
             visit(child, seq_item);
         }
     }
@@ -519,8 +521,7 @@ impl Encoder {
                 self.sequence_start()?;
                 let seq_item = self.seq_item;
                 for item in items {
-                    self.seq_item =
-                        matches!(item, Value::Str(_) | Value::Duration(_) | Value::Node(_));
+                    self.seq_item = true;
                     self.marshal(item, depth)?;
                 }
                 self.seq_item = seq_item;
@@ -530,7 +531,11 @@ impl Encoder {
                 self.mapping_start()?;
                 let seq_item = std::mem::replace(&mut self.seq_item, false);
                 for (key, value) in sorted_entries(entries) {
+                    self.seq_item = false;
                     self.marshal(key, depth)?;
+                    self.seq_item = seq_item
+                        && (matches!(value, Value::Str(_) | Value::Duration(_))
+                            || matches!(value, Value::Node(node) if node.kind == Kind::Scalar));
                     self.marshal(value, depth)?;
                 }
                 self.seq_item = seq_item;
@@ -538,11 +543,17 @@ impl Encoder {
             }
             Value::Struct(fields) => {
                 self.mapping_start()?;
+                let seq_item = std::mem::replace(&mut self.seq_item, false);
                 for field in fields {
+                    self.seq_item = false;
                     self.stringv(&field.key)?;
                     self.flow = field.flow;
+                    self.seq_item = seq_item
+                        && (matches!(field.value, Value::Str(_) | Value::Duration(_))
+                            || matches!(&field.value, Value::Node(node) if node.kind == Kind::Scalar));
                     self.marshal(&field.value, depth)?;
                 }
+                self.seq_item = seq_item;
                 self.emit(Event::mapping_end())
             }
         }
@@ -767,6 +778,7 @@ impl Encoder {
                 let mut tail = "";
                 let seq_item = std::mem::replace(&mut self.seq_item, false);
                 for [key, value] in node.content.as_chunks::<2>().0 {
+                    self.seq_item = false;
                     let key_foot = key.foot_comment.as_str();
                     self.empty_block_mapping_value = key.kind == Kind::Scalar
                         && value.kind == Kind::Mapping
@@ -782,6 +794,7 @@ impl Encoder {
                             || (value.kind == Kind::Mapping && value.content.is_empty()));
                     self.node(key, tail, !key_foot.is_empty(), depth)?;
                     tail = key_foot;
+                    self.seq_item = seq_item && value.kind == Kind::Scalar;
                     self.node(value, "", false, depth)?;
                 }
                 self.seq_item = seq_item;
