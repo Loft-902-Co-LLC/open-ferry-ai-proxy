@@ -1140,7 +1140,6 @@ fn input_deltas(output: &str) -> String {
 // TestConvertGeminiResponseToClaude_AmbiguousCanonicalNameKeepsUpstreamNameAndArguments,
 // TestConvertGeminiResponseToClaude_KeepsReasonWhenTranslatedSchemaHasNoPlaceholder.
 #[test]
-#[ignore = "needs the p42 argument helper"]
 fn cleans_arguments_and_preserves_exact_or_ambiguous_names() {
     let request = json!({"tools": [
         {"name":"EnterPlanMode","input_schema":{"type":"object","properties":{}}},
