@@ -284,24 +284,71 @@ fn independent_expected_owners(data: &[u8], rendered: &[u8]) -> super::owner_tes
         }
         result
     }
-    fn same_scalar(left: &Node, right: &Node) -> bool {
-        left.kind == Kind::Scalar
-            && right.kind == Kind::Scalar
-            && left.short_tag() == right.short_tag()
-            && left.value == right.value
-    }
     let source = parse(data);
     let target = parse(rendered);
     let source_nodes = indexed(&source);
     let target_nodes = indexed(&target);
+    let credentials = |nodes: &[(Vec<String>, &str, &Node)]| {
+        let mut entries = std::collections::BTreeMap::<_, Vec<Vec<String>>>::new();
+        for (path, side, node) in nodes {
+            if *side != "item"
+                || path.get(1).is_none_or(|root| root != "!!str:api-keys")
+                || !(path.len() == 4 || (path.len() == 6 && path[4] == "!!str:keys"))
+            {
+                continue;
+            }
+            if let Some(key) = independent_field(node, "api-key")
+                && key.kind == Kind::Scalar
+                && !key.value.trim().is_empty()
+            {
+                entries
+                    .entry((path[..3].to_vec(), key.value.trim().to_owned()))
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+        entries
+    };
+    let target_credentials = credentials(&target_nodes);
+    let mut credential_moves = Vec::new();
+    for (identity, old_paths) in credentials(&source_nodes) {
+        if let Some(new_paths) = target_credentials.get(&identity) {
+            // Layout conversion keeps key occurrences in order, including
+            // repeated credentials. Parsed values identify them independently
+            // of comments and of the gate's receipt bindings.
+            credential_moves.extend(old_paths.into_iter().zip(new_paths.iter().cloned()));
+        }
+    }
+    let project = |path: &[String], side: &str| {
+        let Some((old, new)) = credential_moves
+            .iter()
+            .find(|(old, _)| path.starts_with(old))
+        else {
+            return path.to_vec();
+        };
+        let tail = &path[old.len()..];
+        let key_path: Vec<_> = new.iter().chain(tail).cloned().collect();
+        if new.len() == 4 || tail.is_empty() {
+            return key_path;
+        }
+        let group_path: Vec<_> = new[..4].iter().chain(tail).cloned().collect();
+        let exists =
+            |path: &Vec<String>| target_nodes.iter().any(|(p, s, _)| p == path && *s == side);
+        match (exists(&key_path), exists(&group_path)) {
+            (true, false) => key_path,
+            (false, true) => group_path,
+            _ => path.to_vec(),
+        }
+    };
     let mut moves = Vec::new();
     for (source_path, source_side, source) in &source_nodes {
         if source.kind != Kind::Sequence {
             continue;
         }
+        let target_path = project(source_path, source_side);
         let Some((_, _, target)) = target_nodes
             .iter()
-            .find(|(path, side, _)| path == source_path && side == source_side)
+            .find(|(path, side, _)| *path == target_path && side == source_side)
         else {
             continue;
         };
@@ -328,7 +375,7 @@ fn independent_expected_owners(data: &[u8], rendered: &[u8]) -> super::owner_tes
                 for (index, next) in old_indices.into_iter().zip(new_indices) {
                     let mut old = source_path.clone();
                     old.push(index.to_string());
-                    let mut new = source_path.clone();
+                    let mut new = target_path.clone();
                     new.push(next.to_string());
                     moves.push((old, new));
                 }
@@ -340,56 +387,8 @@ fn independent_expected_owners(data: &[u8], rendered: &[u8]) -> super::owner_tes
     for ((mut path, side, slot, part, hash), count) in independent_canonical_owners(data) {
         if let Some((old, new)) = moves.iter().find(|(old, _)| path.starts_with(old)) {
             path.splice(..old.len(), new.iter().cloned());
-        } else if path.len() >= 4
-            && path[0] == "0"
-            && path[1] == "!!str:api-keys"
-            && let Some((entry_path, _, entry)) = source_nodes.iter().find(|(p, side, node)| {
-                (p.len() == 4 || (p.len() == 6 && p[4] == "!!str:keys"))
-                    && path.starts_with(p)
-                    && *side == "item"
-                    && independent_field(node, "api-key").is_some()
-            })
-            && let Some(key) = independent_field(entry, "api-key")
-        {
-            let source_count = source_nodes
-                .iter()
-                .filter(|(p, side, node)| {
-                    (p.len() == 4 || (p.len() == 6 && p[4] == "!!str:keys"))
-                        && p[..3] == entry_path[..3]
-                        && *side == "item"
-                        && independent_field(node, "api-key")
-                            .is_some_and(|other| same_scalar(key, other))
-                })
-                .count();
-            let candidates: Vec<_> = target_nodes
-                .iter()
-                .filter(|(p, side, node)| {
-                    p.len() == 6
-                        && p[..3] == entry_path[..3]
-                        && p[4] == "!!str:keys"
-                        && *side == "item"
-                        && independent_field(node, "api-key")
-                            .is_some_and(|other| same_scalar(key, other))
-                })
-                .collect();
-            if source_count == 1
-                && let [(key_path, _, _)] = candidates.as_slice()
-            {
-                let tail = &path[entry_path.len()..];
-                let key_path: Vec<_> = key_path.iter().chain(tail).cloned().collect();
-                let group_path: Vec<_> = key_path[..4].iter().chain(tail).cloned().collect();
-                let key_exists = target_nodes
-                    .iter()
-                    .any(|(p, s, _)| *p == key_path && *s == side);
-                let group_exists = target_nodes
-                    .iter()
-                    .any(|(p, s, _)| *p == group_path && *s == side);
-                if !tail.is_empty() && key_exists != group_exists {
-                    path = if key_exists { key_path } else { group_path };
-                } else if tail.is_empty() && key_exists {
-                    path = key_path;
-                }
-            }
+        } else {
+            path = project(&path, side);
         }
         *expected.entry((path, side, slot, part, hash)).or_insert(0) += count;
     }
@@ -467,6 +466,43 @@ fn owner_independent_inventory_tracks_retained_keys_without_licensing_comment_mo
     assert!(!independent_source_owners_held(
         entry_source.as_bytes(),
         entry_wrong_provider.as_bytes()
+    ));
+}
+
+#[test]
+fn owner_independent_inventory_tracks_provider_occurrences_in_both_layouts() {
+    let source = "xai-api-key:\n  - api-key: removed\n  - api-key: retained\n    request-retry: 1 # retained field\n";
+    let correct = "xai-api-key:\n  - api-key: retained\n    request-retry: 1 # retained field\n";
+    let wrong = "xai-api-key:\n  - api-key: other\n    request-retry: 1 # retained field\n  - api-key: retained\n    request-retry: 1\n";
+    assert!(independent_source_owners_held(
+        source.as_bytes(),
+        correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        source.as_bytes(),
+        wrong.as_bytes()
+    ));
+    let source = "api-keys:\n  gemini:\n    - api-key: repeated # first occurrence\n    - api-key: repeated # second occurrence\n";
+    let correct = "api-keys:\n  gemini:\n    - keys:\n        - api-key: repeated # first occurrence\n    - keys:\n        - api-key: repeated # second occurrence\n";
+    let wrong = "api-keys:\n  gemini:\n    - keys:\n        - api-key: repeated # second occurrence\n    - keys:\n        - api-key: repeated # first occurrence\n";
+    assert!(independent_source_owners_held(
+        source.as_bytes(),
+        correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        source.as_bytes(),
+        wrong.as_bytes()
+    ));
+    let source = "claude-api-key:\n  - api-key: removed\n  - api-key: retained\n    cloak:\n      sensitive-words:\n        - removed\n        # retained child\n        - word\n";
+    let correct = "api-keys:\n  claude:\n    - keys:\n        - api-key: retained\n          cloak:\n            sensitive-words:\n              # retained child\n              - word\n        - api-key: other\n          cloak:\n            sensitive-words:\n              - word\n";
+    let wrong = "api-keys:\n  claude:\n    - keys:\n        - api-key: retained\n          cloak:\n            sensitive-words:\n              - word\n        - api-key: other\n          cloak:\n            sensitive-words:\n              # retained child\n              - word\n";
+    assert!(independent_source_owners_held(
+        source.as_bytes(),
+        correct.as_bytes()
+    ));
+    assert!(!independent_source_owners_held(
+        source.as_bytes(),
+        wrong.as_bytes()
     ));
 }
 
