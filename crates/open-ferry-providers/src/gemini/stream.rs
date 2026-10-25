@@ -279,9 +279,7 @@ fn has_finish_signal(payload: &[u8]) -> bool {
                     .trim()
                     .is_empty()
             })
-        }) || !crate::json::str_at(root, "promptFeedback.blockReason")
-            .trim()
-            .is_empty()
+        })
     })
 }
 
