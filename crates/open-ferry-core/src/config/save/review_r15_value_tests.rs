@@ -169,3 +169,23 @@ fn review_r15_v8_replaced_blocks_survive_repeated_settings() {
         }
     }
 }
+
+#[test]
+fn review_r15_existing_blocks_keep_their_values_or_stay_unchanged() {
+    for source in [
+        "api-keys:\n  - |2-\n          x\n    \u{2028}\n",
+        "config-version: 8\naccess:\n  api-keys:\n    - |2-\n            x\n      \u{2028}\n",
+    ] {
+        for op in ["settings", "migrate", "put"] {
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, source).unwrap();
+            let before = Config::load(&path).unwrap().api_keys;
+            if save_operation(&path, op).is_ok() {
+                assert!(Config::load(&path).unwrap().api_keys == before);
+            } else {
+                assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+            }
+        }
+    }
+}
