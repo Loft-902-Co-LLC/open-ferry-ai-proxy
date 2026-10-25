@@ -323,7 +323,10 @@ fn normalize_values(dst: &mut Node, src: &Node, path: &mut Vec<String>, in_seque
                         path,
                         in_sequence,
                     );
-                } else if in_sequence && !preserved_source_path(path) {
+                } else if (in_sequence
+                    || (path.len() == 2 && save::OAUTH_MAPS.contains(&path[0].as_str())))
+                    && !preserved_source_path(path)
+                {
                     dst.content.drain(index..index + 2);
                     path.pop();
                     continue;
