@@ -137,6 +137,26 @@ fn review_r15_replaced_blocks_survive_migrate() {
 }
 
 #[test]
+fn review_r15_replaced_trailing_tab_keeps_go_block_style() {
+    for migrate in [true, false] {
+        let source = if migrate {
+            "api-keys:\n  - |-\n    x\n"
+        } else {
+            "config-version: 8\naccess:\n  api-keys:\n    - |-\n      x\n"
+        };
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.api_keys = vec!["x\t".into()];
+        save_preserving_comments(&path, &config, migrate).unwrap();
+        let output = std::fs::read_to_string(&path).unwrap();
+        assert!(output.contains("- |-"), "Go's safe block style must stay");
+        assert_eq!(Config::load(&path).unwrap().api_keys, ["x\t"]);
+    }
+}
+
+#[test]
 fn review_r15_replaced_mapping_tab_scalar_survives() {
     for style in ["|-", ">-"] {
         let dir = TempDir::new();

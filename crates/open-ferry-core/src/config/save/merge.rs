@@ -216,6 +216,7 @@ pub(crate) fn merge_node_preserve(dst: &mut Node, src: &Node, path: &mut Vec<Str
             if dst.value != src.value
                 && dst.style.has(Style::LITERAL | Style::FOLDED)
                 && src.style.has(Style::DOUBLE_QUOTED)
+                && (src.value.contains('\n') || src.value.starts_with('\t'))
             {
                 dst.style = src.style;
             }
