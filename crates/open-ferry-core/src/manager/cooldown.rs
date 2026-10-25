@@ -206,6 +206,45 @@ pub(crate) fn recoverable_failure_retry_after(
     Some(add(now, Duration::from_secs(seconds.unsigned_abs())))
 }
 
+/// When a forced cooldown (a stop-and-cooldown rule's error) that cooling
+/// left without a deadline ends.
+pub(crate) fn forced_cooldown_end(now: Timestamp) -> Timestamp {
+    add(now, TRANSIENT_ERROR_COOLDOWN)
+}
+
+/// When the cooldown a transient failure (a 408, 5xx or the like) puts on its
+/// scope ends, by itself: [`recoverable_failure_retry_after`], else, for a
+/// forced cooldown, [`forced_cooldown_end`]. `disable_cooling` comes from
+/// [`failure_cooling_disabled`]. Applying a failure builds this deadline from
+/// the same parts (then keeps a longer one standing), and `quota_recovery`
+/// counts it for the failure's own hold, so that they can't drift.
+pub(crate) fn transient_failure_end(
+    settings: &Settings,
+    now: Timestamp,
+    retry_after: Option<Duration>,
+    disable_cooling: bool,
+    force_cooldown: bool,
+) -> Option<Timestamp> {
+    recoverable_failure_retry_after(settings, now, retry_after, disable_cooling)
+        .or_else(|| force_cooldown.then(|| forced_cooldown_end(now)))
+}
+
+/// Whether a forced cooldown's error, the one that no cooling setting
+/// overrides.
+pub(crate) fn is_forced_cooldown(err: Option<&AuthError>) -> bool {
+    err.is_some_and(|err| err.code == CODE_FORCE_COOLDOWN)
+}
+
+/// Whether cooling is off for a failure on `auth`: its credential's
+/// override, else the settings', unless the failure forces a cooldown.
+pub(crate) fn failure_cooling_disabled(
+    settings: &Settings,
+    auth: &Auth,
+    force_cooldown: bool,
+) -> bool {
+    cooldown_disabled_for_auth(settings, auth) && !force_cooldown
+}
+
 /// The next quota cooldown and backoff level after `prev_level` (upstream's
 /// `nextQuotaCooldown`).
 pub(crate) fn next_quota_cooldown(prev_level: u32, disable_cooling: bool) -> (Duration, u32) {
@@ -786,15 +825,12 @@ fn apply_outcome(
         }
         return;
     }
-    let force_cooldown = result
-        .error
-        .as_ref()
-        .is_some_and(|err| err.code == CODE_FORCE_COOLDOWN);
+    let force_cooldown = is_forced_cooldown(result.error.as_ref());
     if model_key.is_empty() {
         if was_terminal_unauthorized {
             return;
         }
-        let disable_cooling = cooldown_disabled_for_auth(settings, auth) && !force_cooldown;
+        let disable_cooling = failure_cooling_disabled(settings, auth, force_cooldown);
         apply_auth_failure_state(
             settings,
             auth,
@@ -809,7 +845,7 @@ fn apply_outcome(
     if should_skip_credential_cooldown(result.error.as_ref()) {
         return;
     }
-    let disable_cooling = cooldown_disabled_for_auth(settings, auth) && !force_cooldown;
+    let disable_cooling = failure_cooling_disabled(settings, auth, force_cooldown);
     let Some(key) = ensure_model_state(auth, model_key) else {
         return;
     };
@@ -1041,7 +1077,7 @@ fn apply_outcome(
         state.quota.exceeded = false;
     }
     if force_cooldown && is_zero(state.next_retry_after) {
-        state.next_retry_after = Some(add(now, TRANSIENT_ERROR_COOLDOWN));
+        state.next_retry_after = Some(forced_cooldown_end(now));
         state.unavailable = true;
     }
     if !is_zero(state.next_retry_after)
@@ -1204,8 +1240,8 @@ pub(crate) fn apply_auth_failure_state(
     {
         auth.next_retry_after = prev_retry_after;
     }
-    if err.is_some_and(|e| e.code == CODE_FORCE_COOLDOWN) && is_zero(auth.next_retry_after) {
-        auth.next_retry_after = Some(add(now, TRANSIENT_ERROR_COOLDOWN));
+    if is_forced_cooldown(err) && is_zero(auth.next_retry_after) {
+        auth.next_retry_after = Some(forced_cooldown_end(now));
         auth.unavailable = true;
     }
     if disable_cooling && is_zero(auth.next_retry_after) && is_zero(auth.quota.next_recover_at) {
@@ -1377,15 +1413,18 @@ pub(crate) fn reset_quota(
 /// cooldowns stay, stale errors reset, states for models it no longer
 /// serves go, and legacy alias states move to their target (upstream's
 /// `ReconcileRegistryModelStates`, without the lock). Returns the new
-/// states and whether they changed.
+/// states, whether they changed, and the (alias, target) models of each
+/// cooldown it merged or moved into its target (as canonical keys), which
+/// `quota_recovery` must be told of.
 pub(crate) fn reconcile_model_states(
     resolver: Resolver<'_>,
     auth: &Auth,
     supported: &[String],
     now: Timestamp,
-) -> (BTreeMap<String, ModelState>, bool) {
+) -> (BTreeMap<String, ModelState>, bool, Vec<(String, String)>) {
     let mut states = auth.model_states.clone();
     let mut changed = normalize_model_states(&mut states);
+    let mut merged: Vec<(String, String)> = Vec::new();
     let target_key = |route_id: &str| {
         let key = resolver.selection_model_key_for_auth(auth, route_id);
         if key.is_empty() {
@@ -1436,6 +1475,7 @@ pub(crate) fn reconcile_model_states(
                     continue;
                 };
                 if !model_state_is_clean(&state) || is_model_state_active_cooldown(&state, now) {
+                    merged.push((canonical_model_key(&alias), canonical_model_key(&target)));
                     match states.get_mut(&target) {
                         Some(existing) => merge_model_state(existing, &state),
                         None => {
@@ -1473,7 +1513,7 @@ pub(crate) fn reconcile_model_states(
         reset_model_state(state, now);
         changed = true;
     }
-    (states, changed)
+    (states, changed, merged)
 }
 
 #[cfg(test)]

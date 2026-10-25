@@ -3307,10 +3307,15 @@ impl Manager {
             };
             for _ in 0..RECONCILE_ATTEMPTS {
                 let (supported, reg_epoch) = models.models_and_epoch_for_client(id);
-                let (states, changed) =
+                let (states, changed, merged) =
                     reconcile_model_states(resolver, &entry.auth, &supported, now);
                 if models.client_registration_epoch(id) != reg_epoch {
                     continue;
+                }
+                // A cooldown folded into its target model is one no claim of
+                // quota recovery was recorded against.
+                for (alias, target) in &merged {
+                    state.quota_recovery.merged(id, alias, target);
                 }
                 let auth = Arc::make_mut(&mut entry.auth);
                 auth.model_states = states;

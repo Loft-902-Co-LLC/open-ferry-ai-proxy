@@ -78,8 +78,9 @@ use sha2::{Digest, Sha256};
 
 use super::classify::should_skip_credential_cooldown;
 use super::cooldown::{
-    CallResult, has_model_error, is_credential_quota_active, recoverable_failure_retry_after,
-    reset_model_state, unwrap_expired_quota, update_aggregated_availability,
+    CallResult, failure_cooling_disabled, has_model_error, is_credential_quota_active,
+    is_forced_cooldown, reset_model_state, transient_failure_end, unwrap_expired_quota,
+    update_aggregated_availability,
 };
 use super::lifecycle::Save;
 use super::quota_signals::apply_cooldown_fields;
@@ -258,6 +259,7 @@ pub(crate) fn scope_deadline(auth: &Auth, scope: &str) -> Option<Timestamp> {
 /// deadline around the failure.
 fn own_hold(
     settings: &Settings,
+    auth: &Auth,
     result: &CallResult,
     status: u16,
     now: Timestamp,
@@ -266,8 +268,18 @@ fn own_hold(
 ) -> Hold {
     match status {
         408 | 500 | 502 | 503 | 504 | 520..=526 => {
-            // Cooling off leaves no hold at all.
-            recoverable_failure_retry_after(settings, now, result.retry_after, false).or(Some(now))
+            // The deadline cooldown application gives the failure: with
+            // cooling off (the credential's own override included) none,
+            // unless the failure forces a cooldown, which holds for a minute.
+            let force = is_forced_cooldown(result.error.as_ref());
+            transient_failure_end(
+                settings,
+                now,
+                result.retry_after,
+                failure_cooling_disabled(settings, auth, force),
+                force,
+            )
+            .or(Some(now))
         }
         _ => match after {
             None => Some(now),
@@ -409,7 +421,7 @@ impl Recoveries {
             self.touch(&auth.id, &scope)
         };
         let key = (auth.id.clone(), scope.clone());
-        let own = || own_hold(settings, result, status, now, before, after);
+        let own = || own_hold(settings, auth, result, status, now, before, after);
         // A claim stays through a failure it can't be told apart from: its
         // cooldown layer stands (the retain above ends it when it doesn't),
         // and the windows it names stay owed. The failure's sequence number
@@ -453,6 +465,30 @@ impl Recoveries {
         self.claims.retain(|(claim_id, _), _| claim_id != id);
         self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
+    }
+
+    /// Notes that a cooldown of the model `alias` of `id` was merged into (or
+    /// moved to) the state of `target`: no claim of either describes what
+    /// `target` now holds, and no read in flight speaks for it. Both claims
+    /// go, so the target's quota cooldown runs its course (failing closed),
+    /// and a cooldown no usage read can speak for that `alias` had passes to
+    /// `target`. The credential's own scope is left as it is: its hold is
+    /// still on the credential.
+    pub(crate) fn merged(&mut self, id: &str, alias: &str, target: &str) {
+        for scope in [alias, target] {
+            if scope.is_empty() {
+                continue;
+            }
+            self.claims.remove(&(id.to_owned(), scope.to_owned()));
+            self.touch(id, scope);
+        }
+        if !alias.is_empty()
+            && !target.is_empty()
+            && alias != target
+            && let Some(hold) = self.foreign.remove(&(id.to_owned(), alias.to_owned()))
+        {
+            self.hold((id.to_owned(), target.to_owned()), hold);
+        }
     }
 
     /// Notes that saved cooldowns of `scopes` of `id` were put back: no claim
@@ -747,9 +783,14 @@ impl Manager {
                 && auth.quota.reason == "credential_quota"
             {
                 // A model's own layer under the wrap may have been capped to
-                // its next check; it comes out with the provider's reset.
-                state.quota_checks.uncap_shadows(auth, now);
+                // its next check; it comes out of the wrap with the
+                // provider's reset (a capped layer's passed time must not
+                // read as an ended limit), then is capped again as it was,
+                // as a restore does.
+                let lifted = state.quota_checks.uncap_shadows(auth, now);
                 clear_credential(auth, now);
+                state.quota_checks.recap_shadows(auth, &lifted, now);
+                update_aggregated_availability(auth, now);
                 recovery.credential = true;
                 scopes.push(String::new());
             }
