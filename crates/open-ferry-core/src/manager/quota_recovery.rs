@@ -45,9 +45,14 @@
 //! re-registered since, when any failure that cooled it down was recorded
 //! since the claim was (a newer 429, a 401, a 503 on any model), when the
 //! saved cooldowns were restored or the credential reset, or when the
-//! reading's `Date` predates the claim or the token. A failure on one model
-//! fences that model's claim; a credential-wide one (its own quota, a
-//! rejected token) fences them all.
+//! reading's `Date` predates the claim or the token, or when what shapes the
+//! request (proxy, attributes such as the headers and base URL, the quota
+//! probe) was edited since. A failure on one model fences that model's claim;
+//! a credential-wide one (its own quota, a rejected token) fences them all.
+//! A failure no claim can be told apart from (a 503, a 429 of unknown
+//! windows) fences the claim but does not end it: the windows it names stay
+//! owed until a later recognized 429 merges its own in, and for as long as
+//! the cooldown layer they were recorded for stands.
 //!
 //! Claims and the record of what was recovered are runtime only. A cooldown
 //! restored from the saved state after a restart has no claim, so it fails
@@ -330,7 +335,7 @@ impl Recoveries {
 
     /// Notes the outcome just applied to `auth`: any failure that touched its
     /// cooldowns fences the claims, and a Claude 429 records its own.
-    /// `before` and `after` are the deadline of the outcome's scope around
+    /// `deadlines` is the deadline of the outcome's scope before and after
     /// it, as the outcome set them: not as the quota check's cap shortened
     /// them to its next check, which is no end of the provider's cooldown.
     pub(crate) fn observe(
@@ -339,10 +344,10 @@ impl Recoveries {
         auth: &Auth,
         result: &CallResult,
         model_key: &str,
-        before: Option<Timestamp>,
-        after: Option<Timestamp>,
+        deadlines: (Option<Timestamp>, Option<Timestamp>),
         now: Timestamp,
     ) {
+        let (before, after) = deadlines;
         // A claim whose cooldown layer the outcome ended (a success, an
         // expiry) is not owed any more, and must not be joined by a later one.
         self.claims
@@ -837,10 +842,7 @@ fn clear_model(auth: &mut Auth, scope: &str, now: Timestamp, independent: bool) 
         // (which saves a record for an unavailable credential only).
         if independent
             && auth.quota.exceeded
-            && auth
-                .quota
-                .next_recover_at
-                .is_some_and(|until| until > now)
+            && auth.quota.next_recover_at.is_some_and(|until| until > now)
         {
             auth.unavailable = true;
             auth.next_retry_after = auth.quota.next_recover_at;
