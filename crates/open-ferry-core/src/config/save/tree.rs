@@ -540,8 +540,29 @@ fn flow_item_foot_lines(data: &[u8]) -> std::collections::BTreeSet<usize> {
                 if feet.len() <= 1 {
                     continue;
                 }
-                let head_start = feet.iter().flatten().max().map_or(0, |i| i + 1);
+                let mut head_start = feet.iter().flatten().max().map_or(0, |i| i + 1);
                 lines.extend(feet.into_iter().flatten());
+                // Only the one-column root block rebuilt from source is
+                // known to belong here. Other emitted root feet can already
+                // have moved from inner keys before normalization sees them.
+                if source
+                    .get(key.line.saturating_sub(1))
+                    .is_some_and(|line| !line.starts_with([' ', '\t']))
+                {
+                    let end = key.line.saturating_sub(1);
+                    let head = comment_lines_before(&key.head_comment, end, source);
+                    if let Some(head) = head {
+                        let end = head.first().copied().unwrap_or(end);
+                        if let Some(foot) =
+                            comment_lines_before(&n.content[index - 2].foot_comment, end, source)
+                            && foot.first().is_some_and(|at| *at >= head_start)
+                            && foot.iter().all(|at| source[*at].starts_with(" #"))
+                        {
+                            head_start = foot.last().unwrap() + 1;
+                            lines.extend(foot);
+                        }
+                    }
+                }
                 let mut head = key
                     .head_comment
                     .lines()
@@ -573,6 +594,178 @@ fn flow_item_foot_lines(data: &[u8]) -> std::collections::BTreeSet<usize> {
     }
     visit(&doc, &source, &ends, &mut lines);
     lines
+}
+
+fn comment_lines_before(comment: &str, end: usize, physical: &[&str]) -> Option<Vec<usize>> {
+    let expected: Vec<_> = comment.lines().filter(|s| !s.is_empty()).collect();
+    if expected.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut wanted = expected.iter().rev();
+    let mut found = Vec::new();
+    for at in (0..end).rev() {
+        let line = physical.get(at)?.trim_start_matches([' ', '\t']);
+        if line.is_empty() {
+            continue;
+        }
+        if wanted.next().is_none_or(|s| line != *s) {
+            return None;
+        }
+        found.push(at);
+        if found.len() == expected.len() {
+            found.reverse();
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Do not let normalization preserve a key-foot paragraph as the next key's
+/// head. At this boundary we still have the source tree: accept only an exact
+/// split of its foot into the emitted foot plus a prefix of the emitted head.
+pub(super) fn source_flow_item_heads(node: &Node, data: Vec<u8>) -> Vec<u8> {
+    fn candidate(n: &Node) -> bool {
+        (n.kind == Kind::Mapping
+            && (2..n.content.len()).step_by(2).any(|i| {
+                n.content[i - 2].foot_comment.contains("\n\n") && flow_item_boundary(n, i).is_some()
+            }))
+            || n.content.iter().any(candidate)
+    }
+    if !flow_item_feet_enabled() || !candidate(node) {
+        return data;
+    }
+    let Ok(text) = std::str::from_utf8(&data) else {
+        return data;
+    };
+    if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        || data
+            .iter()
+            .enumerate()
+            .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
+    {
+        return data;
+    }
+    let Ok(emitted) = super::super::yaml3::compose::unmarshal(&data) else {
+        return data;
+    };
+    fn comments(text: &str) -> Vec<&str> {
+        text.lines().filter(|s| !s.is_empty()).collect()
+    }
+    fn visit(
+        source: &Node,
+        emitted: &Node,
+        physical: &[&str],
+        marked: &mut std::collections::BTreeMap<usize, usize>,
+        breaks: &mut std::collections::BTreeSet<usize>,
+        skipped: &mut std::collections::BTreeSet<usize>,
+    ) {
+        if source.kind != emitted.kind || source.content.len() != emitted.content.len() {
+            return;
+        }
+        if source.kind == Kind::Mapping {
+            for i in (2..source.content.len()).step_by(2) {
+                if flow_item_boundary(source, i).is_none()
+                    || flow_item_boundary(emitted, i)
+                        .is_none_or(|seq| seq.style.has(super::super::yaml3::Style::FLOW))
+                    || source.content[i].value != emitted.content[i].value
+                    || source.content[i - 2].value != emitted.content[i - 2].value
+                {
+                    continue;
+                }
+                let foot = comments(&source.content[i - 2].foot_comment);
+                let written = comments(&emitted.content[i - 2].foot_comment);
+                let head = comments(&source.content[i].head_comment);
+                let emitted_head = comments(&emitted.content[i].head_comment);
+                let Some(moved) = foot.strip_prefix(written.as_slice()) else {
+                    continue;
+                };
+                if moved.is_empty()
+                    || !emitted_head.starts_with(moved)
+                    || emitted_head.get(moved.len()..) != Some(head.as_slice())
+                {
+                    continue;
+                }
+                let key = &emitted.content[i];
+                let Some(head_lines) =
+                    comment_lines_before(&key.head_comment, key.line.saturating_sub(1), physical)
+                else {
+                    continue;
+                };
+                let Some(first_head) = head_lines.first() else {
+                    continue;
+                };
+                let Some(mut foot_lines) = comment_lines_before(
+                    &emitted.content[i - 2].foot_comment,
+                    *first_head,
+                    physical,
+                ) else {
+                    continue;
+                };
+                foot_lines.extend(head_lines.into_iter().take(moved.len()));
+                let first = foot_lines[0];
+                let mut gap_start = first;
+                while gap_start > 0 && physical[gap_start - 1].trim().is_empty() {
+                    gap_start -= 1;
+                }
+                if gap_start == first {
+                    breaks.insert(first);
+                } else {
+                    skipped.extend(gap_start..first - 1);
+                }
+                // Keep one block of foot paragraphs, rather than merging
+                // parser fields and losing their separating blank on repeat.
+                // At the root an indented foot must stay above column zero.
+                let indent = usize::from(
+                    physical
+                        .get(key.line.saturating_sub(1))
+                        .is_some_and(|line| !line.starts_with([' ', '\t'])),
+                );
+                marked.extend(foot_lines.into_iter().map(|at| (at, indent)));
+            }
+        }
+        for (source, emitted) in source.content.iter().zip(&emitted.content) {
+            visit(source, emitted, physical, marked, breaks, skipped);
+        }
+    }
+    let mut marked = std::collections::BTreeMap::new();
+    let mut breaks = std::collections::BTreeSet::new();
+    let mut skipped = std::collections::BTreeSet::new();
+    visit(
+        node,
+        &emitted,
+        &text.lines().collect::<Vec<_>>(),
+        &mut marked,
+        &mut breaks,
+        &mut skipped,
+    );
+    if marked.is_empty() {
+        return data;
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for (i, line) in data.split(|b| *b == b'\n').enumerate() {
+        if skipped.contains(&i) {
+            continue;
+        }
+        if i > 0 {
+            out.push(b'\n');
+        }
+        if breaks.contains(&i) {
+            out.push(b'\n');
+        }
+        if let Some(indent) = marked.get(&i) {
+            let start = line
+                .iter()
+                .position(|b| !matches!(b, b' ' | b'\t'))
+                .unwrap_or(line.len());
+            out.extend(std::iter::repeat_n(b' ', *indent));
+            out.extend_from_slice(&line[start..]);
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    #[cfg(feature = "parity")]
+    super::parity::ablation::record_normalization(&data, &out);
+    out
 }
 
 /// A repaired sequence whose sibling mapping feet need flow endings.
@@ -626,7 +819,8 @@ pub(crate) fn marshal(node: &Node) -> Result<Vec<u8>, YamlError> {
 pub(crate) fn marshal_config(node: &Node) -> Result<Vec<u8>, YamlError> {
     let mut node = node.clone();
     super::encode::quote_config_unicode(&mut node);
-    marshal_node(&node, CONFIG_INDENT)
+    let emitted = marshal_node(&node, CONFIG_INDENT)?;
+    Ok(source_flow_item_heads(&node, emitted))
 }
 
 #[cfg(test)]

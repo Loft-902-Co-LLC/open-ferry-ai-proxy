@@ -820,6 +820,7 @@ impl Encoder {
                     let separate_head = self.emitter.protect_config_comments
                         && self.empty_collection_value
                         && key.head_comment.contains("\n\n")
+                        && tail.is_empty()
                         && index > 0
                         && pending_flow_item_feet(&node.content[index * 2 - 1]).is_some();
                     #[cfg(feature = "parity")]
