@@ -271,6 +271,16 @@ async fn strips_tool_call_ids_from_responses_requests() {
 
 #[test]
 fn location_endpoints() {
+    for (location, host) in [
+        ("us", "aiplatform.us.rep.googleapis.com"),
+        ("eu", "aiplatform.eu.rep.googleapis.com"),
+        (" US ", "aiplatform.us.rep.googleapis.com"),
+        (" EU ", "aiplatform.eu.rep.googleapis.com"),
+        (" GLOBAL ", "aiplatform.googleapis.com"),
+        ("us-central1", "us-central1-aiplatform.googleapis.com"),
+    ] {
+        assert_eq!(vertex_base_url(location), format!("https://{host}"));
+    }
     assert_eq!(
         vertex_base_url(""),
         "https://us-central1-aiplatform.googleapis.com"
