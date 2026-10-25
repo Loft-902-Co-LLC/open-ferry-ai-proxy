@@ -86,6 +86,7 @@ mod models;
 mod policy;
 mod quota_check;
 mod quota_rank;
+mod quota_recovery;
 mod quota_signals;
 mod refresh;
 mod retry;
@@ -112,6 +113,9 @@ pub use error_events::ErrorEvents;
 pub use lifecycle::{AdoptionResult, CompletedTokenCommand, QuotaReset};
 pub use quota_check::QuotaCheck;
 pub use quota_rank::{QuotaPreference, QuotaPrefs};
+pub use quota_recovery::{
+    QuotaRecovery, QuotaRecoveryToken, UsageReading, UsageWindow, UsageWindowReading,
+};
 pub use quota_signals::provider_supports_quota_observation;
 pub use refresh::ForceRefreshResult;
 pub use select::{ClientModels, ModelProjection};
@@ -435,6 +439,8 @@ pub(crate) struct State {
     pub(crate) save_sequence: HashMap<String, u64>,
     /// The quota rests capped by `routing.quota.check-after`.
     pub(crate) quota_checks: quota_check::QuotaChecks,
+    /// What may end a quota cooldown early (see `quota_recovery`).
+    pub(crate) quota_recovery: quota_recovery::Recoveries,
     /// For each credential whose refresh was deferred for a missing file, the
     /// registration epoch of the episode that was logged at warn. The episode
     /// ends with a non-empty Codex save or the registration's removal.
@@ -645,6 +651,7 @@ impl Manager {
             save_publications: 0,
             save_sequence: HashMap::new(),
             quota_checks: quota_check::QuotaChecks::default(),
+            quota_recovery: quota_recovery::Recoveries::default(),
             missing_file_deferrals: HashMap::new(),
         };
         let shared = Arc::new(Shared {

@@ -64,6 +64,7 @@ mod oauth;
 mod observability_settings;
 mod plugin_quota;
 mod quota;
+mod quota_recovery;
 mod request_logs;
 mod router;
 mod server_management_v8;

@@ -406,7 +406,7 @@ pub(crate) fn reset_model_state(state: &mut ModelState, now: Timestamp) {
 /// state otherwise, and the mark of the wrap goes either way so that a later
 /// wrap snapshots fresh state (upstream's inline normalization in
 /// `MarkResult`).
-fn unwrap_expired_quota(state: &mut ModelState, now: Timestamp) {
+pub(crate) fn unwrap_expired_quota(state: &mut ModelState, now: Timestamp) {
     match state.credential_quota_shadow.take() {
         Some(shadow) if is_model_state_active_cooldown(&shadow, now) => {
             // The shadow's own watermark comes with it.

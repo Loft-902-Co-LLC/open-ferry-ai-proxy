@@ -520,6 +520,7 @@ impl Manager {
         auth.generation = 1;
         // open-ferry's capped quota rests go with the state replaced.
         state.quota_checks.forget(&auth.id);
+        state.quota_recovery.forget(&auth.id);
         let snapshot = Arc::new(auth);
         state.auths.insert(
             snapshot.id.clone(),
@@ -1994,6 +1995,7 @@ impl Manager {
                 affinity.invalidate_auth(id);
             }
             state.quota_checks.forget(id);
+            state.quota_recovery.forget(id);
             state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
             *slot = (*slot)
@@ -2037,6 +2039,7 @@ impl Manager {
         // open-ferry's capped quota rests go with the state replaced.
         for id in previous.keys() {
             state.quota_checks.forget(id);
+            state.quota_recovery.forget(id);
         }
         for mut auth in items {
             if auth.id.is_empty() {
@@ -3082,6 +3085,10 @@ impl Manager {
             let rests = state.quota_checks.live_rests(&auth.id, &model_key, now);
             state.quota_checks.before_result(auth);
             let dispatched = self.current_execution_seq();
+            let scope_before = {
+                let (_, scope) = super::quota_recovery::scope_of(result, &model_key);
+                super::quota_recovery::scope_deadline(auth, &scope)
+            };
             let stale = apply_result(
                 &state.settings,
                 auth,
@@ -3097,6 +3104,15 @@ impl Manager {
             state
                 .quota_checks
                 .after_result(cap, auth, result, &model_key, now, stale);
+            // What a later usage read may end (see `quota_recovery`).
+            state.quota_recovery.observe(
+                &state.settings,
+                auth,
+                result,
+                &model_key,
+                scope_before,
+                now,
+            );
             auth.updated_at = Some(now);
             auth.generation = auth.generation.saturating_add(1);
             let committed = (
@@ -3222,6 +3238,7 @@ impl Manager {
             let auth = Arc::make_mut(&mut entry.auth);
             let (models, cleared) = reset_quota(auth, &registered, now);
             state.quota_checks.forget(id);
+            state.quota_recovery.forget(id);
             let bumps = if cleared { 2 } else { 1 };
             auth.generation = auth.generation.saturating_add(bumps);
             let committed = (
