@@ -310,8 +310,9 @@ fn choice(candidate: &Value, names: Option<&SanitizedToolNames>) -> Value {
     });
     choice["index"] = Value::from(candidate.get("index").map_or(0, int_of));
     if let Some(reason) = candidate.get("finishReason") {
-        let reason = go::to_lower(&str_of(Some(reason)));
-        choice["finish_reason"] = if content_filter_finish_reason(&reason) {
+        let raw_reason = str_of(Some(reason));
+        let reason = go::to_lower(&raw_reason);
+        choice["finish_reason"] = if content_filter_finish_reason(&raw_reason) {
             Value::from("content_filter")
         } else {
             Value::String(reason.clone())
