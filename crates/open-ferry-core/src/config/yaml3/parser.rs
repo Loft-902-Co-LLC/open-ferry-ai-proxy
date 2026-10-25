@@ -431,6 +431,35 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Scanner-level comment lines, including comments that no parser event owns.
+/// Scalar contents that look like comments are never included.
+pub(crate) fn physical_comment_lines(input: &[u8]) -> Option<Vec<(usize, usize)>> {
+    let mut parser = Parser::with_comment_positions(input);
+    while parser.scan().ok()?.typ != TokenType::StreamEnd {}
+    let mut lines = Vec::new();
+    for comment in &parser.comments {
+        for text in [&comment.head, &comment.line, &comment.foot] {
+            let mut offset = parser.mark_offset(comment.start_mark);
+            for line in text.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+                if input.get(offset..offset.checked_add(line.len())?) != Some(line) {
+                    return None;
+                }
+                lines.push((offset, line.len()));
+                offset += line.len();
+                while input
+                    .get(offset)
+                    .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                {
+                    offset += 1;
+                }
+            }
+        }
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    Some(lines)
+}
+
 impl Parser<'_> {
     fn source_offset(&self, index: usize) -> Option<usize> {
         if self.source_is_ascii {

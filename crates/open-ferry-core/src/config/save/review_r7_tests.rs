@@ -405,7 +405,7 @@ fn review_r7_canonical_barrier_keeps_source_owners_when_go_transfers_a_comment()
     let (out, _) = normalize_config_layout(source.as_bytes(), true).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out),
-        "models:\n    ? catalog # k\n    : '' # v\nconfig-version: 8 \nobservability:\n    logs:\n        debug: false\n"
+        "models:\n    ? catalog # k\n    : '' # v\nconfig-version: 8\nobservability:\n    logs:\n        debug: false\n"
     );
     assert_eq!(
         super::owner_tests::independent_owners(source.as_bytes()),

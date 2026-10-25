@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "owner_r5_tests.rs"]
+mod round5;
+
 fn probes() -> Vec<serde_json::Value> {
     serde_json::from_str(include_str!("../testdata/writer/owner_probes.json")).unwrap()
 }
@@ -473,7 +476,7 @@ fn owner_probes_keep_their_nodes_through_every_writer_entry() {
 
 #[test]
 fn owner_bookkeeping_work_scales_with_nodes_and_occurrences() {
-    fn work(n: usize) -> usize {
+    fn work(n: usize, save: bool) -> usize {
         let mut text = String::from("plugins:\n  configs:\n    example:\n      items:\n");
         for i in 0..n {
             text.push_str(&format!(
@@ -488,20 +491,51 @@ fn owner_bookkeeping_work_scales_with_nodes_and_occurrences() {
                 source.holds(&rebound),
                 "cost fixture changed its source owners"
             );
-            render_nested_scalar(text.as_bytes(), &["auth-dir"], "/x")
+            if save {
+                let mut cfg = Config::parse(text.as_bytes()).unwrap();
+                cfg.auth_dir = "/x".into();
+                render_preserving_comments(text.as_bytes(), &cfg, false)
+            } else {
+                render_nested_scalar(text.as_bytes(), &["auth-dir"], "/x")
+            }
         });
         result.unwrap();
         work
     }
-    let small = work(256);
-    let large = work(1024);
+    for save in [false, true] {
+        let small = work(256, save);
+        let large = work(1024, save);
+        assert!(
+            large <= small * 6,
+            "comment bookkeeping grew faster than linearly: {small} -> {large}"
+        );
+        assert!(
+            large <= 2000 * 1024,
+            "comment bookkeeping exceeded its linear work budget: {large}"
+        );
+    }
+    fn alias_work(n: usize) -> usize {
+        let mut text = String::from("plugins:\n  configs:\n    example:\n      pool: &pool\n");
+        for i in 0..16 {
+            text.push_str(&format!("        - item{i} # pool {i}\n"));
+        }
+        text.push_str("      copies:\n");
+        for _ in 0..n {
+            text.push_str("        - *pool\n");
+        }
+        let (output, work) = tree::count_comment_work(|| {
+            let mut cfg = Config::parse(text.as_bytes()).unwrap();
+            cfg.auth_dir = "/x".into();
+            render_preserving_comments(text.as_bytes(), &cfg, false).unwrap()
+        });
+        assert!(Config::load_bytes(&output).is_ok());
+        work
+    }
+    let small = alias_work(32);
+    let large = alias_work(128);
     assert!(
         large <= small * 6,
-        "comment bookkeeping grew faster than linearly: {small} -> {large}"
-    );
-    assert!(
-        large <= 2000 * 1024,
-        "comment bookkeeping exceeded its linear work budget: {large}"
+        "alias-copy save bookkeeping grew faster than linearly: {small} -> {large}"
     );
 }
 

@@ -339,7 +339,7 @@ pub(crate) fn normalize_config_layout_receipted(
     input: super::tree::ReceiptedYaml,
     migrate: bool,
 ) -> Result<super::tree::ReceiptedYaml, SaveError> {
-    let doc = super::tree::read_receipted(&input)?;
+    let doc = super::tree::read_receipted_for_render(&input)?;
     let (doc, changed) = normalize_layout_tree(doc, &input.bytes, migrate)?;
     if changed {
         layout_emitted(&doc, &input.bytes)

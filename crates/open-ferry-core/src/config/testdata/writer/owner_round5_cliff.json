@@ -1,0 +1,6 @@
+[
+{"case":"cliff-ac","source":"plugins:\n  configs:\n    ex:\n      a: &a # ha\n        - x # ia\n        - y\n      c: &c # hc\n        - z # ic\n        - y\n","ops":["nested","save"]},
+{"case":"cliff-abc","source":"plugins:\n  configs:\n    ex:\n      a: &a # ha\n        - x # ia\n        - y\n      b: &b # hb\n        - 7 # ib\n        - y\n      c: &c # hc\n        - z # ic\n        - y\n","ops":["nested","save"]},
+{"case":"cliff-alias","source":"plugins:\n  configs:\n    ex:\n      a: &a # ha\n        - x # ia\n        - y\n      s: &s v\n      u: *s # ua\n","ops":["nested","save"]},
+{"case":"cliff-ek-int","source":"plugins:\n  configs:\n    ex:\n      m: &m # hm\n        k: v # kv\n      n: &n # hn\n        1: w # one\n","ops":["nested"]}
+]

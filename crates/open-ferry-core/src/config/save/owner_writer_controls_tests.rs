@@ -59,9 +59,16 @@ fn check_control(source: &str, case: &str, op: &str, disable: &str, repaired: Op
             let operation = owner_legacy_ops::operation(&input, &row, pass).unwrap();
             let main = tree::without_owner_protection(|| operation.run(&input)).unwrap();
             if actual == main {
-                // The unsupported first migration is byte-identical to main.
-                // Only the second call in this history repairs an owner.
-                assert!(case == "legacy_one_foot" && op == "migrate2" && pass == 0);
+                // Unsupported histories keep the exact frozen writer outcome.
+                // The raw exception also checks both following save modes below.
+                assert!(
+                    pass == 0
+                        && (case == "legacy_one_foot" && op == "migrate2"
+                            || case == "random-30-4096"
+                                && op == "raw"
+                                && matches!(disable, "empty" | "feet")),
+                    "{case} {op} {disable} pass {pass}: unexpected writer fallback"
+                );
                 assert!(file == &off["files"][pass]);
                 input = actual.to_vec();
                 continue;
@@ -219,4 +226,45 @@ fn owner_writer_diagnostic_controls_keep_each_source_owner_under_both_switches()
         }
     }
     assert_eq!(checked, 310);
+}
+
+#[cfg(feature = "parity")]
+#[test]
+fn owner_round5_diagnostic_raw_fallback_keeps_two_step_writer_owners() {
+    let rows = cases();
+    let source = rows
+        .iter()
+        .find(|row| row["case"] == "random-30-4096")
+        .unwrap()["source"]
+        .as_str()
+        .unwrap()
+        .as_bytes();
+    for disable in ["empty", "feet"] {
+        let scope = json!({"disable_empty":disable=="empty","disable_flow_feet":disable=="feet"});
+        owner_legacy_ops::old_scope(&scope, || {
+            let raw = render_write_file(source).unwrap();
+            let main = tree::without_owner_protection(|| render_write_file(source)).unwrap();
+            assert!(
+                raw == main,
+                "diagnostic raw fallback changed frozen writer bytes"
+            );
+            let config = Config::parse(&raw).unwrap();
+            for migrate in [false, true] {
+                let output = render_preserving_comments(&raw, &config, migrate).unwrap();
+                let baseline = tree::without_owner_protection(|| {
+                    render_preserving_comments(&main, &config, migrate)
+                })
+                .unwrap();
+                assert!(
+                    owner_legacy_tests::independent_canonical_owners(&output)
+                        == owner_legacy_tests::independent_canonical_owners(&baseline),
+                    "diagnostic raw fallback changed two-step writer owners"
+                );
+                assert!(
+                    values(&unmarshal(&output).unwrap()) == values(&unmarshal(&baseline).unwrap()),
+                    "diagnostic raw fallback changed values, styles or tags"
+                );
+            }
+        });
+    }
 }
