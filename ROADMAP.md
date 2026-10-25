@@ -18,7 +18,7 @@ What v1 still needs:
 |---|---|
 | Updating with no downtime | **Built:** on Linux and Windows and for macOS user LaunchAgents, a supervised service switches to each new release by itself, and the command line and the dashboard switch and roll back. macOS machine services are still refused. Published candidates 0.0.3 and 0.0.4 passed the four hosted qualification jobs below |
 | The release signing key | **Done:** made on 2026-10-20. Every build from then on trusts it |
-| The first release, 0.1.0 | **Not released.** The owner decides when it is ready after testing in real use |
+| The first release, 0.1.0 | Not released yet; comes after testing in real use |
 | A Homebrew tap | Not started; comes after 0.1.0 |
 | Being findable | Not started; comes after 0.1.0 |
 
@@ -53,7 +53,7 @@ Already in place:
 - `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. The dashboard shows each entry's state. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
 - Release basics: CI on Linux and Windows, with the install scripts tested on macOS too; a release workflow that builds binaries for Linux (glibc, and static musl builds for Alpine and older systems), macOS and Windows, with `SHA256SUMS` and build provenance attestations; a changelog; and a migration guide for CLIProxyAPI users.
-- Ways to install besides building from source, already published with the release candidates:
+- Ways to install besides building from source. The install scripts are published with the release candidates; the container image arrives with the first release:
   - install scripts for Linux, macOS and Windows that check the download against the release's `SHA256SUMS` (and its build attestation, where `gh` is installed) and write a starting config with `open-ferry init`;
   - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name.
 - Setting up from the command line ([docs/cli.md](docs/cli.md)):
@@ -75,7 +75,7 @@ Still to come:
   4. Done: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. The dashboard's About page installs and rolls back the same way. In `auto` mode, a supervised service switches to each release it stages by itself.
   5. Done: `open-ferry migrate` installs the same supervised or plain service form as `service install`, the docs describe it, and CI tests blue-green switching on macOS 15 and native x86_64 musl in Alpine.
   6. Published candidates 0.0.3 and 0.0.4 passed [published-release qualification run 40151160404](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/40151160404) from `main` on **2026-10-25 (UTC)**. All four hosted qualification jobs passed: Ubuntu 24.04 user and machine services, Windows Server 2025 machine service, and macOS 15 user LaunchAgent. This run did not cover Windows user services, which use the separate local published-release qualification. macOS machine services remain unsupported. See [Releasing](RELEASING.md#candidate-qualification).
-- **The first release, 0.1.0,** when the owner decides it is ready after testing in real use.
+- **The first release, 0.1.0,** after it has been tested in real use. The container image is first published with it.
 - **A Homebrew tap.**
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
 

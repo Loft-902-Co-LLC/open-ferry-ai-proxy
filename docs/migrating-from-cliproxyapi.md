@@ -90,7 +90,7 @@ If you run CLIProxyAPI's image with Docker Compose, see [Docker Compose](#docker
 
 open-ferry's image, `ghcr.io/loft-902-co-llc/open-ferry`, keeps the paths of CLIProxyAPI's: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. `/CLIProxyAPI/CLIProxyAPI` is a link to the binary, so a `command:` written for CLIProxyAPI's image still runs. To switch a Compose file written for CLIProxyAPI's image, such as its `docker-compose.yml`:
 
-1. **Change the image** to `ghcr.io/loft-902-co-llc/open-ferry:latest`, or to a version, such as `ghcr.io/loft-902-co-llc/open-ferry:0.0.4`. If the file takes the image from `CLI_PROXY_IMAGE`, set that variable to open-ferry's image instead.
+1. **Change the image** to `ghcr.io/loft-902-co-llc/open-ferry:latest`, or to a version, such as `ghcr.io/loft-902-co-llc/open-ferry:0.1.0`. If the file takes the image from `CLI_PROXY_IMAGE`, set that variable to open-ferry's image instead.
 2. **Remove the `build:` section.** It builds CLIProxyAPI from a checkout; open-ferry's image is built from its release archives.
 3. **Remove the sign-in callback ports** (8085, 1455, 54545, 51121 and 11451). open-ferry's callback servers listen on the container's own loopback, which a published port doesn't reach. The README says [how to sign in](../README.md#run-it-in-a-container) instead.
 4. **Remove the plugins volume and `DEPLOY`.** Neither plugins nor the cloud deploy mode are ported.
