@@ -133,7 +133,10 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
         }
     };
     let flattened = flatten_v8(&root).map_err(|error| {
-        if error.kind() == ConfigErrorKind::Decode {
+        if error.kind() == ConfigErrorKind::Decode
+            && error.to_string().starts_with("yaml: unmarshal errors:\n")
+            && error.to_string().contains(": mapping key ")
+        {
             ConfigError::new(ConfigErrorKind::Decode, format!("{prefix}{error}"))
         } else {
             error
@@ -387,19 +390,19 @@ mod tests {
         (
             "port: 1\nport: 2\n",
             Decode,
-            false,
+            true,
             "yaml: unmarshal errors:\n  line 2: mapping key \"port\" already defined at line 1",
         ),
         (
             "port: 1\ntls:\n  enable: true\n  enable: false\nhost: a\nhost: b\n",
             Decode,
-            false,
+            true,
             "yaml: unmarshal errors:\n  line 6: mapping key \"host\" already defined at line 5",
         ),
         (
             "port: 1\nport: 2\nhost: x\nnested:\n  a: 1\n  a: 2\n",
             Decode,
-            false,
+            true,
             "yaml: unmarshal errors:\n  line 2: mapping key \"port\" already defined at line 1",
         ),
         (
