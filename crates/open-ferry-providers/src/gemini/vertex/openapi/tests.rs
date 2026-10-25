@@ -91,12 +91,24 @@ fn urls_and_official_hosts() {
         "https://aiplatform.googleapis.com",
         "https://us-central1-aiplatform.googleapis.com",
         "https://x.aiplatform.googleapis.com:443/v1",
+        "https://aiplatform.us.rep.googleapis.com",
+        "https://aiplatform.eu.rep.googleapis.com/v1",
+        "https://AIPLATFORM.US.REP.GOOGLEAPIS.COM:443/v1",
+        "aiplatform.us.rep.googleapis.com/v1",
+        "//aiplatform.eu.rep.googleapis.com/v1",
     ] {
         assert!(google_host(base));
     }
     for base in [
         "https://aiplatform.googleapis.com.example.test",
         "http://127.0.0.1:1234",
+        "https://aiplatform..rep.googleapis.com",
+        "https://aiplatform.us.extra.rep.googleapis.com",
+        "https://evil.rep.googleapis.com",
+        "https://aiplatform.us.rep.googleapis.com.evil.example",
+        "aiplatform.us.rep.googleapis.com.evil.example",
+        "aiplatform..rep.googleapis.com",
+        "https://aiplatform.us.rep.googleapis.com@evil.example",
     ] {
         assert!(!google_host(base));
     }
@@ -192,15 +204,24 @@ async fn service_account_wins_and_tokens_are_cached() {
 #[tokio::test]
 async fn official_api_key_is_rejected_and_counts_are_local() {
     let executor = VertexExecutor::new("direct");
+    let proxy = Mock::start(Reply::error(400, "unexpected proxy request")).await;
     for url in [
         "",
         "https://aiplatform.googleapis.com",
         "https://us-central1-aiplatform.googleapis.com",
+        "https://aiplatform.us.rep.googleapis.com",
+        "https://aiplatform.eu.rep.googleapis.com/v1",
+        "aiplatform.us.rep.googleapis.com/v1",
+        // Keep the existing conservative refusal of scheme-less legacy-domain text.
+        "aiplatform.googleapis.com.evil.example",
+        "relay.example/aiplatform.googleapis.com",
+        "relay-aiplatform.googleapis.com.evil.example",
     ] {
-        let auth = key_auth("vertex", "dummy-key", url);
+        let mut auth = (*key_auth("vertex", "dummy-key", url)).clone();
+        auth.proxy_url = proxy.url.clone();
         let error = executor
             .execute(
-                auth,
+                Arc::new(auth),
                 request("meta/llama", PAYLOAD),
                 options(&Format::OPENAI),
             )
@@ -208,6 +229,7 @@ async fn official_api_key_is_rejected_and_counts_are_local() {
             .unwrap_err();
         assert_eq!(error.status, 400);
     }
+    assert_eq!(proxy.hits(), 0);
     let response = executor
         .count_tokens(
             Arc::new(Auth::default()),
