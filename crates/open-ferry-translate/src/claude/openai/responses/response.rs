@@ -1955,7 +1955,8 @@ fn pause_turn(reason: &str) -> bool {
     crate::go::equal_fold(reason.trim(), "pause_turn")
 }
 fn web_search_status(reason: &str, status: &'static str, results: Option<&Value>) -> &'static str {
-    if pause_turn(reason) && results.is_none() {
+    if results.is_none() && (pause_turn(reason) || crate::go::equal_fold(reason.trim(), "tool_use"))
+    {
         "in_progress"
     } else {
         status

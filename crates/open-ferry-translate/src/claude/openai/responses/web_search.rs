@@ -154,8 +154,9 @@ fn convert_with_query(item: &Value, fallback_query: &str, with_result: bool) -> 
     Some(vec![tool_use, result])
 }
 
-/// Paused searches are replayed without invented results; a continuation in
-/// the same assistant run replaces the paused item and inherits its query.
+/// Paused or deferred searches replay without invented results. A continuation
+/// in the same assistant run replaces the open item and inherits its query;
+/// tool outputs keep the run open, while a user turn ends it.
 pub(super) struct SearchHistory {
     boundary_after: Vec<bool>,
     skip: std::collections::HashSet<usize>,
@@ -176,7 +177,6 @@ fn is_turn_boundary(item: &Value) -> bool {
     match kind.as_ref() {
         "message" => role != "assistant",
         "" if !role.is_empty() => role != "assistant",
-        "function_call_output" | "custom_tool_call_output" | "tool_search_output" => true,
         _ => false,
     }
 }
