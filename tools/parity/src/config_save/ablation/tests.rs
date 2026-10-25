@@ -1,5 +1,86 @@
 use super::*;
 
+fn source_owner_byte_gap(name: &str) {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("../testdata/source-owner-byte-gaps.json")).unwrap();
+    let fixture = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fixture| fixture["name"] == name)
+        .unwrap();
+    let operation = &fixture["operation"];
+    let source = if operation["op"] == "write" {
+        operation["body"].as_str().unwrap()
+    } else {
+        fixture["source"].as_str().unwrap()
+    };
+    let protected = fixture["protected"].as_str().unwrap();
+    let mut evidence = fixture["witness"].clone();
+    // The source, operation and Go inventories are real pinned-Go receipts.
+    // Grant stability to isolate check 4, independently of the current writer.
+    let frame = &mut evidence["retained_source_owner"];
+    frame["protected"] = protected.into();
+    frame["repeat_input"] = protected.into();
+    frame["repeat_operation"] = operation.clone();
+    frame["repeat_ok"] = true.into();
+    frame["repeated"] = protected.into();
+    frame["normalized"] = protected.into();
+    let conditions =
+        core::retained_source_owner(source, protected, operation, &evidence).conditions;
+    assert!(
+        conditions == [true; 5],
+        "{name}: source-owner proof setup failed: {conditions:?}"
+    );
+    let go = frame_go(&evidence);
+    let case = Case::new(name, "", "").with_options(json!({
+        "file": source, "steps": [operation], "_ownership_evidence": [evidence]
+    }));
+    let protected = json!({"files": [protected]});
+    let replay = Replay {
+        output: go.clone(),
+        traces: vec![],
+    };
+    let matches = [(1, true)];
+    let result = checks(Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &go,
+        mask: 1,
+        matches: &matches,
+    });
+    assert!(!accepted(result), "{name}: unrelated bytes were certified");
+    assert_eq!(result, [true, true, true, false, true], "{name}");
+}
+
+fn frame_go(evidence: &Value) -> Value {
+    evidence["retained_source_owner"]["go"].clone()
+}
+
+#[test]
+fn retained_source_owner_byte_gap_b1_reorder() {
+    source_owner_byte_gap("B1-reorder");
+}
+#[test]
+fn retained_source_owner_byte_gap_b2_quote() {
+    source_owner_byte_gap("B2-quote");
+}
+#[test]
+fn retained_source_owner_byte_gap_bh1_number_spelling() {
+    source_owner_byte_gap("BH1-hex-to-dec");
+}
+#[test]
+fn retained_source_owner_byte_gap_ba1_anchor() {
+    source_owner_byte_gap("BA1-keep-anchor");
+}
+#[test]
+fn retained_source_owner_byte_gap_w1_write_reorder() {
+    source_owner_byte_gap("W1-reorder");
+}
+
 #[test]
 fn retained_source_owner_accepts_native_replay_and_an_observed_writer_repeat() {
     let fixture: Value =
@@ -26,9 +107,8 @@ fn retained_source_owner_accepts_native_replay_and_an_observed_writer_repeat() {
 
 #[test]
 fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
-    // Pinned Go receipts were captured on these exact first-step sources and
-    // operations. Even a generously granted stable-repeat witness cannot
-    // excuse their lost, duplicated or misplaced source occurrences.
+    // These measured losses already fail eligibility. An indexed source owner
+    // also lacks a surviving Go node, so the proof stops before its conditions.
     let fixtures: Value =
         serde_json::from_str(include_str!("../testdata/source-owner-gaps.json")).unwrap();
     let fixtures = fixtures.as_array().unwrap();
@@ -39,6 +119,10 @@ fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
         let protected = fixture["protected"].as_str().unwrap();
         let operation = &fixture["operation"];
         let evidence = &fixture["evidence"];
+        assert!(
+            !core::source_owner_candidate(source, protected),
+            "{name}: measured missing occurrences passed eligibility"
+        );
         assert!(evidence["retained_source_owner"]["identity"]["occurrences"].is_array());
         assert!(evidence["retained_source_owner"]["go_inventory"]["comments"].is_array());
         assert!(
@@ -55,6 +139,43 @@ fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
         );
     }
 }
+#[test]
+fn retained_source_owner_measured_tracked_gap_reaches_loss_conditions() {
+    // This measured review probe has real pinned-Go receipts for every owner.
+    // Its deliberately bad candidate and granted repeat isolate conditions
+    // one and five; it is not claimed as an observed product output.
+    let fixture: Value =
+        serde_json::from_str(include_str!("../testdata/source-owner-tracked-gap.json")).unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let operation = &fixture["operation"];
+    let evidence = &fixture["evidence"];
+    for occurrence in evidence["retained_source_owner"]["identity"]["occurrences"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(
+            evidence["moves"].as_array().unwrap().iter().any(|m| {
+                m["source"] == occurrence["source"] && m["ordinal"] == occurrence["ordinal"]
+            }),
+            "the measured gap has an untracked source owner"
+        );
+    }
+    assert!(!core::source_owner_candidate(source, protected));
+    let proof = core::retained_source_owner(source, protected, operation, evidence);
+    assert!(
+        proof.conditions == [false, true, true, true, false],
+        "measured-gap conditions: {:?}",
+        proof.conditions
+    );
+    assert!(!proof.accepted());
+    let case = Case::new("measured-tracked-comment-loss", "", "").with_options(json!({
+        "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+    }));
+    let go = evidence["retained_source_owner"]["go"]["files"][0].as_str();
+    assert!(!ownership::analyze(&case, 0, source, go, protected, &[], true).accepted());
+}
+
 use crate::translator::Translator;
 
 #[test]

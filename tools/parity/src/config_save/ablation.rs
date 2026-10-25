@@ -241,10 +241,10 @@ fn nothing_else_changed(case: &Case, protected: &Value, replay: &Replay) -> bool
     ) else {
         return false;
     };
-    let Some(mut source) = case.options["file"].as_str() else {
+    if case.options["file"].as_str().is_none() {
         return false;
-    };
-    g.iter().zip(r).enumerate().all(|(i, (g, r))| {
+    }
+    g.iter().zip(r).all(|(g, r)| {
         let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
             return false;
         };
@@ -254,17 +254,9 @@ fn nothing_else_changed(case: &Case, protected: &Value, replay: &Replay) -> bool
         if Config::load_bytes(g.as_bytes()).is_err() {
             return true;
         }
-        let step = &case.options["steps"][i];
-        if step["op"] == "write" {
-            source = step["body"].as_str().unwrap_or_default()
-        }
-        let faithful = core::faithful_without_comments(g)
+        core::faithful_without_comments(g)
             .zip(core::faithful_without_comments(r))
-            .is_some_and(|(g, r)| g == r);
-        let good = faithful
-            || ownership::source_owner(case, i, source, r).is_some_and(|proof| proof.accepted());
-        source = r;
-        good
+            .is_some_and(|(g, r)| g == r)
     })
 }
 

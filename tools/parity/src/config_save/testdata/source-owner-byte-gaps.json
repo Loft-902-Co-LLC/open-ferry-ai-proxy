@@ -1,0 +1,1096 @@
+[
+  {
+    "name": "B1-reorder",
+    "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+    "operation": {
+      "op": "nested",
+      "keys": [
+        "name"
+      ],
+      "value": "m"
+    },
+    "protected": "y: two\nx: 1\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: m\n",
+    "witness": {
+      "archives": [],
+      "moves": [
+        {
+          "destination": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "ordinal": 0,
+          "source": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "text": "# note-a",
+          "via": "observed"
+        }
+      ],
+      "operation": {
+        "keys": [
+          "name"
+        ],
+        "op": "nested",
+        "value": "m"
+      },
+      "retained_source_owner": {
+        "go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n"
+          ]
+        },
+        "go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "identity": {
+          "masked_source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # parity-source-b4a837a0e1128eba-00000000\nname: n\n",
+          "occurrences": [
+            {
+              "id": "# parity-source-b4a837a0e1128eba-00000000",
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "operation": {
+            "keys": [
+              "name"
+            ],
+            "op": "nested",
+            "value": "m"
+          },
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+        },
+        "marked_go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n"
+          ]
+        },
+        "marked_go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# parity-source-b4a837a0e1128eba-00000000"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "protected_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "y: two\nx: 1\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        }
+      },
+      "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    }
+  },
+  {
+    "name": "B2-quote",
+    "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+    "operation": {
+      "op": "nested",
+      "keys": [
+        "name"
+      ],
+      "value": "m"
+    },
+    "protected": "x: 1\ny: 'two'\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: m\n",
+    "witness": {
+      "archives": [],
+      "moves": [
+        {
+          "destination": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "ordinal": 0,
+          "source": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "text": "# note-a",
+          "via": "observed"
+        }
+      ],
+      "operation": {
+        "keys": [
+          "name"
+        ],
+        "op": "nested",
+        "value": "m"
+      },
+      "retained_source_owner": {
+        "go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n"
+          ]
+        },
+        "go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "identity": {
+          "masked_source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # parity-source-b4a837a0e1128eba-00000000\nname: n\n",
+          "occurrences": [
+            {
+              "id": "# parity-source-b4a837a0e1128eba-00000000",
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "operation": {
+            "keys": [
+              "name"
+            ],
+            "op": "nested",
+            "value": "m"
+          },
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+        },
+        "marked_go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n"
+          ]
+        },
+        "marked_go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# parity-source-b4a837a0e1128eba-00000000"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "protected_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 1\ny: 'two'\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        }
+      },
+      "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    }
+  },
+  {
+    "name": "BH1-hex-to-dec",
+    "source": "x: 0x10\ny: two\nsrv:\n  host: h\n  # note-a\nname: n\n",
+    "operation": {
+      "op": "nested",
+      "keys": [
+        "name"
+      ],
+      "value": "m"
+    },
+    "protected": "x: 16\ny: two\nsrv:\n  host: h\n  # note-a\nname: m\n",
+    "witness": {
+      "archives": [],
+      "moves": [
+        {
+          "destination": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "ordinal": 0,
+          "source": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "text": "# note-a",
+          "via": "observed"
+        }
+      ],
+      "operation": {
+        "keys": [
+          "name"
+        ],
+        "op": "nested",
+        "value": "m"
+      },
+      "retained_source_owner": {
+        "go": {
+          "files": [
+            "x: 0x10\ny: two\nsrv:\n  host: h\n# note-a\nname: m\n"
+          ]
+        },
+        "go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 0x10\ny: two\nsrv:\n  host: h\n# note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":16, \"y\":\"two\"}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+            ]
+          }
+        },
+        "identity": {
+          "masked_source": "x: 0x10\ny: two\nsrv:\n  host: h\n  # parity-source-8301db42fe437ccc-00000000\nname: n\n",
+          "occurrences": [
+            {
+              "id": "# parity-source-8301db42fe437ccc-00000000",
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "operation": {
+            "keys": [
+              "name"
+            ],
+            "op": "nested",
+            "value": "m"
+          },
+          "source": "x: 0x10\ny: two\nsrv:\n  host: h\n  # note-a\nname: n\n"
+        },
+        "marked_go": {
+          "files": [
+            "x: 0x10\ny: two\nsrv:\n  host: h\n# parity-source-8301db42fe437ccc-00000000\nname: m\n"
+          ]
+        },
+        "marked_go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# parity-source-8301db42fe437ccc-00000000"
+            }
+          ],
+          "source": "x: 0x10\ny: two\nsrv:\n  host: h\n# parity-source-8301db42fe437ccc-00000000\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":16, \"y\":\"two\"}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+            ]
+          }
+        },
+        "protected_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 16\ny: two\nsrv:\n  host: h\n  # note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":16, \"y\":\"two\"}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+            ]
+          }
+        }
+      },
+      "source": "x: 0x10\ny: two\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    }
+  },
+  {
+    "name": "BA1-keep-anchor",
+    "source": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # note-a\nname: n\n",
+    "operation": {
+      "op": "nested",
+      "keys": [
+        "name"
+      ],
+      "value": "m"
+    },
+    "protected": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # note-a\nname: m\n",
+    "witness": {
+      "archives": [],
+      "moves": [
+        {
+          "destination": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "ordinal": 0,
+          "source": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "text": "# note-a",
+          "via": "observed"
+        }
+      ],
+      "operation": {
+        "keys": [
+          "name"
+        ],
+        "op": "nested",
+        "value": "m"
+      },
+      "retained_source_owner": {
+        "go": {
+          "files": [
+            "p: {k: v}\nq: {k: v}\nsrv:\n  host: h\n# note-a\nname: m\n"
+          ]
+        },
+        "go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "p: {k: v}\nq: {k: v}\nsrv:\n  host: h\n# note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"p\":map[string]interface {}{\"k\":\"v\"}, \"q\":map[string]interface {}{\"k\":\"v\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]"
+            ]
+          }
+        },
+        "identity": {
+          "masked_source": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # parity-source-45c6b1770e4785f8-00000000\nname: n\n",
+          "occurrences": [
+            {
+              "id": "# parity-source-45c6b1770e4785f8-00000000",
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "operation": {
+            "keys": [
+              "name"
+            ],
+            "op": "nested",
+            "value": "m"
+          },
+          "source": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # note-a\nname: n\n"
+        },
+        "marked_go": {
+          "files": [
+            "p: {k: v}\nq: {k: v}\nsrv:\n  host: h\n# parity-source-45c6b1770e4785f8-00000000\nname: m\n"
+          ]
+        },
+        "marked_go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# parity-source-45c6b1770e4785f8-00000000"
+            }
+          ],
+          "source": "p: {k: v}\nq: {k: v}\nsrv:\n  host: h\n# parity-source-45c6b1770e4785f8-00000000\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"p\":map[string]interface {}{\"k\":\"v\"}, \"q\":map[string]interface {}{\"k\":\"v\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]"
+            ]
+          }
+        },
+        "protected_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # note-a\nname: m\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"m\", \"p\":map[string]interface {}{\"k\":\"v\"}, \"q\":map[string]interface {}{\"k\":\"v\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"p\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"},{\"key\":\"k\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"q\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]"
+            ]
+          }
+        }
+      },
+      "source": "p: &a {k: v}\nq: *a\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    }
+  },
+  {
+    "name": "W1-reorder",
+    "source": "x: 0\n",
+    "operation": {
+      "op": "write",
+      "body": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    },
+    "protected": "y: two\nx: 1\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+    "witness": {
+      "archives": [],
+      "moves": [
+        {
+          "destination": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "ordinal": 0,
+          "source": {
+            "path": [
+              {
+                "key": "srv",
+                "tag": "!!str"
+              },
+              {
+                "key": "host",
+                "tag": "!!str"
+              }
+            ],
+            "node": "key",
+            "slot": "foot"
+          },
+          "text": "# note-a",
+          "via": "observed"
+        }
+      ],
+      "operation": {
+        "body": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+        "op": "write"
+      },
+      "retained_source_owner": {
+        "go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: n\n"
+          ]
+        },
+        "go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: n\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"n\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "identity": {
+          "masked_source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # parity-source-d163374665e3de44-00000000\nname: n\n",
+          "occurrences": [
+            {
+              "id": "# parity-source-d163374665e3de44-00000000",
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "operation": {
+            "body": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+            "op": "write"
+          },
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+        },
+        "marked_go": {
+          "files": [
+            "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-d163374665e3de44-00000000\nname: n\n"
+          ]
+        },
+        "marked_go_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "name",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "head"
+              },
+              "text": "# parity-source-d163374665e3de44-00000000"
+            }
+          ],
+          "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-d163374665e3de44-00000000\nname: n\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"n\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        },
+        "protected_inventory": {
+          "comments": [
+            {
+              "ordinal": 0,
+              "source": {
+                "path": [
+                  {
+                    "key": "srv",
+                    "tag": "!!str"
+                  },
+                  {
+                    "key": "host",
+                    "tag": "!!str"
+                  }
+                ],
+                "node": "key",
+                "slot": "foot"
+              },
+              "text": "# note-a"
+            }
+          ],
+          "source": "y: two\nx: 1\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+          "values": {
+            "decoded": "map[string]interface {}{\"name\":\"n\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+            "tags": [
+              "[[],\"root\",\"!!map\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+              "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+            ]
+          }
+        }
+      },
+      "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+    }
+  }
+]

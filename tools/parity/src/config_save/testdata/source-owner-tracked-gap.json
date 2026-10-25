@@ -1,0 +1,219 @@
+{
+  "case": "B9-lost",
+  "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+  "protected": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+  "operation": {
+    "op": "nested",
+    "keys": [
+      "name"
+    ],
+    "value": "m"
+  },
+  "evidence": {
+    "archives": [],
+    "moves": [
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "srv",
+              "tag": "!!str"
+            },
+            {
+              "key": "host",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "foot"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "srv",
+              "tag": "!!str"
+            },
+            {
+              "key": "host",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "foot"
+        },
+        "text": "# note-a",
+        "via": "observed"
+      }
+    ],
+    "operation": {
+      "keys": [
+        "name"
+      ],
+      "op": "nested",
+      "value": "m"
+    },
+    "retained_source_owner": {
+      "go": {
+        "files": [
+          "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n"
+        ]
+      },
+      "go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "name",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "identity": {
+        "masked_source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # parity-source-b4a837a0e1128eba-00000000\nname: n\n",
+        "occurrences": [
+          {
+            "id": "# parity-source-b4a837a0e1128eba-00000000",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "srv",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "host",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "foot"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "operation": {
+          "keys": [
+            "name"
+          ],
+          "op": "nested",
+          "value": "m"
+        },
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+      },
+      "marked_go": {
+        "files": [
+          "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n"
+        ]
+      },
+      "marked_go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "name",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# parity-source-b4a837a0e1128eba-00000000"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-b4a837a0e1128eba-00000000\nname: m\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "protected_inventory": {
+        "comments": [],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "protected": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+      "repeat_input": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+      "repeat_operation": {
+        "op": "nested",
+        "keys": [
+          "name"
+        ],
+        "value": "m"
+      },
+      "repeat_ok": true,
+      "repeated": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+      "normalized": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n"
+    },
+    "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
+  },
+  "measured_provenance": "Pinned-Go loss probe measured by the reviewer on head 6a18a549",
+  "protected_output_provenance": "Deliberately bad candidate; not claimed as a product output",
+  "repeat_witness": "Granted to isolate source-owner occurrence and budget conditions"
+}
