@@ -115,6 +115,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
+- **Small tool schemas with nested references no longer take seconds to translate** when Gemini tool arguments are cleaned against the client's Claude schemas.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
