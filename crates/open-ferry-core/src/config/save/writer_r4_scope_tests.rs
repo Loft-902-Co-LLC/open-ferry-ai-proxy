@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn writer_r4_deep_root_partial_repair_keeps_its_repeat_stability() {
     let source = input("s3_root_deep_seq_col6");
+    let expected_owners: Value =
+        serde_json::from_str(include_str!("../testdata/writer/writer_r5_owners.json")).unwrap();
     for op in ["nested2", "raw2"] {
         let result = op_run(&source, op, false);
         assert!(
@@ -11,6 +13,14 @@ fn writer_r4_deep_root_partial_repair_keeps_its_repeat_stability() {
         );
         assert_eq!(result["files"].as_array().unwrap().len(), 2);
         for file in result["files"].as_array().unwrap() {
+            let actual_owners: Vec<_> = inventory(file.as_str().unwrap())
+                .into_iter()
+                .map(|((path, slot, line), count)| json!([path, slot, line, count]))
+                .collect();
+            assert!(
+                Value::Array(actual_owners) == expected_owners[op],
+                "deep root {op} changed the frozen owner inventory"
+            );
             let mut expected = Config::parse(&source).unwrap();
             if op == "nested2" {
                 expected.auth_dir = "/x".into();
