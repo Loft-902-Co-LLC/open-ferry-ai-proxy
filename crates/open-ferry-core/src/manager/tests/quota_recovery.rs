@@ -729,4 +729,59 @@ async fn an_independent_no_model_hold_still_blocks_selection_and_storage_after_a
     );
 }
 
+/// A header edit between the token and the apply leaves the version of the
+/// credential alone, yet the read was made with the old header.
+#[tokio::test(start_paused = true)]
+async fn a_request_shaping_edit_fences_a_read_in_flight() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    let token = h.manager.quota_recovery_token(ID).expect("token");
+    h.clock.advance(Duration::from_secs(5));
+    let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+    assert!(token.matches(&h.get(ID)));
+
+    h.manager
+        .edit(ID, |auth| {
+            auth.attributes
+                .insert("header:X-Team".into(), "green".into());
+            Ok::<_, ()>(true)
+        })
+        .expect("edit");
+    assert!(
+        h.manager
+            .apply_quota_usage_recovery(&token, &healthy)
+            .expect("apply")
+            .is_empty(),
+        "a read made before a header edit ended a cooldown"
+    );
+    assert!(blocked(&h, OPUS));
+    assert!(!token.matches(&h.get(ID)));
+}
+
+/// Another model's outcome between the token and the apply neither fences
+/// this model's read nor changes what the token stands for.
+#[tokio::test(start_paused = true)]
+async fn an_unrelated_models_outcome_leaves_a_read_in_flight_valid() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    let token = h.manager.quota_recovery_token(ID).expect("token");
+    h.clock.advance(Duration::from_secs(5));
+    h.manager
+        .mark_result(&quota_429(SONNET, sonnet_headers(), FIVE_DAYS));
+    assert!(token.matches(&h.get(ID)));
+    let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+    assert!(
+        !h.manager
+            .apply_quota_usage_recovery(&token, &healthy)
+            .expect("apply")
+            .is_empty()
+    );
+    assert!(!blocked(&h, OPUS));
+    assert!(blocked(&h, SONNET));
+}
+
 /
