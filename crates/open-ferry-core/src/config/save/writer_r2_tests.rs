@@ -559,3 +559,6 @@ fn writer_r3_separator_does_not_change_faithful_yaml() {
         );
     }
 }
+
+#[path = "writer_r4_tests.rs"]
+mod writer_r4_tests;
