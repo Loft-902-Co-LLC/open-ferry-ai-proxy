@@ -281,9 +281,13 @@ impl<'a> Resolver<'a, '_> {
                 self.active.insert(reference.to_owned());
                 let resolved = self.resolve(target, 1);
                 self.active.remove(reference);
-                if let Value::Object(mut target) = resolved {
-                    target.extend(out);
-                    return Value::Object(target);
+                if let Value::Object(target_map) = resolved {
+                    let dialect = out.shift_remove("$schema");
+                    let mut merged = self.merge_ref(target_map, out, target, reference, 0);
+                    if let Some(dialect) = dialect {
+                        merged.insert("$schema".into(), dialect);
+                    }
+                    return Value::Object(merged);
                 }
             }
             return Value::Object(self.fallback(
@@ -327,17 +331,70 @@ impl<'a> Resolver<'a, '_> {
                     self.active.insert(reference.to_owned());
                     let resolved = self.resolve(target, depth + 1);
                     self.active.remove(reference);
-                    if let Value::Object(mut out) = resolved {
+                    if let Value::Object(out) = resolved {
                         let mut siblings = self.entries(map, depth + 1);
                         siblings.shift_remove("$ref");
-                        out.extend(siblings);
-                        return Value::Object(out);
+                        return Value::Object(
+                            self.merge_ref(out, siblings, target, reference, depth),
+                        );
                     }
                 }
                 Value::Object(self.entries(map, depth + 1))
             }
             _ => value.clone(),
         }
+    }
+
+    fn merge_ref(
+        &mut self,
+        mut target: Map<String, Value>,
+        mut siblings: Map<String, Value>,
+        source: &Value,
+        reference: &str,
+        depth: usize,
+    ) -> Map<String, Value> {
+        if !needs_conjunction(&target, &siblings) {
+            target.extend(siblings);
+            return target;
+        }
+        // A retained target adds an applicator array and two output levels.
+        // Transfer existing values, and charge the new container before allocating it.
+        let target_value = Value::Object(target);
+        if depth + 2 + structural_depth(&target_value) > self.max_depth {
+            self.depth_exhausted = true;
+            return self.fallback(
+                FallbackSiblings::Resolved(siblings),
+                source,
+                reference,
+                depth,
+            );
+        }
+        let nodes = node_count(&target_value, 100_000, false);
+        if self
+            .budget
+            .spend(CopyCost {
+                bytes: 11,
+                nodes: 1,
+                path_work: nodes
+                    .saturating_mul("allOf.0.".len())
+                    .saturating_add(depth + 1),
+            })
+            .is_none()
+        {
+            self.budget_exhausted = true;
+            return self.fallback(
+                FallbackSiblings::Resolved(siblings),
+                source,
+                reference,
+                depth,
+            );
+        }
+        let mut branches = vec![target_value];
+        if let Some(Value::Array(existing)) = siblings.shift_remove("allOf") {
+            branches.extend(existing);
+        }
+        siblings.insert("allOf".into(), Value::Array(branches));
+        siblings
     }
 
     fn entries(&mut self, map: &Map<String, Value>, depth: usize) -> Map<String, Value> {
@@ -453,6 +510,49 @@ impl<'a> Resolver<'a, '_> {
     }
 }
 
+// Adjacent assertions can depend on each other's evaluation scope, even when
+// their values are equal. Keep the whole reference target under an applicator.
+fn needs_conjunction(target: &Map<String, Value>, siblings: &Map<String, Value>) -> bool {
+    let present =
+        |map: &Map<String, Value>, key: &str| map.get(key).is_some_and(|value| !value.is_null());
+    if !siblings.is_empty()
+        && ["unevaluatedProperties", "unevaluatedItems"]
+            .iter()
+            .any(|key| present(target, key))
+    {
+        return true;
+    }
+    for (left, right) in [
+        ("additionalProperties", "properties"),
+        ("additionalProperties", "patternProperties"),
+        ("additionalProperties", "additionalProperties"),
+        ("items", "prefixItems"),
+        ("contains", "contains"),
+        ("contains", "minContains"),
+        ("contains", "maxContains"),
+    ] {
+        if (present(target, left) && present(siblings, right))
+            || (present(siblings, left) && present(target, right))
+        {
+            return true;
+        }
+    }
+    siblings.iter().any(|(key, value)| {
+        !matches!(
+            key.as_str(),
+            "title"
+                | "description"
+                | "default"
+                | "example"
+                | "examples"
+                | "$comment"
+                | "deprecated"
+                | "readOnly"
+                | "writeOnly"
+        ) && target.get(key).is_some_and(|previous| previous != value)
+    })
+}
+
 fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     reference
         .strip_prefix("#/")?
@@ -560,3 +660,6 @@ fn literal_size(value: &Value) -> usize {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod conjunction_tests;
