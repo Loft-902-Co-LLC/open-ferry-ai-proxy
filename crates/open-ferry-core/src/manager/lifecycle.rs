@@ -1590,6 +1590,15 @@ impl Manager {
             // As in `clear_disabled_cooldown_states`.
             state.quota_recovery.forget(&auth.id);
         }
+        // An update that stores cooldowns other than the live ones (model
+        // states carried in, keys merged by normalizing) has put in state no
+        // claim describes, and a read in flight spoke for the old one: as for
+        // a registration, fence it and hold what the credential now carries.
+        if super::quota_recovery::cooldowns_differ(&existing_auth, &auth) {
+            state.quota_recovery.forget(&auth.id);
+            let carried = super::quota_recovery::cooldown_scopes(&auth);
+            state.quota_recovery.restored(&auth.id, &carried);
+        }
         auth.ensure_index();
         auth.registration_epoch = live_epoch;
         auth.generation = generation;
@@ -3094,6 +3103,10 @@ impl Manager {
             count_result(auth, result, now);
             // open-ferry's cap on long quota rests (see `quota_check`).
             let rests = state.quota_checks.live_rests(&auth.id, &model_key, now);
+            // A merge's mark ends only once nothing it could have touched is
+            // still ahead, judged before this result changes any of it.
+            let rest_live = state.quota_checks.rest_live(&auth.id, now);
+            state.quota_recovery.settle_merge_mark(auth, rest_live, now);
             state.quota_checks.before_result(auth);
             let dispatched = self.current_execution_seq();
             let (_, recovery_scope) = super::quota_recovery::scope_of(result, &model_key);
