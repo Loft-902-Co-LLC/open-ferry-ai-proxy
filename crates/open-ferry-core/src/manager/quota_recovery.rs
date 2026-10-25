@@ -51,8 +51,10 @@
 //! quota-check rest (the capped check time is not the reset), and every model
 //! state's own deadline, quota deadline and wrap shadow, with an unknown end
 //! counting as live. A repeated merge keeps the later bound; an unknown bound
-//! lasts until the credential is removed or reset by the user, or the saved
-//! cooldowns replace the live ones. No single field says it (a Cloudflare
+//! lasts until the credential is removed, its cooldowns are reset (by the
+//! user, or by cooling being turned off or the credential disabled, which an
+//! update can also do), or the saved cooldowns replace the live ones. No
+//! single field says it (a Cloudflare
 //! failure that names no model rewrites the credential's quota reason, a cap
 //! shortens its deadline), and no failure of any kind drops it. While it
 //! stands every recovery on the credential is refused, a model's as well as the
@@ -60,10 +62,11 @@
 //! the merged cooldowns can't be given back as they were), and what was owed is
 //! of no use once it is gone: a mark that has passed leaves a credential whose
 //! every layer has ended. The registering, updating and refreshing of a
-//! credential that stores other cooldowns keep it (their cooldowns are held
-//! with an unknown end beside it); the user's reset keeps one with a bound and
-//! ends one with none, which no bound would ever end; removing the credential
-//! ends it. So it can outlive the wrap it was made under, for as long as the
+//! credential that stores other cooldowns keep the mark, whatever its bound
+//! (their cooldowns are held with an unknown end beside it); a reset of the
+//! cooldowns (the user's, cooling turned off, the credential disabled) keeps a
+//! mark with a bound and ends one with none, which no bound would ever end;
+//! removing the credential ends it. So it can outlive the wrap it was made under, for as long as the
 //! longest layer lasts: the credential is refused until its cooldowns end by
 //! themselves. Ending the wrap would otherwise have to rebuild what lay under
 //! it, and a rebuilt hold could come out shorter than the real one.
@@ -106,11 +109,16 @@
 //! are merged with its models', so taking the model out from under the hold
 //! could not give the hold back as it was, and selection skips the credential
 //! until the hold ends anyway. A hold ends only at its own recorded deadline
-//! (an unknown one never), on a success on its own scope, or on a reset,
-//! removal, restore or clearing of the cooldowns; it never ends because a
-//! sibling's failure made the aggregation rewrite the credential's live
-//! flags. Those discard old holds while preserving the fence against reads
-//! already in flight.
+//! (an unknown one never), on a success on any model that leaves the hold's
+//! scope unblocked, or on a reset, removal, restore or clearing of the
+//! cooldowns. For the credential's own hold that is a sibling's success that
+//! lets the aggregation clear the credential's flags (main had then lifted
+//! the hold for all traffic); a success that leaves the credential blocked
+//! ends nothing, and no failure ever does, since a sibling's failure may have
+//! rewritten the credential's live flags. This is also how the unknown-end
+//! holds recorded after a registration or a restore end in ordinary use. The
+//! resets and removals discard old holds while preserving the fence against
+//! reads already in flight.
 //!
 //! A refused read mutates nothing, in the recovery or in the quota checks: a
 //! read that recovers no scope only puts the leases back, and sweeps no rest.

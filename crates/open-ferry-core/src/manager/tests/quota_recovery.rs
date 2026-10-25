@@ -3717,3 +3717,54 @@ fn repeated_merges_keep_the_latest_finite_bound_and_unknown_wins() {
     recoveries.merged(ID, "a", "b", Some(after(900)));
     assert_eq!(recoveries.mark(ID), Some(None), "unknown stays unknown");
 }
+
+/// A one hour no-model 503 hold, `between` run (a success of a model), then a
+/// recognised five day 429 of Opus; whether a fresh read recovers Opus, and
+/// whether the credential's own flags were blocked just before the 429.
+fn hold_then_success_then_claim(between: impl Fn(&Harness)) -> (bool, bool) {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager.mark_result(&success(OPUS));
+    h.manager.mark_result(&success(SONNET));
+    h.clock.advance(secs(1));
+    h.manager.mark_result(&other_failure("", 503, HOUR));
+    h.clock.advance(secs(5));
+    between(&h);
+    h.clock.advance(secs(5));
+    let flags = h.get(ID).unavailable;
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(secs(5));
+    (
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        flags,
+    )
+}
+
+/// A success on any model ends a hold whose scope it leaves unblocked: for the
+/// credential's own hold, a sibling's success lets the aggregation clear the
+/// credential's flags. The control: a success that leaves the credential
+/// blocked (its other model is cooling) ends nothing, and the read is refused.
+#[tokio::test(start_paused = true)]
+async fn a_sibling_success_that_unblocks_the_credential_ends_its_hold() {
+    let (recovered, flags) = hold_then_success_then_claim(|h| {
+        h.manager.mark_result(&success(SONNET));
+    });
+    assert!(
+        !flags,
+        "the sibling's success cleared the credential's flags"
+    );
+    assert!(recovered, "the hold ended with the credential unblocked");
+
+    let (recovered, flags) = hold_then_success_then_claim(|h| {
+        // A credential-wide quota wrap keeps the credential blocked past a
+        // success of Opus.
+        wrap(h, HOUR);
+        h.manager.mark_result(&success(OPUS));
+    });
+    assert!(flags, "the credential stayed blocked");
+    assert!(
+        !recovered,
+        "the hold stayed while the credential was blocked"
+    );
+}
