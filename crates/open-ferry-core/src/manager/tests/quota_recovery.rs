@@ -641,4 +641,28 @@ async fn an_unrecognized_429_between_keeps_windows_owed_and_fails_closed() {
     assert!(blocked(&h, OPUS));
 }
 
+/// An unrecognized 429 holding a model for seven days, recorded under a 1 hour
+/// check cap, is still a seven-day foreign hold: a recognized 429 after it
+/// and a healthy read after the check time must not end the unproven rest.
+#[tokio::test(start_paused = true)]
+async fn a_capped_foreign_hold_keeps_its_provider_deadline() {
+    let h = Harness::new(Settings {
+        quota_check_after: HOUR,
+        ..Settings::default()
+    });
+    h.add(auth(ID, "claude"), &[OPUS]);
+    h.manager
+        .mark_result(&other_failure(OPUS, 429, SEVEN_DAYS));
+    h.clock.advance(Duration::from_secs(10));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), SEVEN_DAYS));
+
+    h.clock.advance(Duration::from_secs(65 * 60));
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "the 1 hour check time was taken for the end of a 7 day hold"
+    );
+    assert!(h.get(ID).model_states[OPUS].quota.exceeded);
+}
+
 /
