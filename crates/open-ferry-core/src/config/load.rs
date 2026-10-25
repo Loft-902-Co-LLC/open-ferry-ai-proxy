@@ -14,7 +14,8 @@
 //!   `parse config payload: ` ([`Config::parse`]).
 //! - A `models` source that is neither an http(s) URL nor an absolute
 //!   path: prefixed as above, since upstream checks it while decoding.
-//! - Duplicate keys, a root that isn't a mapping, a bad v8 layout, weights
+//! - Duplicate keys have the same prefix as other decode errors.
+//! - A root that isn't a mapping, a bad v8 layout, weights
 //!   and trusted proxies: upstream's message alone.
 //!
 //! An empty or comment-only file loads as the defaults; an empty payload is
@@ -131,7 +132,13 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
             return Err(ConfigError::new(ConfigErrorKind::Syntax, message));
         }
     };
-    let flattened = flatten_v8(&root)?;
+    let flattened = flatten_v8(&root).map_err(|error| {
+        if error.kind() == ConfigErrorKind::Decode {
+            ConfigError::new(ConfigErrorKind::Decode, format!("{prefix}{error}"))
+        } else {
+            error
+        }
+    })?;
     validate_weights(&flattened.root)?;
     let mut config: Config = decode(&flattened.root).map_err(|error| {
         let kind = match error {
