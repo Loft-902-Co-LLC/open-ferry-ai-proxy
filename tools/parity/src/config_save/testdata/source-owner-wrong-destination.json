@@ -5,7 +5,8 @@
     "go_receipts": "native source, operation, output, masked output and protected inventories",
     "deliberate_changes": [
       "replay destination redirected to another equal-named key with a different value",
-      "repeat granted to isolate the destination guard"
+      "repeat granted to isolate the destination guard",
+      "protected hand-written to place the comment at the redirected destination"
     ]
   },
   "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\nother:\n  host: different\ntail: end\n",

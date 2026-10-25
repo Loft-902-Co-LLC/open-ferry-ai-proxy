@@ -15,6 +15,7 @@ pub const ALL: [Protection; 7] = [
     Protection::BlockScalarCommentIndentation,
     Protection::MultipleFlowItemFeet,
 ];
+const _: () = assert!(ALL.len() <= 8);
 
 #[derive(Clone, Debug)]
 pub struct Replay {

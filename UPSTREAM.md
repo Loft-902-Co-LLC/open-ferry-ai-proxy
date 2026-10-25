@@ -560,7 +560,30 @@ on the parsed tree
 without the save's write-and-reload step, so a comment that step drops still
 has a destination; the archive replay includes that step.
 
-The `retained-source-owner` rule can prove that our writer kept a comment at its source owner when pinned Go moved or dropped it. A separate inventory must find each source occurrence once, on the same node, key/value/item side and head/line/foot slot, following each node Go's replay moved. A separate Go run checks each comment against the exact input and edit. For each moved or dropped comment, its place in the replay must have the source node's value and tag in Go's real output; a key and its value are checked together. Comments Go kept must stay at Go's real owners. A comment Go moved whose list item the save also rewrote stays Different, as do ambiguous identities, missing or duplicate comments and comments at another owner. All decoded values and tags must match Go. The output must load, and repeating the operation with our writer must not change it. An accepted proof still needs check 4, the faithful comment-free byte match, with no new exception for formatting or alias expansion. Extra comments need the existing Go archive or migration proof. The evidence lists the protections the proof needed.
+The `retained-source-owner` rule can prove that our writer kept a comment at
+its source owner when pinned Go moved or dropped it. A separate inventory must
+find each source occurrence once, on the same node, key/value/item side and
+head/line/foot slot, following each node Go's replay moved. A separate Go run
+checks each comment against the exact input and edit. For each moved or
+dropped comment, its place in the replay must have the source node's value and
+tag in Go's real output; a key and its value are checked together. Comments Go
+kept must stay at Go's real owners. A comment Go moved whose node, or for a
+key its value, the save also rewrote stays Different. Keys with equal names
+and equal values cannot be told apart. Ambiguous identities and missing,
+duplicate or misplaced comments stay Different. All decoded values and tags
+must match Go. The output must load and stay unchanged when our writer repeats
+the operation. Check 4 compares faithful comment-free re-encodes; it does not
+cover raw whitespace or key style. For this rule, an additional guard checks
+physical layout within top-level keys and between code lines shared with equal
+counts by the source, Go and our output. Every occurrence is numbered,
+including lines with no whitespace defect. Blank lines need counterparts in
+the same region in the source or Go output; trailing whitespace also needs the
+same code line and occurrence. The two inputs' blank-line allowances are not
+added together. Removing whitespace elsewhere cannot pay for an addition. A
+layout defect with no shared boundary fails closed. Comment text does not
+count as layout. Explicit-key syntax is allowed because yaml.v3 needs it to
+retain a comment on a key. Extra comments need the existing Go archive or
+migration proof. The evidence lists the protections the proof needed.
 
 For archives of unknown keys, a separate replay computes the exact comment
 lines and their places from each original entry and the requested write.

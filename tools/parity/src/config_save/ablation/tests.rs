@@ -60,6 +60,104 @@ fn frame_go(evidence: &Value) -> Value {
     evidence["retained_source_owner"]["go"].clone()
 }
 
+fn source_owner_layout_gap(name: &str) {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("../testdata/source-owner-layout-gaps.json")).unwrap();
+    let fixture = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == name)
+        .unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let operation = &fixture["operation"];
+    let evidence = &fixture["evidence"];
+    // Go replies and inventories are pinned-Go receipts. The small controls
+    // alter layout and grant stability; the two measured cases use the actual
+    // owners writer output and repeat. Their provenance distinguishes them.
+    let proof = core::retained_source_owner(source, protected, operation, evidence);
+    assert!(!proof.accepted(), "{name}: added layout was certified");
+    assert_eq!(proof.conditions, [false, true, true, true, true]);
+    let case = Case::new(name, "", "").with_options(json!({
+        "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+    }));
+    let go = frame_go(evidence);
+    assert!(
+        !ownership::analyze(
+            &case,
+            0,
+            source,
+            go["files"][0].as_str(),
+            protected,
+            &[],
+            true
+        )
+        .accepted()
+    );
+    let protected = json!({"files":[protected]});
+    let replay = Replay {
+        output: go.clone(),
+        traces: vec![],
+    };
+    let result = checks(Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &go,
+        mask: 1,
+        matches: &[(1, true)],
+    });
+    assert_eq!(result, [true, true, false, true, true]);
+}
+
+#[test]
+fn retained_source_owner_refuses_a_new_trailing_space() {
+    source_owner_layout_gap("trailing");
+}
+
+#[test]
+fn retained_source_owner_refuses_a_new_blank_line() {
+    source_owner_layout_gap("blank");
+}
+
+#[test]
+fn retained_source_owner_refuses_measured_trailing_space() {
+    source_owner_layout_gap("trailing-key-region");
+}
+
+#[test]
+fn retained_source_owner_refuses_measured_blank_inside_a_key_region() {
+    source_owner_layout_gap("blank-key-region");
+}
+
+#[test]
+fn retained_source_owner_records_later_exemptions_after_an_invalid_go_owner() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../testdata/source-owner-wrong-destination.json"
+    ))
+    .unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let mut evidence = fixture["evidence"].clone();
+    let go = frame_go(&evidence);
+    assert!(core::source_owner_layout(
+        source,
+        go["files"][0].as_str().unwrap(),
+        protected
+    ));
+    // Deliberately invalidate the first Go-owner comparison. The destination
+    // check must still see the exemption and record its different-value fault.
+    evidence["retained_source_owner"]["go_inventory"]["comments"][0]["source"]["slot"] =
+        "line".into();
+    let proof = core::retained_source_owner(source, protected, &fixture["operation"], &evidence);
+    assert!(!proof.conditions[0]);
+    assert!(!proof.conditions[1]);
+    assert!(!proof.accepted());
+}
+
 #[test]
 fn retained_source_owner_accepts_an_edited_value_go_kept_at_its_owner() {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -122,8 +220,8 @@ fn retained_source_owner_refuses_a_different_real_go_key_value_destination() {
     let protected = fixture["protected"].as_str().unwrap();
     let operation = &fixture["operation"];
     let evidence = &fixture["evidence"];
-    // Go's source, output and inventories are real. Only the replay destination
-    // is redirected to another equal-named key; repeat is granted to isolate it.
+    // Go's source, output and inventories are real. The replay destination and
+    // protected placement are deliberately redirected; repeat is granted.
     let proof = core::retained_source_owner(source, protected, operation, evidence);
     assert!(
         !proof.accepted(),
