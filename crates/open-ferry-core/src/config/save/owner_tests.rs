@@ -816,3 +816,39 @@ fn owner_lookup_hints_cannot_change_receipt_identity() {
     source.comments.push(source.comments[0].clone());
     assert!(!source.holds(&document));
 }
+
+#[test]
+fn owner_byte_only_rendering_skips_unused_receipt_walks() {
+    let mut text = String::from("items:\n");
+    for _ in 0..1024 {
+        text.push_str("  - item\n");
+    }
+    let node = unmarshal(text.as_bytes()).unwrap();
+    let (plain, plain_work) = tree::count_comment_work(|| encode::faithful_node(&node, 2).unwrap());
+    let (tracked, tracked_work) =
+        tree::count_comment_work(|| encode::faithful_node_receipted(&node, 2).unwrap());
+    assert!(plain == tracked.0);
+    assert!(tracked.1.owners.is_empty() && tracked.1.comments.is_empty());
+    assert!(
+        tracked_work >= plain_work + 1024,
+        "byte-only rendering scanned receipt paths it never returns"
+    );
+
+    let (mut node, source) = tree::read_comment_source(b"items:\n  - item # keep\n").unwrap();
+    let line_id = super::super::yaml3::CommentId::fresh();
+    yaml_path_mut(&mut node.content[0], "items")
+        .unwrap()
+        .content[0]
+        .line_comment_id = Some(line_id.clone());
+    let plain = encode::protected_node(&node, 2).unwrap();
+    let tracked = tree::marshal_receipted(&node, 2).unwrap();
+    assert!(plain.0 == tracked.bytes);
+    assert!(source.holds(&tree::read_receipted(&tracked).unwrap()));
+    let value = encode::Value::Node(node);
+    let plain = encode::marshal_with_comment_ids(&value).unwrap();
+    let tracked = encode::marshal_with_receipts(&value).unwrap();
+    assert!(plain.0 == tracked.0);
+    assert!(plain.1.len() == 1 && tracked.1.len() == 1);
+    assert!(plain.1[0].id == line_id && tracked.1[0].id == line_id);
+    assert!(!tracked.2.owners.is_empty() && !tracked.2.comments.is_empty());
+}

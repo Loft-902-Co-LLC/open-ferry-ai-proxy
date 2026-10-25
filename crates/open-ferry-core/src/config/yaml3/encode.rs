@@ -127,6 +127,8 @@ impl Value {
 }
 
 fn node_has_receipts(node: &Node) -> bool {
+    #[cfg(test)]
+    crate::config::save::tree::comment_work(1);
     node.comment_receipts.owner.is_some()
         || !node.comment_receipts.head.is_empty()
         || !node.comment_receipts.line.is_empty()
@@ -149,7 +151,7 @@ fn value_has_receipts(value: &Value) -> bool {
 /// `yaml.Marshal`: `value` as a YAML document, indented by 4.
 pub(crate) fn marshal(value: &Value) -> Result<Vec<u8>, YamlError> {
     let mut encoder = Encoder::new();
-    encoder.encode(value)?;
+    encoder.encode_with_receipts(value, false)?;
     encoder.close()
 }
 
@@ -160,7 +162,7 @@ pub(crate) fn marshal_with_comment_ids(
     let mut encoder = Encoder::new();
     encoder.emitter.record_comments = true;
     encoder.protect_generated_unicode = true;
-    encoder.encode(value)?;
+    encoder.encode_with_receipts(value, false)?;
     encoder.finish()?;
     let ids = std::mem::take(&mut encoder.emitter.emitted_comments);
     Ok((encoder.emitter.into_output(), ids))
@@ -212,7 +214,7 @@ pub(crate) fn protect_pending_version_comments(root: &mut Node) -> Result<(), Ya
     };
     let mut encoder = Encoder::new();
     encoder.emitter.record_comments = true;
-    encoder.encode_node(root)?;
+    encoder.encode_node_with_receipts(root, false)?;
     encoder.finish()?;
     let emitted = encoder.emitter.emitted_comments;
     let pending: std::collections::HashSet<_> = emitted
@@ -284,7 +286,7 @@ pub(crate) fn marshal_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlEr
 pub(crate) fn faithful_node(node: &Node, indent: usize) -> Result<Vec<u8>, YamlError> {
     let mut encoder = Encoder::new();
     encoder.set_indent(indent);
-    encoder.encode_node(node)?;
+    encoder.encode_node_with_receipts(node, false)?;
     encoder.finish()?;
     Ok(encoder.emitter.into_output())
 }
@@ -344,12 +346,20 @@ pub(crate) fn protected_node(
     node: &Node,
     indent: usize,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>), YamlError> {
-    protected_node_receipted(node, indent).map(|(bytes, marks, _)| (bytes, marks))
+    protected_node_inner(node, indent, false).map(|(bytes, marks, _)| (bytes, marks))
 }
 
 pub(crate) fn protected_node_receipted(
     node: &Node,
     indent: usize,
+) -> Result<(Vec<u8>, Vec<super::types::Mark>, super::EmissionReceipts), YamlError> {
+    protected_node_inner(node, indent, true)
+}
+
+fn protected_node_inner(
+    node: &Node,
+    indent: usize,
+    collect_receipts: bool,
 ) -> Result<(Vec<u8>, Vec<super::types::Mark>, super::EmissionReceipts), YamlError> {
     let mut node = node.clone();
     protect_pending_item_foot(&mut node);
@@ -357,7 +367,7 @@ pub(crate) fn protected_node_receipted(
     let mut encoder = Encoder::new();
     encoder.emitter.protect_config_comments = true;
     encoder.set_indent(indent);
-    encoder.encode_node(&node)?;
+    encoder.encode_node_with_receipts(&node, collect_receipts && node_has_receipts(&node))?;
     encoder.finish()?;
     let protected = std::mem::take(&mut encoder.emitter.protected_scalars);
     let receipts = encoder.emitter.take_receipts();
@@ -467,7 +477,7 @@ pub(crate) fn protect_conflicting_key_comments(
     encoder.emitter.protect_config_comments = true;
     encoder.emitter.record_comments = output_complete;
     encoder.set_indent(indent);
-    encoder.encode_node(node)?;
+    encoder.encode_node_with_receipts(node, false)?;
     encoder.finish()?;
     let hazardous: std::collections::HashSet<_> =
         encoder.emitter.hazardous_key_comments.into_iter().collect();
@@ -599,13 +609,24 @@ impl Encoder {
         event: Event,
         receipts: super::CommentReceipts,
     ) -> Result<(), YamlError> {
+        if !self.emitter.record_receipt_paths {
+            return self.emit(event);
+        }
         self.emitter
             .emit_receipted(event, receipts)
             .map_err(|error| YamlError::fail(error.message()))
     }
 
     pub(crate) fn encode_node(&mut self, node: &Node) -> Result<(), YamlError> {
-        self.emitter.record_receipt_paths = node_has_receipts(node);
+        self.encode_node_with_receipts(node, node_has_receipts(node))
+    }
+
+    fn encode_node_with_receipts(
+        &mut self,
+        node: &Node,
+        collect_receipts: bool,
+    ) -> Result<(), YamlError> {
+        self.emitter.record_receipt_paths = collect_receipts;
         self.init()?;
         if node.kind == Kind::Document {
             return self.node(node, "", &[], false, 0);
@@ -617,10 +638,18 @@ impl Encoder {
 
     /// `Encoder.Encode(value)` (`marshalDoc`).
     pub(crate) fn encode(&mut self, value: &Value) -> Result<(), YamlError> {
+        self.encode_with_receipts(value, value_has_receipts(value))
+    }
+
+    fn encode_with_receipts(
+        &mut self,
+        value: &Value,
+        collect_receipts: bool,
+    ) -> Result<(), YamlError> {
         if let Value::Node(node) = value {
-            return self.encode_node(node);
+            return self.encode_node_with_receipts(node, collect_receipts);
         }
-        self.emitter.record_receipt_paths = value_has_receipts(value);
+        self.emitter.record_receipt_paths = collect_receipts;
         self.init()?;
         self.emit(Event::document_start(None, Vec::new(), true))?;
         self.marshal(value, 0)?;

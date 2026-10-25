@@ -740,7 +740,7 @@ fn candidate_preserving_comments(
     }
 
     source.include_copies(&original);
-    let mut out = tree::normalize_receipted(tree::marshal_config_receipted(&original)?);
+    let mut out = tree::normalize_receipted(tree::marshal_config_for_source(&original, &source)?);
     if migrating {
         out = normalize_config_layout_receipted(out, true)?;
     }
@@ -805,7 +805,7 @@ fn candidate_nested_scalar(
     }
     let intended = IntendedValues::node(&doc, false)?;
     source.include_copies(&doc);
-    let output = tree::normalize_receipted(tree::marshal_config_receipted(&doc)?);
+    let output = tree::normalize_receipted(tree::marshal_config_for_source(&doc, &source)?);
     check_values(&output.bytes, &intended)?;
     Ok((output, source))
 }
