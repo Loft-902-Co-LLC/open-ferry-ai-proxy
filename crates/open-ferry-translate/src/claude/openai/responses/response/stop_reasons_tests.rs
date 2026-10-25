@@ -526,3 +526,30 @@ fn deferred_search_replays_and_coalesces_across_tool_outputs() {
         }
     }
 }
+
+#[test]
+fn context_window_keeps_completed_search_results_and_usage() {
+    let (events, complete) = translate(&native(
+        json!([
+            {"type":"server_tool_use","id":"srvtoolu_context","name":"web_search","input":{"query":"lindorm vector"}},
+            {"type":"web_search_tool_result","tool_use_id":"srvtoolu_context","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"dummy-result"}]}
+        ]),
+        "model_context_window_exceeded",
+    ));
+    assert_eq!(terminal(&events)["type"], "response.incomplete");
+    for response in [&terminal(&events)["response"], &complete] {
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+        assert!(response.get("error").is_none_or(Value::is_null));
+        assert_eq!(response["output"][0]["action"]["query"], "lindorm vector");
+        assert_eq!(
+            response["output"][0]["results"][0]["encrypted_content"],
+            "dummy-result"
+        );
+        assert_eq!(response["usage"]["input_tokens"], 10);
+        assert_eq!(response["usage"]["output_tokens"], 4);
+    }
+}
