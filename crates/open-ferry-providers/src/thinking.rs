@@ -38,6 +38,10 @@
 //!   `extractCodexConfig` reads what gjson finds in it. A Claude model bound
 //!   to a request would also need `stripInferredClaudeSummaryActivation`,
 //!   which isn't ported.
+//! - On Chat/Responses targets, a lookup of type `openai-compatibility` also
+//!   maps `xhigh` and `max` through its registered levels. The lookup has no
+//!   selected-credential capability snapshot, so this preserves configured
+//!   compatibility behavior without treating all custom types as families.
 //! - Configuration-update helpers take parsed JSON values; malformed JSON
 //!   cannot enter them, so the upstream invalid-JSON boundary cases do not apply.
 //! - The Kimi and Antigravity targets aren't ported.
@@ -480,7 +484,11 @@ fn apply<T: Target>(
         }
         return Ok(());
     }
-    if resolved && config.mode == Mode::Level && maps_high_intent(&plan.from, T::NAME, &info) {
+    // Compatibility registrations have configured levels without a bound snapshot.
+    let map_high = resolved
+        || (matches!(T::NAME, "openai" | "codex")
+            && go::equal_fold(info.model_type.trim(), "openai-compatibility"));
+    if map_high && config.mode == Mode::Level && maps_high_intent(&plan.from, T::NAME, &info) {
         config.level = map_high_intent(&config.level, support);
     }
     let requested_off =
@@ -909,6 +917,7 @@ fn same_family(from: &str, to: &str) -> bool {
     from == to || (gemini(from) && gemini(to)) || (openai(from) && openai(to))
 }
 
+/// `isKnownProviderFamily`.
 fn known_family(provider: &str) -> bool {
     matches!(
         provider,
@@ -1274,7 +1283,7 @@ mod tests {
         assert_eq!(extract_config(&wrapped, "antigravity"), Config::budget(64));
     }
 
-    fn gemini_model(support: ThinkingSupport) -> Model {
+    pub(super) fn gemini_model(support: ThinkingSupport) -> Model {
         Model {
             id: "m".into(),
             model_type: "gemini".into(),
@@ -1681,6 +1690,7 @@ mod standalone_effort_tests {
 
 #[cfg(test)]
 mod shared_hardening_tests {
+    use super::tests::gemini_model;
     use super::*;
     use open_ferry_core::models::ModelInfo;
     use serde_json::json;
@@ -1730,6 +1740,176 @@ mod shared_hardening_tests {
                 body, source, requested, from, target, target, info,
             ),
             _ => unreachable!(),
+        }
+    }
+
+    fn registered(info: ModelInfo) -> open_ferry_core::registry::ModelRegistry {
+        let catalog = open_ferry_core::registry::ModelRegistry::new();
+        catalog.register_client("thinking-lookup-test", "compat-test", &[info]);
+        catalog
+    }
+
+    fn compatibility_model() -> ModelInfo {
+        ModelInfo {
+            model_type: "openai-compatibility".into(),
+            thinking: Some(ThinkingSupport {
+                levels: vec!["low".into(), "medium".into(), "high".into()],
+                ..Default::default()
+            }),
+            ..model("openai")
+        }
+    }
+
+    fn apply_lookup_to(
+        target: &str,
+        body: &mut Value,
+        source: &Body,
+        requested: &str,
+        from: &str,
+        catalog: &dyn open_ferry_core::models::ModelCatalog,
+    ) -> Result<(), ExecError> {
+        let route = Route {
+            model: requested,
+            from,
+            to: if target == "codex" {
+                "openai-response"
+            } else {
+                "openai"
+            },
+            provider: "compat-test",
+        };
+        if target == "codex" {
+            crate::codex::thinking::apply_request(body, route, source, &Body::Empty, Some(catalog))
+        } else {
+            crate::openai_compat::thinking::apply_request(
+                body,
+                route,
+                source,
+                &Body::Empty,
+                Some(catalog),
+            )
+        }
+    }
+
+    #[test]
+    fn lookup_compatibility_high_intent_uses_registered_levels() {
+        let catalog = registered(compatibility_model());
+        for (target, from) in [("openai", "openai"), ("codex", "openai-response")] {
+            for (requested, effort) in [
+                ("m", "xhigh"),
+                ("m", "max"),
+                ("m(xhigh)", "low"),
+                ("m(max)", "low"),
+            ] {
+                let mut body = body(target, effort);
+                let source = Body::Json(body.clone());
+                apply_lookup_to(target, &mut body, &source, requested, from, &catalog).unwrap();
+                assert_eq!(json::str_at(&body, effort_path(target)), "high");
+            }
+            for requested in ["m", "m(minimal)"] {
+                let mut body = body(target, "minimal");
+                let source = Body::Json(body.clone());
+                let error = apply_lookup_to(target, &mut body, &source, requested, from, &catalog)
+                    .unwrap_err();
+                assert_eq!(error.http_status(), 400);
+                assert!(error.message.contains("minimal"));
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_high_intent_does_not_change_other_catalog_model_types() {
+        for model_type in ["meta", "custom-compatible", "openai"] {
+            let catalog = registered(ModelInfo {
+                model_type: model_type.into(),
+                ..compatibility_model()
+            });
+            for (target, from) in [("openai", "openai"), ("codex", "openai-response")] {
+                for effort in ["minimal", "xhigh", "max"] {
+                    let mut body = body(target, effort);
+                    let source = Body::Json(body.clone());
+                    let error = apply_lookup_to(target, &mut body, &source, "m", from, &catalog)
+                        .unwrap_err();
+                    assert_eq!(error.http_status(), 400, "{model_type}: {effort}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_suffix_validation_rejects_fast_and_accepts_padded_levels() {
+        let catalog = registered(compatibility_model());
+        for (target, from) in [("openai", "openai"), ("codex", "openai-response")] {
+            let mut body = body(target, "low");
+            let source = Body::Json(body.clone());
+            let error =
+                apply_lookup_to(target, &mut body, &source, "m(fast)", from, &catalog).unwrap_err();
+            assert_eq!(error.http_status(), 400);
+            assert!(error.message.contains("fast"));
+            apply_lookup_to(target, &mut body, &source, "m( high )", from, &catalog).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "high");
+        }
+    }
+
+    #[test]
+    fn lookup_source_format_fallback_keeps_target_and_suffix_priority() {
+        let catalog = registered(compatibility_model());
+        for (target, from, fields) in [
+            ("codex", "openai", json!({"reasoning_effort":"high"})),
+            (
+                "openai",
+                "claude",
+                json!({"output_config":{"effort":"high"}}),
+            ),
+        ] {
+            let mut body = fields.clone();
+            apply_lookup_to(target, &mut body, &Body::Empty, "m", from, &catalog).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "high");
+
+            let mut body = fields.clone();
+            json::set(&mut body, effort_path(target), json!("medium"));
+            let source = Body::Json(fields);
+            apply_lookup_to(target, &mut body, &source, "m", from, &catalog).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "medium");
+            apply_lookup_to(target, &mut body, &source, "m(low)", from, &catalog).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "low");
+        }
+    }
+
+    #[test]
+    fn lookup_literal_model_id_compares_the_trimmed_requested_name() {
+        struct LiteralCatalog;
+        impl open_ferry_core::models::ModelCatalog for LiteralCatalog {
+            fn model_providers(&self, _model: &str) -> Vec<String> {
+                Vec::new()
+            }
+            fn first_available_model(&self) -> Option<String> {
+                None
+            }
+            fn available_models(&self) -> Vec<ModelInfo> {
+                Vec::new()
+            }
+            fn model_info(&self, id: &str, _provider: &str) -> Option<ModelInfo> {
+                assert_eq!(id, "m");
+                Some(ModelInfo {
+                    id: "m(fast)".into(),
+                    ..model("openai")
+                })
+            }
+        }
+        for (target, from) in [("openai", "openai"), ("codex", "openai-response")] {
+            let mut body = body(target, "low");
+            let source = Body::Json(body.clone());
+            apply_lookup_to(
+                target,
+                &mut body,
+                &source,
+                " \tm(fast)",
+                from,
+                &LiteralCatalog,
+            )
+            .unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "low");
         }
     }
 
@@ -2000,15 +2180,6 @@ mod shared_hardening_tests {
                 .unwrap(),
                 Config::budget(8192)
             );
-        }
-    }
-
-    fn gemini_model(support: ThinkingSupport) -> Model {
-        Model {
-            id: "m".into(),
-            model_type: "gemini".into(),
-            thinking: Some(support),
-            ..Model::default()
         }
     }
 }
