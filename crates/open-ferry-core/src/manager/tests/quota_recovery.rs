@@ -1840,12 +1840,17 @@ async fn a_live_alias_hold_merged_into_a_model_still_refuses_a_later_claim() {
     );
     assert_eq!(shape(&h), before);
 
+    // Round 12: the merge mark stands until the latest layer it merged (Opus's
+    // own five days) has run out, and it refuses a model's recovery as well:
+    // the 503 has ended but the read still can't end the merged cooldown.
     h.clock.advance(3 * HOUR);
-    assert!(recover(
-        &h,
-        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
-    ));
-    assert!(!blocked(&h, OPUS));
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "a model recovered under the merge mark"
+    );
+    assert!(blocked(&h, OPUS));
+    h.clock.advance(FIVE_DAYS);
+    assert!(!blocked(&h, OPUS), "it runs out by itself");
 }
 
 /// A read taken before the reconcile merged the alias is fenced.
@@ -2246,11 +2251,13 @@ async fn a_merge_keeps_the_aliass_owed_window_through_a_later_claim() {
     );
     assert_eq!(shape(&h), before);
     assert!(blocked(&h, OPUS));
-    assert!(recover(
-        &h,
-        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
-    ));
-    assert!(!blocked(&h, OPUS));
+    // Round 12: the merge mark refuses the model's recovery as well, so the
+    // cooldown runs out by itself rather than being ended by a read.
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "a model recovered under the merge mark"
+    );
+    assert!(blocked(&h, OPUS));
 }
 
 /// Finding E: an HTTP 500 with the code `model_not_found` holds the model for
@@ -3199,4 +3206,514 @@ async fn a_refresh_that_changes_no_cooldown_leaves_a_read_in_flight_valid() {
 #[tokio::test(start_paused = true)]
 async fn a_refresh_that_changes_the_opus_cooldown_fences_a_read_in_flight() {
     refresh_around_a_read(true).await;
+}
+
+// Round 12: while a credential's merge mark stands every recovery on it is
+// refused (a model's as well); the mark survives the callers of `forget` that
+// don't end the cooldowns, and a restart; a live hold of the credential isn't
+// dropped because aggregation rewrote the live fields; and a refused read
+// moves no rest.
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+/// The credential's merge mark: none, or its bound (`None` inside: unknown).
+fn mark_of(h: &Harness) -> Option<Option<Timestamp>> {
+    h.manager.lock().quota_recovery.mark(ID)
+}
+
+/// An alias with a 120 second Opus cooldown, a target with a newer 10 second
+/// one, both wrapped for 10 seconds, merged at the 2 second mark.
+fn shadow_merge(h: &Harness) {
+    h.manager
+        .mark_result(&quota_429(ROUTE, opus_headers(), secs(120)));
+    h.clock.advance(secs(1));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), secs(10)));
+    wrap(h, secs(10));
+    h.clock.advance(secs(1));
+    merge_with(h, route_alias());
+}
+
+/// [`shadow_merge`], then two more 10 second wraps that unwrap onto the
+/// shadow and find nothing live: the third ends at 33 seconds, the alias's
+/// 120 seconds are the mark's bound.
+fn three_wraps(h: &Harness) {
+    shadow_merge(h);
+    h.clock.advance(secs(10));
+    wrap(h, secs(10));
+    h.clock.advance(secs(11));
+    wrap(h, secs(10));
+}
+
+/// Finding 1: a model-support failure and a five-hour 429 of Opus after the
+/// merge; the credential's recovery is refused, and so is Opus's own.
+#[tokio::test(start_paused = true)]
+async fn later_failures_of_a_merged_model_keep_refusing_the_credentials_recovery() {
+    for opus in [100.0, 2.0] {
+        refused_read(
+            Settings::default(),
+            route_alias(),
+            &[OPUS, ROUTE, SONNET],
+            |h| {
+                shadow_merge(h);
+                h.clock.advance(secs(10));
+                h.manager.mark_result(&classified_429(
+                    OPUS,
+                    "model_not_found",
+                    "no such model",
+                    secs(10),
+                ));
+                h.clock.advance(secs(11));
+                h.manager
+                    .mark_result(&quota_429(OPUS, five_hour_headers(), secs(10)));
+            },
+            secs(5),
+            opus,
+        )
+        .await;
+    }
+}
+
+/// Finding 1, model side: with the mark standing a model's recovery is refused
+/// too, though its own claim is proven and nothing but the mark stands in the
+/// way. The control: the bound has passed.
+#[tokio::test(start_paused = true)]
+async fn a_merge_mark_refuses_a_models_recovery_until_its_bound_passes() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE, SONNET]);
+    three_wraps(&h);
+    h.clock.advance(secs(11));
+    assert!(mark_of(&h).is_some_and(|bound| bound.is_some()));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), secs(100)));
+    h.clock.advance(secs(5));
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "a model recovered under the credential's mark"
+    );
+    assert!(blocked(&h, OPUS));
+    h.clock.advance(secs(200));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), secs(100)));
+    h.clock.advance(secs(5));
+    assert!(
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "the mark's bound has passed"
+    );
+    assert!(!blocked(&h, OPUS));
+}
+
+/// A short Sonnet-only cooldown published by an update that changes the
+/// cooldowns (the caller that used to take the mark with it).
+fn update_with_a_sonnet_cooldown(h: &Harness) {
+    let mut updated = Auth::clone(&h.get(ID));
+    let end = h.now() + TimeDelta::seconds(5);
+    updated.model_states.insert(
+        SONNET.into(),
+        crate::auth::ModelState {
+            status: crate::auth::Status::Error,
+            unavailable: true,
+            next_retry_after: Some(end),
+            ..crate::auth::ModelState::default()
+        },
+    );
+    h.manager.update_unsaved(updated).expect("update");
+}
+
+/// Finding 2: an update that stores other cooldowns keeps the mark; a short
+/// Sonnet cooldown runs out and a Sonnet success prunes it; a credential-wide
+/// 429 and a read that shows Opus full are refused.
+#[tokio::test(start_paused = true)]
+async fn an_update_of_other_cooldowns_keeps_the_merge_mark_and_its_refusal() {
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            three_wraps(h);
+            h.clock.advance(secs(11));
+            h.manager.reconcile_registry_model_states(ID);
+            update_with_a_sonnet_cooldown(h);
+            assert!(mark_of(h).is_some_and(|bound| bound.is_some()), "kept");
+            h.clock.advance(secs(6));
+            h.manager.mark_result(&success(SONNET));
+            wrap(h, secs(10));
+        },
+        secs(5),
+    )
+    .await;
+}
+
+/// Finding 2, per caller: what each does to the mark.
+#[tokio::test(start_paused = true)]
+async fn each_forget_caller_treats_the_merge_mark_as_it_should() {
+    let setup = || {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, ROUTE, SONNET]);
+        three_wraps(&h);
+        h.clock.advance(secs(11));
+        h
+    };
+    // Registering a credential again and updating it keep a finite mark.
+    let h = setup();
+    let bound = mark_of(&h).expect("mark");
+    assert!(bound.is_some());
+    h.manager
+        .register_unsaved(auth(ID, "claude"))
+        .expect("register");
+    assert_eq!(mark_of(&h), Some(bound), "register");
+    update_with_a_sonnet_cooldown(&h);
+    assert_eq!(mark_of(&h), Some(bound), "update");
+    // The user's reset keeps a finite mark and ends an unknown one.
+    let h = setup();
+    h.manager.reset_quota(ID).expect("reset");
+    assert_eq!(mark_of(&h), Some(bound), "reset keeps a finite mark");
+    h.manager.lock().quota_recovery.restore_mark(ID, None);
+    assert_eq!(mark_of(&h), Some(None));
+    h.manager.reset_quota(ID).expect("reset");
+    assert_eq!(mark_of(&h), None, "reset ends an unknown mark");
+    // Removing the credential ends it.
+    let h = setup();
+    h.manager.remove(ID);
+    assert_eq!(mark_of(&h), None, "remove");
+}
+
+/// The short-shadow state at 34 seconds on a saving harness: the mark stands,
+/// nothing is live.
+fn marked_and_idle(dir: &Path) -> Harness {
+    let h = saving(dir, Settings::default(), &[OPUS, ROUTE, SONNET]);
+    three_wraps(&h);
+    h.clock.advance(secs(11));
+    assert!(mark_of(&h).is_some_and(|bound| bound.is_some()));
+    let current = h.get(ID);
+    assert!(
+        current.next_retry_after.is_none_or(|end| end <= h.now())
+            && !blocked(&h, OPUS)
+            && !blocked(&h, SONNET),
+        "nothing live: {:?} {:?}",
+        current.next_retry_after,
+        current.model_states
+    );
+    h
+}
+
+/// A fresh process reading what `h` flushed to `dir`.
+fn restarted(h: &Harness, dir: &Path) -> Harness {
+    flush(&h.manager);
+    let next = Harness::new(Settings::default());
+    next.add(credential(dir), &[OPUS, SONNET]);
+    next.clock
+        .advance((h.now() - next.now()).to_std().unwrap_or_default());
+    let on = config(dir, true);
+    reconfigure(&next.manager, None, &on);
+    restore(&next.manager, &on);
+    next
+}
+
+/// Another credential-wide weekly 429, then a read that shows Opus full.
+fn wrap_then_read(h: &Harness) -> bool {
+    wrap(h, secs(10));
+    h.clock.advance(secs(5));
+    recover(h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)]))
+}
+
+/// Finding 3: the mark is written while it stands with no live cooldown, in a
+/// field of its own; a restart gives the same refusal.
+#[tokio::test(start_paused = true)]
+async fn a_restart_keeps_the_merge_mark_and_its_refusal() {
+    use crate::manager::cooldown_store::Refusal;
+    let dir = temp_dir();
+    let h = marked_and_idle(dir.path());
+    let bound = mark_of(&h).flatten().expect("finite bound");
+    let next = restarted(&h, dir.path());
+    let own = saved_own(dir.path()).expect("the credential's record is written");
+    assert_eq!(own.recovery_refused, Some(Refusal::Until(bound)));
+    assert!(own.next_retry_after.is_none(), "no cooldown in the record");
+    assert_eq!(mark_of(&next), Some(Some(bound)), "restored");
+    assert!(!next.get(ID).unavailable && !blocked(&next, OPUS));
+    assert!(!wrap_then_read(&next), "the restored mark refused nothing");
+    assert!(!wrap_then_read(&h));
+    assert_restart_agrees(&capture(&h, dir.path(), Settings::default()).await);
+}
+
+/// Finding 3 through a thaw that makes the file the authority.
+#[tokio::test(start_paused = true)]
+async fn a_thaw_that_restores_the_file_brings_the_merge_mark_back() {
+    use crate::manager::cooldown_store::{Thaw, freeze, thaw};
+    let dir = temp_dir();
+    let h = marked_and_idle(dir.path());
+    let bound = mark_of(&h).expect("mark");
+    freeze(&h.manager).expect("freeze");
+    thaw(&h.manager, Thaw::Restore);
+    assert_eq!(mark_of(&h), Some(bound), "restored by the thaw");
+    assert!(!wrap_then_read(&h), "the restored mark refused nothing");
+    assert_restart_agrees(&capture(&h, dir.path(), Settings::default()).await);
+}
+
+/// Finding 3: a mark of unknown bound is saved as such and comes back.
+#[tokio::test(start_paused = true)]
+async fn an_unknown_bound_survives_a_restart() {
+    use crate::manager::cooldown_store::Refusal;
+    let dir = temp_dir();
+    let h = saving(dir.path(), Settings::default(), &[OPUS, ROUTE, SONNET]);
+    h.manager.lock().quota_recovery.restore_mark(ID, None);
+    h.manager.mark_result(&other_failure(SONNET, 503, secs(5)));
+    h.clock.advance(secs(10));
+    let next = restarted(&h, dir.path());
+    let own = saved_own(dir.path()).expect("the credential's record");
+    assert_eq!(own.recovery_refused, Some(Refusal::Unknown));
+    assert_eq!(mark_of(&next), Some(None));
+    assert!(!wrap_then_read(&next));
+    assert!(!wrap_then_read(&h));
+}
+
+/// The control: the bound passed before the restart, so nothing is saved and
+/// the restored credential recovers.
+#[tokio::test(start_paused = true)]
+async fn a_bound_that_passed_before_the_restart_is_not_saved() {
+    let dir = temp_dir();
+    let h = marked_and_idle(dir.path());
+    h.clock.advance(secs(200));
+    h.manager.mark_result(&other_failure(SONNET, 503, secs(5)));
+    h.clock.advance(secs(10));
+    let next = restarted(&h, dir.path());
+    assert!(
+        FileStore::new(dir.path().to_path_buf())
+            .load()
+            .expect("load")
+            .iter()
+            .all(|record| record.recovery_refused.is_none()),
+        "a passed bound was saved"
+    );
+    assert_eq!(mark_of(&next), None);
+    assert!(wrap_then_read(&next), "nothing stands in the way");
+}
+
+/// A file written without the field (upstream's, or an earlier open-ferry's)
+/// reads with no mark, and a file with it reads as written, in both forms.
+#[tokio::test(start_paused = true)]
+async fn the_mark_field_is_optional_in_a_saved_file() {
+    use crate::manager::cooldown_store::Refusal;
+    let dir = temp_dir();
+    let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+    flush(&h.manager);
+    let name = files(dir.path())
+        .into_iter()
+        .find(|name| name.ends_with(".cds"))
+        .expect("a cooldown file");
+    let text = std::fs::read_to_string(dir.path().join(&name)).expect("read");
+    assert!(
+        !text.contains("open_ferry_recovery_refused"),
+        "a credential without a mark writes no field: {text}"
+    );
+    let next = restarted(&h, dir.path());
+    assert_eq!(mark_of(&next), None);
+    assert!(blocked(&next, OPUS), "the cooldown itself came back");
+
+    for (value, expected) in [
+        ("\"unknown\"", Some(Refusal::Unknown)),
+        ("\"Unknown\"", Some(Refusal::Unknown)),
+        ("7", None),
+        ("null", None),
+    ] {
+        let other = temp_dir();
+        std::fs::write(
+            other.path().join("a.cds"),
+            format!(
+                r#"{{"Records":[{{"AUTH_ID":"{ID}","open_ferry_recovery_refused_until":{value}}}]}}"#
+            ),
+        )
+        .expect("write");
+        let loaded = FileStore::new(other.path().to_path_buf())
+            .load()
+            .expect("load");
+        let read = loaded.first().and_then(|record| record.recovery_refused);
+        assert_eq!(read, expected, "{value}");
+    }
+    let dated = temp_dir();
+    std::fs::write(
+        dated.path().join("a.cds"),
+        format!(
+            r#"{{"Records":[{{"AUTH_ID":"{ID}","open_ferry_recovery_refused_until":"2099-01-01T00:00:00Z"}}]}}"#
+        ),
+    )
+    .expect("write");
+    let loaded = FileStore::new(dated.path().to_path_buf())
+        .load()
+        .expect("load");
+    assert!(
+        matches!(
+            loaded.first().and_then(|record| record.recovery_refused),
+            Some(Refusal::Until(_))
+        ),
+        "{loaded:?}"
+    );
+}
+
+/// Finding 4: a one hour no-model 503, a ten second 503 of Sonnet (the
+/// aggregation drops the credential's live flags), then a five day quota 429
+/// of Opus; a healthy read must not end the credential's hold. With
+/// `sonnet_503` false the flags stay and the hold holds as before.
+async fn a_foreign_hold_under_an_aggregation(sonnet_503: bool) {
+    refused_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager.mark_result(&success(OPUS));
+            h.manager.mark_result(&success(SONNET));
+            h.clock.advance(secs(1));
+            h.manager.mark_result(&other_failure("", 503, HOUR));
+            h.clock.advance(secs(5));
+            if sonnet_503 {
+                h.manager.mark_result(&other_failure(SONNET, 503, secs(10)));
+                h.clock.advance(secs(5));
+            }
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        },
+        secs(5),
+        2.0,
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_aggregation_that_clears_the_credentials_flags_does_not_end_its_hold() {
+    a_foreign_hold_under_an_aggregation(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_credential_hold_that_stays_live_still_refuses_a_models_recovery() {
+    a_foreign_hold_under_an_aggregation(false).await;
+}
+
+/// Finding 5: Opus rests on a one hour check under a five day 429, a two hour
+/// credential wrap follows, and the registry drops Opus: the reconcile removes
+/// its state and leaves the rest. A refused read moves nothing.
+#[tokio::test(start_paused = true)]
+async fn a_refused_read_leaves_an_orphaned_rest_alone() {
+    for opus in [100.0, 2.0] {
+        refused_read(
+            capped_hour(),
+            capped_hour(),
+            &[OPUS, SONNET],
+            |h| {
+                h.manager
+                    .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+                h.clock.advance(secs(5));
+                wrap(h, 2 * HOUR);
+                h.models.register(ID, &[SONNET]);
+                h.manager.reconcile_registry_model_states(ID);
+                assert!(!h.get(ID).model_states.contains_key(OPUS));
+                assert!(!rested(h).is_empty(), "the rest is orphaned, not gone");
+            },
+            secs(5),
+            opus,
+        )
+        .await;
+    }
+}
+
+fn state_until(until: Option<Timestamp>) -> crate::auth::ModelState {
+    crate::auth::ModelState {
+        status: crate::auth::Status::Error,
+        unavailable: true,
+        next_retry_after: until,
+        ..crate::auth::ModelState::default()
+    }
+}
+
+fn base() -> Timestamp {
+    chrono::DateTime::from_timestamp(1_800_000_000, 0).expect("time")
+}
+
+fn after(n: i64) -> Timestamp {
+    base() + TimeDelta::seconds(n)
+}
+
+#[test]
+fn the_merge_bound_counts_every_layer() {
+    use crate::manager::quota_recovery::merge_bound;
+    let mut credential = auth(ID, "claude");
+    assert_eq!(merge_bound(&credential, None, base()), Some(base()));
+
+    // The credential's own deadline.
+    credential.unavailable = true;
+    credential.next_retry_after = Some(after(30));
+    assert_eq!(merge_bound(&credential, None, base()), Some(after(30)));
+    credential.unavailable = false;
+    credential.next_retry_after = None;
+
+    // Nested shadows count, the latest layer wins.
+    let mut outer = state_until(Some(after(10)));
+    let mut shadow = state_until(Some(after(100)));
+    shadow.credential_quota_shadow = Some(Box::new(state_until(Some(after(250)))));
+    outer.credential_quota_shadow = Some(Box::new(shadow));
+    credential.model_states.insert("m".into(), outer);
+    assert_eq!(merge_bound(&credential, None, base()), Some(after(250)));
+
+    // A key that isn't canonical counts like any other.
+    credential.model_states.clear();
+    credential
+        .model_states
+        .insert("  Claude-OPUS-4  ".into(), state_until(Some(after(50))));
+    credential
+        .model_states
+        .insert("claude-opus-4".into(), state_until(Some(after(30))));
+    assert_eq!(merge_bound(&credential, None, base()), Some(after(50)));
+
+    // The retry and the quota deadlines of one state differ: the later wins.
+    let mut both = state_until(Some(after(10)));
+    both.quota.exceeded = true;
+    both.quota.next_recover_at = Some(after(60));
+    credential.model_states.clear();
+    credential.model_states.insert("m".into(), both);
+    assert_eq!(merge_bound(&credential, None, base()), Some(after(60)));
+
+    // A rest's reset counts when it is the latest; ended layers count for
+    // nothing.
+    assert_eq!(
+        merge_bound(&credential, Some(after(90)), base()),
+        Some(after(90))
+    );
+    assert_eq!(merge_bound(&credential, None, after(500)), Some(after(500)));
+}
+
+#[test]
+fn a_layer_that_blocks_with_no_end_makes_the_bound_unknown() {
+    use crate::manager::quota_recovery::merge_bound;
+    let mut credential = auth(ID, "claude");
+    credential
+        .model_states
+        .insert("m".into(), state_until(Some(after(10))));
+    credential
+        .model_states
+        .insert("n".into(), state_until(None));
+    assert_eq!(merge_bound(&credential, Some(after(5)), base()), None);
+    // Only under a shadow too.
+    credential.model_states.remove("n");
+    let mut outer = state_until(Some(after(10)));
+    outer.credential_quota_shadow = Some(Box::new(state_until(None)));
+    credential.model_states.insert("m".into(), outer);
+    assert_eq!(merge_bound(&credential, None, base()), None);
+}
+
+#[test]
+fn repeated_merges_keep_the_latest_finite_bound_and_unknown_wins() {
+    use crate::manager::quota_recovery::Recoveries;
+    let mut recoveries = Recoveries::default();
+    recoveries.merged(ID, "a", "b", Some(after(100)));
+    recoveries.merged(ID, "a", "b", Some(after(50)));
+    assert_eq!(recoveries.mark(ID), Some(Some(after(100))), "kept the max");
+    recoveries.merged(ID, "a", "b", Some(after(200)));
+    assert_eq!(recoveries.mark(ID), Some(Some(after(200))));
+    recoveries.merged(ID, "a", "b", None);
+    assert_eq!(recoveries.mark(ID), Some(None));
+    recoveries.merged(ID, "a", "b", Some(after(900)));
+    assert_eq!(recoveries.mark(ID), Some(None), "unknown stays unknown");
 }

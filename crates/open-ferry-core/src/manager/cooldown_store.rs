@@ -77,6 +77,15 @@
 //!   restart. A rest whose check is due when it is saved, or comes due
 //!   before the restart, has no cooldown left to carry it, so it is lost:
 //!   the next quota answer starts again at the cap.
+//! - A credential's record carries, under `open_ferry_recovery_refused_until`,
+//!   the bound of the merge mark that refuses its quota recovery (an RFC 3339
+//!   time, or `"unknown"`), see `super::quota_recovery`. It is written while
+//!   the mark stands, in a record of its own with no cooldown when none is
+//!   live, and put back by a restore or a thaw before the bound passes. A
+//!   record with no cooldown is skipped by upstream's restore, and an
+//!   unknown key is ignored by it, so upstream reads such a file as it reads
+//!   one without the field; open-ferry reads a file without the field with
+//!   no mark.
 //! - What a file keeps of a credential's free text is scrubbed of that
 //!   credential's secrets: its own keys and tokens, its credential headers
 //!   and each cookie value among them, and its proxy's password, every one
@@ -122,7 +131,7 @@ use crate::observe::redact::{Policy, Secrets};
 pub(crate) use file::FileStore;
 #[cfg(test)]
 pub(crate) use file::{Limits, MAX_FILE_BYTES, sanitize};
-pub(crate) use record::{QuotaCheckRecord, Record};
+pub(crate) use record::{QuotaCheckRecord, Record, Refusal};
 
 /// How long the worker waits after a change for more before saving.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -672,7 +681,7 @@ fn save_ungated(manager: &Manager, io: &mut Io) -> bool {
 /// `cooldownStateRecordsSnapshot`). Only the handles are taken under the
 /// lock.
 pub(crate) fn snapshot(manager: &Manager, now: Timestamp) -> Vec<Record> {
-    let (settings, auths, checks) = {
+    let (settings, auths, checks, marks) = {
         let state = manager.lock();
         let auths: Vec<Arc<Auth>> = state
             .auths
@@ -680,14 +689,27 @@ pub(crate) fn snapshot(manager: &Manager, now: Timestamp) -> Vec<Record> {
             .map(|entry| entry.auth.clone())
             .collect();
         let checks = state.quota_checks.records(&state.settings, now);
-        (state.settings.clone(), auths, checks)
+        (
+            state.settings.clone(),
+            auths,
+            checks,
+            state.quota_recovery.marks(now),
+        )
     };
     let mut records = Vec::new();
     for auth in &auths {
-        records_for_auth(&settings, auth, now, &mut records);
+        let mark = marks.get(&auth.id).map(|hold| match hold {
+            Some(until) => Refusal::Until(*until),
+            None => Refusal::Unknown,
+        });
+        records_for_auth(&settings, auth, mark, now, &mut records);
     }
-    // open-ferry's capped quota rests ride with their cooldowns.
+    // open-ferry's capped quota rests ride with their cooldowns (a record
+    // that holds only a merge's refusal has none to ride with).
     for record in &mut records {
+        if record.next_retry_after.is_none() {
+            continue;
+        }
         let scope = canonical_model_key(record.model.trim());
         record.quota_check = checks.get(&(record.auth_id.clone(), scope)).copied();
     }
@@ -709,9 +731,15 @@ fn after(time: Option<Timestamp>, now: Timestamp) -> bool {
 /// `auth`'s records (upstream's `cooldownStateRecordsForAuthLocked`): its
 /// own cooldown and each model's, while they last. Their free text is
 /// scrubbed of the credential's secrets (see [`scrub_record`]).
-fn records_for_auth(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut Vec<Record>) {
+fn records_for_auth(
+    settings: &Settings,
+    auth: &Auth,
+    mark: Option<Refusal>,
+    now: Timestamp,
+    out: &mut Vec<Record>,
+) {
     let first = out.len();
-    collect_records(settings, auth, now, out);
+    collect_records(settings, auth, mark, now, out);
     if out.len() > first {
         let mut secrets = Secrets::new();
         secrets.add_auth(auth);
@@ -746,7 +774,17 @@ fn scrub_record(secrets: &Secrets, record: &mut Record) {
 }
 
 /// `auth`'s records as the manager holds them, before they are scrubbed.
-fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut Vec<Record>) {
+/// `mark` is the refusal of usage recoveries a merge left on the credential,
+/// if one stands: it rides on the credential's own record, or, when the
+/// credential has no cooldown of its own, on a record that holds nothing else
+/// (no `next_retry_after`, so upstream's restore skips it).
+fn collect_records(
+    settings: &Settings,
+    auth: &Auth,
+    mark: Option<Refusal>,
+    now: Timestamp,
+    out: &mut Vec<Record>,
+) {
     if auth.id.is_empty()
         || auth.disabled
         || auth.status == Status::Disabled
@@ -771,6 +809,15 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
             independent_state: None,
             credential_quota_propagated: false,
             quota_check: None,
+            recovery_refused: mark,
+        });
+    } else if mark.is_some() {
+        out.push(Record {
+            provider: provider.to_owned(),
+            auth_id: auth.id.clone(),
+            auth_file: auth_file.clone(),
+            recovery_refused: mark,
+            ..Record::default()
         });
     }
     for (model, state) in &auth.model_states {
@@ -805,6 +852,7 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
                 }),
             credential_quota_propagated: state.credential_quota_propagated,
             quota_check: None,
+            recovery_refused: None,
         });
     }
 }
@@ -844,6 +892,30 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
 /// [`apply`] on the state `manager` has locked, at `now`.
 fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: Timestamp) -> usize {
     let settings = state.settings.clone();
+    // The refusal a merge left on a credential comes back while its bound is
+    // ahead (or unknown), whether or not the credential has a cooldown to
+    // restore: it puts no cooldown on anything and changes no selection.
+    for record in records {
+        let id = record.auth_id.trim();
+        let Some(refusal) = record.recovery_refused else {
+            continue;
+        };
+        let hold = match refusal {
+            Refusal::Until(until) if until > now => Some(until),
+            Refusal::Until(_) => continue,
+            Refusal::Unknown => None,
+        };
+        if !record.model.trim().is_empty() {
+            continue;
+        }
+        if let Some(entry) = state.auths.get(id)
+            && !entry.auth.disabled
+            && entry.auth.status != Status::Disabled
+            && !cooldown_disabled_for_auth(&settings, &entry.auth)
+        {
+            state.quota_recovery.restore_mark(id, hold);
+        }
+    }
     // A record older than a recovery of its scope is the cooldown that
     // recovery ended, not a newer one (storage turned off, then on).
     let (model_records, auth_records): (Vec<&Record>, Vec<&Record>) = records

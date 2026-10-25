@@ -150,7 +150,7 @@ pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) 
     // The cooldowns are gone with no failure to show for it: what the quota
     // recovery noted of them goes too, and a read in flight is fenced.
     for id in &cleared {
-        state.quota_recovery.forget(id);
+        state.quota_recovery.reset(id);
     }
     cleared
 }
@@ -1588,7 +1588,7 @@ impl Manager {
         {
             generation = generation.saturating_add(1);
             // As in `clear_disabled_cooldown_states`.
-            state.quota_recovery.forget(&auth.id);
+            state.quota_recovery.reset(&auth.id);
         }
         // An update that stores cooldowns other than the live ones (model
         // states carried in, keys merged by normalizing) has put in state no
@@ -2015,7 +2015,7 @@ impl Manager {
                 affinity.invalidate_auth(id);
             }
             state.quota_checks.forget(id);
-            state.quota_recovery.forget(id);
+            state.quota_recovery.remove(id);
             state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
             *slot = (*slot)
@@ -2059,7 +2059,7 @@ impl Manager {
         // open-ferry's capped quota rests go with the state replaced.
         for id in previous.keys() {
             state.quota_checks.forget(id);
-            state.quota_recovery.forget(id);
+            state.quota_recovery.remove(id);
         }
         for mut auth in items {
             if auth.id.is_empty() {
@@ -3263,7 +3263,7 @@ impl Manager {
             let auth = Arc::make_mut(&mut entry.auth);
             let (models, cleared) = reset_quota(auth, &registered, now);
             state.quota_checks.forget(id);
-            state.quota_recovery.forget(id);
+            state.quota_recovery.reset(id);
             let bumps = if cleared { 2 } else { 1 };
             auth.generation = auth.generation.saturating_add(bumps);
             let committed = (

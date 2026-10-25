@@ -85,7 +85,7 @@ While a rest waits for its check, the credential's `next_retry_after` and `coold
 
 ### Across a restart
 
-With `save-cooldown-status` on, a capped rest is saved with its cooldown, in the `.cds` file, under a key of open-ferry's own, `open_ferry_quota_check`, and put back at the next start, so the doubling goes on. A check that was in flight when the file was saved is due at once after a restart. A rest whose check was already due when it was saved, or comes due before the restart, has no cooldown left to carry it: it is lost, and the next quota answer starts again at the cap.
+With `save-cooldown-status` on, a capped rest is saved with its cooldown, in the `.cds` file, under a key of open-ferry's own, `open_ferry_quota_check`, and put back at the next start, so the doubling goes on. A check that was in flight when the file was saved is due at once after a restart. A rest whose check was already due when it was saved, or comes due before the restart, has no cooldown left to carry it: it is lost, and the next quota answer starts again at the cap. The same record can carry `open_ferry_recovery_refused_until` (a time, or `unknown`): the bound of the mark that keeps a usage read from ending the credential's cooldowns after two models' cooldowns were merged. It is put back at the next start, and puts no cooldown on the credential; upstream ignores the key.
 
 ### In the management API
 
