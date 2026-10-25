@@ -6,7 +6,7 @@ What open-ferry is building next, in order. [UPSTREAM.md](UPSTREAM.md) says what
 
 | Milestone | Status |
 |---|---|
-| [v1: a complete proxy](#v1-a-complete-proxy-for-one-person-or-a-small-team) | **In progress.** Everything under "Already in place" works today. Updating with no downtime is built, and is tested with release candidates before the first release; the rest waits for that release. |
+| [v1: a complete proxy](#v1-a-complete-proxy-for-one-person-or-a-small-team) | **In progress.** Everything under "Already in place" works today. Updating with no downtime is built, and candidates 0.0.3 and 0.0.4 passed the hosted published-release qualification below; the rest waits for 0.1.0. |
 | [After v1: smaller additions](#after-v1-smaller-additions) | Not started |
 | [v2: Realtime](#v2-realtime) | Not started |
 | [v3: plugins](#v3-plugins-if-they-are-worth-it) | Not started |
@@ -16,16 +16,16 @@ What v1 still needs:
 
 | | Status |
 |---|---|
-| Updating with no downtime | **Built:** on Linux and Windows and for macOS user LaunchAgents, a supervised service switches to each new release by itself, and the command line and the dashboard switch and roll back. macOS machine services are still refused. Two release candidates are tested end to end before 0.1.0 |
+| Updating with no downtime | **Built:** on Linux and Windows and for macOS user LaunchAgents, a supervised service switches to each new release by itself, and the command line and the dashboard switch and roll back. macOS machine services are still refused. Published candidates 0.0.3 and 0.0.4 passed the four hosted qualification jobs below |
 | The release signing key | **Done:** made on 2026-10-20. Every build from then on trusts it |
-| The first release, 0.1.0 | Waits for the two release candidates above, signed with that key, and for testing in real use |
+| The first release, 0.1.0 | **Not released.** The owner decides when it is ready after testing in real use |
 | A Homebrew tap | Not started; comes after 0.1.0 |
 | Being findable | Not started; comes after 0.1.0 |
 
 ## v1: a complete proxy for one person or a small team
 
 Already in place:
-- **Parity with CLIProxyAPI v8.0.32 for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
+- **Parity with CLIProxyAPI v8.0.38 for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
 - CLIProxyAPI's config and auth directory, read as they are.
 - The OpenAI, Claude and Gemini client APIs, over HTTP and WebSocket.
 - The credential manager.
@@ -53,7 +53,7 @@ Already in place:
 - `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. The dashboard shows each entry's state. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
 - Release basics: CI on Linux and Windows, with the install scripts tested on macOS too; a release workflow that builds binaries for Linux (glibc, and static musl builds for Alpine and older systems), macOS and Windows, with `SHA256SUMS` and build provenance attestations; a changelog; and a migration guide for CLIProxyAPI users.
-- Ways to install besides building from source, which arrive with the first release:
+- Ways to install besides building from source, already published with the release candidates:
   - install scripts for Linux, macOS and Windows that check the download against the release's `SHA256SUMS` (and its build attestation, where `gh` is installed) and write a starting config with `open-ferry init`;
   - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name.
 - Setting up from the command line ([docs/cli.md](docs/cli.md)):
@@ -74,8 +74,8 @@ Still to come:
   3. Done on Linux and Windows, and for macOS user LaunchAgents: supported services start open-ferry under the supervisor when they can update themselves, and installer reruns refuse to replace a running supervised install. macOS machine services are still refused.
   4. Done: `open-ferry update` and `-rollback` switch versions through the supervisor on the same listener, `-check` shows its live status and last outcome, and `-cancel` asks it to cancel. The dashboard's About page installs and rolls back the same way. In `auto` mode, a supervised service switches to each release it stages by itself.
   5. Done: `open-ferry migrate` installs the same supervised or plain service form as `service install`, the docs describe it, and CI tests blue-green switching on macOS 15 and native x86_64 musl in Alpine.
-  6. Partly in place: release dry runs qualify two throwaway candidates built on the Linux and macOS runners themselves, with a per-job signing key and a loopback mirror: `auto` switches under request load, then rolls back and uninstalls, requiring zero failed requests. Windows candidate builds and packaging were verified once at `962f661f` and are not run now. Its hosted user task is blocked by the lack of an unelevated interactive desktop logon; an explicitly selected prerequisite probe records the scheduler refusal and never counts as qualification. Machine installers cannot use the loopback mirror. Before 0.1.0, qualification still needs the Windows user lifecycle and two published candidates signed with the real release key; see [Releasing](RELEASING.md#candidate-qualification).
-- **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
+  6. Published candidates 0.0.3 and 0.0.4 passed [published-release qualification run 40151160404](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/40151160404) from `main` on **2026-10-25 (UTC)**. All four hosted qualification jobs passed: Ubuntu 24.04 user and machine services, Windows Server 2025 machine service, and macOS 15 user LaunchAgent. This run did not cover Windows user services, which use the separate local published-release qualification. macOS machine services remain unsupported. See [Releasing](RELEASING.md#candidate-qualification).
+- **The first release, 0.1.0,** when the owner decides it is ready after testing in real use.
 - **A Homebrew tap.**
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
 

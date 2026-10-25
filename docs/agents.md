@@ -1,6 +1,6 @@
 # open-ferry for coding agents
 
-What an agent needs to install open-ferry, set it up, change its setup, and point a client at it. Every command here is one open-ferry or its install scripts define. Where something arrives with the first release, it says so.
+What an agent needs to install open-ferry, set it up, change its setup, and point a client at it. Every command here is one open-ferry or its install scripts define.
 
 **To look at a setup or change it, use open-ferry's own commands (`open-ferry status`, `config`, `keys`, `credentials` and `clients`) or its MCP server (`open-ferry mcp`)**, not hand edits of the YAML or curl with the management key: they check each change, keep secrets out of what they print and out of the command line, and ask for a yes before anything risky. See [Look at it and change it](#look-at-it-and-change-it-the-commands-and-the-mcp-server).
 
@@ -8,7 +8,7 @@ open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/rou
 
 ## Install
 
-**With the first release**, the install scripts and the container image:
+The published release candidates include the install scripts and the container image:
 
 - **Linux and macOS:** `install.sh`, a POSIX shell script attached to each release. It downloads the release's archive for the platform (on Linux, the static musl build on Alpine and on systems with no glibc or one older than 2.31), refuses it unless it matches the release's `SHA256SUMS` and, when the GitHub CLI `gh` is installed, its build provenance attestation, and installs `~/.local/bin/open-ferry`. To read it before running it:
 
@@ -43,7 +43,7 @@ open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/rou
 
   Requests from the host reach the container through Docker's gateway, not its loopback, so the dashboard and the management API answer them only with `management.allow-remote: true` in the config. The repository's [`docker-compose.yml`](../docker-compose.yml) runs the same container with Compose, and the [README](../README.md#run-it-in-a-container) says how to sign in from a container.
 
-**Until then**, build from source, with Rust and a C compiler ([README](../README.md#build-from-source)):
+Or build from source, with Rust and a C compiler ([README](../README.md#build-from-source)):
 
 ```sh
 git clone https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy.git
