@@ -8,6 +8,7 @@
 //! codex/usage.rs.
 
 mod accounting;
+mod claude_speed;
 mod codex_image_usage;
 mod echoed_secrets;
 mod error_events;
