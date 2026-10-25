@@ -119,6 +119,21 @@ fn review_r15_mapping_values_survive_migrate() {
 #[test]
 fn review_r15_mapping_values_survive_put() {
     mapping_values("put");
+    let source = "claude-api-key:\n  - api-key: |2-\n            x\n      y\n";
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, source).unwrap();
+    assert!(
+        save_operation(&path, "put").is_ok(),
+        "block mapping PUT refused"
+    );
+    let output = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        named(&AnyValue::parse_yaml(&output).unwrap(), "api-key")
+            == Some(&AnyValue::Str("      x\ny".into())),
+        "block mapping PUT changed the value"
+    );
+    Config::load(&path).unwrap();
 }
 
 #[test]
@@ -221,25 +236,41 @@ fn review_r15_existing_blocks_keep_their_values_or_stay_unchanged() {
 }
 
 #[test]
-fn review_r15_duplicate_key_errors_have_load_prefixes() {
-    for source in ["port: 1\nport: 2\n", "# \u{2028}\nport: 1\nport: 2\n"] {
+fn review_r15_duplicate_key_errors_have_no_load_prefix() {
+    for (source, line, key, first) in [
+        ("port: 1\nport: 2\n", 2, "port", 1),
+        ("# \u{2028}\nport: 1\nport: 2\n", 4, "port", 3),
+        (
+            "remote-management:\n  allow-remote: true\n  allow-remote: false\n",
+            3,
+            "allow-remote",
+            2,
+        ),
+        (
+            "claude-api-key:\n  - api-key: x\n    api-key: y\n",
+            3,
+            "api-key",
+            2,
+        ),
+        (
+            "config-version: 8\nserver:\n  port: 1\n  port: 2\n",
+            4,
+            "port",
+            3,
+        ),
+    ] {
+        let expected = format!(
+            "yaml: unmarshal errors:\n  line {line}: mapping key \"{key}\" already defined at line {first}"
+        );
         let error = Config::parse(source).unwrap_err();
         assert_eq!(error.kind(), crate::config::ConfigErrorKind::Decode);
-        assert!(
-            error
-                .to_string()
-                .starts_with("parse config payload: yaml: ")
-        );
+        assert_eq!(error.to_string(), expected);
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
         std::fs::write(&path, source).unwrap();
         let error = Config::load(&path).unwrap_err();
         assert_eq!(error.kind(), crate::config::ConfigErrorKind::Decode);
-        assert!(
-            error
-                .to_string()
-                .starts_with("failed to parse config file: yaml: ")
-        );
+        assert_eq!(error.to_string(), expected);
     }
 }
 
