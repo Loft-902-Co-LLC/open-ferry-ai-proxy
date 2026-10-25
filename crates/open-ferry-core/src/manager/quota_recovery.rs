@@ -122,16 +122,20 @@
 //! holds (and the merge mark) and adds unknown-end ones beside them, the later
 //! end winning; only a reset, a removal, a clearing of the cooldowns or a
 //! restore drops them, and all of these fence reads already in flight. The
-//! merge mark is saved whatever the credential's state, and disabling a
-//! credential ends an unknown mark even when there was no cooldown to clear. A
+//! merge mark is saved whatever the credential's state. Disabling a
+//! credential or turning cooling off ends every hold and an unknown mark it
+//! keeps, even when there was no cooldown to clear (a hold only `foreign`
+//! shows exists nowhere else); a finite mark stays. A
 //! mark restored from a file stays after the cooldowns it guarded were cleared
 //! elsewhere, until its bound passes or a reset (a stale mark).
 //!
 //! A refused read mutates nothing, in the recovery or in the quota checks: the
-//! recovery runs on copies of the credential and its quota checks, which are
-//! stored only when a scope recovered. A recovery ends only the rests of the
-//! scopes it recovers; it sweeps no other model's rest, because a credential
-//! recovery is refused while any model rests on a check.
+//! recovery runs on copies of the credential and of its own quota checks,
+//! which are stored only when a scope recovered. A recovery changes exactly
+//! the scopes it recovers: it ends only their rests and sweeps no other
+//! model's (a credential recovery is refused while any model rests on a
+//! check), and a scope it confirms but does not clear keeps its model states
+//! as they were, an expired wrap on them included.
 //!
 //! # Fences
 //!
@@ -749,9 +753,16 @@ impl Recoveries {
         self.era = self.era.saturating_add(1);
     }
 
-    /// Whether `id` carries a merge mark.
-    pub(crate) fn marked(&self, id: &str) -> bool {
-        self.merged_under.contains_key(id)
+    /// Whether recovery keeps anything for `id` that a [`Self::reset`] would
+    /// end: a claim, an owed window, a hold or a mark with no bound (a mark
+    /// with one stays through a reset, so it is no reason to call it). A
+    /// credential that stops cooling down is reset when it does, even with no
+    /// cooldown left to clear; a call that would change nothing is not made.
+    pub(crate) fn keeps(&self, id: &str) -> bool {
+        matches!(self.merged_under.get(id), Some(None))
+            || self.claims.keys().any(|(claim_id, _)| claim_id == id)
+            || self.owed.keys().any(|(owed_id, _)| owed_id == id)
+            || self.foreign.keys().any(|(foreign_id, _)| foreign_id == id)
     }
 
     /// The bound of `id`'s merge mark, if it has one (`Some(None)`: unknown).
@@ -1125,7 +1136,7 @@ impl Manager {
             // were (not even `Arc::make_mut`'s copy, `updated_at` or a
             // lease taken off and put back).
             let mut working = Auth::clone(&entry.auth);
-            let mut checks = state.quota_checks.clone();
+            let mut checks = state.quota_checks.only(id);
             let auth = &mut working;
             let mut recovery = QuotaRecovery::default();
             checks.before_result(auth);
@@ -1162,7 +1173,7 @@ impl Manager {
             auth.updated_at = Some(now);
             auth.generation = auth.generation.saturating_add(bumps);
             entry.auth = Arc::new(working);
-            state.quota_checks = checks;
+            state.quota_checks.put_back(id, checks);
             let committed = (
                 entry.auth.clone(),
                 recovery,
@@ -1222,7 +1233,9 @@ fn clear_credential(auth: &mut Auth, now: Timestamp) {
 
 /// Takes the model `scope`'s own quota cooldown off `auth`, leaving the
 /// credential-wide one over it, and says whether there was one. The caller
-/// has refused it while the credential has a hold of its own.
+/// has refused it while the credential has a hold of its own. A state changes
+/// only when it is the one cleared: an expired wrap is not taken off a state
+/// with nothing to clear (it is taken off on the next result, as ever).
 fn clear_model(auth: &mut Auth, scope: &str, now: Timestamp) -> bool {
     let wrap_live = is_credential_quota_active(&auth.quota, now);
     let wrap_next = auth.quota.next_recover_at;
@@ -1231,22 +1244,31 @@ fn clear_model(auth: &mut Auth, scope: &str, now: Timestamp) -> bool {
         if canonical_model_key(name) != scope {
             continue;
         }
+        // Each state is worked on a copy and written back only when it
+        // cleared: an expired wrap that unwrapped onto nothing to clear is
+        // left as it was, as the failure paths of the cooldowns would find it.
+        let mut work = state.clone();
         let mut wrapped =
-            state.credential_quota_propagated || state.quota.reason == "credential_quota";
+            work.credential_quota_propagated || work.quota.reason == "credential_quota";
         if wrapped && !wrap_live {
-            unwrap_expired_quota(state, now);
-            wrapped = state.credential_quota_propagated || state.quota.reason == "credential_quota";
+            unwrap_expired_quota(&mut work, now);
+            wrapped = work.credential_quota_propagated || work.quota.reason == "credential_quota";
         }
+        let mut state_cleared = false;
         if wrapped {
-            if state.credential_quota_shadow.take().is_some() {
+            if work.credential_quota_shadow.take().is_some() {
                 // What shows outside is the wrap alone again.
-                state.next_retry_after = wrap_next;
-                state.quota.next_recover_at = wrap_next;
-                state.updated_at = Some(now);
-                cleared = true;
+                work.next_retry_after = wrap_next;
+                work.quota.next_recover_at = wrap_next;
+                work.updated_at = Some(now);
+                state_cleared = true;
             }
-        } else if state.quota.exceeded && state.quota.reason == "quota" {
-            reset_model_state(state, now);
+        } else if work.quota.exceeded && work.quota.reason == "quota" {
+            reset_model_state(&mut work, now);
+            state_cleared = true;
+        }
+        if state_cleared {
+            *state = work;
             cleared = true;
         }
     }

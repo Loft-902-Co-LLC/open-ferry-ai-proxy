@@ -4239,3 +4239,170 @@ async fn disabling_a_clean_credential_ends_an_unknown_mark() {
         assert_eq!(mark_of(&h), Some(finite), "a finite mark stays");
     }
 }
+
+// Round 14: disabling or turning cooling off ends every hold, and a mixed
+// recovery leaves the scopes it doesn't recover alone.
+
+#[derive(Clone, Copy, Debug)]
+enum Ender {
+    Disable,
+    CoolingOff,
+    Reset,
+    Success,
+}
+
+/// Finding 1: a no-model 503 (one hour) and, when `unknown`, a registration of
+/// the snapshot that carries it (the hold's end becomes unknown); then a clean
+/// registration, which keeps the hold only `foreign` shows. Disabling and
+/// enabling the credential, or turning cooling off and on, ends it; so do the
+/// explicit reset and an accepted success (the controls).
+#[tokio::test(start_paused = true)]
+async fn disabling_or_cooling_off_ends_a_hold_only_foreign_shows() {
+    hold_ended_by(&[Ender::Disable, Ender::CoolingOff]);
+}
+
+/// The controls of the one above: the explicit reset and an accepted success.
+#[tokio::test(start_paused = true)]
+async fn a_reset_or_an_accepted_success_ends_a_hold_only_foreign_shows() {
+    hold_ended_by(&[Ender::Reset, Ender::Success]);
+}
+
+fn hold_ended_by(enders: &[Ender]) {
+    for unknown in [false, true] {
+        for &ender in enders {
+            let h = Harness::new(Settings::default());
+            h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+            h.manager.mark_result(&success(OPUS));
+            h.manager.mark_result(&success(SONNET));
+            h.clock.advance(secs(1));
+            h.manager.mark_result(&other_failure("", 503, HOUR));
+            if unknown {
+                h.manager
+                    .register_unsaved(Auth::clone(&h.get(ID)))
+                    .expect("register the snapshot");
+            }
+            h.manager
+                .register_unsaved(auth(ID, "claude"))
+                .expect("register clean");
+            assert!(!no_model_blocked(&h), "the registration is clean");
+            match ender {
+                Ender::Disable => {
+                    set_disabled(&h, true);
+                    set_disabled(&h, false);
+                }
+                Ender::CoolingOff => {
+                    h.manager.set_settings(Settings {
+                        disable_cooling: true,
+                        ..Settings::default()
+                    });
+                    h.manager.set_settings(Settings::default());
+                }
+                Ender::Reset => {
+                    h.manager.reset_quota(ID).expect("reset");
+                }
+                Ender::Success => {
+                    h.clock.advance(secs(1));
+                    h.manager.mark_result(&as_of_now(&h, success(SONNET)));
+                }
+            }
+            // A finite hold is read inside its hour, an unknown one after it.
+            h.clock
+                .advance(if unknown { HOUR + secs(5) } else { secs(5) });
+            h.manager
+                .mark_result(&as_of_now(&h, quota_429(OPUS, opus_headers(), FIVE_DAYS)));
+            h.clock.advance(secs(5));
+            let read = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+            assert!(
+                recover(&h, &read),
+                "unknown {unknown} ender {ender:?}: the hold outlived it"
+            );
+        }
+    }
+}
+
+/// Finding 2: Opus's wrap has run out with nothing of its own left, Sonnet's
+/// own limit still holds, and a read confirms both. Sonnet recovers; Opus's
+/// model state is byte-equal to before the read.
+#[tokio::test(start_paused = true)]
+async fn a_mixed_recovery_leaves_the_scope_it_does_not_recover_alone() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET, ROUTE]);
+    h.manager.mark_result(&CallResult {
+        credential_scope: true,
+        ..other_failure(ROUTE, 429, secs(200))
+    });
+    h.clock.advance(secs(10));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), secs(100)));
+    h.manager
+        .mark_result(&quota_429(SONNET, sonnet_headers(), secs(400)));
+    h.clock.advance(secs(300));
+    // What a read may touch of a scope it doesn't recover is only what the
+    // aggregation refreshes for every state once a deadline has passed
+    // (`unavailable`, `next_retry_after`); the wrap and the layer beneath it,
+    // the reason and the error stay.
+    let kept = |h: &Harness| {
+        let state = h.get(ID).model_states[OPUS].clone();
+        format!(
+            "{:?} {:?} {} {:?} {:?} {:?}",
+            state.credential_quota_shadow,
+            state.credential_quota_propagated,
+            state.quota.reason,
+            state.quota.next_recover_at,
+            state.last_error,
+            state.status
+        )
+    };
+    let opus_before = kept(&h);
+    let read = reading(
+        h.now(),
+        &[
+            (UsageWindow::SevenDayOpus, 2.0),
+            (UsageWindow::SevenDaySonnet, 3.0),
+        ],
+    );
+    assert!(recover(&h, &read), "Sonnet recovered");
+    assert!(!blocked(&h, SONNET));
+    assert_eq!(
+        kept(&h),
+        opus_before,
+        "Opus's state was unwrapped by a read that recovered it nothing"
+    );
+}
+
+/// The third item: a valid cooldown record whose quota check's reset normalises
+/// to year 10000 keeps its cooldown; the check reads as absent, and the file
+/// written after the restore and the process after it agree.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_range_check_time_costs_no_cooldown_record() {
+    let dir = temp_dir();
+    let h = Harness::new(Settings::default());
+    let end = (h.now() + TimeDelta::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let soon =
+        (h.now() + TimeDelta::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    std::fs::write(
+        dir.path().join("a.cds"),
+        format!(
+            r#"{{"Records":[{{"provider":"claude","auth_id":"{ID}","next_retry_after":"{end}","status":"cooling","reason":"upstream 503","open_ferry_quota_check":{{"wait_seconds":1800,"check_at":"{soon}","reset_at":"9999-12-31T23:59:59-01:00"}}}}]}}"#
+        ),
+    )
+    .expect("write");
+    h.add(credential(dir.path()), &[OPUS, SONNET]);
+    let on = config(dir.path(), true);
+    reconfigure(&h.manager, None, &on);
+    restore(&h.manager, &on);
+    assert!(no_model_blocked(&h), "the cooldown came back");
+    assert!(h.manager.quota_checks(ID).is_empty(), "the check is absent");
+    flush(&h.manager);
+    let own = saved_own(dir.path()).expect("the cooldown record survived");
+    assert!(own.next_retry_after.is_some());
+    assert!(own.quota_check.is_none());
+    let next = restarted(&h, dir.path());
+    assert!(no_model_blocked(&next), "the cooldown survived a restart");
+    assert!(next.manager.quota_checks(ID).is_empty());
+    assert_eq!(
+        format!("{:?}", h.get(ID).next_retry_after),
+        format!("{:?}", next.get(ID).next_retry_after),
+        "live and restored agree"
+    );
+}
