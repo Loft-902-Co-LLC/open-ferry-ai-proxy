@@ -1205,6 +1205,23 @@ fn runtime_auth_placement_checks_privilege_and_the_known_machine_root() {
 }
 
 #[test]
+fn a_refused_default_auth_directory_is_not_suggested_in_its_own_place() {
+    for (platform, root) in [
+        (Platform::Linux, MACHINE),
+        (Platform::Windows, "C:/ProgramData/open-ferry"),
+    ] {
+        let default = platform.join(root, "auth");
+        let other = platform.join(root, "auth/team");
+        let mut probe = Fake::new(platform, true);
+        probe.dir(root).dir(&default).dir(&other).untrust(&default);
+        let refusal = refused(authorize_auth_dir(&probe, Path::new(&default))).to_string();
+        assert!(!refusal.contains("set auth-dir"), "{refusal}");
+        let refusal = refused(authorize_auth_dir(&probe, Path::new(&other))).to_string();
+        assert!(refusal.contains("set auth-dir"), "{refusal}");
+    }
+}
+
+#[test]
 fn a_container_has_no_exemption_for_record_trees_or_machine_installs() {
     let mut probe = Fake::new(Platform::Linux, true);
     probe.container = true;

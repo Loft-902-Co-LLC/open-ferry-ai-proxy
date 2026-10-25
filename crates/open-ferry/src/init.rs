@@ -714,7 +714,8 @@ mod tests {
                     Err(error) => error,
                 };
             assert!(error.contains("Refusing the auth directory"));
-            assert!(error.contains("set auth-dir"));
+            // The refused directory is the default, so it isn't suggested.
+            assert!(!error.contains("set auth-dir"), "{error}");
             assert!(!path.exists());
         }
     }

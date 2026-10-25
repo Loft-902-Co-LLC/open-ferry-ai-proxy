@@ -803,10 +803,16 @@ pub(crate) fn authorize_auth_dir_with(
     trusted: &dyn Fn(&str) -> Result<(), String>,
     canonical: &dyn Fn(&str) -> io::Result<String>,
 ) -> Result<(), String> {
+    let default = platform.join(root, "auth");
+    // Suggesting the directory that was just refused would not help.
+    let instead = if same_path(platform, path, &default) {
+        String::new()
+    } else {
+        format!(", or set auth-dir to {default}")
+    };
     let refuse = |why| {
         format!(
-            "Refusing the auth directory {path}: {why}. Make it and every directory above it root's (on Windows, the administrators'), not writable by others, with no links, or set auth-dir to {}.",
-            platform.join(root, "auth")
+            "Refusing the auth directory {path}: {why}. Make it and every directory above it root's (on Windows, the administrators'), not writable by others, with no links{instead}."
         )
     };
     if !platform.is_absolute(path)
@@ -2916,7 +2922,7 @@ fn parse_record_kind(bytes: &[u8], kind: &str) -> Option<Record> {
 }
 
 /// Whether two paths are the same as `platform` compares them.
-fn same_path(platform: Platform, a: &str, b: &str) -> bool {
+pub(crate) fn same_path(platform: Platform, a: &str, b: &str) -> bool {
     let (a, b) = (platform.clean(a), platform.clean(b));
     match platform {
         Platform::Windows | Platform::MacOs => a.eq_ignore_ascii_case(&b),
