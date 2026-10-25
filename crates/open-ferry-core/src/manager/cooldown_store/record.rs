@@ -145,14 +145,17 @@ pub(crate) fn writable(record: &Record) -> bool {
         own.and_then(|state| state.quota.next_recover_at),
         record.quota_check.map(|check| check.check_at),
         record.quota_check.map(|check| check.reset_at),
-        match record.recovery_refused {
-            Some(Refusal::Until(time)) => Some(time),
-            _ => None,
-        },
+        // The refusal is not checked: it never costs a record its place
+        // (an unrepresentable bound is written as `"unknown"`).
     ]
     .into_iter()
     .flatten()
-    .all(|time| (0..=9999).contains(&chrono::Datelike::year(&time)))
+    .all(representable)
+}
+
+/// Whether Go can write `time` (years 0 to 9999, in UTC).
+fn representable(time: Timestamp) -> bool {
+    (0..=9999).contains(&chrono::Datelike::year(&time))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +228,8 @@ fn record_node(record: &Record) -> Node {
     }
     if let Some(refusal) = record.recovery_refused {
         let node = match refusal {
-            Refusal::Until(time) => time_node(time),
-            Refusal::Unknown => string(UNKNOWN),
+            Refusal::Until(time) if representable(time) => time_node(time),
+            Refusal::Until(_) | Refusal::Unknown => string(UNKNOWN),
         };
         fields.push(("open_ferry_recovery_refused_until", node));
     }
@@ -530,7 +533,15 @@ fn decode_quota_check(value: &Value) -> Option<QuotaCheckRecord> {
     };
     let (mut wait, mut check_at, mut reset_at) = (None, None, None);
     for (key, value) in map {
-        let time = || timestamp(value, key).ok().flatten().flatten();
+        // A time Go could not write back reads as absent, so a rest never
+        // costs its record its place.
+        let time = || {
+            timestamp(value, key)
+                .ok()
+                .flatten()
+                .flatten()
+                .filter(|time| representable(*time))
+        };
         match field(key, FIELDS) {
             Some("wait_seconds") => {
                 wait = value
@@ -559,7 +570,15 @@ fn decode_refusal(value: &Value) -> Option<Refusal> {
     if text.trim().eq_ignore_ascii_case(UNKNOWN) {
         return Some(Refusal::Unknown);
     }
-    parse_go_rfc3339(text.trim()).map(Refusal::Until)
+    // A bound Go could not write back (after normalising to UTC) reads as an
+    // unknown one: that only refuses more, and the record keeps its place.
+    parse_go_rfc3339(text.trim()).map(|time| {
+        if representable(time) {
+            Refusal::Until(time)
+        } else {
+            Refusal::Unknown
+        }
+    })
 }
 
 fn decode_quota(quota: &mut QuotaState, map: &Map<String, Value>) -> Result<(), String> {

@@ -57,7 +57,7 @@ const QUOTA: &str = "quota";
 const CREDENTIAL_QUOTA: &str = "credential_quota";
 
 /// The capped rests, by credential ID and scope.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct QuotaChecks {
     rests: BTreeMap<(String, String), Rest>,
     last_claim: u64,
@@ -160,15 +160,6 @@ fn auth_in_scope(auth: &Auth, scope: &str) -> bool {
 fn state_in_scope(name: &str, state: &ModelState, scope: &str) -> bool {
     is_quota_rest(state.quota.exceeded, &state.quota.reason)
         && (scope == CREDENTIAL || canonical_model_key(name) == scope)
-}
-
-/// Whether any cooldown of `scope`'s rest is on `auth`, whatever its times.
-fn rests_anywhere(auth: &Auth, scope: &str) -> bool {
-    (scope == CREDENTIAL && auth_in_scope(auth, scope))
-        || auth
-            .model_states
-            .iter()
-            .any(|(name, state)| state_in_scope(name, state, scope))
 }
 
 /// The end of `scope`'s rest on `auth`, if after `now`. A model's rest is
@@ -423,37 +414,17 @@ impl QuotaChecks {
 
     /// Ends the rests of `scopes` of `auth`, whose quota cooldowns the
     /// provider's own usage report just ended (see `quota_recovery`), after
-    /// [`Self::before_result`] took the leases off. The rests of other scopes
-    /// stay unless nothing rests under them any more; a check in flight on
-    /// one that stays is leased again. A recovered credential's own rest is
-    /// the whole credential's, so the models' rests under it are judged by
-    /// what is left of their cooldowns.
+    /// [`Self::before_result`] took the leases off. Nothing else is swept: the
+    /// rests of other scopes end at the provider's reset, as ever (or on a
+    /// success, or a reset), whatever state their model is in. A recovered
+    /// credential needs no sweep either: its recovery is refused while any
+    /// model rests on a check, so no model's rest is under it. A check in
+    /// flight on a rest that stays is leased again.
     pub(crate) fn recovered(&mut self, auth: &mut Auth, scopes: &[String], now: Timestamp) {
         for scope in scopes {
             self.rests.remove(&Self::key(&auth.id, scope));
         }
-        // Rests of other scopes end at the provider's reset, as ever; only
-        // one that has no cooldown left under it and no check in flight goes
-        // now (the leases are off, so a due or capped rest can't be judged
-        // by its times). A rest whose model has no state any more (an alias a
-        // reconcile merged, a model the registry dropped) is kept to the
-        // provider's reset: its state is no evidence that it ended.
         self.forget_ended(&auth.id, now);
-        for scope in self.scopes(&auth.id) {
-            let key = Self::key(&auth.id, &scope);
-            let claimed = self
-                .rests
-                .get(&key)
-                .is_some_and(|rest| rest.claim.is_some());
-            let stateless = scope != CREDENTIAL
-                && !auth
-                    .model_states
-                    .keys()
-                    .any(|name| canonical_model_key(name) == scope);
-            if !claimed && !stateless && !rests_anywhere(auth, &scope) {
-                self.rests.remove(&key);
-            }
-        }
         self.lease_claims(auth);
     }
 
@@ -485,12 +456,6 @@ impl QuotaChecks {
     /// knows the provider's reset.
     pub(crate) fn rests_on_a_model(&self, id: &str) -> bool {
         self.scopes(id).iter().any(|scope| scope != CREDENTIAL)
-    }
-
-    /// Puts the leases of the checks in flight back after
-    /// [`Self::before_result`] took them off, and changes nothing else.
-    pub(crate) fn lease_again(&mut self, auth: &mut Auth) {
-        self.lease_claims(auth);
     }
 
     /// Leases again the checks in flight that have no lease.

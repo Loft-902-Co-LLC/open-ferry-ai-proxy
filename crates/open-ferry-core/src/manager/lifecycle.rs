@@ -137,6 +137,7 @@ fn count_result(auth: &mut Auth, result: &CallResult, now: Timestamp) {
 pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) -> Vec<String> {
     let settings = state.settings.clone();
     let mut cleared = Vec::new();
+    let mut marked = Vec::new();
     for (id, entry) in &mut state.auths {
         if !cooldown_disabled_for_auth(&settings, &entry.auth) && !is_disabled(&entry.auth) {
             continue;
@@ -145,11 +146,15 @@ pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) 
         if clear_cooldown_state_for_auth(auth, now) {
             auth.generation += 1;
             cleared.push(id.clone());
+        } else if state.quota_recovery.marked(id) {
+            // Already clean, but carrying a merge's mark: ending the unknown
+            // one is not left to a cooldown that happened to be there.
+            marked.push(id.clone());
         }
     }
     // The cooldowns are gone with no failure to show for it: what the quota
     // recovery noted of them goes too, and a read in flight is fenced.
-    for id in &cleared {
+    for id in cleared.iter().chain(&marked) {
         state.quota_recovery.reset(id);
     }
     cleared
@@ -1583,12 +1588,16 @@ impl Manager {
         }
         auth.updated_at = Some(now);
         normalize_model_states(&mut auth.model_states);
-        if (cooldown_disabled_for_auth(&state.settings, &auth) || is_disabled(&auth))
-            && clear_cooldown_state_for_auth(&mut auth, now)
-        {
-            generation = generation.saturating_add(1);
-            // As in `clear_disabled_cooldown_states`.
-            state.quota_recovery.reset(&auth.id);
+        if cooldown_disabled_for_auth(&state.settings, &auth) || is_disabled(&auth) {
+            let cleared = clear_cooldown_state_for_auth(&mut auth, now);
+            if cleared {
+                generation = generation.saturating_add(1);
+            }
+            // As in `clear_disabled_cooldown_states`: a clean credential's
+            // mark is ended (an unknown one) all the same.
+            if cleared || state.quota_recovery.marked(&auth.id) {
+                state.quota_recovery.reset(&auth.id);
+            }
         }
         // An update that stores cooldowns other than the live ones (model
         // states carried in, keys merged by normalizing) has put in state no
@@ -3136,6 +3145,7 @@ impl Manager {
                 &model_key,
                 own,
                 (scope_before, scope_after),
+                stale,
                 now,
             );
             auth.updated_at = Some(now);

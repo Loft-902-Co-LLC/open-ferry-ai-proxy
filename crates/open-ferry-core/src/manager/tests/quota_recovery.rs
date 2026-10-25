@@ -3768,3 +3768,474 @@ async fn a_sibling_success_that_unblocks_the_credential_ends_its_hold() {
         "the hold stayed while the credential was blocked"
     );
 }
+
+// Round 13: a recovery changes exactly the scopes it recovers; the mark is
+// saved whatever the credential's state; a rejected success ends nothing; an
+// update keeps a hold only `foreign` shows; a time Go can't write costs no
+// record.
+
+/// The check rest of `model`, as the management API shows it.
+fn rest_of(h: &Harness, model: &str) -> Vec<crate::manager::QuotaCheck> {
+    h.manager
+        .quota_checks(ID)
+        .into_iter()
+        .filter(|check| check.model_key == model)
+        .collect()
+}
+
+/// Finding 1: Opus rests on a one hour check under a long 429, Sonnet gets its
+/// own a half hour later, a reconcile that merges nothing resets Opus's state
+/// to clean once its capped time has passed, and a read proves Sonnet healthy
+/// with Opus full. Sonnet's recovery leaves Opus's rest, its next check and
+/// its doubling be. The control: Opus's reset has passed, so its rest goes.
+#[tokio::test(start_paused = true)]
+async fn recovering_one_model_leaves_another_models_rest_alone() {
+    for (opus_retry, minutes, stays) in [(FIVE_DAYS, 31, true), (secs(70 * 60), 45, false)] {
+        let h = Harness::new(capped_hour());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), opus_retry));
+        h.clock.advance(secs(30 * 60));
+        h.manager
+            .mark_result(&quota_429(SONNET, sonnet_headers(), FIVE_DAYS));
+        h.clock.advance(secs(minutes * 60));
+        h.manager.reconcile_registry_model_states(ID);
+        let opus_before = rest_of(&h, OPUS);
+        assert_eq!(opus_before.len(), usize::from(stays), "{opus_before:?}");
+        let read = reading(
+            h.now(),
+            &[
+                (UsageWindow::SevenDayOpus, 100.0),
+                (UsageWindow::SevenDaySonnet, 3.0),
+            ],
+        );
+        assert!(recover(&h, &read), "Sonnet recovered");
+        assert_eq!(rest_of(&h, SONNET), [], "Sonnet's own rest went");
+        if stays {
+            assert_eq!(rest_of(&h, OPUS), opus_before, "Opus's rest was touched");
+            assert_eq!(rested(&h), [OPUS]);
+        } else {
+            assert_eq!(rested(&h), Vec::<String>::new(), "the ended rest stayed");
+        }
+    }
+}
+
+/// Finding 2: a mark that stands while the credential is disabled, or while
+/// cooling is off, is saved and comes back through a restart.
+#[tokio::test(start_paused = true)]
+async fn a_disabled_or_cooling_off_credentials_mark_is_saved_and_restored() {
+    use crate::manager::cooldown_store::Refusal;
+    for cooling_off in [false, true] {
+        let dir = temp_dir();
+        let h = marked_and_idle(dir.path());
+        let bound = mark_of(&h).flatten().expect("finite bound");
+        if cooling_off {
+            h.manager.set_settings(Settings {
+                disable_cooling: true,
+                ..route_alias()
+            });
+        } else {
+            set_disabled(&h, true);
+        }
+        assert_eq!(mark_of(&h), Some(Some(bound)), "reset keeps a finite mark");
+        let next = restarted(&h, dir.path());
+        let own = saved_own(dir.path()).expect("a record for the mark");
+        assert_eq!(own.recovery_refused, Some(Refusal::Until(bound)));
+        assert!(own.next_retry_after.is_none(), "no cooldown in the record");
+        assert_eq!(mark_of(&next), Some(Some(bound)), "restored");
+        // Enabled again before the bound passes, both refuse.
+        if cooling_off {
+            h.manager.set_settings(route_alias());
+        } else {
+            set_disabled(&h, false);
+        }
+        assert!(!wrap_then_read(&next), "the restored mark refused nothing");
+        assert!(!wrap_then_read(&h), "the live mark refused nothing");
+        assert_restart_agrees(&capture(&h, dir.path(), Settings::default()).await);
+    }
+}
+
+/// [`restarted`] onto a credential that is disabled, or has cooling off.
+fn restarted_ineligible(h: &Harness, dir: &Path, cooling_off: bool) -> Harness {
+    flush(&h.manager);
+    let next = Harness::new(Settings {
+        disable_cooling: cooling_off,
+        ..Settings::default()
+    });
+    next.add(credential(dir), &[OPUS, SONNET]);
+    if !cooling_off {
+        set_disabled(&next, true);
+    }
+    next.clock
+        .advance((h.now() - next.now()).to_std().unwrap_or_default());
+    let on = config(dir, true);
+    reconfigure(&next.manager, None, &on);
+    restore(&next.manager, &on);
+    next
+}
+
+/// Finding 2, restore side: a saved mark is put back whether or not the
+/// credential is eligible for cooldowns when the restore runs, and it makes
+/// the credential unavailable for nothing.
+#[tokio::test(start_paused = true)]
+async fn a_saved_mark_is_restored_onto_a_disabled_or_cooling_off_credential() {
+    for cooling_off in [false, true] {
+        let dir = temp_dir();
+        let h = marked_and_idle(dir.path());
+        let bound = mark_of(&h).flatten().expect("finite bound");
+        let next = restarted_ineligible(&h, dir.path(), cooling_off);
+        assert_eq!(mark_of(&next), Some(Some(bound)), "restored");
+        if cooling_off {
+            assert!(!blocked(&next, OPUS) && !blocked(&next, SONNET));
+        }
+        assert!(!next.get(ID).unavailable);
+        // Enabled again, the mark still refuses.
+        if cooling_off {
+            next.manager.set_settings(Settings::default());
+        } else {
+            set_disabled(&next, false);
+        }
+        assert!(!wrap_then_read(&next), "the restored mark refused nothing");
+    }
+}
+
+/// Finding 2 through a thaw that makes the file the authority, while the
+/// credential is disabled.
+#[tokio::test(start_paused = true)]
+async fn a_thaw_restores_the_mark_onto_a_disabled_credential() {
+    use crate::manager::cooldown_store::{Thaw, freeze, thaw};
+    let dir = temp_dir();
+    let h = marked_and_idle(dir.path());
+    let bound = mark_of(&h).expect("mark");
+    freeze(&h.manager).expect("freeze");
+    set_disabled(&h, true);
+    thaw(&h.manager, Thaw::Restore);
+    assert_eq!(mark_of(&h), Some(bound), "restored by the thaw");
+    set_disabled(&h, false);
+    assert!(!wrap_then_read(&h), "the restored mark refused nothing");
+}
+
+fn set_disabled(h: &Harness, on: bool) {
+    h.manager
+        .edit(ID, |auth| {
+            auth.disabled = on;
+            Ok::<_, ()>(true)
+        })
+        .expect("edit");
+}
+
+/// Finding 3: a recognised Opus claim, an unrecognised credential-wide 429 that
+/// outlasts it, both deadlines past with nothing in between: a read that
+/// proves the claim recovers nothing, and leaves the credential (the same
+/// allocation, equal) and the quota checks as they were.
+#[tokio::test(start_paused = true)]
+async fn a_read_that_recovers_nothing_changes_no_model_state() {
+    for settings in [Settings::default(), capped_hour()] {
+        let h = Harness::new(settings);
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), secs(100)));
+        h.clock.advance(secs(10));
+        h.manager.mark_result(&CallResult {
+            credential_scope: true,
+            ..other_failure(SONNET, 429, secs(200))
+        });
+        h.clock.advance(secs(300));
+        let before = h.get(ID);
+        let before_text = format!("{:?}", *before);
+        let checks = format!("{:?}", h.manager.lock().quota_checks);
+        let read = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+        assert!(!recover(&h, &read), "nothing was recovered");
+        let after = h.get(ID);
+        assert_eq!(format!("{:?}", *after), before_text, "the credential moved");
+        assert!(Arc::ptr_eq(&before, &after), "the credential was copied");
+        assert_eq!(format!("{:?}", h.manager.lock().quota_checks), checks);
+    }
+}
+
+/// Finding 4: the same one hour no-model 503 and ten second Sonnet 503 as the
+/// aggregation test, then a Sonnet success that predates the Sonnet cooldown:
+/// application rejects it, and it ends no hold. The control has no such
+/// success; both refuse the read.
+#[tokio::test(start_paused = true)]
+async fn a_success_application_rejected_as_stale_ends_no_hold() {
+    for stale in [false, true] {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        let older = h.manager.next_execution_seq();
+        h.manager.mark_result(&success(OPUS));
+        h.manager.mark_result(&success(SONNET));
+        h.clock.advance(secs(1));
+        h.manager.mark_result(&other_failure("", 503, HOUR));
+        h.clock.advance(secs(5));
+        h.manager.mark_result(&other_failure(SONNET, 503, secs(10)));
+        h.clock.advance(secs(3));
+        if stale {
+            h.manager.mark_result(&CallResult {
+                execution_seq: older,
+                ..success(SONNET)
+            });
+            assert!(blocked(&h, SONNET), "the stale success changed Sonnet");
+        }
+        h.clock.advance(secs(2));
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        h.clock.advance(secs(5));
+        assert!(
+            h.manager
+                .lock()
+                .quota_recovery
+                .foreign_live(ID, "", h.now())
+        );
+        let read = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+        assert!(!recover(&h, &read), "stale {stale}");
+        assert!(blocked(&h, OPUS));
+    }
+}
+
+/// An update of the Sonnet cooldown's deadline, from `h`'s live credential.
+fn update_sonnet_deadline(h: &Harness, seconds: i64) {
+    let mut updated = Auth::clone(&h.get(ID));
+    let end = h.now() + TimeDelta::seconds(seconds);
+    let state = updated.model_states.get_mut(SONNET).expect("sonnet state");
+    state.next_retry_after = Some(end);
+    h.manager.update_unsaved(updated).expect("update");
+}
+
+/// Finding 5: the one hour no-model 503 and a ten second Sonnet 503, then an
+/// update that changes only Sonnet's deadline: the credential's hold, which
+/// only `foreign` still shows, stays. The control: an update that changes no
+/// cooldown refuses as well.
+#[tokio::test(start_paused = true)]
+async fn an_update_of_another_models_cooldown_keeps_a_hold_only_foreign_shows() {
+    for changed in [true, false] {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager.mark_result(&success(OPUS));
+        h.manager.mark_result(&success(SONNET));
+        h.clock.advance(secs(1));
+        h.manager.mark_result(&other_failure("", 503, HOUR));
+        h.clock.advance(secs(5));
+        h.manager.mark_result(&other_failure(SONNET, 503, secs(10)));
+        h.clock.advance(secs(1));
+        let live = h.get(ID);
+        assert!(!live.unavailable, "aggregation hid the credential's hold");
+        let live_end = live.model_states[SONNET].next_retry_after;
+        if changed {
+            update_sonnet_deadline(&h, 20);
+            assert_ne!(h.get(ID).model_states[SONNET].next_retry_after, live_end);
+        } else {
+            let same = Auth::clone(&h.get(ID));
+            h.manager.update_unsaved(same).expect("update");
+        }
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        h.clock.advance(secs(5));
+        let read = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+        assert!(!recover(&h, &read), "changed {changed}");
+        assert!(blocked(&h, OPUS));
+    }
+}
+
+/// Registering the credential again keeps a hold only `foreign` shows; a reset
+/// ends it.
+#[tokio::test(start_paused = true)]
+async fn registering_again_keeps_the_hold_and_a_reset_ends_it() {
+    for reset in [false, true] {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager.mark_result(&success(OPUS));
+        h.manager.mark_result(&success(SONNET));
+        h.clock.advance(secs(1));
+        h.manager.mark_result(&other_failure("", 503, HOUR));
+        h.clock.advance(secs(5));
+        h.manager.mark_result(&other_failure(SONNET, 503, secs(10)));
+        h.clock.advance(secs(11));
+        if reset {
+            h.manager.reset_quota(ID).expect("reset");
+        } else {
+            h.manager
+                .register_unsaved(auth(ID, "claude"))
+                .expect("register");
+        }
+        h.manager
+            .mark_result(&as_of_now(&h, quota_429(OPUS, opus_headers(), FIVE_DAYS)));
+        h.clock.advance(secs(5));
+        let read = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+        assert_eq!(recover(&h, &read), reset, "reset {reset}");
+    }
+}
+
+/// A saved credential record with a one hour cooldown and `refusals` marks,
+/// each in a record of its own; the harness restored from it.
+fn restored_with_marks(dir: &Path, refusals: &[&str]) -> Harness {
+    let h = Harness::new(Settings::default());
+    let end = (h.now() + TimeDelta::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut records = Vec::new();
+    for (index, refusal) in refusals.iter().enumerate() {
+        let cooldown = if index == 0 {
+            format!(r#","next_retry_after":"{end}","status":"cooling","reason":"upstream 503""#)
+        } else {
+            String::new()
+        };
+        records.push(format!(
+            r#"{{"provider":"claude","auth_id":"{ID}"{cooldown},"open_ferry_recovery_refused_until":{refusal}}}"#
+        ));
+    }
+    std::fs::write(
+        dir.join("a.cds"),
+        format!(r#"{{"Records":[{}]}}"#, records.join(",")),
+    )
+    .expect("write");
+    h.add(credential(dir), &[OPUS, SONNET]);
+    let on = config(dir, true);
+    reconfigure(&h.manager, None, &on);
+    restore(&h.manager, &on);
+    h
+}
+
+/// Finding 6: a refusal time that normalises past year 9999 reads as unknown,
+/// and the valid one hour cooldown beside it is flushed and survives a restart.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_range_refusal_time_costs_no_cooldown_record() {
+    use crate::manager::cooldown_store::Refusal;
+    let dir = temp_dir();
+    let h = restored_with_marks(dir.path(), &[r#""9999-12-31T23:59:59-01:00""#]);
+    assert!(no_model_blocked(&h), "the cooldown came back");
+    assert_eq!(mark_of(&h), Some(None), "read as unknown");
+    flush(&h.manager);
+    let own = saved_own(dir.path()).expect("the cooldown record survived the flush");
+    assert!(own.next_retry_after.is_some());
+    assert_eq!(own.recovery_refused, Some(Refusal::Unknown));
+    let next = restarted(&h, dir.path());
+    assert!(no_model_blocked(&next), "the cooldown survived a restart");
+    assert_eq!(mark_of(&next), Some(None));
+}
+
+/// Finding 6, decoding: the UTC boundary dates, and what else is read.
+#[tokio::test(start_paused = true)]
+async fn refusal_times_are_read_by_their_utc_year() {
+    use crate::manager::cooldown_store::Refusal;
+    for (value, expected) in [
+        (
+            "\"9999-12-31T23:59:59Z\"",
+            Some(Refusal::Until(
+                chrono::DateTime::parse_from_rfc3339("9999-12-31T23:59:59Z")
+                    .expect("time")
+                    .to_utc(),
+            )),
+        ),
+        ("\"9999-12-31T23:59:59-01:00\"", Some(Refusal::Unknown)),
+        ("\"0000-01-01T00:00:00+01:00\"", Some(Refusal::Unknown)),
+        (
+            "\"0000-01-01T00:00:00Z\"",
+            Some(Refusal::Until(
+                chrono::DateTime::parse_from_rfc3339("0000-01-01T00:00:00Z")
+                    .expect("time")
+                    .to_utc(),
+            )),
+        ),
+        ("\"not a time\"", None),
+    ] {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.path().join("a.cds"),
+            format!(
+                r#"{{"Records":[{{"auth_id":"{ID}","open_ferry_recovery_refused_until":{value}}}]}}"#
+            ),
+        )
+        .expect("write");
+        let loaded = FileStore::new(dir.path().to_path_buf())
+            .load()
+            .expect("load");
+        let read = loaded.first().and_then(|record| record.recovery_refused);
+        assert_eq!(read, expected, "{value}");
+    }
+}
+
+/// Finding 6, restore level: the marks of a mark-only record on an absent
+/// credential and on a model's record are ignored; two records for one
+/// credential keep the later bound, and unknown wins.
+#[tokio::test(start_paused = true)]
+async fn restored_marks_follow_their_credential_and_keep_the_latest() {
+    let now = Harness::new(Settings::default()).now();
+    let later = (now + TimeDelta::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let sooner = (now + TimeDelta::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Each file is restored by a manager of its own.
+    let write = |records: &str| -> Harness {
+        let dir = temp_dir();
+        std::fs::write(
+            dir.path().join("a.cds"),
+            format!(r#"{{"Records":[{records}]}}"#),
+        )
+        .expect("write");
+        let h = Harness::new(Settings::default());
+        h.add(credential(dir.path()), &[OPUS, SONNET]);
+        let on = config(dir.path(), true);
+        reconfigure(&h.manager, None, &on);
+        restore(&h.manager, &on);
+        h
+    };
+    let record = |id: &str, model: &str, mark: &str| {
+        format!(
+            r#"{{"provider":"claude","auth_id":"{id}","model":"{model}","open_ferry_recovery_refused_until":{mark}}}"#
+        )
+    };
+    let h = write(&record("ghost", "", "\"unknown\""));
+    assert_eq!(
+        h.manager.lock().quota_recovery.mark("ghost"),
+        None,
+        "absent"
+    );
+    assert_eq!(mark_of(&h), None);
+    let h = write(&record(ID, OPUS, "\"unknown\""));
+    assert_eq!(mark_of(&h), None, "a model's record carries no mark");
+    let h = write(&format!(
+        "{},{}",
+        record(ID, "", &format!("\"{sooner}\"")),
+        record(ID, "", &format!("\"{later}\""))
+    ));
+    let bound = chrono::DateTime::parse_from_rfc3339(&later)
+        .expect("time")
+        .to_utc();
+    assert_eq!(mark_of(&h), Some(Some(bound)), "the later bound wins");
+    let h = write(&format!(
+        "{},{}",
+        record(ID, "", &format!("\"{later}\"")),
+        record(ID, "", "\"unknown\"")
+    ));
+    assert_eq!(mark_of(&h), Some(None), "unknown wins");
+}
+
+/// Item 7: disabling, or turning cooling off for, a credential that is clean
+/// but carries an unknown mark ends the mark; a finite one stays.
+#[tokio::test(start_paused = true)]
+async fn disabling_a_clean_credential_ends_an_unknown_mark() {
+    for cooling_off in [false, true] {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager.lock().quota_recovery.restore_mark(ID, None);
+        if cooling_off {
+            h.manager.set_settings(Settings {
+                disable_cooling: true,
+                ..Settings::default()
+            });
+        } else {
+            set_disabled(&h, true);
+        }
+        assert_eq!(mark_of(&h), None, "cooling_off {cooling_off}");
+        let finite = Some(h.now() + TimeDelta::hours(1));
+        h.manager.lock().quota_recovery.restore_mark(ID, finite);
+        h.manager.set_settings(Settings::default());
+        set_disabled(&h, false);
+        if cooling_off {
+            h.manager.set_settings(Settings {
+                disable_cooling: true,
+                ..Settings::default()
+            });
+        } else {
+            set_disabled(&h, true);
+        }
+        assert_eq!(mark_of(&h), Some(finite), "a finite mark stays");
+    }
+}
