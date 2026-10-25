@@ -1,0 +1,428 @@
+//! Values supplied before encoding, compared with what the file will load.
+
+use std::collections::BTreeMap;
+
+use crate::config::decode::decode;
+use crate::config::layout::{AnyValue, decode_any_value};
+use crate::config::normalize::post_process;
+use crate::config::save::{self, generate, merge, tree};
+use crate::config::yaml;
+use crate::config::yaml3::encode::{self, Value};
+use crate::config::yaml3::{Kind, Node, STR_TAG, Style};
+use crate::config::{Config, v8};
+
+use super::{SaveError, SaveErrorKind};
+
+pub(crate) struct IntendedValues {
+    input: Option<Vec<u8>>,
+    values: Option<Snapshot>,
+    raw: Option<(Node, bool)>,
+}
+
+struct Snapshot {
+    typed: Option<Semantic>,
+    document: Node,
+    generated: Option<Node>,
+    schema: Schema,
+    migrate: bool,
+}
+
+impl IntendedValues {
+    /// Direct writes and undo pass their actual input, with no intervening encoder.
+    pub(crate) fn unchanged(input: &[u8]) -> Self {
+        Self {
+            input: Some(input.to_vec()),
+            values: None,
+            raw: None,
+        }
+    }
+
+    pub(crate) fn settings(data: &[u8], cfg: &Config, migrate: bool) -> Result<Self, SaveError> {
+        let doc = save::unmarshal(data)?;
+        let migrate = migrate
+            || doc
+                .content
+                .first()
+                .map(save::is_v8_config_layout)
+                .transpose()?
+                .unwrap_or(false);
+        Self::capture(doc, cfg, migrate, false)
+    }
+
+    pub(crate) fn bytes(data: &[u8]) -> Result<Self, SaveError> {
+        let doc = save::unmarshal(data)?;
+        let migrate = doc
+            .content
+            .first()
+            .map(save::is_v8_config_layout)
+            .transpose()?
+            .unwrap_or(false);
+        Ok(Self {
+            input: Some(data.to_vec()),
+            values: None,
+            raw: Some((doc, migrate)),
+        })
+    }
+
+    pub(crate) fn node(doc: &Node, migrate: bool) -> Result<Self, SaveError> {
+        // Keep the pre-encoding tree now; decode it after the output's
+        // existing load check, so invalid requests keep their error class.
+        Ok(Self {
+            input: None,
+            values: None,
+            raw: Some((doc.clone(), migrate)),
+        })
+    }
+
+    fn capture(
+        doc: Node,
+        cfg: &Config,
+        migrate: bool,
+        allow_opaque: bool,
+    ) -> Result<Self, SaveError> {
+        let raw = generated_node(cfg);
+        let mut normalized = cfg.clone();
+        post_process(&mut normalized).map_err(check_error)?;
+        let generated = match generated_node(&normalized) {
+            Ok(node) => Some(node),
+            Err(_) if allow_opaque => None,
+            Err(error) => return Err(error),
+        };
+        let mut schema = Schema::default();
+        if let Ok(raw) = &raw {
+            schema.include(raw);
+        }
+        if let Some(generated) = &generated {
+            schema.include(generated);
+        }
+        if let Ok(source) = config_from_node(&doc).and_then(|cfg| generated_node(&cfg)) {
+            schema.include(&source);
+        }
+        let typed = generated.as_ref().map(semantic).transpose()?;
+        Ok(Self {
+            input: None,
+            values: Some(Snapshot {
+                typed,
+                document: doc,
+                generated,
+                schema,
+                migrate,
+            }),
+            raw: None,
+        })
+    }
+
+    pub(crate) fn difference(
+        &self,
+        data: &[u8],
+        actual: &Config,
+    ) -> Result<Option<String>, SaveError> {
+        if let Some(input) = &self.input {
+            if input == data {
+                return Ok(None);
+            }
+            if self.raw.is_none() {
+                return Ok(Some("$".to_owned()));
+            }
+        }
+        if let Some((doc, migrate)) = &self.raw {
+            let cfg = config_from_node(doc)?;
+            return Self::capture(doc.clone(), &cfg, *migrate, true)?.difference(data, actual);
+        }
+        let expected = self.values.as_ref().expect("a captured save intent");
+        let actual_generated = if expected.generated.is_some() {
+            match generated_node(actual) {
+                Ok(node) => Some(node),
+                Err(_) => return Ok(Some("$".into())),
+            }
+        } else {
+            None
+        };
+        if let (Some(wanted), Some(generated)) = (&expected.typed, &actual_generated) {
+            if let Some(path) = wanted.difference(&semantic(generated)?, "$") {
+                return Ok(Some(path));
+            }
+        }
+        let mut schema = expected.schema.clone();
+        if let Some(generated) = &actual_generated {
+            schema.include(generated);
+        }
+        let wanted = canonical(
+            &expected.document,
+            expected.generated.as_ref(),
+            &schema,
+            expected.migrate,
+        )?;
+        let actual_doc = save::unmarshal(data)?;
+        let got = canonical(
+            &actual_doc,
+            actual_generated.as_ref(),
+            &schema,
+            expected.migrate,
+        )?;
+        Ok(wanted.difference(&got, "$"))
+    }
+}
+
+fn check_error(error: impl std::fmt::Display) -> SaveError {
+    SaveError::new(SaveErrorKind::Check, error.to_string())
+}
+
+fn config_from_node(doc: &Node) -> Result<Config, SaveError> {
+    let Some(root) = doc
+        .content
+        .first()
+        .filter(|_| doc.kind == Kind::Document)
+        .or_else(|| (doc.kind != Kind::Document && doc.kind != Kind::Zero).then_some(doc))
+    else {
+        return Ok(Config::default());
+    };
+    let node = yaml::from_writer_node(root).map_err(|error| check_error(error.message()))?;
+    let flat = v8::flatten_v8(&node).map_err(check_error)?;
+    decode(&flat.root).map_err(|error| check_error(error.message()))
+}
+
+/// Quotes are used only for the comparison's private copy, never the saved file.
+fn quoted_node(node: &mut Node) {
+    node.head_comment.clear();
+    node.line_comment.clear();
+    node.foot_comment.clear();
+    if node.kind == Kind::Scalar {
+        node.style = Style::DOUBLE_QUOTED
+            | if node.tag == STR_TAG {
+                Style::NONE
+            } else {
+                Style::TAGGED
+            };
+    }
+    for child in &mut node.content {
+        quoted_node(child);
+    }
+}
+
+fn quoted_value(value: &mut Value) {
+    match value {
+        Value::Str(text) => {
+            let mut node = Node::scalar(STR_TAG, text);
+            node.style = Style::DOUBLE_QUOTED;
+            *value = Value::Node(node);
+        }
+        Value::Node(node) => quoted_node(node),
+        Value::Seq(items) => items.iter_mut().for_each(quoted_value),
+        Value::Map(entries) => {
+            for (key, value) in entries {
+                quoted_value(key);
+                quoted_value(value);
+            }
+        }
+        Value::Struct(fields) => {
+            for field in fields {
+                quoted_value(&mut field.value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn generated_node(cfg: &Config) -> Result<Node, SaveError> {
+    let mut value = generate::legacy_config(cfg)
+        .map_err(|error| SaveError::new(SaveErrorKind::Unwritable, error.0))?;
+    quoted_value(&mut value);
+    let bytes = encode::marshal(&value)?;
+    let mut doc = save::unmarshal(&bytes)?;
+    Ok(doc.content.pop().unwrap_or_else(Node::mapping))
+}
+
+#[derive(Clone, Default)]
+struct Schema {
+    keys: BTreeMap<String, Schema>,
+    item: Option<Box<Schema>>,
+}
+
+impl Schema {
+    fn include(&mut self, node: &Node) {
+        if node.kind == Kind::Mapping {
+            for (key, value) in node.pairs() {
+                self.keys
+                    .entry(key.value.clone())
+                    .or_default()
+                    .include(value);
+            }
+        } else if node.kind == Kind::Sequence {
+            let item = self.item.get_or_insert_with(Default::default);
+            for child in &node.content {
+                item.include(child);
+            }
+        }
+    }
+}
+
+fn prune_normalized(dst: &mut Node, src: Option<&Node>, schema: &Schema, path: &mut Vec<String>) {
+    if dst.kind == Kind::Mapping {
+        let mut index = 0;
+        while index + 1 < dst.content.len() {
+            let key = dst.content[index].value.clone();
+            let generated = src.and_then(|src| {
+                tree::find_map_key_index(src, &key).and_then(|i| src.content.get(i + 1))
+            });
+            if generated.is_none() && schema.keys.contains_key(&key) {
+                // Only a field seen in the typed serialization can disappear
+                // here. Ignored source fields never enter this schema; the
+                // generator's untyped defaults stay present on both sides.
+                dst.content.drain(index..index + 2);
+                continue;
+            }
+            path.push(key.clone());
+            prune_normalized(
+                &mut dst.content[index + 1],
+                generated,
+                schema.keys.get(&key).unwrap_or(&Schema::default()),
+                path,
+            );
+            path.pop();
+            index += 2;
+        }
+    } else if dst.kind == Kind::Sequence {
+        if let Some(item) = &schema.item {
+            for (i, child) in dst.content.iter_mut().enumerate() {
+                prune_normalized(child, src.and_then(|src| src.content.get(i)), item, path);
+            }
+        }
+    }
+}
+
+fn canonical(
+    doc: &Node,
+    generated: Option<&Node>,
+    schema: &Schema,
+    migrate: bool,
+) -> Result<Semantic, SaveError> {
+    let mut doc = doc.clone();
+    if doc.kind == Kind::Document {
+        if let Some(root) = doc.content.first_mut() {
+            *root = tree::expand_config_aliases(root)?;
+        }
+    }
+    quoted_node(&mut doc);
+    if migrate {
+        let bytes = encode::faithful_node(&doc, 2)?;
+        doc = save::normalize_config_layout_doc(&bytes, true)?.0;
+    }
+    let first = doc
+        .content
+        .first()
+        .filter(|_| doc.kind == Kind::Document)
+        .unwrap_or(&doc);
+    let mut root = if first.kind == Kind::Zero {
+        Node::mapping()
+    } else {
+        save::v8::flatten_v8(first)?
+    };
+    let Some(generated) = generated else {
+        return semantic(&root);
+    };
+    if !migrate {
+        merge::remove_legacy_auth_block(&mut root);
+        merge::remove_removed_integration_keys(&mut root);
+        merge::remove_legacy_generative_language_keys(&mut root);
+    }
+    merge::remove_legacy_openai_compat_api_keys(&mut root);
+    for key in save::OAUTH_MAPS {
+        merge::prune_mapping_to_generated_keys(&mut root, generated, key);
+    }
+    merge::prune_routing_quota(&mut root, generated);
+    merge::prune_mapping_to_generated_keys(&mut root, generated, "self-update");
+    merge::merge_mapping_preserve(&mut root, generated, &mut Vec::new());
+    prune_normalized(&mut root, Some(generated), schema, &mut Vec::new());
+    semantic(&root)
+}
+
+enum Semantic {
+    Scalar(AnyValue),
+    Opaque(String, String),
+    Seq(Vec<Semantic>),
+    Map(BTreeMap<String, Semantic>),
+    Pairs(Vec<(Semantic, Semantic)>),
+}
+
+fn semantic(node: &Node) -> Result<Semantic, SaveError> {
+    let node = yaml::from_writer_node(node).map_err(|error| check_error(error.message()))?;
+    fn visit(node: &yaml::Node) -> Semantic {
+        match node.kind {
+            yaml::Kind::Sequence => Semantic::Seq(node.content.iter().map(visit).collect()),
+            yaml::Kind::Mapping if node.content.chunks_exact(2).all(|p| p[0].tag == STR_TAG) => {
+                Semantic::Map(
+                    node.content
+                        .chunks_exact(2)
+                        .map(|p| (p[0].value.to_string(), visit(&p[1])))
+                        .collect(),
+                )
+            }
+            yaml::Kind::Mapping => Semantic::Pairs(
+                node.content
+                    .chunks_exact(2)
+                    .map(|p| (visit(&p[0]), visit(&p[1])))
+                    .collect(),
+            ),
+            _ => match decode_any_value(node) {
+                Ok(value) => Semantic::Scalar(value),
+                Err(_) => Semantic::Opaque(node.tag.to_string(), node.value.to_string()),
+            },
+        }
+    }
+    Ok(visit(&node))
+}
+
+impl Semantic {
+    fn difference(&self, actual: &Self, path: &str) -> Option<String> {
+        match (self, actual) {
+            (Self::Scalar(AnyValue::Float(a)), Self::Scalar(AnyValue::Float(b)))
+                if a.is_nan() && b.is_nan() =>
+            {
+                None
+            }
+            (Self::Scalar(a), Self::Scalar(b)) if a == b => None,
+            (Self::Opaque(a, x), Self::Opaque(b, y)) if a == b && x == y => None,
+            (Self::Seq(a), Self::Seq(b)) => {
+                for (i, (a, b)) in a.iter().zip(b).enumerate() {
+                    if let Some(p) = a.difference(b, &format!("{path}[{i}]")) {
+                        return Some(p);
+                    }
+                }
+                (a.len() != b.len()).then(|| format!("{path}[{}]", a.len().min(b.len())))
+            }
+            (Self::Map(a), Self::Map(b)) => {
+                for (key, a) in a {
+                    let p = format!("{path}.{key}");
+                    let Some(b) = b.get(key) else {
+                        return Some(p);
+                    };
+                    if let Some(p) = a.difference(b, &p) {
+                        return Some(p);
+                    }
+                }
+                b.keys()
+                    .find(|k| !a.contains_key(*k))
+                    .map(|k| format!("{path}.{k}"))
+            }
+            (Self::Pairs(a), Self::Pairs(b)) => {
+                if a.len() != b.len() {
+                    return Some(path.to_owned());
+                }
+                for (key, value) in a {
+                    let Some((_, other)) = b
+                        .iter()
+                        .find(|(other, _)| key.difference(other, "$").is_none())
+                    else {
+                        return Some(path.to_owned());
+                    };
+                    if let Some(p) = value.difference(other, &format!("{path}[map-key]")) {
+                        return Some(p);
+                    }
+                }
+                None
+            }
+            _ => Some(path.to_owned()),
+        }
+    }
+}
