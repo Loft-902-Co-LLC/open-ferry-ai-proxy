@@ -300,6 +300,7 @@ fn parse_claude_usage_node(usage: Node<'_>) -> Detail {
         cached_tokens: cache_read,
         cache_read_tokens: cache_read,
         cache_creation_tokens: cache_creation,
+        response_service_tier: usage.get("speed").string().trim().to_owned(),
         ..Detail::default()
     };
     if detail.cached_tokens == 0 {
