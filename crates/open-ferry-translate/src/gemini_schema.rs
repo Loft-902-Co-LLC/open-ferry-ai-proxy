@@ -13,16 +13,16 @@
 //! - local `$ref` targets are inlined within 256 KiB; unresolved refs become
 //!   description hints, and `const` becomes `enum`
 //! - enum values become strings
-//! - `allOf` is merged into its parent; multi-branch `anyOf` and `oneOf`
-//!   unions are kept, while single branches are merged or unwrapped
-//! - a type array is flattened to one type
+//! - `allOf` conjunctions retain their assertion scopes; without conjunctions,
+//!   multi-branch unions are kept and single branches are merged or unwrapped
+//! - a type array is flattened to one type only without conjunctions
 //! - conditionals, metadata keywords and `x-` extensions are dropped
 //!
 //! It also repairs schemas some MCP servers write: a bare property map gets
 //! its `type` and `properties` wrapper, a boolean `required` on a property
-//! moves into its parent's `required`, and an array gets `items`. Gemini only
-//! takes `properties` and `required` on an object, so a node with
-//! `properties` always ends up an object.
+//! moves into its parent's `required`. Without conjunctions, arrays receive
+//! missing `items` and nodes with `properties` become objects. Conjunctions
+//! retain their local shapes because other branches may constrain them.
 //!
 //! Upstream rewrites the schema's JSON text one gjson path at a time, and
 //! several of its passes depend on how those paths resolve:
@@ -504,19 +504,25 @@ pub(crate) fn clean_json_schema_for_gemini_json_schema(
     convert_enum_values_to_strings(&mut doc);
     add_enum_hints(&mut doc);
 
-    // Flatten.
+    // Conjunctions make local shape assumptions unsafe throughout the schema.
+    let preserve_conjunctions = find_paths(&doc, "allOf")
+        .iter()
+        .any(|path| get(&doc, path).is_some_and(Value::is_array));
     merge_conditionals(&mut doc, budget);
-    merge_all_of(&mut doc);
-    flatten_any_of_one_of(&mut doc, budget);
-    flatten_type_arrays(&mut doc);
+    if !preserve_conjunctions {
+        flatten_any_of_one_of(&mut doc, budget);
+        flatten_type_arrays(&mut doc);
+    }
 
     // Clean up.
     remove_unsupported_keywords(&mut doc);
     remove_keywords(&mut doc, &["nullable", "title"]);
     remove_placeholder_fields(&mut doc);
-    cleanup_required_fields(&mut doc);
-    sanitize_object_properties(&mut doc);
-    sanitize_array_items(&mut doc);
+    if !preserve_conjunctions {
+        cleanup_required_fields(&mut doc);
+        sanitize_object_properties(&mut doc);
+        sanitize_array_items(&mut doc);
+    }
     doc
 }
 
@@ -815,34 +821,12 @@ fn repair_schema_node(mut node: Map<String, Value>) -> (Map<String, Value>, bool
             modified = true;
         }
     }
-    if matches!(node.get("properties"), Some(Value::Object(_))) && !node.contains_key("type") {
-        node.insert("type".into(), Value::from("object"));
-        modified = true;
-    }
     if let Some(Value::Object(properties)) = node.get_mut("properties") {
         let (repaired, promoted, changed) = repair_property_map(std::mem::take(properties));
         *properties = repaired;
         modified |= changed;
         if !promoted.is_empty() {
             promote_required(&mut node, &promoted);
-            modified = true;
-        }
-    }
-    if !node.get("$ref").is_none_or(Value::is_null) {
-        // Synthesized siblings must not override the referenced array schema.
-    } else if is_array_declared_type(node.get("type")) {
-        if !node.contains_key("items") {
-            node.insert("items".into(), object([("type", Value::from("string"))]));
-            modified = true;
-        }
-    } else if node.contains_key("items") {
-        let untyped = match node.get("type") {
-            None | Some(Value::Null) => true,
-            Some(Value::String(kind)) => kind.is_empty(),
-            Some(_) => false,
-        };
-        if untyped {
-            node.insert("type".into(), Value::from("array"));
             modified = true;
         }
     }
@@ -1124,98 +1108,6 @@ fn merge_conditionals(doc: &mut Value, budget: &mut SchemaCopyBudget) {
         for (path, value) in writes {
             set(doc, &path, value);
         }
-    }
-}
-
-/// Merges each `allOf` branch into its parent: `required` names are added,
-/// conditionals are dropped, and other keywords fill what the parent lacks.
-/// The `allOf` is then removed.
-fn merge_all_of(doc: &mut Value) {
-    let mut paths = find_paths(doc, "allOf");
-    sort_by_depth(&mut paths);
-    for path in paths {
-        let Some(Value::Array(branches)) = get(doc, &path).cloned() else {
-            continue;
-        };
-        let parent = trim_suffix(&path, ".allOf");
-        let required_path = join_path(&parent, "required");
-        let mut required: Option<RequiredNames> = None;
-        for branch in branches {
-            let Value::Object(fields) = branch else {
-                continue;
-            };
-            for (field, value) in fields {
-                match field.as_str() {
-                    "required" => {
-                        let Value::Array(names) = value else {
-                            continue;
-                        };
-                        let mut current = required
-                            .take()
-                            .filter(|current| current.is_written(doc, &required_path))
-                            .unwrap_or_else(|| RequiredNames::read(doc, &required_path));
-                        current.add(doc, &required_path, &names);
-                        required = Some(current);
-                    }
-                    // A condition can't be expressed in the upstream schema.
-                    "if" | "then" | "else" | "allOf" => {}
-                    _ => {
-                        let destination = join_path(&parent, &escape_key(&field));
-                        merge_missing_schema_at_path(doc, &destination, &value);
-                    }
-                }
-            }
-        }
-        delete(doc, &path);
-    }
-}
-
-/// A `required` list that `allOf` branches add names to. Each branch's names
-/// are written as upstream writes them, but appended to the list the last
-/// branch wrote rather than writing it all again.
-struct RequiredNames {
-    names: Vec<String>,
-    seen: HashSet<String>,
-    written: bool,
-}
-
-impl RequiredNames {
-    /// The list at `path`, as text.
-    fn read(doc: &Value, path: &str) -> Self {
-        let names = get_strings(doc, path);
-        let seen = names.iter().cloned().collect();
-        Self {
-            names,
-            seen,
-            written: false,
-        }
-    }
-
-    /// Whether `doc` still holds the list as [`Self::add`] last wrote it.
-    fn is_written(&self, doc: &Value, path: &str) -> bool {
-        self.written
-            && matches!(get(doc, path), Some(Value::Array(items)) if items.len() == self.names.len())
-    }
-
-    /// Adds the names in `new` the list doesn't have, and writes it at `path`.
-    fn add(&mut self, doc: &mut Value, path: &str, new: &[Value]) {
-        let start = self.names.len();
-        for name in new {
-            let name = str_of(Some(name));
-            if !self.seen.contains(name.as_ref()) {
-                self.seen.insert(name.clone().into_owned());
-                self.names.push(name.into_owned());
-            }
-        }
-        if self.written
-            && let Some(Value::Array(items)) = get_mut(doc, path)
-            && items.len() == start
-        {
-            items.extend(self.names[start..].iter().cloned().map(Value::String));
-            return;
-        }
-        set(doc, path, strings(self.names.clone()));
-        self.written = true;
     }
 }
 
@@ -1725,6 +1617,7 @@ fn strings(values: Vec<String>) -> Value {
 
 /// The strings of the array at `path`, as gjson's `String()` gives them, or
 /// none if it isn't an array.
+#[cfg(test)]
 fn get_strings(doc: &Value, path: &str) -> Vec<String> {
     match get(doc, path) {
         Some(Value::Array(items)) => items
@@ -1975,13 +1868,6 @@ fn child<'v>(value: &'v Value, key: &str) -> Option<&'v Value> {
         Value::Array(items) => index(key).and_then(|index| items.get(index)),
         _ => None,
     }
-}
-
-/// [`get`] for editing.
-fn get_mut<'v>(doc: &'v mut Value, path: &str) -> Option<&'v mut Value> {
-    keys(path)
-        .iter()
-        .try_fold(doc, |value, key| child_mut(value, key))
 }
 
 /// [`child`] for editing.
