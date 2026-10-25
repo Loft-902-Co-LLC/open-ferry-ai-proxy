@@ -340,7 +340,6 @@ async fn execute_replaces_claude_signature_of_function_call_with_bypass() {
 }
 
 #[tokio::test]
-#[ignore = "requires p42-schema-signatures signature-group changes"]
 async fn execute_preserves_signature_groups_across_claude_text() {
     let mock = Mock::start(Reply::json(OK_ANSWER)).await;
     let payload = json!({
