@@ -1,12 +1,63 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+const parityFallbackCollisionSource = "config-version: 8\nopenai-compatibility:\n  - name: fixture\n    base-url: https://example.invalid/v1\n    # first\n    keys: old\n    # first\n    # second\n    api-key-entries:\n      - api-key: fixture\n"
+
+func TestParityOwnershipFallbackCollisionEvidence(t *testing.T) {
+	proof := ParityOwnership(parityFallbackCollisionSource, map[string]any{"op": "write", "body": parityFallbackCollisionSource})
+	if proof["unavailable"] != nil {
+		t.Fatal("tree oracle unavailable")
+	}
+	moves := proof["moves"].([]any)
+	if len(moves) != 2 {
+		t.Fatal("expected both fallback lines and no move for the overwritten identity")
+	}
+	for i, raw := range moves {
+		move := raw.(map[string]any)
+		from, to := move["source"].(ParityOwner), move["destination"].(ParityOwner)
+		if move["via"] != "fallback" || move["ordinal"] != i || move["text"] != []string{"# first", "# second"}[i] ||
+			from.Node != "key" || from.Slot != "head" || len(from.Path) != 3 || from.Path[2].(map[string]any)["key"] != "api-key-entries" ||
+			to.Node != "key" || to.Slot != "head" || len(to.Path) != 4 || to.Path[0].(map[string]any)["key"] != "api-keys" || to.Path[3].(map[string]any)["key"] != "keys" {
+			t.Fatal("review fixture no longer supplies the bound fallback block")
+		}
+	}
+	output, _, err := NormalizeConfigLayout([]byte(parityFallbackCollisionSource), true)
+	if err != nil || bytes.Count(output, []byte("# first")) != 1 || bytes.Contains(output, []byte("# second")) {
+		t.Fatal("review fixture no longer keeps only the other equal-text source line")
+	}
+}
+
+func TestParityOwnershipMoveOrderIsStable(t *testing.T) {
+	for name, source := range map[string]string{
+		"fallback": parityFallbackCollisionSource,
+		"observed": "disable-cooling: false # a\nrequest-retry: 0 # b\n# c\nauth-dir: /tmp/x # d\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			op := map[string]any{"op": "save", "migrate": true}
+			if name == "fallback" {
+				op = map[string]any{"op": "write", "body": source}
+			}
+			first, err := json.Marshal(ParityOwnership(source, op)["moves"])
+			if err != nil || string(first) == "[]" {
+				t.Fatal("missing moves for order regression")
+			}
+			for i := 0; i < 200; i++ {
+				next, err := json.Marshal(ParityOwnership(source, op)["moves"])
+				if err != nil || !bytes.Equal(first, next) {
+					t.Fatal("source identity move order changed between repeated runs")
+				}
+			}
+		})
+	}
+}
 
 func TestParityOwnershipIgnoresUnboundTransfersAndFallsBackToOwnNode(t *testing.T) {
 	for _, side := range []string{"key", "value", "item"} {

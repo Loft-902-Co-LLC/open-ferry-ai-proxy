@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -84,8 +85,8 @@ func parityRelocations(root *yaml.Node, origins map[string]parityOrigin) []any {
 	observed := map[string]bool{}
 	moves := []any{}
 	parityWalk(root, []any{}, "root", func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
-		for slot, text := range map[string]string{"head": n.HeadComment, "line": n.LineComment, "foot": n.FootComment} {
-			for _, line := range strings.Split(text, "\n") {
+		for _, field := range []struct{ slot, text string }{{"head", n.HeadComment}, {"line", n.LineComment}, {"foot", n.FootComment}} {
+			for _, line := range strings.Split(field.text, "\n") {
 				origin, ok := origins[strings.TrimSpace(line)]
 				if !ok || !surviving[origin.Identity] {
 					continue
@@ -100,7 +101,7 @@ func parityRelocations(root *yaml.Node, origins map[string]parityOrigin) []any {
 					continue
 				}
 				observed[strings.TrimSpace(line)] = true
-				moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "text": origin.Text, "via": "observed", "destination": ParityOwner{path, side, slot}})
+				moves = append(moves, map[string]any{"source": origin.Owner, "ordinal": origin.Ordinal, "text": origin.Text, "via": "observed", "destination": ParityOwner{path, side, field.slot}})
 			}
 		}
 	})
@@ -109,7 +110,13 @@ func parityRelocations(root *yaml.Node, origins map[string]parityOrigin) []any {
 	// For a key, value or item comment with no bound transfer (including one
 	// Go misplaced), use its own node's surviving place in its original slot.
 	// Only a bound transfer takes precedence; no equal text is read.
-	for id, origin := range origins {
+	ids := make([]string, 0, len(origins))
+	for id := range origins {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		origin := origins[id]
 		if observed[id] {
 			continue
 		}

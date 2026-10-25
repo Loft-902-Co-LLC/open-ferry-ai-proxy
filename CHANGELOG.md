@@ -10,7 +10,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Added
 
-- **Config-save parity proofs require complete relocated comment blocks.** Every moved line must reach its destination in order. Partial or misplaced blocks stay Different; the recalibrated baseline records the measured counts.
+- **Config-save parity proofs follow comments that upstream moves.** The parity tool replays the pinned Go edits on the exact input to find where each comment ends up, and accepts a moved comment block only if every line is kept there, in order. Partial or misplaced blocks stay Different. The recalibrated baseline records the measured counts.
 - **Offline differential parity in CI** runs handwritten cases and a fixed-seed random set against the pinned CLIProxyAPI source in required checks, with larger daily and manually seeded runs and retained synthetic failure artifacts ([parity in CI](tools/parity/README.md#in-ci)).
 - **Repeatable parity suite filters** select named suites with `open-ferry-parity --suite`; unknown names are rejected before running Go.
 - **Claude tool-closure and embedded JSON comparisons** recognize independent closures within each provider event and compact object-valued text only at documented translator paths with raw-request provenance.
