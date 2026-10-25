@@ -16,77 +16,77 @@
     },
     {
       "cases": 609,
-      "different": 28,
+      "different": 30,
       "random": 500,
       "seed": 12,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 259,
+      "different": 267,
       "random": 5000,
       "seed": 30,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 282,
+      "different": 293,
       "random": 5000,
       "seed": 31,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 257,
+      "different": 265,
       "random": 5000,
       "seed": 32,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 280,
+      "different": 285,
       "random": 5000,
       "seed": 33,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 270,
+      "different": 276,
       "random": 5000,
       "seed": 34,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 270,
+      "different": 276,
       "random": 5000,
       "seed": 35,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 291,
+      "different": 302,
       "random": 5000,
       "seed": 36,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 304,
+      "different": 307,
       "random": 5000,
       "seed": 37,
       "selected": false
     },
     {
       "cases": 609,
-      "different": 27,
+      "different": 28,
       "random": 500,
       "seed": 38,
       "selected": false
     },
     {
       "cases": 5109,
-      "different": 243,
+      "different": 249,
       "random": 5000,
       "seed": 38,
       "selected": false
@@ -100,21 +100,21 @@
     },
     {
       "cases": 5109,
-      "different": 266,
+      "different": 273,
       "random": 5000,
       "seed": 39,
       "selected": false
     },
     {
       "cases": 170,
-      "different": 161,
+      "different": 168,
       "random": 5000,
       "seed": 11,
       "selected": true
     },
     {
       "cases": 164,
-      "different": 154,
+      "different": 161,
       "random": 5000,
       "seed": 12,
       "selected": true
