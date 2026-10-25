@@ -137,6 +137,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Honor standalone Claude `output_config.effort`** across thinking targets while retaining native defaults and final payload overrides.
 - **Preserve valid alias objects in mixed string/object auth-file model lists.** A string no longer causes valid alias objects in the same list to be discarded.
 
+- **Copy buttons say they couldn't copy when the browser has no clipboard access,** such as a dashboard opened over plain HTTP from another machine, instead of doing nothing.
 - **Preserve xAI image credential prefixes**, and allow vendor-alias fallback under force-prefix.
 - **Keep OAuth query values out of access logs**, including arbitrary query parameters on v8 OAuth routes.
 - **Detect truncated Claude streams**, including Gemini, Vertex and OpenAI-compatible streams serving Claude; retain observed usage and emit one bounded, correctly framed terminal error.

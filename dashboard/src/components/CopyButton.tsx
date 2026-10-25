@@ -27,14 +27,22 @@ export function CopyButton({ text, label, size = "sm" }: CopyButtonProps) {
   }, [state]);
 
   const copy = () => {
-    navigator.clipboard.writeText(text).then(
-      () => {
-        setState("copied");
-      },
-      () => {
+    try {
+      if (typeof navigator.clipboard === "undefined" || typeof navigator.clipboard.writeText !== "function") {
         setState("failed");
-      },
-    );
+        return;
+      }
+      navigator.clipboard.writeText(text).then(
+        () => {
+          setState("copied");
+        },
+        () => {
+          setState("failed");
+        },
+      );
+    } catch {
+      setState("failed");
+    }
   };
 
   return (
