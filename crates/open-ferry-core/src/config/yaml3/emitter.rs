@@ -280,6 +280,8 @@ pub(crate) struct Emitter {
     pub(crate) emitted_comments: Vec<super::CommentEmission>,
     /// Config writers keep multiline comments out of scalar bodies.
     pub(crate) protect_config_comments: bool,
+    /// Empty keys with multi-paragraph heads after consecutive flow feet.
+    pub(crate) flow_item_head_keys: std::collections::BTreeSet<usize>,
     /// Indentation at the owner of a deferred collection foot comment.
     pending_foot_indent: Option<i64>,
     pub(crate) protected_scalars: Vec<super::types::Mark>,
@@ -368,6 +370,7 @@ impl Emitter {
             record_comments: false,
             emitted_comments: Vec::new(),
             protect_config_comments: false,
+            flow_item_head_keys: std::collections::BTreeSet::new(),
             pending_foot_indent: None,
             protected_scalars: Vec::new(),
         }
@@ -1044,6 +1047,12 @@ impl Emitter {
             // Separate the incoming head even when the foot's owner was
             // deeper than this key, before collection ends unwound the stack.
             self.foot_indent = indent;
+        }
+        if self.flow_item_head_keys.remove(&event.source_node_id) && self.foot_indent > self.indent
+        {
+            // Collection ends may have unwound the item's indent already.
+            // Its foot still needs a blank before this key's first paragraph.
+            self.foot_indent = self.indent;
         }
         self.process_head_comment()?;
         if event.typ == EventType::MappingEnd {
