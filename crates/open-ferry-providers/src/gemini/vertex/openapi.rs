@@ -156,6 +156,12 @@ fn auth_base_url(auth: &Auth) -> &str {
         .unwrap_or_default()
 }
 
+fn google_rep_host(host: &str) -> bool {
+    host.strip_prefix("aiplatform.")
+        .and_then(|rest| rest.strip_suffix(".rep.googleapis.com"))
+        .is_some_and(|location| !location.is_empty() && !location.contains('.'))
+}
+
 fn google_host(base: &str) -> bool {
     if base.trim().is_empty() {
         return true;
@@ -168,8 +174,16 @@ fn google_host(base: &str) -> bool {
             host == "aiplatform.googleapis.com"
                 || host.ends_with("-aiplatform.googleapis.com")
                 || host.ends_with(".aiplatform.googleapis.com")
+                || google_rep_host(&host)
         }
-        None => to_lower(base).contains("aiplatform.googleapis.com"),
+        None => {
+            to_lower(base).contains("aiplatform.googleapis.com")
+                || (!base.contains("://")
+                    && url::Url::parse(&format!("https://{}", base.trim().trim_start_matches('/')))
+                        .ok()
+                        .and_then(|url| url.host_str().map(google_rep_host))
+                        .unwrap_or(false))
+        }
     }
 }
 
@@ -244,13 +258,10 @@ fn rewrite_location(base: &str, location: &str) -> String {
     if google_host(&rewritten)
         && let Ok(mut url) = url::Url::parse(&rewritten)
     {
-        let host = if equal_fold(location, "global") {
-            "aiplatform.googleapis.com".into()
-        } else {
-            format!("{location}-aiplatform.googleapis.com")
-        };
+        let endpoint = vertex_base_url(location);
+        let host = endpoint.trim_start_matches("https://");
         let _ = url.set_scheme("https");
-        let _ = url.set_host(Some(&host));
+        let _ = url.set_host(Some(host));
         let _ = url.set_port(None);
         // Url serializes a host-only HTTP URL with `/`; Go preserves its empty
         // path. The caller appends `/endpoints/openapi` in both host-only branches.
