@@ -28,7 +28,7 @@
 //! - Where upstream would index past the end of a node's content (a path
 //!   it assumes exists), nothing happens.
 
-use super::super::yaml3::compose::{MAX_ALIAS_COPIES, YamlError};
+use super::super::yaml3::compose::{MAX_ALIAS_COPIES, MAX_ALIAS_COPY_TEXT, YamlError};
 use super::super::yaml3::encode::marshal_node;
 use super::super::yaml3::{AliasTarget, Kind, MAP_TAG, MAX_DEPTH, MERGE_TAG, Node, STR_TAG};
 
@@ -231,7 +231,7 @@ pub(crate) fn remove_map_key(node: &mut Node, key: &str) {
 /// bring in that the mapping doesn't have, and no anchors. An alias's own
 /// comments go; its anchor node's come along.
 pub(crate) fn expand_config_aliases(node: &Node) -> Result<Node, YamlError> {
-    let mut budget = (MAX_ALIAS_COPIES, 64usize << 20);
+    let mut budget = (MAX_ALIAS_COPIES, MAX_ALIAS_COPY_TEXT);
     expand(node, &mut budget, false, 0, &mut Vec::new())
 }
 
