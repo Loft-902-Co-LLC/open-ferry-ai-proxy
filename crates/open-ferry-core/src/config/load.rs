@@ -14,7 +14,6 @@
 //!   `parse config payload: ` ([`Config::parse`]).
 //! - A `models` source that is neither an http(s) URL nor an absolute
 //!   path: prefixed as above, since upstream checks it while decoding.
-//! - Duplicate keys have the same prefix as other decode errors.
 //! - A root that isn't a mapping, a bad v8 layout, weights
 //!   and trusted proxies: upstream's message alone.
 //!
@@ -132,16 +131,7 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
             return Err(ConfigError::new(ConfigErrorKind::Syntax, message));
         }
     };
-    let flattened = flatten_v8(&root).map_err(|error| {
-        if error.kind() == ConfigErrorKind::Decode
-            && error.to_string().starts_with("yaml: unmarshal errors:\n")
-            && error.to_string().contains(": mapping key ")
-        {
-            ConfigError::new(ConfigErrorKind::Decode, format!("{prefix}{error}"))
-        } else {
-            error
-        }
-    })?;
+    let flattened = flatten_v8(&root)?;
     validate_weights(&flattened.root)?;
     let mut config: Config = decode(&flattened.root).map_err(|error| {
         let kind = match error {
@@ -390,19 +380,19 @@ mod tests {
         (
             "port: 1\nport: 2\n",
             Decode,
-            true,
+            false,
             "yaml: unmarshal errors:\n  line 2: mapping key \"port\" already defined at line 1",
         ),
         (
             "port: 1\ntls:\n  enable: true\n  enable: false\nhost: a\nhost: b\n",
             Decode,
-            true,
+            false,
             "yaml: unmarshal errors:\n  line 6: mapping key \"host\" already defined at line 5",
         ),
         (
             "port: 1\nport: 2\nhost: x\nnested:\n  a: 1\n  a: 2\n",
             Decode,
-            true,
+            false,
             "yaml: unmarshal errors:\n  line 2: mapping key \"port\" already defined at line 1",
         ),
         (
