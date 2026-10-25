@@ -211,6 +211,7 @@ pub(crate) struct Emitter {
     /// The event queue, from `events_head` on.
     events: VecDeque<Event>,
     receipt_events: VecDeque<super::CommentReceipts>,
+    pub(crate) record_receipt_paths: bool,
     owner_stack: Vec<(Vec<usize>, usize)>,
     node_owners: Vec<super::NodeOwnerEmission>,
     pending_receipts: super::CommentReceipts,
@@ -343,6 +344,7 @@ impl Emitter {
             states: Vec::with_capacity(INITIAL_STACK_SIZE),
             events: VecDeque::with_capacity(INITIAL_QUEUE_SIZE),
             receipt_events: VecDeque::with_capacity(INITIAL_QUEUE_SIZE),
+            record_receipt_paths: true,
             owner_stack: Vec::new(),
             node_owners: Vec::new(),
             pending_receipts: super::CommentReceipts::default(),
@@ -478,6 +480,9 @@ impl Emitter {
     }
 
     fn record_node_owner(&mut self, event: &Event, owner: Option<super::CommentId>) {
+        if !self.record_receipt_paths {
+            return;
+        }
         match event.typ {
             EventType::DocumentStart
             | EventType::MappingStart
@@ -2347,6 +2352,12 @@ impl Emitter {
         comment: &[u8],
         receipts: &[super::ReceiptSpan],
     ) -> Result<(), EmitterError> {
+        let mut by_at = std::collections::HashMap::new();
+        if receipts.len() > 1 {
+            for span in receipts {
+                by_at.entry(span.at).or_insert(span);
+            }
+        }
         let mut receipt_start = None;
         #[cfg(feature = "parity")]
         let mut trace_start = None;
@@ -2367,7 +2378,12 @@ impl Emitter {
                     self.write_indent()?;
                 }
                 if !pound {
-                    if let Some(span) = receipts.iter().find(|span| span.at == i) {
+                    let span = if receipts.len() == 1 {
+                        receipts.first().filter(|span| span.at == i)
+                    } else {
+                        by_at.get(&i).copied()
+                    };
+                    if let Some(span) = span {
                         receipt_start =
                             Some((self.output.len() + self.buffer.len(), span.receipt.clone()));
                     }

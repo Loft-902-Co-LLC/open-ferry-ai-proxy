@@ -215,7 +215,6 @@ pub(crate) struct Parser<'a> {
     track_comment_positions: bool,
     pending_positions: CommentPositions,
     stem_positions: Vec<CommentPosition>,
-    tail_positions: Vec<CommentPosition>,
     pub(crate) event_positions: CommentPositions,
     source_lines: Vec<usize>,
     source_offsets: Vec<usize>,
@@ -302,6 +301,12 @@ fn split_positions(
         p.at = p.at.saturating_sub(rest);
     }
     (head, tail)
+}
+
+fn checked_comment_text(input: &[u8]) -> Result<&str, std::str::Utf8Error> {
+    #[cfg(test)]
+    crate::config::save::tree::comment_work(input.len());
+    std::str::from_utf8(input)
 }
 
 /// Position-only composition follows decode.go's comment moves. It never
@@ -438,7 +443,7 @@ impl Parser<'_> {
         let mut parser = Parser::new(input);
         parser.track_comment_positions = true;
         parser.source_lines.push(0);
-        if let Ok(text) = std::str::from_utf8(input) {
+        if let Ok(text) = checked_comment_text(input) {
             parser.source_offsets = text
                 .char_indices()
                 .map(|(at, _)| at)
@@ -545,37 +550,48 @@ impl Parser<'_> {
                     ),
                 ] {
                     let mut relative = 0;
-                    for (line, part) in text.split(|b| *b == b'\n').enumerate() {
+                    let mut source_line = comment.start_mark.line;
+                    let mut first = true;
+                    for part in text.split(|b| *b == b'\n') {
                         if !part.is_empty() {
-                            let source_line = comment.start_mark.line + line;
-                            if let Some(&start) = self.source_lines.get(source_line) {
-                                let column = if line == 0 {
-                                    comment.start_mark.column
-                                } else {
-                                    self.input[start..]
+                            let offset = if first {
+                                first = false;
+                                let offset =
+                                    self.source_offsets.get(comment.start_mark.index).copied();
+                                if let Some(offset) = offset {
+                                    source_line = self
+                                        .source_lines
+                                        .partition_point(|start| *start <= offset)
+                                        .saturating_sub(1);
+                                }
+                                offset
+                            } else {
+                                // The scanner collapses repeated blank lines in
+                                // comment text. Follow its physical comment lines
+                                // rather than treating text line numbers as marks.
+                                loop {
+                                    source_line += 1;
+                                    let Some(&start) = self.source_lines.get(source_line) else {
+                                        break None;
+                                    };
+                                    let indent = self.input[start..]
                                         .iter()
                                         .take_while(|b| matches!(b, b' ' | b'\t'))
-                                        .count()
-                                };
-                                // Parser marks count characters, not UTF-8 bytes.
-                                let column_bytes = std::str::from_utf8(&self.input[start..])
-                                    .ok()
-                                    .map(|s| {
-                                        s.chars().take(column).map(char::len_utf8).sum::<usize>()
-                                    })
-                                    .unwrap_or(column);
-                                pending.push(CommentPosition {
-                                    at: base + usize::from(base > 0) + relative,
-                                    offset: if line == 0 {
-                                        self.source_offsets
-                                            .get(comment.start_mark.index)
-                                            .copied()
-                                            .unwrap_or(start + column_bytes)
-                                    } else {
-                                        start + column_bytes
-                                    },
-                                });
-                            }
+                                        .count();
+                                    let offset = start + indent;
+                                    if self.input.get(offset) == Some(&b'#') {
+                                        break Some(offset);
+                                    }
+                                    if !super::chars::is_breakz(self.input, offset) {
+                                        break None;
+                                    }
+                                }
+                            };
+                            let Some(offset) = offset else { break };
+                            pending.push(CommentPosition {
+                                at: base + usize::from(base > 0) + relative,
+                                offset,
+                            });
                         }
                         relative += part.len() + 1;
                     }
@@ -948,7 +964,6 @@ impl Parser<'_> {
     /// to the event.
     fn set_event_comments(&mut self, event: &mut Event) {
         self.event_positions = mem::take(&mut self.pending_positions);
-        self.tail_positions.clear();
         self.stem_positions.clear();
         event.head_comment = mem::take(&mut self.head_comment);
         event.line_comment = mem::take(&mut self.line_comment);
@@ -1408,7 +1423,6 @@ impl Parser<'_> {
         //      processed. Emit an event as it needs to be processed with that
         //      value and not the following key.
         if !self.tail_comment.is_empty() {
-            self.event_positions.foot = mem::take(&mut self.tail_positions);
             *event = Event {
                 typ: EventType::TailComment,
                 start_mark: token.start_mark,

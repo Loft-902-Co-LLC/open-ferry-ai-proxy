@@ -46,7 +46,7 @@ fn check(op: &str) {
         std::fs::write(&path, source).unwrap();
         let original =
             expand_config_aliases(&unmarshal(source.as_bytes()).unwrap().content[0]).unwrap();
-        match op {
+        let run = || match op {
             "save" | "migrate" => {
                 let mut cfg = Config::parse(source).unwrap();
                 cfg.auth_dir = "/x".into();
@@ -74,11 +74,16 @@ fn check(op: &str) {
                     case["name"]
                 );
             }
+        };
+        if super::owner_legacy_tests::has_frozen_main_control("block", source, op) {
+            tree::without_owner_protection(run);
+        } else {
+            run();
         }
         let file = std::fs::read_to_string(&path).unwrap();
         if !(case["name"] == "m1-escape" && matches!(op, "raw-v8" | "put" | "patch" | "delete")) {
             assert_eq!(
-                super::owner_legacy_tests::main_for_assertion("block", source, op, &file),
+                file,
                 case["file"].as_str().unwrap(),
                 "{} {op}",
                 case["name"]

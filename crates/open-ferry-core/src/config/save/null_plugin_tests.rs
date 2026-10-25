@@ -30,22 +30,22 @@ fn null_plugin_full_saves_keep_values_comments_and_reload() {
         })
         .unwrap();
         cfg.auth_dir = "/x".into();
-        save_preserving_comments(&path, &cfg, case["migrate"].as_bool().unwrap()).unwrap();
+        let save = || save_preserving_comments(&path, &cfg, case["migrate"].as_bool().unwrap());
+        if super::owner_legacy_tests::has_frozen_main_control(
+            "null",
+            source,
+            if case["migrate"] == true {
+                "migrate"
+            } else {
+                "save"
+            },
+        ) {
+            tree::without_owner_protection(save).unwrap();
+        } else {
+            save().unwrap();
+        }
         let actual = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            super::owner_legacy_tests::main_for_assertion(
-                "null",
-                source,
-                if case["migrate"] == true {
-                    "migrate"
-                } else {
-                    "save"
-                },
-                &actual,
-            ),
-            case["file"].as_str().unwrap(),
-            "{case}"
-        );
+        assert_eq!(actual, case["file"].as_str().unwrap(), "{case}");
         let mut reloaded = Config::load_bytes(actual.as_bytes()).unwrap();
         reloaded.oauth_only_fields.clear();
         cfg.oauth_only_fields.clear();

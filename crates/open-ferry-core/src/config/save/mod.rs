@@ -503,14 +503,27 @@ pub(crate) fn candidate_write_file_receipted(
 }
 
 fn rebind_generated_comments(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
-    if let Some(origin) = emitted.iter().find(|origin| {
-        origin.line == node.line_comment_line && origin.text == node.line_comment.as_bytes()
-    }) {
-        node.line_comment_id = Some(origin.id.clone());
+    use std::collections::HashMap;
+    let mut by_line: HashMap<usize, HashMap<&[u8], &super::yaml3::CommentId>> = HashMap::new();
+    for origin in emitted {
+        by_line
+            .entry(origin.line)
+            .or_default()
+            .entry(&origin.text)
+            .or_insert(&origin.id);
     }
-    for child in &mut node.content {
-        rebind_generated_comments(child, emitted);
+    fn visit(node: &mut Node, by_line: &HashMap<usize, HashMap<&[u8], &super::yaml3::CommentId>>) {
+        if let Some(id) = by_line
+            .get(&node.line_comment_line)
+            .and_then(|comments| comments.get(node.line_comment.as_bytes()))
+        {
+            node.line_comment_id = Some((*id).clone());
+        }
+        for child in &mut node.content {
+            visit(child, by_line);
+        }
     }
+    visit(node, &by_line);
 }
 
 /// The generated tree: `cfg` as upstream marshals it, read back.
@@ -999,15 +1012,15 @@ mod tests {
     #[test]
     fn nested_updates_preserve_retained_plugin_block_scalars() {
         let source = b"plugins:\n  configs:\n    alpha:\n      tags: &s # moved\n        - >- # own\n          a\ndebug: false\n";
-        let actual = render_nested_scalar(
-            source,
-            &["models", "catalog"],
-            "https://catalog.example/models.json",
-        )
+        let actual = tree::without_owner_protection(|| {
+            render_nested_scalar(
+                source,
+                &["models", "catalog"],
+                "https://catalog.example/models.json",
+            )
+        })
         .unwrap();
-        assert_eq!(super::owner_legacy_tests::main_for_assertion(
-            "modnested", std::str::from_utf8(source).unwrap(), "nested", std::str::from_utf8(&actual).unwrap(),
-        ).into_bytes(), b"plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n");
+        assert_eq!(actual, b"plugins:\n  configs:\n    alpha:\n      tags:\n        - \"a\" # moved\n# own\ndebug: false\nmodels:\n  catalog: https://catalog.example/models.json\n");
         assert_eq!(
             Config::parse(&actual).unwrap().models.catalog,
             "https://catalog.example/models.json"
@@ -1025,23 +1038,29 @@ mod tests {
         .unwrap();
         for case in cases {
             let cfg = Config::parse(case["config"].as_str().unwrap()).unwrap();
-            let actual = render_preserving_comments(
-                case["file"].as_str().unwrap().as_bytes(),
-                &cfg,
-                case["migrate"].as_bool().unwrap(),
-            )
+            let run = || {
+                render_preserving_comments(
+                    case["file"].as_str().unwrap().as_bytes(),
+                    &cfg,
+                    case["migrate"].as_bool().unwrap(),
+                )
+            };
+            let actual = if super::owner_legacy_tests::has_frozen_main_control(
+                "pending",
+                case["file"].as_str().unwrap(),
+                if case["migrate"] == true {
+                    "migrate"
+                } else {
+                    "save"
+                },
+            ) {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            }
             .unwrap();
             assert_eq!(
-                super::owner_legacy_tests::main_for_assertion(
-                    "pending",
-                    case["file"].as_str().unwrap(),
-                    if case["migrate"] == true {
-                        "migrate"
-                    } else {
-                        "save"
-                    },
-                    &String::from_utf8(actual).unwrap(),
-                ),
+                String::from_utf8(actual).unwrap(),
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["name"]
@@ -1083,16 +1102,21 @@ mod tests {
                 .unwrap();
         for case in cases {
             let cfg = Config::parse(case["config"].as_str().unwrap()).unwrap();
-            let actual =
+            let run = || {
                 render_preserving_comments(case["file"].as_str().unwrap().as_bytes(), &cfg, false)
-                    .unwrap();
+            };
+            let actual = if super::owner_legacy_tests::has_frozen_main_control(
+                "aliases",
+                case["file"].as_str().unwrap(),
+                "save",
+            ) {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            }
+            .unwrap();
             assert_eq!(
-                super::owner_legacy_tests::main_for_assertion(
-                    "aliases",
-                    case["file"].as_str().unwrap(),
-                    "save",
-                    &String::from_utf8(actual).unwrap(),
-                ),
+                String::from_utf8(actual).unwrap(),
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["name"]
@@ -2322,3 +2346,6 @@ mod owner_legacy_tests;
 
 #[cfg(test)]
 mod owner_caller_tests;
+
+#[cfg(test)]
+mod owner_writer_controls_tests;

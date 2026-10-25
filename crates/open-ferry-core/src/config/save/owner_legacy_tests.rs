@@ -3,26 +3,6 @@ use super::super::yaml3::{CommentId, CommentSlot};
 use super::owner_legacy_ops::{self as ops, Operation};
 use super::*;
 use serde_json::{Value, json};
-fn location(root: &Node, wanted: &CommentId) -> Option<String> {
-    fn walk(n: &Node, id: &CommentId, path: &str) -> Option<String> {
-        if n.comment_receipts.owner.as_ref() == Some(id) {
-            return Some(path.into());
-        }
-        match n.kind {
-            Kind::Mapping => n.pairs().find_map(|(k, v)| {
-                let path = format!("{path}.{}", k.value);
-                walk(k, id, &format!("{path}:key")).or_else(|| walk(v, id, &path))
-            }),
-            Kind::Document => n.content.iter().find_map(|c| walk(c, id, path)),
-            _ => n
-                .content
-                .iter()
-                .enumerate()
-                .find_map(|(i, c)| walk(c, id, &format!("{path}[{i}]"))),
-        }
-    }
-    walk(root, wanted, "$")
-}
 fn occurrences(root: &Node, wanted: &CommentId) -> Vec<Value> {
     fn walk(n: &Node, id: &CommentId, path: &str, out: &mut Vec<Value>) {
         for (slot, text, spans) in [
@@ -66,12 +46,13 @@ fn values(n: &Node) -> Value {
     json!([
         format!("{:?}", n.kind),
         n.short_tag(),
+        format!("{:?}", n.style),
         n.value,
         n.content.iter().map(values).collect::<Vec<_>>()
     ])
 }
 fn prove_step(data: &[u8], op: &Operation, actual: &[u8]) -> Result<Value, String> {
-    let (candidate, source) = op.candidate(data)?;
+    let (candidate, source) = tree::with_owner_locations(|| op.candidate(data))?;
     let main = tree::without_owner_protection(|| op.run(data))?;
     if candidate.bytes != main {
         return Err("tracked candidate differs from frozen-path output".into());
@@ -92,11 +73,7 @@ fn prove_step(data: &[u8], op: &Operation, actual: &[u8]) -> Result<Value, Strin
     let stable = op.run(actual).is_ok_and(|b| b == actual);
     let mut receipts = Vec::new();
     for (index, comment) in source.comments.iter().enumerate() {
-        let src = source
-            .original_sources
-            .iter()
-            .chain(&source.original_inputs)
-            .find_map(|n| location(n, &comment.receipt.owner));
+        let src = source.original_locations.get(&comment.receipt.owner);
         receipts.push(json!({"occurrence":index,"source":{"path":src,"slot":format!("{:?}",comment.receipt.slot),"part":comment.receipt.ordinal},"main":occurrences(&parsed_main,&comment.receipt.id),"new":occurrences(&parsed_new,&comment.receipt.id)}));
     }
     Ok(
@@ -109,6 +86,7 @@ fn audit(row: &Value) -> Value {
         let on = ops::history(row);
         let mut data = row["source"].as_str().unwrap().as_bytes().to_vec();
         let mut proofs = Vec::new();
+        let mut independent = Vec::new();
         for (pass, actual) in on["files"].as_array().unwrap().iter().enumerate() {
             let result = ops::operation(&data, row, pass)
                 .and_then(|op| prove_step(&data, &op, actual.as_str().unwrap().as_bytes()));
@@ -116,9 +94,18 @@ fn audit(row: &Value) -> Value {
                 Ok(proof) => proofs.push(proof),
                 Err(error) => proofs.push(json!({"audit_error":error})),
             }
+            let proof = ops::operation(&data, row, pass).and_then(|op| {
+                let main = tree::without_owner_protection(|| op.run(&data))?;
+                Ok(if main == actual.as_str().unwrap().as_bytes() {
+                    Value::Null
+                } else {
+                    independent_step_proof(&data, &main, actual.as_str().unwrap().as_bytes())
+                })
+            });
+            independent.push(proof.unwrap_or_else(|error| json!({"audit_error":error})));
             data = actual.as_str().unwrap().as_bytes().to_vec();
         }
-        json!({"id":row["id"],"changed":off!=on,"off":off,"on":on,"proofs":proofs})
+        json!({"id":row["id"],"changed":off!=on,"off":off,"on":on,"proofs":proofs,"independent":independent})
     })
 }
 #[test]
@@ -172,17 +159,138 @@ fn owner_validate_legacy_recipes() {
 }
 
 fn repaired_rows() -> Vec<Value> {
-    serde_json::from_str(include_str!("owner_legacy.json")).unwrap()
+    ops::resolve_sources(
+        serde_json::from_str(include_str!("../testdata/writer/owner_legacy.json")).unwrap(),
+    )
 }
+pub(super) fn independent_canonical_owners(data: &[u8]) -> super::owner_tests::OwnerInventory {
+    let mut paths: Vec<_> = super::super::v8::V8_PATHS
+        .iter()
+        .chain(super::super::layout::V8_STRUCT_PATHS)
+        .chain(super::super::v8::V8_SHARED_STRUCT_PATHS)
+        .chain(v8::v8_aliases())
+        .copied()
+        .collect();
+    paths.sort_by_key(|(old, _)| std::cmp::Reverse(old.split('.').count()));
+    let mut result = std::collections::BTreeMap::new();
+    for ((mut path, side, slot, part, hash), count) in super::owner_tests::independent_owners(data)
+    {
+        for (old, current) in &paths {
+            let old: Vec<_> = old.split('.').map(|s| format!("!!str:{s}")).collect();
+            if path.get(1..).is_some_and(|p| p.starts_with(&old)) {
+                path.splice(
+                    1..1 + old.len(),
+                    current.split('.').map(|s| format!("!!str:{s}")),
+                );
+                break;
+            }
+        }
+        *result.entry((path, side, slot, part, hash)).or_insert(0) += count;
+    }
+    result
+}
+
+fn independent_step_proof(input: &[u8], main: &[u8], output: &[u8]) -> Value {
+    let source = independent_canonical_owners(input);
+    let main = independent_canonical_owners(main);
+    let actual = independent_canonical_owners(output);
+    let drift = source
+        .iter()
+        .any(|(owner, count)| main.get(owner) != Some(count));
+    let held = source
+        .iter()
+        .all(|(owner, count)| actual.get(owner) == Some(count));
+    let totals = |owners: &super::owner_tests::OwnerInventory| {
+        let mut counts = std::collections::BTreeMap::new();
+        for ((_, _, _, _, hash), count) in owners {
+            *counts.entry(hash.clone()).or_insert(0) += count;
+        }
+        counts
+    };
+    let source_counts = totals(&source);
+    let main_counts = totals(&main);
+    let multiplicity = totals(&actual).iter().all(|(hash, count)| {
+        *count
+            <= source_counts
+                .get(hash)
+                .copied()
+                .unwrap_or_default()
+                .max(main_counts.get(hash).copied().unwrap_or_default())
+    });
+    json!({"main_drift":drift,"source_owners_held":held,"multiplicity":multiplicity})
+}
+
 fn verify_repaired_row(row: &Value) {
     let result = audit(&row["recipe"]);
     let id = row["recipe"]["id"].as_str().unwrap();
-    assert!(result["off"] == row["main"], "{id}: frozen main outcome");
+    assert!(
+        super::owner_matrix_tests::receipt(&result["off"]) == row["main"],
+        "{id}: frozen main outcome"
+    );
     assert!(result["on"] == row["on"], "{id}: repaired bytes/outcome");
     assert!(
         result["proofs"] == row["proofs"],
         "{id}: occurrence owner map"
     );
+    // Re-parse source, main and actual output with an independent path walker.
+    // Static v8 path moves identify the same setting across layout changes.
+    let mut input = row["recipe"]["source"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    for (pass, file) in result["on"]["files"].as_array().unwrap().iter().enumerate() {
+        let output = file.as_str().unwrap().as_bytes();
+        let source_owners = independent_canonical_owners(&input);
+        let main = ops::old_scope(&row["recipe"], || {
+            tree::without_owner_protection(|| {
+                ops::operation(&input, &row["recipe"], pass)
+                    .unwrap()
+                    .run(&input)
+            })
+        })
+        .unwrap();
+        let main_owners = independent_canonical_owners(&main);
+        let actual_owners = independent_canonical_owners(output);
+        assert!(
+            source_owners
+                .iter()
+                .any(|(owner, count)| main_owners.get(owner) != Some(count)),
+            "{id}: independent main owner check did not demonstrate drift"
+        );
+        for (owner, count) in &source_owners {
+            assert_eq!(
+                actual_owners.get(owner),
+                Some(count),
+                "{id}: independent source owner inventory"
+            );
+        }
+        // Generated config comments are distinct from source occurrences. They
+        // may remain where main already writes them, without replacing a source owner.
+        fn totals(
+            owners: &super::owner_tests::OwnerInventory,
+        ) -> std::collections::BTreeMap<&str, usize> {
+            let mut out = std::collections::BTreeMap::new();
+            for ((_, _, _, _, hash), count) in owners {
+                *out.entry(hash.as_str()).or_insert(0) += count;
+            }
+            out
+        }
+        let source_counts = totals(&source_owners);
+        let main_counts = totals(&main_owners);
+        for (hash, count) in totals(&actual_owners) {
+            assert!(
+                count
+                    <= source_counts
+                        .get(hash)
+                        .copied()
+                        .unwrap_or_default()
+                        .max(main_counts.get(hash).copied().unwrap_or_default()),
+                "{id}: independent comment multiplicity"
+            );
+        }
+        input = output.to_vec();
+    }
     for proof in result["proofs"].as_array().unwrap() {
         assert!(proof["faithful_main"] == false, "{id}: main did not drift");
         for check in [
@@ -196,40 +304,13 @@ fn verify_repaired_row(row: &Value) {
         }
     }
 }
-/// Only these frozen, independently audited rows move their old assertions
-/// to OFF. The actual ON bytes still pass all the original value checks.
-pub(super) fn main_for_assertion(group: &str, source: &str, op: &str, actual: &str) -> String {
-    for row in repaired_rows() {
+/// Static, independently audited drift controls. Each caller explicitly runs
+/// its original operation OFF; unchanged rows continue to run ON.
+pub(super) fn has_frozen_main_control(group: &str, source: &str, op: &str) -> bool {
+    repaired_rows().iter().any(|row| {
         let recipe = &row["recipe"];
-        if recipe["group"] != group || recipe["source"] != source || recipe["op"] != op {
-            continue;
-        }
-        if let Some(pass) = row["on"]["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .position(|v| v.as_str() == Some(actual))
-        {
-            verify_repaired_row(&row);
-            return row["main"]["files"][pass].as_str().unwrap().to_owned();
-        }
-    }
-    actual.to_owned()
-}
-#[cfg(feature = "parity")]
-pub(super) fn history_for_assertion(group: &str, source: &str, op: &str, actual: &Value) -> Value {
-    for row in repaired_rows() {
-        let recipe = &row["recipe"];
-        if recipe["group"] == group
-            && recipe["source"] == source
-            && recipe["op"] == op
-            && row["on"] == *actual
-        {
-            verify_repaired_row(&row);
-            return row["main"].clone();
-        }
-    }
-    actual.clone()
+        recipe["group"] == group && recipe["source"] == source && recipe["op"] == op
+    })
 }
 #[test]
 fn owner_legacy_repairs_have_frozen_main_bytes_and_complete_source_owners() {
@@ -241,7 +322,7 @@ fn owner_legacy_repairs_have_frozen_main_bytes_and_complete_source_owners() {
         verify_repaired_row(&row);
         count += 1;
     }
-    assert_eq!(count, if cfg!(feature = "parity") { 33 } else { 29 });
+    assert_eq!(count, if cfg!(feature = "parity") { 35 } else { 31 });
 }
 #[cfg(feature = "parity")]
 fn sweep_operation(data: &[u8], step: &Value) -> Result<Operation, String> {
@@ -311,6 +392,11 @@ fn owner_audit_persisted_sweeps() {
             let call_changed = candidate.0.bytes != actual.as_bytes();
             let proof = prove_step(input, &operation, actual.as_bytes())
                 .unwrap_or_else(|error| json!({"audit_error":error}));
+            let independent = if call_changed {
+                independent_step_proof(input, &candidate.0.bytes, actual.as_bytes())
+            } else {
+                Value::Null
+            };
             let good = !call_changed
                 || (proof["faithful_main"] == false
                     && [
@@ -321,12 +407,27 @@ fn owner_audit_persisted_sweeps() {
                         "stable",
                     ]
                     .iter()
-                    .all(|key| proof[*key] == true));
+                    .all(|key| proof[*key] == true)
+                    && ["main_drift", "source_owners_held", "multiplicity"]
+                        .iter()
+                        .all(|key| independent[*key] == true));
             mismatches += usize::from(!good);
             let go = row["go"]["files"].get(index).and_then(Value::as_str);
             let go_loadable = go.is_some_and(|g| {
                 Config::load_bytes(g.as_bytes()).is_ok() && parity::single_document(g)
             });
+            let source_owners = independent_canonical_owners(input);
+            let holds = |owners: &super::owner_tests::OwnerInventory| {
+                source_owners
+                    .iter()
+                    .all(|(owner, count)| owners.get(owner) == Some(count))
+            };
+            let independent_rust_holds = holds(&independent_canonical_owners(actual.as_bytes()));
+            let independent_go_holds = if go_loadable {
+                go.map(|bytes| holds(&independent_canonical_owners(bytes.as_bytes())))
+            } else {
+                None
+            };
             let main_inventory = super::owner_evidence_tests::inventory(
                 std::str::from_utf8(&candidate.0.bytes).unwrap(),
                 false,
@@ -345,7 +446,7 @@ fn owner_audit_persisted_sweeps() {
             } else {
                 Value::Null
             };
-            steps.push(json!({"step":index,"op":step,"main_inventory":main_inventory,"config_inventory":config_inventory,"certifier":certifier,"input":String::from_utf8_lossy(input),"main_candidate":String::from_utf8(candidate.0.bytes).unwrap(),"actual":actual,"call_changed":call_changed,"proved":good,"proof":proof,"go_loadable":go_loadable,"source_inventory":super::owner_evidence_tests::inventory(std::str::from_utf8(input).unwrap(),true),"go_inventory":if go_loadable {go.map(|g|super::owner_evidence_tests::inventory(g,false))}else{None},"rust_inventory":super::owner_evidence_tests::inventory(actual,false)}));
+            steps.push(json!({"step":index,"op":step,"main_inventory":main_inventory,"config_inventory":config_inventory,"certifier":certifier,"input":String::from_utf8_lossy(input),"main_candidate":String::from_utf8(candidate.0.bytes).unwrap(),"actual":actual,"call_changed":call_changed,"proved":good,"proof":proof,"independent":independent,"go_loadable":go_loadable,"independent_rust_source_owners_held":independent_rust_holds,"independent_go_source_owners_held":independent_go_holds,"source_inventory":super::owner_evidence_tests::inventory(std::str::from_utf8(input).unwrap(),true),"go_inventory":if go_loadable {go.map(|g|super::owner_evidence_tests::inventory(g,false))}else{None},"rust_inventory":super::owner_evidence_tests::inventory(actual,false)}));
             data = actual.as_bytes().to_vec();
         }
         results.push(json!({"run":row["run"],"case":row["case"],"off_matches":off_matches,"on_matches":on_matches,"changed":off!=on,"off":off,"on":on,"go":row["go"],"steps":steps}));
@@ -359,4 +460,41 @@ fn owner_audit_persisted_sweeps() {
         mismatches, 0,
         "persisted outputs or changed-call owner/value/stability proofs"
     );
+}
+
+#[cfg(feature = "parity")]
+#[test]
+#[ignore = "offline independent same-input Go source-owner witnesses"]
+fn owner_audit_same_input_go_witnesses() {
+    let rows: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(std::env::var_os("FU_OWNERS_GO_INPUT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut result = Vec::new();
+    for row in rows {
+        let source = independent_canonical_owners(row["source"].as_str().unwrap().as_bytes());
+        let rust = independent_canonical_owners(row["rust"].as_str().unwrap().as_bytes());
+        let holds = |owners: &super::owner_tests::OwnerInventory| {
+            source
+                .iter()
+                .all(|(owner, count)| owners.get(owner) == Some(count))
+        };
+        assert!(holds(&rust), "same-input witness lost a Rust source owner");
+        let go_file = row["go"]["files"].get(0).and_then(Value::as_str);
+        let go = go_file
+            .filter(|text| {
+                Config::load_bytes(text.as_bytes()).is_ok() && parity::single_document(text)
+            })
+            .map(|text| independent_canonical_owners(text.as_bytes()));
+        result.push(json!({"id":row["id"],"rust_source_owners_held":true,
+            "go_source_owners_held":go.as_ref().map(holds),
+            "source":source.into_iter().collect::<Vec<_>>(),
+            "rust":rust.into_iter().collect::<Vec<_>>(),
+            "go":go.map(|v|v.into_iter().collect::<Vec<_>>())}));
+    }
+    std::fs::write(
+        std::env::var_os("FU_OWNERS_GO_OUTPUT").unwrap(),
+        serde_json::to_vec(&result).unwrap(),
+    )
+    .unwrap();
 }

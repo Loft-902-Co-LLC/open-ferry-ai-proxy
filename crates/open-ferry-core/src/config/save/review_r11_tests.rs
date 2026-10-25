@@ -61,31 +61,32 @@ fn review_r11_opus_go_byte_fixtures() {
     for row in rows {
         let source = row["source"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
-        let out = if op == "nested" {
-            operation(source, op).1
-        } else {
-            match super::review_r10_tests::outputs(source, op) {
-                Ok(mut out) => out.pop().unwrap(),
-                Err(error) => {
-                    failures.push(
-                        serde_json::json!({"case":row["case"],"op":op,"error":error.to_string()}),
-                    );
-                    continue;
-                }
+        let run = || {
+            if op == "nested" {
+                Ok(vec![operation(source, op).1])
+            } else {
+                super::review_r10_tests::outputs(source, op)
             }
         };
-        if super::owner_legacy_tests::main_for_assertion("r11", source, op, &out)
-            != row["expected"].as_str().unwrap()
-        {
+        let result = if super::owner_legacy_tests::has_frozen_main_control("r11", source, op) {
+            tree::without_owner_protection(run)
+        } else {
+            run()
+        };
+        let out = match result {
+            Ok(mut out) => out.pop().unwrap(),
+            Err(error) => {
+                failures.push(
+                    serde_json::json!({"case":row["case"],"op":op,"error":error.to_string()}),
+                );
+                continue;
+            }
+        };
+        if out != row["expected"].as_str().unwrap() {
             failures.push(serde_json::json!({"case":row["case"],"op":op,"out":out,"expected":row["expected"]}));
         }
         if row["go_equal"] == true {
-            assert_eq!(
-                super::owner_legacy_tests::main_for_assertion("r11", source, op, &out),
-                row["go"].as_str().unwrap(),
-                "{} {op}",
-                row["case"]
-            );
+            assert_eq!(out, row["go"].as_str().unwrap(), "{} {op}", row["case"]);
         }
     }
     eprintln!("opus byte changes: {failures:#?}");

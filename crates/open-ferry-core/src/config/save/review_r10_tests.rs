@@ -138,14 +138,16 @@ fn review_r10_styled_item_foot_and_empty_key_head_keep_their_owners() {
         // Keep the end-to-end evidence as a negative rather than normalizing
         // this defect away in the certifier or claiming it is repaired.
         for op in ["save", "migrate", "save2", "put"] {
-            for out in outputs(&source, op).unwrap() {
+            let run = || outputs(&source, op);
+            let result = if super::owner_legacy_tests::has_frozen_main_control("r10", &source, op) {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            };
+            for out in result.unwrap() {
                 Config::load_bytes(out.as_bytes()).unwrap();
                 assert!(
-                    !parity::retained_unloadable_comments(
-                        &source,
-                        &super::owner_legacy_tests::main_for_assertion("r10", &source, op, &out),
-                        &[],
-                    ),
+                    !parity::retained_unloadable_comments(&source, &out, &[],),
                     "{op}: {out}"
                 );
                 for comment in ["# item foot", "# rse head"] {
