@@ -313,6 +313,7 @@ fn nested_error_detail(node: &Value) -> Value {
             .is_some_and(|message| message.starts_with("prompt is too long"))
     {
         detail["code"] = "context_length_exceeded".into();
+        return sorted(&detail);
     }
     detail
 }
@@ -670,6 +671,49 @@ mod tests {
 #[cfg(test)]
 mod prompt_overflow_tests {
     use super::*;
+
+    #[test]
+    fn prompt_overflow_nested_codes_keep_go_key_order_in_exact_bytes() {
+        for nested in [false, true] {
+            for (code, expected_code) in [
+                (None, "context_length_exceeded"),
+                (Some(json!(null)), "context_length_exceeded"),
+                (Some(json!("")), "context_length_exceeded"),
+                (Some(json!(" \t ")), "context_length_exceeded"),
+                (Some(json!("custom_code")), "custom_code"),
+                (Some(json!(" custom_code ")), " custom_code "),
+            ] {
+                let mut error = json!({"type":"invalid_request_error","message":"prompt is too long: input overflow"});
+                if let Some(code) = &code {
+                    error["code"] = code.clone();
+                }
+                let payload = if nested {
+                    json!({"response":{"error":error}})
+                } else {
+                    json!({"error":error})
+                };
+                let text = payload.to_string();
+                let detail = format!(
+                    r#"{{"code":"{expected_code}","message":"prompt is too long: input overflow","type":"invalid_request_error"}}"#
+                );
+                let expected =
+                    format!(r#"{{"type":"error","error":{detail},"sequence_number":3}}"#);
+                assert_eq!(
+                    error_chunk(400, &text, 3).as_bytes(),
+                    expected.as_bytes(),
+                    "nested={nested}, code={code:?}"
+                );
+                let expected = format!(
+                    r#"{{"type":"response.failed","sequence_number":3,"response":{{"status":"failed","error":{detail}}}}}"#
+                );
+                assert_eq!(
+                    failed_chunk(400, &text, 3).as_bytes(),
+                    expected.as_bytes(),
+                    "nested={nested}, code={code:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn prompt_overflow_adds_only_missing_or_blank_nested_codes() {
