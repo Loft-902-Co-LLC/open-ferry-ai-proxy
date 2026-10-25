@@ -134,6 +134,7 @@ impl<'a> Info<'a> {
     }
     fn parameterless(&self) -> bool {
         !self.complex
+            && self.forbids
             && self.object
             && self.required.is_empty()
             && self.properties.is_empty()
@@ -852,6 +853,7 @@ fn clean_value(
         }
     }
     if !info.complex
+        && info.forbids
         && infos.iter().all(|i| i.object)
         && info.required.is_empty()
         && info.properties.is_empty()
