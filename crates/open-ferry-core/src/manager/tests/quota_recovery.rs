@@ -205,13 +205,13 @@ async fn a_recovered_credential_is_dispatched_again_and_a_new_429_blocks_it_agai
     );
 }
 
-/// A model's own limit, capped to its next check, comes out from under a
-/// credential-wide cooldown when the credential recovers: its capped time,
-/// passed by then, doesn't read as an ended limit, and it is capped again as it
-/// was (not held to the provider's reset), so its due check lets one call
-/// through.
+/// A model's own limit, capped to its next check, stays under a
+/// credential-wide cooldown when a read proves the credential: the recovery is
+/// refused while any model of the credential rests on a quota check, and
+/// changes nothing. The wrap then runs out by itself, and Opus's due check lets
+/// exactly one call through.
 #[tokio::test(start_paused = true)]
-async fn a_capped_model_layer_survives_the_credentials_recovery() {
+async fn a_capped_model_layer_refuses_the_credentials_recovery() {
     let h = Harness::new(Settings {
         quota_check_after: HOUR,
         ..Settings::default()
@@ -241,36 +241,35 @@ async fn a_capped_model_layer_survives_the_credentials_recovery() {
     // Opus's capped check time is past; the wrap's is not.
     h.clock.advance(Duration::from_secs(50 * 60));
 
+    let before = shape(&h);
+    let rests = rested(&h);
     let weekly_only = reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)]);
     assert!(
-        recover(&h, &weekly_only),
-        "the credential's window is healthy"
+        !recover(&h, &weekly_only),
+        "a credential recovery went ahead with a model resting on a check"
     );
-    assert!(!blocked(&h, SONNET), "the wrap is gone");
-    // Opus's own limit stands as it was before the wrap came off: its check
-    // is due, so one call goes to the provider to prove it, and the rest wait.
-    assert_eq!(
-        rested(&h),
-        [OPUS],
-        "opus keeps its rest: {:?}",
-        h.get(ID).model_states.get(OPUS)
-    );
+    assert_eq!(shape(&h), before, "a refused recovery changed something");
+    assert!(blocked(&h, SONNET), "the wrap stays");
+    assert_eq!(rested(&h), rests, "the rests are as they were");
     assert!(
-        !blocked(&h, OPUS),
-        "opus's check is due, but the recovery held it to the provider's reset: {:?}",
-        h.get(ID).model_states.get(OPUS)
+        rests.iter().any(|scope| scope == OPUS),
+        "opus keeps its rest"
     );
+
+    // The wrap's own check time is next: past it, Opus's due check lets one
+    // call through, and the wrap is gone by itself.
+    h.clock.advance(Duration::from_secs(15 * 60));
     sonnet_ok.store(true, Ordering::SeqCst);
     assert!(call(&h, SONNET).await.is_ok());
     assert_eq!(reached_by_two_calls(&h).await, 1, "one check proceeds");
 }
 
-/// The same recovery before opus's check is due: in memory and after a
-/// restart opus is held to its check, which then lets exactly one call
-/// through, and the flushed record equals what memory holds.
+/// The same refusal before opus's check is due, in memory and after a restart:
+/// nothing changes, the flushed record equals what memory holds, and the
+/// restored manager (which has no claim to recover against) changes nothing
+/// either.
 #[tokio::test(start_paused = true)]
-async fn a_capped_model_rest_is_the_same_in_memory_and_after_a_restart_when_the_credential_recovers()
- {
+async fn a_capped_model_rest_refuses_the_credentials_recovery_in_memory_and_after_a_restart() {
     let dir = temp_dir();
     let settings = Settings {
         quota_check_after: HOUR,
@@ -294,11 +293,6 @@ async fn a_capped_model_rest_is_the_same_in_memory_and_after_a_restart_when_the_
     h.clock.advance(Duration::from_secs(10 * 60));
     assert!(blocked(&h, OPUS) && blocked(&h, SONNET));
 
-    let weekly_only = reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)]);
-    assert!(recover(&h, &weekly_only));
-    assert!(!blocked(&h, SONNET), "the wrap is gone");
-    assert!(blocked(&h, OPUS), "opus waits for its check");
-
     let opus = |h: &Harness| {
         let state = h.get(ID).model_states.get(OPUS).cloned().expect("opus");
         (
@@ -307,7 +301,14 @@ async fn a_capped_model_rest_is_the_same_in_memory_and_after_a_restart_when_the_
             format!("{:?}", h.manager.quota_checks(ID)),
         )
     };
+    let before = shape(&h);
     let live = opus(&h);
+    let weekly_only = reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)]);
+    assert!(!recover(&h, &weekly_only));
+    assert_eq!(shape(&h), before, "a refused recovery changed something");
+    assert!(blocked(&h, OPUS) && blocked(&h, SONNET), "the wrap stays");
+    assert_eq!(opus(&h), live);
+
     flush(&h.manager);
     let next = Harness::new(settings);
     next.add(credential(dir.path()), &[OPUS, SONNET]);
@@ -316,13 +317,22 @@ async fn a_capped_model_rest_is_the_same_in_memory_and_after_a_restart_when_the_
     let on = config(dir.path(), true);
     reconfigure(&next.manager, None, &on);
     restore(&next.manager, &on);
-    assert_eq!(opus(&next), live, "the restored record is not memory's");
-    assert!(blocked(&next, OPUS));
+    // A restore puts the wrap's own deadline back under opus (the cap is not
+    // stored), as it did before any recovery existed; the rests are memory's.
+    assert_eq!(opus(&next).2, live.2, "the restored rests are not memory's");
+    assert!(blocked(&next, OPUS) && blocked(&next, SONNET));
+    let restored = shape(&next);
+    assert!(!recover(&next, &weekly_only));
+    assert_eq!(shape(&next), restored, "a read changed the restored state");
 
-    h.clock.advance(Duration::from_secs(25 * 60));
-    next.clock.advance(Duration::from_secs(25 * 60));
-    assert_eq!(reached_by_two_calls(&h).await, 1, "in memory");
-    assert_eq!(reached_by_two_calls(&next).await, 1, "after a restart");
+    // Past the wrap's own check time both run alike.
+    h.clock.advance(Duration::from_secs(55 * 60));
+    next.clock.advance(Duration::from_secs(55 * 60));
+    assert_eq!(
+        reached_by_two_calls(&h).await,
+        reached_by_two_calls(&next).await,
+        "memory and a restart disagree on the due check"
+    );
 }
 
 /// Ending one model's cooldown leaves the capped rest of another, even when
@@ -1951,4 +1961,398 @@ async fn a_read_taken_before_a_forced_hold_is_refused_while_it_lives() {
         "a read from before the forced hold ended it"
     );
     assert!(blocked(&h, OPUS) && no_model_blocked(&h));
+}
+
+// Round 8: a credential-wide recovery is refused wherever the state isn't
+// simple (a model resting on a quota check under any key, a live hold of a
+// model's own, a merge since the claim); a merge keeps the windows it owed; and
+// a failure's own hold is the deadline application set.
+
+/// A credential-wide 429 of Sonnet that wraps every model for `retry`.
+fn wrap(h: &Harness, retry: Duration) {
+    h.manager.mark_result(&CallResult {
+        retry_after: Some(retry),
+        ..failure(SONNET, weekly(h.now()), true)
+    });
+}
+
+fn alias_settings(cap: Duration) -> Settings {
+    Settings {
+        quota_check_after: cap,
+        ..route_alias()
+    }
+}
+
+/// `ROUTE` becomes Opus's alias under `settings`, and the registry reconciles
+/// the credential's model states.
+fn merge_with(h: &Harness, settings: Settings) {
+    h.manager.set_settings(settings);
+    h.models.register(ID, &[ROUTE]);
+    h.manager.reconcile_registry_model_states(ID);
+    let merged = h.get(ID);
+    assert!(
+        !merged.model_states.contains_key(ROUTE),
+        "the alias was merged: {:?}",
+        merged.model_states
+    );
+    assert!(blocked(h, OPUS));
+}
+
+/// Builds the same state twice with `setup`, once with a credential read that
+/// proves the credential (Opus shown full) `wait` after it and once without,
+/// and requires the read to be refused and to change nothing: the live
+/// credential, the selections and dispatch counts, the check rests, the flushed
+/// record and the state restored from it.
+async fn refused_credential_read(
+    initial: Settings,
+    finally: Settings,
+    models: &[&str],
+    setup: impl Fn(&Harness),
+    wait: Duration,
+) {
+    let mut seen = Vec::new();
+    for read in [true, false] {
+        let dir = temp_dir();
+        let h = saving(dir.path(), initial.clone(), models);
+        setup(&h);
+        h.clock.advance(wait);
+        if read {
+            assert!(
+                !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+                "the credential's recovery went ahead"
+            );
+        }
+        seen.push(capture(&h, dir.path(), finally.clone()).await);
+    }
+    assert_eq!(seen[0], seen[1], "a refused read changed something");
+}
+
+/// Finding A: Opus's 5-day quota 429 is capped to a 1 hour check, an
+/// independent 503 with a 2 hour hint follows, and a credential-wide 429 wraps
+/// both. Lifting both layers' times to the provider's reset and capping them
+/// again shortened the 503 by an hour; the credential's recovery is refused
+/// while Opus rests on a check.
+#[tokio::test(start_paused = true)]
+async fn a_credential_recovery_does_not_shorten_an_independent_503_under_a_capped_rest() {
+    refused_credential_read(
+        capped_hour(),
+        capped_hour(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&other_failure(OPUS, 503, 2 * HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, 2 * HOUR);
+        },
+        Duration::from_secs(30 * 60),
+    )
+    .await;
+}
+
+/// Finding B: the capped rest of an alias stays under the alias's key when the
+/// alias is merged into Opus. A credential recovery then found no rest under
+/// Opus and freed a model still at its limit, with no check to lease.
+#[tokio::test(start_paused = true)]
+async fn a_credential_recovery_is_refused_while_an_alias_keys_rest_is_orphaned() {
+    refused_credential_read(
+        capped_hour(),
+        alias_settings(HOUR),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, 2 * HOUR);
+            h.clock.advance(Duration::from_secs(5));
+            merge_with(h, alias_settings(HOUR));
+        },
+        Duration::from_secs(65 * 60),
+    )
+    .await;
+}
+
+/// Finding C: a merge of two wrapped states keeps one shadow, so the other's
+/// hold (a 2 hour 503 of the alias) would be lost by the credential's recovery.
+#[tokio::test(start_paused = true)]
+async fn a_credential_recovery_is_refused_after_a_merge_of_two_wrapped_holds() {
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager.mark_result(&other_failure(ROUTE, 503, 2 * HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&other_failure(OPUS, 503, HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, 3 * HOUR);
+            h.clock.advance(Duration::from_secs(5));
+            merge_with(h, route_alias());
+        },
+        Duration::from_secs(30 * 60),
+    )
+    .await;
+}
+
+/// A merge since the credential's claim is refused on its own, with no rest and
+/// no hold of a model's own: the claim no longer speaks for what the merged
+/// state holds under the wrap.
+#[tokio::test(start_paused = true)]
+async fn a_merge_since_the_credentials_claim_refuses_its_recovery() {
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, 2 * HOUR);
+            h.clock.advance(Duration::from_secs(5));
+            merge_with(h, route_alias());
+        },
+        Duration::from_secs(20 * 60),
+    )
+    .await;
+}
+
+/// A live hold of a model's own under the wrap refuses the credential's
+/// recovery: the shadow may not show it. Once it has ended a fresh read
+/// recovers the credential, and Opus keeps its own 5-day limit.
+#[tokio::test(start_paused = true)]
+async fn a_live_model_hold_under_the_wrap_refuses_the_credentials_recovery_until_it_ends() {
+    refused_credential_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&other_failure(OPUS, 503, HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, 3 * HOUR);
+        },
+        Duration::from_secs(20 * 60),
+    )
+    .await;
+
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    h.manager.mark_result(&other_failure(OPUS, 503, HOUR));
+    h.clock.advance(Duration::from_secs(5));
+    wrap(&h, 3 * HOUR);
+    h.clock.advance(Duration::from_secs(70 * 60));
+    assert!(
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+        "the 503 ended an hour in"
+    );
+    assert!(!blocked(&h, SONNET), "the wrap is gone");
+    assert!(blocked(&h, OPUS), "opus keeps its own 5 day limit");
+}
+
+/// With no rest and no live hold of a model's own, the credential's recovery
+/// still works, and it equals the wrap's natural expiry: each model's own layer
+/// is back as it was under the wrap. (Passes before round 8 as well.)
+#[tokio::test(start_paused = true)]
+async fn a_plain_credential_recovery_equals_the_wraps_natural_expiry() {
+    let build = || {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        h.clock.advance(Duration::from_secs(5));
+        wrap(&h, 2 * HOUR);
+        h
+    };
+    let own = |h: &Harness, layer: bool| {
+        let state = h.get(ID).model_states.get(OPUS).cloned().expect("opus");
+        let state = if layer {
+            *state.credential_quota_shadow.expect("the wrap's shadow")
+        } else {
+            state
+        };
+        (
+            state.next_retry_after,
+            state.quota.next_recover_at,
+            state.quota.exceeded,
+            state.quota.reason.clone(),
+        )
+    };
+
+    let recovered = build();
+    recovered.clock.advance(Duration::from_secs(30 * 60));
+    assert!(recover(
+        &recovered,
+        &reading(recovered.now(), &[(UsageWindow::SevenDayOpus, 100.0)])
+    ));
+    let natural = build();
+    natural.clock.advance(Duration::from_secs(2 * 60 * 60 + 60));
+    assert_eq!(
+        own(&recovered, false),
+        own(&natural, true),
+        "opus's own layer is not what the wrap's expiry leaves"
+    );
+    for h in [&recovered, &natural] {
+        assert!(!blocked(h, SONNET), "the wrap is gone");
+        assert!(blocked(h, OPUS), "opus keeps its own limit");
+    }
+    let state = recovered.get(ID);
+    assert_ne!(state.quota.reason, "credential_quota", "the wrap is gone");
+    assert!(
+        state.model_states[OPUS].credential_quota_shadow.is_none()
+            && !state.model_states[OPUS].credential_quota_propagated
+    );
+}
+
+/// Finding D: an alias's recognised claim names a window; merging it into Opus
+/// keeps its cooldown, and the window stays owed when a later recognised Opus
+/// 429 names another. A read showing the later window healthy and the earlier
+/// one full must not end the merged cooldown.
+#[tokio::test(start_paused = true)]
+async fn a_merge_keeps_the_aliass_owed_window_through_a_later_claim() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE]);
+    h.manager
+        .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    merge_with(&h, route_alias());
+    h.clock.advance(Duration::from_secs(5));
+    h.manager
+        .mark_result(&quota_429(OPUS, five_hour_headers(), HOUR));
+    h.clock.advance(Duration::from_secs(5));
+
+    let before = shape(&h);
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+        "the alias's window was forgotten by the merge"
+    );
+    assert_eq!(shape(&h), before);
+    assert!(blocked(&h, OPUS));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS));
+}
+
+/// Finding E: an HTTP 500 with the code `model_not_found` holds the model for
+/// 12 hours (the model-support rule), not the minute of an ordinary transient
+/// failure. A later recognised Opus 429 and a read a minute on must not end it.
+#[tokio::test(start_paused = true)]
+async fn a_model_support_hold_is_counted_at_its_own_deadline() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    let mut unsupported = other_failure(OPUS, 500, Duration::ZERO);
+    unsupported.retry_after = None;
+    if let Some(error) = unsupported.error.as_mut() {
+        error.code = "model_not_found".into();
+    }
+    h.manager.mark_result(&unsupported);
+    h.clock.advance(Duration::from_secs(5));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(65));
+
+    let before = shape(&h);
+    assert!(
+        !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+        "a live 12 hour model-support hold was cleared"
+    );
+    assert_eq!(shape(&h), before);
+    assert!(blocked(&h, OPUS));
+
+    h.clock.advance(Duration::from_secs(12 * 60 * 60));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS));
+}
+
+/// Application sets each failure's own deadline once; the recovery counts
+/// exactly that. For a table of status, error code, message, hint and cooling
+/// setting, the failure's recorded own hold ends where the deadline it left on
+/// a credential with nothing earlier standing ends.
+#[tokio::test(start_paused = true)]
+async fn a_failures_own_hold_is_the_deadline_application_set() {
+    use crate::manager::quota_recovery::scope_deadline;
+
+    let statuses = [
+        400u16, 401, 402, 403, 404, 408, 429, 500, 502, 503, 504, 520, 526,
+    ];
+    let codes = ["", "model_not_found", "force_cooldown", "invalid_grant"];
+    let hints = [None, Some(Duration::from_secs(90))];
+    let settings = [
+        Settings::default(),
+        cooling_off(),
+        Settings {
+            transient_error_cooldown_seconds: 30,
+            ..Settings::default()
+        },
+        Settings {
+            disable_cooling: true,
+            ..Settings::default()
+        },
+    ];
+    let mut checked = 0;
+    for (index, setting) in settings.into_iter().enumerate() {
+        let h = Harness::new(setting);
+        for scoped in [false, true] {
+            for status in statuses {
+                for code in codes {
+                    for message in ["failed", "cloudflare challenge"] {
+                        for hint in hints {
+                            let id = format!(
+                                "parity-{index}-{scoped}-{status}-{code}-{message}-{hint:?}"
+                            );
+                            h.add(auth(&id, "claude"), &[OPUS]);
+                            let now = h.now();
+                            let mut result = other_failure(
+                                if scoped { OPUS } else { "" },
+                                status,
+                                Duration::ZERO,
+                            );
+                            result.auth_id = id.clone();
+                            result.retry_after = hint;
+                            if let Some(error) = result.error.as_mut() {
+                                error.code = code.into();
+                                error.message = message.into();
+                            }
+                            h.manager.mark_result(&result);
+                            let scope = if scoped { OPUS } else { "" };
+                            let deadline = scope_deadline(&h.get(&id), scope);
+                            let live = |at: Timestamp| {
+                                h.manager.lock().quota_recovery.foreign_live(&id, scope, at)
+                            };
+                            let case = format!(
+                                "{status} code {code:?} {message:?} hint {hint:?} scoped {scoped} \
+                                 settings {index}: deadline {deadline:?}"
+                            );
+                            match deadline {
+                                Some(end) if end > now => {
+                                    assert!(live(now), "{case}: not held now");
+                                    assert!(
+                                        live(end - TimeDelta::milliseconds(1)),
+                                        "{case}: held less than application did"
+                                    );
+                                    assert!(!live(end), "{case}: held longer than application did");
+                                }
+                                _ => assert!(!live(now), "{case}: held with no cooldown"),
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 1000, "the table ran {checked} cases");
 }

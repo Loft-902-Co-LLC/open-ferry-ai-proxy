@@ -450,58 +450,14 @@ impl QuotaChecks {
         self.lease_claims(auth);
     }
 
-    /// Lifts the times of each model's own quota cooldown under a
-    /// credential-wide one (its shadow) from the next check to the provider's
-    /// reset its rest holds, so that bringing the model out from under the
-    /// wrap doesn't take a capped layer for an ended one.
-    ///
-    /// Returns the models whose layer it lifted, for [`Self::recap_shadows`]
-    /// to cap again once the wrap is off.
-    pub(crate) fn uncap_shadows(&self, auth: &mut Auth, now: Timestamp) -> Vec<String> {
-        let id = auth.id.clone();
-        let mut lifted = Vec::new();
-        for (name, state) in &mut auth.model_states {
-            let scope = canonical_model_key(name);
-            let Some(rest) = self.rests.get(&Self::key(&id, &scope)) else {
-                continue;
-            };
-            let reset = rest.reset_at;
-            if reset <= now {
-                continue;
-            }
-            if let Some(own) = state.credential_quota_shadow.as_deref_mut()
-                && is_quota_rest(own.quota.exceeded, &own.quota.reason)
-            {
-                let lift = |time: &mut Option<Timestamp>| {
-                    if time.is_none_or(|t| t < reset) {
-                        *time = Some(reset);
-                    }
-                };
-                lift(&mut own.next_retry_after);
-                lift(&mut own.quota.next_recover_at);
-                if !lifted.contains(&scope) {
-                    lifted.push(scope);
-                }
-            }
-        }
-        lifted
-    }
-
-    /// Caps the rests of `scopes` of `auth` again, which [`Self::uncap_shadows`]
-    /// lifted to the provider's reset while a credential-wide cooldown wrapped
-    /// them, now that their layers are out from under it: the times between a
-    /// rest's check and its reset go back to the check, as a restore puts
-    /// them, so the check is due then in memory as after a restart.
-    pub(crate) fn recap_shadows(&self, auth: &mut Auth, scopes: &[String], now: Timestamp) {
-        for scope in scopes {
-            let Some(rest) = self.rests.get(&Self::key(&auth.id, scope)) else {
-                continue;
-            };
-            if rest.reset_at <= now || rest.check_at >= rest.reset_at {
-                continue;
-            }
-            retime(auth, scope, rest.check_at, rest.reset_at);
-        }
+    /// Whether credential `id` rests on a quota check of any model scope,
+    /// under whatever key it was recorded (an alias's included, which a
+    /// reconcile leaves behind when it merges the alias's state). A
+    /// credential-wide recovery is refused while one is there: the model's
+    /// layer under the wrap may be capped to its check, and only the rest
+    /// knows the provider's reset.
+    pub(crate) fn rests_on_a_model(&self, id: &str) -> bool {
+        self.scopes(id).iter().any(|scope| scope != CREDENTIAL)
     }
 
     /// Leases again the checks in flight that have no lease.

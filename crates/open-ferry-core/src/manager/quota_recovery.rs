@@ -32,6 +32,21 @@
 //! wrap over it. The quota-check rests and leases of that scope go with it.
 //! It never calls the broad manual reset, so other cooldowns stay.
 //!
+//! The credential-wide recovery is the simple case only. It is refused, and
+//! changes nothing (the wrap runs out by itself), while any model of the
+//! credential rests on a quota check (under any key, an orphaned alias's
+//! included), while a model has a cooldown of its own that no read can speak
+//! for and that is live, and once a merge of two models' cooldowns happened
+//! since its claim. Ending the wrap would otherwise have to rebuild what lay
+//! under it, and a rebuilt hold could come out shorter than the real one.
+//! Merging two models keeps the windows both claims named: they are carried
+//! to the target as debt, and the target's next recognised 429 must have a
+//! reading prove them too.
+//!
+//! A failure's own deadline (what a hold of its own lasts) is the one
+//! cooldown application computed for it, with its precedence of rules, before
+//! it kept a longer earlier hold; it is passed in, not worked out again here.
+//!
 //! Independent holds, including a no-model 429 or 503, stay separate from a
 //! model-derived credential aggregate. Each keeps its own deadline, not the
 //! merged quota deadline; an unknown deadline fails closed. While the
@@ -78,14 +93,13 @@ use sha2::{Digest, Sha256};
 
 use super::classify::should_skip_credential_cooldown;
 use super::cooldown::{
-    CallResult, failure_cooling_disabled, has_model_error, is_credential_quota_active,
-    is_forced_cooldown, reset_model_state, transient_failure_end, unwrap_expired_quota,
-    update_aggregated_availability,
+    CallResult, OwnDeadline, has_model_error, is_credential_quota_active, reset_model_state,
+    unwrap_expired_quota, update_aggregated_availability,
 };
 use super::lifecycle::Save;
 use super::quota_signals::apply_cooldown_fields;
 use super::text::canonical_model_key;
-use super::{Manager, ManagerError, Settings};
+use super::{Manager, ManagerError};
 use crate::auth::{Auth, QuotaState, Status, Timestamp};
 
 /// The reading may not be older than this, or further ahead, by its `Date`.
@@ -255,33 +269,21 @@ pub(crate) fn scope_deadline(auth: &Auth, scope: &str) -> Option<Timestamp> {
 
 /// What a failure that no usage read can speak for added to the scope's
 /// cooldown: its own deadline, not the merged one (a later cooldown keeps an
-/// earlier, longer one standing). `before` and `after` are the scope's
+/// earlier, longer one standing). `own` is what application itself computed
+/// for the failure, before it kept a longer earlier hold (so it is never
+/// re-derived here, with a precedence of its own). Where application derived
+/// no deadline of its own (a quota 429), `before` and `after` are the scope's
 /// deadline around the failure.
 fn own_hold(
-    settings: &Settings,
-    auth: &Auth,
-    result: &CallResult,
-    status: u16,
+    own: OwnDeadline,
     now: Timestamp,
     before: Option<Timestamp>,
     after: Option<Timestamp>,
 ) -> Hold {
-    match status {
-        408 | 500 | 502 | 503 | 504 | 520..=526 => {
-            // The deadline cooldown application gives the failure: with
-            // cooling off (the credential's own override included) none,
-            // unless the failure forces a cooldown, which holds for a minute.
-            let force = is_forced_cooldown(result.error.as_ref());
-            transient_failure_end(
-                settings,
-                now,
-                result.retry_after,
-                failure_cooling_disabled(settings, auth, force),
-                force,
-            )
-            .or(Some(now))
-        }
-        _ => match after {
+    match own {
+        // A failure that set no end (cooling off) holds nothing past now.
+        OwnDeadline::Set(end) => end.or(Some(now)),
+        OwnDeadline::Derived => match after {
             None => Some(now),
             Some(after) if before.is_none_or(|before| after > before) => Some(after),
             // The failure's own time is hidden behind an older, longer one.
@@ -308,6 +310,9 @@ pub(crate) struct Recoveries {
     /// Scopes a failure no usage read can speak for put a cooldown on, with
     /// how long those cooldowns last (each failure's own contribution).
     foreign: BTreeMap<(String, String), Hold>,
+    /// Windows a merge carried to a model's scope from another's claim: owed
+    /// by the next recognised 429 of that scope, which must prove them too.
+    owed: BTreeMap<(String, String), Vec<UsageWindow>>,
     /// When a scope was last recovered, against a restore of older records.
     recovered: BTreeMap<(String, String), Timestamp>,
     /// Moves when the saved cooldowns replace the live ones.
@@ -370,6 +375,15 @@ impl Recoveries {
             .is_some_and(|hold| hold.is_none_or(|until| until > now))
     }
 
+    /// Whether a model of `id` has a cooldown no usage read can speak for
+    /// that is live at `now`, or may be.
+    fn model_hold_live(&self, id: &str, now: Timestamp) -> bool {
+        self.foreign
+            .range((id.to_owned(), String::new())..)
+            .take_while(|((foreign_id, _), _)| foreign_id == id)
+            .any(|((_, scope), hold)| !scope.is_empty() && hold.is_none_or(|until| until > now))
+    }
+
     /// Adds a foreign cooldown to `key`: the longest of them counts, and an
     /// unknown one stays unknown.
     fn hold(&mut self, key: (String, String), hold: Hold) {
@@ -387,10 +401,10 @@ impl Recoveries {
     /// them to its next check, which is no end of the provider's cooldown.
     pub(crate) fn observe(
         &mut self,
-        settings: &Settings,
         auth: &Auth,
         result: &CallResult,
         model_key: &str,
+        own: OwnDeadline,
         deadlines: (Option<Timestamp>, Option<Timestamp>),
         now: Timestamp,
     ) {
@@ -398,6 +412,8 @@ impl Recoveries {
         // A claim whose cooldown layer the outcome ended (a success, an
         // expiry) is not owed any more, and must not be joined by a later one.
         self.claims
+            .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
+        self.owed
             .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
         // The same for a cooldown nothing could have recovered.
         self.foreign
@@ -421,7 +437,7 @@ impl Recoveries {
             self.touch(&auth.id, &scope)
         };
         let key = (auth.id.clone(), scope.clone());
-        let own = || own_hold(settings, auth, result, status, now, before, after);
+        let own = || own_hold(own, now, before, after);
         // A claim stays through a failure it can't be told apart from: its
         // cooldown layer stands (the retain above ends it when it doesn't),
         // and the windows it names stay owed. The failure's sequence number
@@ -441,9 +457,13 @@ impl Recoveries {
                 // owed until a reading clears it too.
                 if let Some(previous) = self.claims.get(&key) {
                     windows.extend(previous.windows.iter().copied());
-                    windows.sort_unstable();
-                    windows.dedup();
                 }
+                // Windows a merge carried here are owed the same way.
+                if let Some(carried) = self.owed.remove(&key) {
+                    windows.extend(carried);
+                }
+                windows.sort_unstable();
+                windows.dedup();
                 self.claims.insert(
                     key,
                     Claim {
@@ -463,6 +483,7 @@ impl Recoveries {
     /// recorded after; the fence against reads in flight stays.
     pub(crate) fn forget(&mut self, id: &str) {
         self.claims.retain(|(claim_id, _), _| claim_id != id);
+        self.owed.retain(|(owed_id, _), _| owed_id != id);
         self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
     }
@@ -470,18 +491,36 @@ impl Recoveries {
     /// Notes that a cooldown of the model `alias` of `id` was merged into (or
     /// moved to) the state of `target`: no claim of either describes what
     /// `target` now holds, and no read in flight speaks for it. Both claims
-    /// go, so the target's quota cooldown runs its course (failing closed),
-    /// and a cooldown no usage read can speak for that `alias` had passes to
-    /// `target`. The credential's own scope is left as it is: its hold is
-    /// still on the credential.
+    /// go, but the windows they named stay owed: they are carried to
+    /// `target`, and the next recognised 429 of it must have a reading prove
+    /// them too (until then its cooldown runs its course, failing closed).
+    /// A cooldown no usage read can speak for that `alias` had passes to
+    /// `target`. The credential's own claim goes as well, as the merge may
+    /// have put a cooldown under its wrap that the claim knows nothing of,
+    /// but its foreign record stays: its hold is still on the credential.
     pub(crate) fn merged(&mut self, id: &str, alias: &str, target: &str) {
+        let mut carried = Vec::new();
         for scope in [alias, target] {
             if scope.is_empty() {
                 continue;
             }
-            self.claims.remove(&(id.to_owned(), scope.to_owned()));
+            let key = (id.to_owned(), scope.to_owned());
+            if let Some(claim) = self.claims.remove(&key) {
+                carried.extend(claim.windows);
+            }
+            if let Some(owed) = self.owed.remove(&key) {
+                carried.extend(owed);
+            }
             self.touch(id, scope);
         }
+        if !target.is_empty() && !carried.is_empty() {
+            carried.sort_unstable();
+            carried.dedup();
+            self.owed
+                .insert((id.to_owned(), target.to_owned()), carried);
+        }
+        self.claims.remove(&(id.to_owned(), String::new()));
+        self.touch_wrapped(id);
         if !alias.is_empty()
             && !target.is_empty()
             && alias != target
@@ -497,6 +536,7 @@ impl Recoveries {
     pub(crate) fn restored(&mut self, id: &str, scopes: &[String]) {
         for scope in scopes {
             self.claims.remove(&(id.to_owned(), scope.clone()));
+            self.owed.remove(&(id.to_owned(), scope.clone()));
             // A cooldown that came back from the file has no provenance.
             self.hold((id.to_owned(), scope.clone()), None);
             if scope.is_empty() {
@@ -511,6 +551,7 @@ impl Recoveries {
     /// authority.
     pub(crate) fn clear(&mut self) {
         self.claims.clear();
+        self.owed.clear();
         self.foreign.clear();
         self.recovered.clear();
         self.era = self.era.saturating_add(1);
@@ -757,6 +798,12 @@ impl Manager {
                         // A model stays in cooldown while the credential has
                         // a hold of its own (live, or of unknown end).
                         && !state.quota_recovery.foreign_live(id, "", now)
+                        // The wrap is not lifted from over a model that rests
+                        // on a quota check or holds a cooldown of its own:
+                        // their ends could not be told apart from the wrap's.
+                        && (!scope.is_empty()
+                            || (!state.quota_checks.rests_on_a_model(id)
+                                && !state.quota_recovery.model_hold_live(id, now)))
                         && claim.seq <= token.seq
                         && state.quota_recovery.untouched_since(id, scope, claim)
                         && observed + DATE_GRACE >= claim.recorded_at
@@ -782,14 +829,7 @@ impl Manager {
                 && auth.quota.exceeded
                 && auth.quota.reason == "credential_quota"
             {
-                // A model's own layer under the wrap may have been capped to
-                // its next check; it comes out of the wrap with the
-                // provider's reset (a capped layer's passed time must not
-                // read as an ended limit), then is capped again as it was,
-                // as a restore does.
-                let lifted = state.quota_checks.uncap_shadows(auth, now);
                 clear_credential(auth, now);
-                state.quota_checks.recap_shadows(auth, &lifted, now);
                 update_aggregated_availability(auth, now);
                 recovery.credential = true;
                 scopes.push(String::new());
@@ -808,6 +848,7 @@ impl Manager {
             for scope in &scopes {
                 let key = (id.to_owned(), scope.clone());
                 state.quota_recovery.claims.remove(&key);
+                state.quota_recovery.owed.remove(&key);
                 state.quota_recovery.recovered.insert(key, now);
             }
             state.quota_checks.recovered(auth, &scopes, now);
