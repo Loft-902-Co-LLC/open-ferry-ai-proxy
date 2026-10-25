@@ -439,11 +439,7 @@ fn writer_r2_nonboundary_and_excluded_model_saves_keep_main_bytes() {
             } else {
                 run()
             };
-            assert_eq!(
-                receipt(&result),
-                row["normal"],
-                "{case} {op}"
-            );
+            assert_eq!(receipt(&result), row["normal"], "{case} {op}");
         }
     }
 }
