@@ -120,3 +120,52 @@ fn review_r15_mapping_values_survive_migrate() {
 fn review_r15_mapping_values_survive_put() {
     mapping_values("put");
 }
+
+#[test]
+fn review_r15_replaced_blocks_survive_migrate() {
+    for style in ["|-", ">-"] {
+        for value in ["      x\n\u{2028}", " x\n\u{2028}", "   x\n"] {
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(&path, format!("api-keys:\n  - {style}\n    x\n")).unwrap();
+            let mut config = Config::load(&path).unwrap();
+            config.api_keys = vec![value.into()];
+            save_preserving_comments(&path, &config, true).unwrap();
+            assert!(Config::load(&path).unwrap().api_keys == [value]);
+        }
+    }
+}
+
+#[test]
+fn review_r15_replaced_mapping_tab_scalar_survives() {
+    for style in ["|-", ">-"] {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, format!("auth-dir: {style}\n  x\n")).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.auth_dir = "\tx".into();
+        save_preserving_comments(&path, &config, false).unwrap();
+        assert!(Config::load(&path).unwrap().auth_dir == "\tx");
+    }
+}
+
+#[test]
+fn review_r15_v8_replaced_blocks_survive_repeated_settings() {
+    for style in ["|-", ">-"] {
+        for value in ["      x\n\u{2028}", "      x\n"] {
+            let dir = TempDir::new();
+            let path = dir.join("config.yaml");
+            std::fs::write(
+                &path,
+                format!("config-version: 8\naccess:\n  api-keys:\n    - {style}\n      x\n"),
+            )
+            .unwrap();
+            for _ in 0..3 {
+                let mut config = Config::load(&path).unwrap();
+                config.api_keys = vec![value.into()];
+                save_preserving_comments(&path, &config, false).unwrap();
+                assert!(Config::load(&path).unwrap().api_keys == [value]);
+            }
+        }
+    }
+}

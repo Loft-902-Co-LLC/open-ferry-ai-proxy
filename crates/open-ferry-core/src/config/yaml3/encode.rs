@@ -819,7 +819,7 @@ impl Encoder {
                     || node.style.has(Style::FOLDED)
                     || node.value.contains('\n');
                 let style = if node.style.has(Style::DOUBLE_QUOTED)
-                    || (self.protect_generated_unicode
+                    || ((self.protect_generated_unicode || (self.indent == 4 && self.seq_item))
                         && !node.style.has(Style::SINGLE_QUOTED)
                         && block
                         && leading_unicode_block_break(&node.value, false, self.seq_item))

@@ -213,6 +213,12 @@ pub(crate) fn merge_node_preserve(dst: &mut Node, src: &Node, path: &mut Vec<Str
         }
         Kind::Scalar | Kind::Alias => {
             // The style stays, to keep the quoting.
+            if dst.value != src.value
+                && dst.style.has(Style::LITERAL | Style::FOLDED)
+                && src.style.has(Style::DOUBLE_QUOTED)
+            {
+                dst.style = src.style;
+            }
             dst.kind = src.kind;
             dst.tag.clone_from(&src.tag);
             dst.value.clone_from(&src.value);
