@@ -159,6 +159,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
 - Whole-file v8 YAML saves preserve the replacement document's trailing comments, including a dashboard edit that only adds a final comment.
 - Dashboard config saves use the loaded config ETag as `If-Match` on v8 writes, refusing concurrent changes with a reload action and an unsaved-edit warning. Older endpoints without ETags remain usable.
+- **Pressing Escape no longer hides a confirmation while its action is still running.** This includes deleting a credential.
 
 ## [0.0.4] - 2026-10-24
 
