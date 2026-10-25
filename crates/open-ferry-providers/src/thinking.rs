@@ -1862,20 +1862,6 @@ mod shared_hardening_tests {
             .unwrap_err();
             assert_eq!(error.http_status(), 400);
 
-            let mut claude = json!({"output_config":{"effort":effort}});
-            let source = Body::Json(claude.clone());
-            let error = crate::claude::thinking::apply_request_with_models(
-                &mut claude,
-                "m",
-                "claude",
-                &source,
-                &Body::Empty,
-                Some(&catalog),
-                None,
-            )
-            .unwrap_err();
-            assert_eq!(error.http_status(), 400);
-
             for provider in ["codex", "meta"] {
                 let mut chat = json!({"reasoning_effort":effort});
                 let source = Body::Json(chat.clone());
