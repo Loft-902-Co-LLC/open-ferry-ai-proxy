@@ -131,6 +131,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Record token counts for native Vertex AI Interactions calls**, streamed or not, retaining observed counts on cancellation and the `vertex` provider name.
 - **Guardian reviews can inherit their parent's credential across model scopes**, including mixed-provider routes, when the parent's newest live selection among real providers available to the review is eligible; child bindings and session-affinity settings retain precedence.
 - **Preserve parent selection order** across result refreshes and transient failover without extending parent TTL during guardian lookups.
+- **The Client API keys card says client keys go under `access.api-keys`,** where current config files keep them. It used to point to the top-level `api-keys`, which older files use for client keys and current files use for provider keys.
 - **Drop blank text sent to Claude** and keep dropped-part cache markers on the preceding surviving block without changing TTL order; Responses item markers are dropped when the final block cannot host them.
 - **Preserve explicit `parallel_tool_calls: false`** in Chat Completions and Responses requests sent to Codex.
 - **Honor standalone Claude `output_config.effort`** across thinking targets while retaining native defaults and final payload overrides.
