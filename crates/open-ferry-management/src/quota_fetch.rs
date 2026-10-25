@@ -618,6 +618,15 @@ fn official_source(
     {
         return false;
     }
+    // Beside the bearer, the probe may carry no other header that could name
+    // an identity (`X-Api-Key`, a cookie, a token): with two present, which
+    // one the endpoint reads is not provable.
+    if headers.into_iter().flatten().any(|(name, value)| {
+        !equal_fold(name, "authorization")
+            && overrides_authentication(&format!("header:{name}"), value.as_str().unwrap_or("$"))
+    }) {
+        return false;
+    }
     let mut bearers = headers
         .into_iter()
         .flatten()

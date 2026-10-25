@@ -709,6 +709,42 @@ async fn an_authentication_header_override_never_ends_a_cooldown() {
     }
 }
 
+// The probe's own extra headers are sent with the bearer: an `X-Api-Key` or
+// a cookie beside it leaves open which identity the endpoint reads, so the
+// read is shown and ends nothing. The display fetch itself still works.
+#[tokio::test]
+async fn a_second_authentication_header_on_the_probe_never_ends_a_cooldown() {
+    for (name, value) in [
+        ("X-Api-Key", "another-key"),
+        ("x-api-key", "another-key"),
+        ("X-API-KEY", "another-key"),
+        ("Cookie", "session=another"),
+        ("cookie", "session=another"),
+        ("Proxy-Authorization", "Basic YW5vdGhlcg=="),
+        ("X-Auth-Token", "another-token"),
+        ("X-Source", "$X-Api-Key"),
+    ] {
+        let upstream = Upstream::start(|_, _| usage_response(&healthy_usage(), &[])).await;
+        let api = Api::new();
+        let mut auth = credential(ID, &upstream.url, true);
+        match auth.metadata.get_mut("quota_probe") {
+            Some(Value::Object(probe)) => match probe.get_mut("header") {
+                Some(Value::Object(headers)) => {
+                    headers.insert(name.into(), json!(value));
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+        let index = api.register(auth);
+        api.manager
+            .mark_result(&credential_429(SONNET, weekly_headers(), SEVEN_DAYS));
+        let answer = fetch(&api, &index).await;
+        assert_eq!(answer.status, StatusCode::OK, "{name}: {}", answer.body);
+        assert!(blocked(&api), "{name:?} on the probe ended the cooldown");
+    }
+}
+
 // An unrelated custom header does not stop a recovery.
 #[tokio::test]
 async fn an_unrelated_custom_header_still_allows_a_recovery() {
