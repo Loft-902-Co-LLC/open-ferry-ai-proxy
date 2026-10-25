@@ -24,7 +24,7 @@ fn with_legacy<T>(operation: impl FnOnce() -> T) -> T {
 pub(super) fn legacy_analyze<'a>(schema: &'a Value, root: &'a Value) -> Info<'a> {
     legacy_analyze_depth(schema, root, 0, &mut BTreeSet::new())
 }
-fn legacy_analyze_depth<'a>(
+pub(super) fn legacy_analyze_depth<'a>(
     schema: &'a Value,
     root: &'a Value,
     depth: usize,
@@ -111,7 +111,7 @@ fn legacy_analyze_depth<'a>(
     info
 }
 
-fn snapshot(info: &Info<'_>) -> Value {
+pub(super) fn snapshot(info: &Info<'_>) -> Value {
     let properties: Vec<_> = info
         .properties
         .iter()
@@ -133,7 +133,7 @@ fn snapshot(info: &Info<'_>) -> Value {
         "complex":info.complex,"unsafe_complex":info.unsafe_complex,"object":info.object})
 }
 
-fn reference_graph(levels: usize, width: usize) -> Value {
+pub(super) fn reference_graph(levels: usize, width: usize) -> Value {
     let mut definitions = serde_json::Map::new();
     definitions.insert(
         "D0".into(),
@@ -146,6 +146,20 @@ fn reference_graph(levels: usize, width: usize) -> Value {
         definitions.insert(format!("D{level}"), json!({"allOf":branches}));
     }
     json!({"$ref":format!("#/$defs/D{levels}"),"$defs":definitions})
+}
+
+pub(super) fn cyclic_reference_graph(levels: usize, width: usize, kind: &str) -> Value {
+    let mut schema = reference_graph(levels, width);
+    match kind {
+        "self" => schema["$defs"]["D0"]["anyOf"] = json!([{"$ref":"#/$defs/D0"}]),
+        "mutual" => {
+            schema["$defs"]["D0"]["anyOf"] = json!([{"$ref":"#/$defs/M"}]);
+            schema["$defs"]["M"] = json!({"$ref":"#/$defs/D0"});
+        }
+        "deep" => schema["$defs"]["D3"]["anyOf"] = json!([{"$ref":"#/$defs/D3"}]),
+        _ => panic!("unknown cycle fixture"),
+    }
+    schema
 }
 
 #[test]
@@ -171,6 +185,70 @@ fn analysis_memo_cost_is_bounded_by_distinct_targets() {
             memo.targets.len()
         );
     }
+}
+
+#[test]
+fn analysis_memo_cyclic_cost_is_bounded_by_distinct_targets() {
+    for (levels, kind, expected) in [
+        (6, "self", 13),
+        (7, "self", 14),
+        (6, "mutual", 20),
+        (6, "deep", 13),
+        (7, "deep", 14),
+    ] {
+        let schema = cyclic_reference_graph(levels, 7, kind);
+        let mut memo = AnalysisMemo::default();
+        let info = analyze_depth_memo(
+            &schema,
+            &schema,
+            0,
+            &mut BTreeSet::new(),
+            &mut memo,
+            &mut AnalysisReferences::default(),
+        );
+        assert!(info.complex && info.object && info.forbids);
+        assert_eq!(info.properties.keys().collect::<Vec<_>>(), [&"p"]);
+        assert_eq!(
+            memo.target_analyses, expected,
+            "levels={levels} kind={kind}"
+        );
+        let targets = schema["$defs"].as_object().unwrap().len();
+        assert!(memo.target_analyses <= 3 * targets);
+        assert!(memo.targets.len() <= targets);
+        eprintln!(
+            "levels={levels} kind={kind} target_analyses={} distinct_targets={targets}",
+            memo.target_analyses
+        );
+    }
+}
+
+#[test]
+fn analysis_memo_cache_hits_propagate_followed_references() {
+    let schema = json!({"x":{"allOf":[{"allOf":[{"$ref":"#/y"}]},{"$ref":"#/t"}]},
+        "t":{"$ref":"#/y"},"y":{"$ref":"#/z"},
+        "z":{"type":"object","properties":{"z":{}}}});
+    let mut memo = AnalysisMemo::default();
+    memo.resolve(
+        &schema["x"],
+        &schema,
+        0,
+        &mut BTreeSet::new(),
+        &mut AnalysisReferences::default(),
+    );
+    let mut visited = BTreeSet::from(["#/z".to_owned()]);
+    let expected = legacy_analyze_depth(&schema["t"], &schema, 2, &mut visited.clone());
+    let actual = memo.resolve(
+        &schema["t"],
+        &schema,
+        2,
+        &mut visited,
+        &mut AnalysisReferences::default(),
+    );
+    assert!(expected.complex);
+    assert_eq!(
+        snapshot(&actual).to_string(),
+        snapshot(&expected).to_string()
+    );
 }
 
 #[test]
@@ -217,16 +295,16 @@ fn analysis_memo_keeps_depth_and_cycle_contexts_separate() {
                 depths
                     .iter()
                     .flatten()
-                    .all(|entry| !entry.references.cyclic)
+                    .all(|entry| entry.references.cut.is_subset(&entry.references.followed))
             );
         }
     }
 }
 
-struct Generator(u64);
+pub(super) struct Generator(pub(super) u64);
 
 impl Generator {
-    fn next(&mut self, bound: usize) -> usize {
+    pub(super) fn next(&mut self, bound: usize) -> usize {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
         (self.0 >> 32) as usize % bound
     }
@@ -241,6 +319,14 @@ impl Generator {
     }
 
     fn schema(&mut self, case: usize) -> Value {
+        if case.is_multiple_of(4) {
+            let levels = 2 + self.next(3);
+            let mut schema = reference_graph(levels, 2 + self.next(2));
+            let cycle = if case.is_multiple_of(8) { 0 } else { 1 };
+            schema["$defs"][format!("D{cycle}")]["anyOf"] =
+                json!([{"$ref":format!("#/$defs/D{cycle}")}]);
+            return schema;
+        }
         let count = 2 + self.next(4);
         let mut defs = serde_json::Map::new();
         for index in 0..count {
@@ -326,6 +412,75 @@ impl Generator {
             }
         }
         schema
+    }
+
+    pub(super) fn spelling(&mut self, count: usize) -> String {
+        let index = self.next(count);
+        match self.next(8) {
+            0 => format!("#/x-d/{index}"),
+            1 => format!("#/x-d/0{index}"),
+            2 => format!("#/x-d/+{index}"),
+            3 if index == 0 => "#/x-d/-0".into(),
+            3 => format!("#/x-d/00{index}"),
+            4 => format!("#/x-k/a~0{index}"),
+            5 => format!("#/x-k/a~{index}"),
+            6 => "#/$defs/missing".into(),
+            _ => "https://example.invalid/schema".into(),
+        }
+    }
+
+    fn wide_node(&mut self, count: usize, depth: usize) -> Value {
+        let mut schema = json!({});
+        if self.next(2) == 0 {
+            schema["type"] = json!("object");
+        }
+        if self.next(2) == 0 {
+            schema["$ref"] = json!(self.spelling(count));
+        }
+        if depth > 0 && self.next(3) == 0 {
+            let branches: Vec<_> = (0..1 + self.next(2))
+                .map(|_| self.wide_node(count, depth - 1))
+                .collect();
+            schema["allOf"] = json!(branches);
+        }
+        if depth > 0 && self.next(4) == 0 {
+            let mut branches: Vec<_> = (0..1 + self.next(2))
+                .map(|_| self.wide_node(count, depth - 1))
+                .collect();
+            if self.next(3) == 0 {
+                branches.push(json!({"type":"null"}));
+            }
+            let keyword = if self.next(2) == 0 { "anyOf" } else { "oneOf" };
+            schema[keyword] = json!(branches);
+        }
+        let name = ["p", "reason", "_", "a"][self.next(4)];
+        if self.next(2) == 0 {
+            schema["properties"] = json!({name:{"type":"string"}});
+        }
+        if self.next(3) == 0 {
+            schema["additionalProperties"] = json!(self.next(2) == 0);
+        }
+        if self.next(3) == 0 {
+            schema["required"] = json!([name]);
+        }
+        if self.next(3) == 0 {
+            schema["items"] = json!({"type":"object","properties":{name:{}}});
+        }
+        if self.next(32) == 0 {
+            schema["enum"] = json!([1]);
+        }
+        schema
+    }
+
+    pub(super) fn wide_schema(&mut self) -> Value {
+        let count = 2 + self.next(5);
+        let definitions: Vec<_> = (0..count).map(|_| self.wide_node(count, 1)).collect();
+        let aliases: serde_json::Map<_, _> = definitions
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (format!("a~{index}"), value.clone()))
+            .collect();
+        json!({"x-d":definitions,"x-k":aliases,"$ref":self.spelling(count)})
     }
 }
 
