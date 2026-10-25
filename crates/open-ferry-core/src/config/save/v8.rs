@@ -281,7 +281,20 @@ pub(crate) fn normalize_config_layout(
     let (doc, changed) = normalize_config_layout_doc(data, migrate)?;
     Ok((
         if changed {
-            marshal(&doc)?
+            let emitted = marshal(&doc)?;
+            // Keep the established normalization of other YAML line breaks.
+            // The source-aware physical-line repair has the same scope.
+            let text = String::from_utf8_lossy(data);
+            if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+                || data
+                    .iter()
+                    .enumerate()
+                    .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
+            {
+                emitted
+            } else {
+                super::tree::source_flow_item_heads(&doc, emitted)
+            }
         } else {
             data.to_vec()
         },
