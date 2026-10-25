@@ -428,18 +428,50 @@ fn writer_r2_nonboundary_and_excluded_model_saves_keep_main_bytes() {
 }
 
 #[test]
-fn writer_r2_quoted_scalar_probes_keep_main_refusals() {
-    let golden = main_rows();
-    for row in golden
+fn writer_r2_quoted_scalar_probes_keep_main_or_source_owners() {
+    for row in main_rows()
         .into_iter()
         .filter(|r| ["f1", "f1b"].contains(&r["case"].as_str().unwrap()))
     {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
+        let source = source(case);
+        let result = op_run(&source, op, true);
+        if !["nested", "nested2", "raw", "raw2"].contains(&op) {
+            assert_eq!(receipt(&result), row["normal"], "{case} {op}");
+            continue;
+        }
+        // The loader now accepts these writes. Preserve their source owners
+        // and values rather than requiring the old parser's refusal.
+        assert!(
+            !result["refused"].as_bool().unwrap_or(false),
+            "{case} {op} refuses"
+        );
         assert_eq!(
-            receipt(&op_run(&source(case), op, true)),
-            row["normal"],
-            "{case} {op}"
+            result["files"].as_array().unwrap().len(),
+            if op.ends_with('2') { 2 } else { 1 }
+        );
+        for (i, file) in result["files"].as_array().unwrap().iter().enumerate() {
+            let output = file.as_str().unwrap();
+            assert!(
+                inventory(output) == inventory(&source),
+                "{case} {op} moved a comment"
+            );
+            let mut expected = Config::parse(&source).unwrap();
+            if op.starts_with("nested") {
+                expected.auth_dir = if i > 0 { "/y" } else { "/x" }.into();
+            }
+            assert!(
+                config_values(&Config::parse(output).unwrap()) == config_values(&expected),
+                "{case} {op} changed a value"
+            );
+        }
+        let repeat = op_run(&source, &format!("{}2", op.trim_end_matches('2')), false);
+        assert!(
+            !repeat["refused"].as_bool().unwrap_or(false)
+                && repeat["files"].as_array().unwrap().len() == 2
+                && repeat["files"][0] == repeat["files"][1],
+            "{case} {op} did not settle"
         );
     }
 }
