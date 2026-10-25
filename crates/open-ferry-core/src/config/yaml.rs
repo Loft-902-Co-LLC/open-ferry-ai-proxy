@@ -855,6 +855,21 @@ fn uses_writer_parser(text: &str) -> bool {
     text.contains(['\u{0085}', '\u{2028}', '\u{2029}']) || text.starts_with("\u{feff}\u{feff}")
 }
 
+fn writer_document(text: &str) -> Result<Option<Node>, YamlError> {
+    let node = yaml3::compose::unmarshal(text.as_bytes()).map_err(|error| {
+        if error.message() == "yaml: document contains excessive aliasing" {
+            YamlError::Fatal(EXCESSIVE_ALIASING.into())
+        } else {
+            YamlError::Syntax(error.message().to_owned())
+        }
+    })?;
+    if node.kind == yaml3::Kind::Zero {
+        Ok(None)
+    } else {
+        from_writer_node(&node).map(Some)
+    }
+}
+
 /// Reads the first YAML document; `None` when there is none.
 pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
     // saphyr would stop at a NUL and read what came before as the whole
@@ -865,25 +880,22 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
         ));
     }
     if uses_writer_parser(text) {
-        let node = yaml3::compose::unmarshal(text.as_bytes()).map_err(|error| {
-            if error.message() == "yaml: document contains excessive aliasing" {
-                YamlError::Fatal(EXCESSIVE_ALIASING.into())
-            } else {
-                YamlError::Syntax(error.message().to_owned())
-            }
-        })?;
-        return if node.kind == yaml3::Kind::Zero {
-            Ok(None)
-        } else {
-            from_writer_node(&node).map(Some)
-        };
+        return writer_document(text);
     }
+    let original = text;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut aliases = HashSet::new();
     let error = match read_document(text, &mut aliases) {
         Ok(root) => return Ok(root),
         Err(error) => error,
     };
+    // ScanError exposes only a marker and its information string, no error
+    // code for this refusal. Keep the original refusal if yaml.v3 also fails.
+    if matches!(&error, YamlError::Syntax(message) if message.ends_with(": invalid indentation in quoted scalar"))
+        && let Ok(root) = writer_document(original)
+    {
+        return Ok(root);
+    }
     // An alias used as a key with the `:` right after its name: saphyr
     // takes the `:` as part of the name, where yaml.v3 ends the name before
     // it and reads it as the key's `:`, which may have space before it.
@@ -923,21 +935,9 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
 /// whether one follows can't be told.
 pub(crate) fn has_more_documents(text: &str) -> bool {
     if uses_writer_parser(text) {
-        use yaml3::types::EventType;
-        let mut parser = yaml3::parser::Parser::new(text.as_bytes());
-        let mut started = false;
-        loop {
-            match parser.parse() {
-                Ok(event) => match event.typ {
-                    EventType::DocumentStart if started => return true,
-                    EventType::DocumentStart => started = true,
-                    EventType::StreamEnd => return false,
-                    _ => {}
-                },
-                Err(_) => return true,
-            }
-        }
+        return writer_has_more_documents(text);
     }
+    let original = text;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut started = false;
     for item in Parser::new_from_str(text) {
@@ -946,10 +946,30 @@ pub(crate) fn has_more_documents(text: &str) -> bool {
             Ok((Event::DocumentStart(_), _)) => started = true,
             Ok((Event::StreamEnd, _)) => return false,
             Ok(_) => {}
+            Err(error) if error.info() == "invalid indentation in quoted scalar" => {
+                return writer_document(original).is_err() || writer_has_more_documents(original);
+            }
             Err(_) => return true,
         }
     }
     false
+}
+
+fn writer_has_more_documents(text: &str) -> bool {
+    use yaml3::types::EventType;
+    let mut parser = yaml3::parser::Parser::new(text.as_bytes());
+    let mut started = false;
+    loop {
+        match parser.parse() {
+            Ok(event) => match event.typ {
+                EventType::DocumentStart if started => return true,
+                EventType::DocumentStart => started = true,
+                EventType::StreamEnd => return false,
+                _ => {}
+            },
+            Err(_) => return true,
+        }
+    }
 }
 
 /// Reads the first document of `text`, noting the character index of each
