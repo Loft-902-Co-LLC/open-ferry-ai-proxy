@@ -5184,6 +5184,32 @@ fn auth_directory_trust_and_aliases_are_checked_at_install() {
         .unwrap_err();
         assert!(error.contains("Refusing the auth directory"), "{error}");
     }
+    // A refused default directory isn't suggested in its own place.
+    for auth in [
+        r"C:\ProgramData\open-ferry\auth",
+        r"c:\programdata\open-ferry\AUTH",
+    ] {
+        let (mut fake, context) = windows_admin(PROGRAM_FILES_EXE);
+        fake = fake
+            .file(PROGRAM_FILES_CONFIG, &format!("auth-dir: '{auth}'\n"))
+            .dir(auth);
+        fake.untrusted.insert(auth.to_owned());
+        let error = execute_with(
+            &mut fake,
+            &context,
+            &[
+                "install",
+                "-system",
+                "-dry-run",
+                "-config",
+                PROGRAM_FILES_CONFIG,
+            ],
+        )
+        .0
+        .unwrap_err();
+        assert!(error.contains("Refusing the auth directory"), "{error}");
+        assert!(!error.contains("set auth-dir"), "{error}");
+    }
 }
 
 #[test]
