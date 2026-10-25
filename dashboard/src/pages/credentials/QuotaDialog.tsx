@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Gauge } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { callProblem } from "../../api/access";
 import { AUTH_FILES, QUOTA_FETCH, type Credential, type QuotaAnswer } from "../../api/credentials";
@@ -87,68 +87,102 @@ export function quotaCooldownConflict(credential: Credential, quota: QuotaAnswer
   );
 }
 
-/** A button that asks the provider for a credential's quota, and shows it. */
-export function QuotaButton({ credential, name }: { credential: Credential; name: string }) {
+/** The row only launches the quota read; the list owns its dialog across row moves. */
+export function QuotaButton({ name, disabled, checking, onClick }: {
+  name: string;
+  disabled: boolean;
+  checking: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button size="sm" disabled={disabled} onClick={onClick}>
+      {checking ? <Spinner /> : <Gauge aria-hidden="true" className="size-4" />}
+      Check quota <span className="sr-only">of {name}</span>
+    </Button>
+  );
+}
+
+/** Keep the quota answer visible even when reconciliation moves or removes its row. */
+export function useQuotaDialog(credentials: readonly Credential[], onLostOpener: () => void) {
   const call = useApiCall();
   const client = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (target === null && opener.current !== null) {
+      const previous = opener.current;
+      opener.current = null;
+      // A recovered row can move into the hidden ready group while the dialog stays open.
+      if (!previous.isConnected || previous.closest("[hidden]") !== null || previous.matches(":disabled")) {
+        onLostOpener();
+      }
+    }
+  }, [target, onLostOpener]);
   const fetchQuota = useMutation({
-    mutationFn: () =>
-      call<QuotaAnswer>(QUOTA_FETCH, {
+    mutationFn: async (credential: Credential) => {
+      const quota = await call<QuotaAnswer>(QUOTA_FETCH, {
         method: "POST",
         json: { auth_index: credential.auth_index },
-      }),
-    // Wait for reconciliation before comparing fresh capacity with cached cooldowns.
-    onSuccess: () => client.invalidateQueries({ queryKey: [AUTH_FILES] }),
+      });
+      // Keep reload success with this answer, including when another read supersedes it.
+      let reloadFailed = false;
+      try {
+        await client.invalidateQueries({ queryKey: [AUTH_FILES] }, { throwOnError: true });
+      } catch {
+        reloadFailed = true;
+      }
+      return { quota, reloadFailed };
+    },
   });
-  return (
-    <>
-      <Button
-        size="sm"
-        disabled={fetchQuota.isPending}
-        onClick={() => {
-          setOpen(true);
-          fetchQuota.mutate();
-        }}
-      >
-        {fetchQuota.isPending ? <Spinner /> : <Gauge aria-hidden="true" className="size-4" />}
-        Check quota <span className="sr-only">of {name}</span>
-      </Button>
-      <Dialog
-        open={open}
-        title={`Quota of ${name}`}
-        onClose={() => {
-          setOpen(false);
-        }}
-        footer={
-          <Button
-            data-autofocus
-            onClick={() => {
-              setOpen(false);
-            }}
-          >
-            Close
-          </Button>
-        }
-      >
-        {fetchQuota.isPending && <Loading>Asking the provider…</Loading>}
-        {fetchQuota.isError && <ProblemNotice problem={callProblem(fetchQuota.error)} live />}
-        {fetchQuota.isSuccess && (
-          <>
-            <QuotaView quota={fetchQuota.data} />
-            {quotaCooldownConflict(credential, fetchQuota.data) && (
-              <Alert tone="warn" title="Proxy quota cooldown still cached">
-                <p>
-                  The quota check reports available capacity, but a proxy quota cooldown is still
-                  cached. The read may not confirm the limit that caused it. Clear proxy cooldown
-                  only if you have confirmed the affected limit has reset.
-                </p>
-                <p>Unknown or model-specific limits may not be included in this read.</p>
-              </Alert>
-            )}
-          </>
-        )}
-      </Dialog>
-    </>
+  const current = credentials.find((credential) => credential.id === target?.id);
+  const dialog = (
+    <Dialog
+      open={target !== null}
+      title={`Quota of ${target?.name ?? "credential"}`}
+      onClose={() => { setTarget(null); }}
+      footer={
+        <Button data-autofocus onClick={() => { setTarget(null); }}>
+          Close
+        </Button>
+      }
+    >
+      {fetchQuota.isPending && <Loading>Asking the provider…</Loading>}
+      {fetchQuota.isError && <ProblemNotice problem={callProblem(fetchQuota.error)} live />}
+      {fetchQuota.isSuccess && (
+        <>
+          <QuotaView quota={fetchQuota.data.quota} />
+          {fetchQuota.data.reloadFailed ? (
+            <Alert tone="warn" live title="Routing state could not be reloaded">
+              <p>
+                The quota check succeeded, but the proxy routing state could not be reloaded.
+                The cooldown shown on the page may be out of date. Reload the credentials before
+                deciding whether to clear the proxy cooldown.
+              </p>
+            </Alert>
+          ) : current !== undefined && quotaCooldownConflict(current, fetchQuota.data.quota) && (
+            <Alert tone="warn" live title="Proxy quota cooldown still cached">
+              <p>
+                The quota check reports available capacity, but a proxy quota cooldown is still
+                cached. The read may not confirm the limit that caused it. Clear proxy cooldown
+                only if you have confirmed the affected limit has reset.
+              </p>
+              <p>Unknown or model-specific limits may not be included in this read.</p>
+            </Alert>
+          )}
+        </>
+      )}
+    </Dialog>
   );
+  return {
+    dialog,
+    pending: fetchQuota.isPending,
+    checkingId: fetchQuota.isPending ? fetchQuota.variables.id : null,
+    openQuota: (credential: Credential, name: string) => {
+      // Quota probes are serialized, even if their dialog was closed mid-read.
+      if (fetchQuota.isPending) return;
+      opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setTarget({ id: credential.id, name });
+      fetchQuota.mutate(credential);
+    },
+  };
 }

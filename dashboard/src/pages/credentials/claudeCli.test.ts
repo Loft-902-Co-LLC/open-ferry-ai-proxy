@@ -6,9 +6,9 @@ import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
 import { credentialHealth } from "./credentialStates";
 
 const CHECK_SIGN_IN =
-  "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then stop it resting.";
+  "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then use Clear proxy cooldown.";
 const CHECK_SIGN_IN_FAILING =
-  "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then try it again now.";
+  "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then use Clear proxy cooldown.";
 
 describe("a claude-cli entry's health", () => {
   it("is off when config.yaml turns it off, and not loaded without a credential", () => {

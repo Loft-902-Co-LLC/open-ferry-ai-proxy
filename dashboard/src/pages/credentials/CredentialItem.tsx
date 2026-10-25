@@ -369,6 +369,10 @@ export interface CredentialItemProps {
    * credential may move in the list, or leave it, while the sign-in runs.
    */
   onBind: () => void;
+  /** Open the quota dialog owned by the stable list. */
+  onQuota: () => void;
+  quotaPending: boolean;
+  quotaChecking: boolean;
 }
 
 /** One credential: its health, why, what to do, and its actions. */
@@ -381,6 +385,9 @@ export function CredentialItem({
   readAt,
   onDone,
   onBind,
+  onQuota,
+  quotaPending,
+  quotaChecking,
 }: CredentialItemProps) {
   const titleId = useId();
   const detailsId = useId();
@@ -538,7 +545,14 @@ export function CredentialItem({
               {itemName}
             </Button>
           )}
-          {credential.supports_quota === true && <QuotaButton credential={credential} name={name} />}
+          {credential.supports_quota === true && (
+            <QuotaButton
+              name={name}
+              disabled={quotaPending}
+              checking={quotaChecking}
+              onClick={onQuota}
+            />
+          )}
           {canBind(credential) && (
             <Button
               size="sm"
