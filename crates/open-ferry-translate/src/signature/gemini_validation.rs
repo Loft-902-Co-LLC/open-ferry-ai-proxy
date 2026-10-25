@@ -23,7 +23,7 @@ use super::gemini_sanitize::{has_normalized_part_thought_signature, part_thought
 use super::{Error, claude_validation::is_canonical_uuid, is_valid_claude_cais_signature};
 use crate::go::base64::{RAW_STD, STD};
 use crate::go::{self, quote};
-use crate::json::{self, str_of};
+use crate::json::{self, bool_of, str_of};
 use crate::protowire::{
     self, BYTES_TYPE, FIXED32_TYPE, FIXED64_TYPE, VARINT_TYPE, consume_bytes, consume_tag,
 };
@@ -162,9 +162,9 @@ pub fn inspect_gemini_thought_signature(
 }
 
 /// `ValidateGeminiThoughtSignatures`: checks the `thoughtSignature` fields of a
-/// Gemini request. The first `functionCall` of each model turn needs a valid
-/// signature or the bypass sentinel. Later parallel calls may be unsigned, but
-/// a signature they carry must be valid.
+/// Gemini request. The first `functionCall` in each parallel group of a model
+/// turn needs a valid signature or the bypass sentinel. Non-thought parts end
+/// a group. Later siblings may be unsigned; signatures they carry must be valid.
 pub fn validate_gemini_thought_signatures(
     payload: &Value,
     opt: GeminiValidationOptions,
@@ -185,8 +185,8 @@ pub fn validate_gemini_thought_signatures(
             let has_function_call = part.get("functionCall").is_some();
             let is_first_function_call =
                 is_model_turn && has_function_call && !first_function_call_seen;
-            if is_model_turn && has_function_call {
-                first_function_call_seen = true;
+            if is_model_turn && (has_function_call || !part.get("thought").is_some_and(bool_of)) {
+                first_function_call_seen = has_function_call;
             }
             let signature = part_thought_signature(part);
             if !has_function_call && signature.is_none() {
