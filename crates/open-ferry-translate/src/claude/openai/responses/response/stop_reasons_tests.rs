@@ -266,12 +266,10 @@ fn paused_search_round_trip_continuation_and_second_pause() {
 }
 
 #[test]
-fn search_replay_never_coalesces_across_user_or_tool_output_boundaries() {
+fn search_replay_never_coalesces_across_user_turns() {
     for boundary in [
         json!({"role":"user","content":"Again"}),
-        json!({"type":"function_call_output","call_id":"x","output":"Done"}),
-        json!({"type":"custom_tool_call_output","call_id":"x","output":"Done"}),
-        json!({"type":"tool_search_output","call_id":"x","tools":[]}),
+        json!({"type":"message","role":"user","content":"Again"}),
     ] {
         let first = paused("srvtoolu_a", "query a");
         let completed = continuation("srvtoolu_a", "end_turn", None);
@@ -464,6 +462,67 @@ fn context_window_preserves_tools_and_marks_only_unfinished_output_incomplete() 
             assert_eq!(output[1]["content"][0]["text"], "Partial answer");
             assert_eq!(response["usage"]["input_tokens"], 10);
             assert_eq!(response["usage"]["output_tokens"], 4);
+        }
+    }
+}
+
+#[test]
+fn deferred_search_replays_and_coalesces_across_tool_outputs() {
+    for reason in ["tool_use", " TOOL_USE "] {
+        let (events, complete) = translate(&native(
+            json!([
+                {"type":"server_tool_use","id":"srvtoolu_deferred","name":"web_search","input":{"query":"deferred query"}},
+                {"type":"tool_use","id":"toolu_exec","name":"exec","input":{"cmd":"uname"}}
+            ]),
+            reason,
+        ));
+        let continued = continuation("srvtoolu_deferred", "end_turn", None);
+        for response in [&terminal(&events)["response"], &complete] {
+            assert_eq!(response["output"][0]["status"], "in_progress");
+            assert!(response["output"][0].get("results").is_none());
+            assert_eq!(response["output"][1]["call_id"], "toolu_exec");
+            for output in [
+                json!({"type":"function_call_output","call_id":"toolu_exec","output":"Linux"}),
+                json!({"type":"custom_tool_call_output","call_id":"toolu_exec","output":"Linux"}),
+                json!({"type":"tool_search_output","call_id":"toolu_exec","tools":[]}),
+            ] {
+                for compat in [false, true] {
+                    let mut req = history(&[response.clone(), json!({"output":[output]})]);
+                    let out = request("claude-test", &req, compat);
+                    let blocks = assistant_blocks(&out);
+                    let types: Vec<_> = blocks
+                        .iter()
+                        .map(|block| block["type"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(types, ["server_tool_use", "tool_use"], "{out}");
+                    req["input"]
+                        .as_array_mut()
+                        .unwrap()
+                        .extend(continued["output"].as_array().unwrap().iter().cloned());
+                    req["input"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"user","content":"thanks"}));
+                    let out = request("claude-test", &req, compat);
+                    let blocks = assistant_blocks(&out);
+                    let uses: Vec<_> = blocks
+                        .iter()
+                        .filter(|b| b["type"] == "server_tool_use")
+                        .collect();
+                    assert_eq!(uses.len(), 1, "{out}");
+                    assert_eq!(uses[0]["input"]["query"], "deferred query");
+                    let results: Vec<_> = blocks
+                        .iter()
+                        .filter(|b| b["type"] == "web_search_tool_result")
+                        .collect();
+                    assert_eq!(results.len(), 1, "{out}");
+                    assert_eq!(
+                        results[0]["content"][0]["encrypted_content"],
+                        "dummy-result"
+                    );
+                    assert_eq!(blocks.iter().filter(|b| b["type"] == "tool_use").count(), 1);
+                }
+            }
         }
     }
 }
