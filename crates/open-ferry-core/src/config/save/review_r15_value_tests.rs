@@ -175,6 +175,7 @@ fn review_r15_existing_blocks_keep_their_values_or_stay_unchanged() {
     for source in [
         "api-keys:\n  - |2-\n          x\n    \u{2028}\n",
         "config-version: 8\naccess:\n  api-keys:\n    - |2-\n            x\n      \u{2028}\n",
+        "api-keys: [\"   x\\n\"]\n",
     ] {
         for op in ["settings", "migrate", "put"] {
             let dir = TempDir::new();
