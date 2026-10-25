@@ -38,6 +38,7 @@ struct Case {
     split_usage: bool,
     read_error: bool,
     failed: bool,
+    no_content: bool,
 }
 
 impl Case {
@@ -47,6 +48,12 @@ impl Case {
             "candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]}}],
             "traceId": format!("terminal-disconnect-{}", self.name),
         });
+        if self.no_content {
+            chunk["candidates"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("content");
+        }
         if !self.finish.is_empty() {
             chunk["candidates"][0]["finishReason"] = self.finish.into();
         }
@@ -73,6 +80,7 @@ async fn terminal_disconnect_usage() {
         split_usage: false,
         read_error: false,
         failed: false,
+        no_content: false,
     };
     for provider in PROVIDERS {
         for model in ["claude-opus-4-6", "gemini-3.8-flash-high"] {
@@ -207,6 +215,48 @@ async fn terminal_disconnect_usage() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+#[tokio::test]
+async fn no_content_terminal_delivery_and_disconnect_usage() {
+    for provider in PROVIDERS {
+        for finish in [
+            "STOP",
+            "MAX_TOKENS",
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "PROHIBITED_CONTENT",
+            "SPII",
+            "IMAGE_SAFETY",
+            "MALFORMED_RESPONSE",
+            "MALFORMED_FUNCTION_CALL",
+        ] {
+            let case = Case {
+                name: "no_content_eof",
+                finish,
+                cancel_on: "",
+                split_usage: true,
+                read_error: false,
+                failed: false,
+                no_content: true,
+            };
+            run(provider, "gemini-2.5-flash", &Format::GEMINI, case).await;
+            run(provider, "gemini-2.5-flash", &Format::OPENAI_RESPONSE, case).await;
+            run(
+                provider,
+                "gemini-2.5-flash",
+                &Format::GEMINI,
+                Case {
+                    name: "no_content_terminal_cancel",
+                    cancel_on: "finishReason",
+                    split_usage: false,
+                    ..case
+                },
+            )
+            .await;
+        }
+    }
 }
 
 async fn check(
