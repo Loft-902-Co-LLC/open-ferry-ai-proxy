@@ -73,6 +73,8 @@ pub(crate) struct Record {
     pub(crate) reasoning_effort: String,
     /// The service tier the client asked for.
     pub(crate) service_tier: String,
+    /// The tier in the final outbound request, or empty.
+    pub(crate) effective_service_tier: String,
     /// The model the answer said it served, or empty.
     pub(crate) response_model: String,
     pub(crate) generate: bool,
@@ -347,6 +349,7 @@ impl Record {
         object.str_omitempty("session_id", &session_id);
         object.str("reasoning_effort", self.reasoning_effort.trim());
         object.str("service_tier", self.service_tier.trim());
+        object.str_omitempty("effective_service_tier", self.effective_service_tier.trim());
         object.str_omitempty("response_service_tier", detail.response_service_tier.trim());
         object.str_omitempty("response_model", self.response_model.trim());
         object.finish()

@@ -115,8 +115,8 @@
 //!   attempt's upstream format selects Vertex's parser, preserving its
 //!   `vertex` provider name; its Gemini bridge uses the Gemini parser.
 //!   Calls delegated to the Gemini executor are recorded as `gemini`'s.
-//! - `reasoning_effort` is always empty: upstream reads it from the
-//!   translated request, which the tap doesn't see.
+//! - `reasoning_effort` remains empty. Only the service tier is read from
+//!   the final outbound request for usage metadata.
 //! - A failure's body is the error's text, scrubbed of every secret the
 //!   attempts sent, the credential's own keys and tokens (also for a call
 //!   that failed before it sent anything) and the client's key, each
@@ -713,11 +713,33 @@ fn image_generation_tool_model(body: &[u8]) -> String {
         .unwrap_or_else(|| DEFAULT_IMAGE_TOOL_MODEL.to_owned())
 }
 
+/// The tier in the final outbound payload, after translation and payload
+/// rules (upstream's `extractEffectiveServiceTier`).
+fn effective_service_tier(payload: &[u8]) -> String {
+    if payload.is_empty() || !json::valid(payload) {
+        return String::new();
+    }
+    let doc = Doc::parse(payload);
+    [
+        "service_tier",
+        "request.service_tier",
+        "interaction.service_tier",
+    ]
+    .into_iter()
+    .map(|path| doc.get(path))
+    .filter(|node| node.is_string())
+    .map(|node| node.string().trim().to_owned())
+    .find(|tier| !tier.is_empty())
+    .unwrap_or_default()
+}
+
 /// The executor call being read.
 struct Call {
     mode: Mode,
     provider: String,
     model: String,
+    /// Only the tier is retained from the attempt's final request body.
+    effective_service_tier: String,
     executor_type: &'static str,
     credential: Credential,
     requested_at: DateTime<Utc>,
@@ -771,6 +793,7 @@ impl Call {
             mode,
             provider,
             model,
+            effective_service_tier: String::new(),
             executor_type,
             credential,
             requested_at: Utc::now(),
@@ -828,6 +851,7 @@ impl Call {
             && request.format.as_str() == Format::OPENAI_IMAGE.as_str();
         self.provider = request.provider.to_owned();
         self.model = request.model.to_owned();
+        self.effective_service_tier = effective_service_tier(request.body);
         self.executor_type = executor_type(request.provider, Some(request.kind));
         self.credential = Credential::of(request.auth, client_key);
         self.secrets.extend(request.secrets);
@@ -1461,6 +1485,7 @@ impl UsageTap {
             access_token_sha256: call.credential.access_token_sha256.clone(),
             auth_type: call.credential.auth_type.to_owned(),
             service_tier: self.shared.service_tier.clone(),
+            effective_service_tier: self.scrub(call.effective_service_tier.clone(), &call.secrets),
             response_model: self.scrub(call.response_model.get().to_owned(), &call.secrets),
             generate: self.shared.generate,
             stream: self.shared.stream,

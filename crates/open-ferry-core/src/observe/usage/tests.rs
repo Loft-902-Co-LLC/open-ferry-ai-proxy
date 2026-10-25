@@ -20,6 +20,7 @@ mod queue;
 mod response_model;
 mod response_model_multiprovider;
 mod responses_ttft_helpers;
+mod service_tier;
 mod stream_lifecycle;
 mod stream_response_model_observer;
 mod support;
