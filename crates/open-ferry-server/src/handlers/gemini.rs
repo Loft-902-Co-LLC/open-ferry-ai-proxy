@@ -243,10 +243,19 @@ fn gemini_map(model: &ModelInfo) -> Map<String, Value> {
             entry.insert(key.into(), value.clone().into());
         }
     }
-    for (key, value) in [
-        ("inputTokenLimit", model.input_token_limit),
-        ("outputTokenLimit", model.output_token_limit),
+    for (key, value, fallback) in [
+        (
+            "inputTokenLimit",
+            model.input_token_limit,
+            model.context_length,
+        ),
+        (
+            "outputTokenLimit",
+            model.output_token_limit,
+            model.max_completion_tokens,
+        ),
     ] {
+        let value = if value > 0 { value } else { fallback };
         if value > 0 {
             entry.insert(key.into(), value.into());
         }
