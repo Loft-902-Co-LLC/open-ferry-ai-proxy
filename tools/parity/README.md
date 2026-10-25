@@ -350,10 +350,7 @@ not a baselined comment-placement kind. A failed wrapper's successful prefix is
 `files.len() - 1` for `unloadable` (the last file failed reload), or `files.len()`
 for `error`. Go must also have failed, with its successful prefix no longer than
 the protected wrapper's; the same definition applies to both sides.
-The Unicode write guard's own exact
-message has a separate `rust-refusal/unicode-guard/<op>` kind, deliberately
-absent from the baseline. The portable wrapper has no guard-specific typed
-error or trace event, so this matcher requires the complete message shape.
+
 Comment-free Go oracle replies must have a valid wrapper and one snapshot per
 successful step, or a consistent error/unloadable boundary; malformed replies
 remain fatal as `comment_free_go_malformed`.

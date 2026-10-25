@@ -233,17 +233,8 @@ pub fn difference_kinds(
         && (!(go.get("error").is_some() || go.get("unloadable").is_some())
             || successful_prefix(go)? > successful_prefix(protected)?)
     {
-        // A Rust-only refusal is not a comment-placement limitation. Only the
-        // existing Unicode guard gets its own (deliberately unbaselined) kind.
-        if !protected["error"]
-            .as_str()
-            .is_some_and(unicode_guard_refusal)
-        {
-            return None;
-        }
-        let op = steps.get(protected["files"].as_array()?.len())?["op"].as_str()?;
-        return matches!(op, "save" | "nested" | "write")
-            .then(|| BTreeSet::from([format!("rust-refusal/unicode-guard/{op}")]));
+        // A Rust-only refusal is not a comment-placement limitation.
+        return None;
     }
     let mut kinds = BTreeSet::new();
     let mut add = |failure: &Value, prefix: &str| -> Option<()> {
@@ -320,50 +311,6 @@ pub fn difference_kinds(
         _ => return None,
     }
     (!kinds.is_empty()).then_some(kinds)
-}
-
-/// The portable wrapper has only text errors. `SaveErrorKind::Unwritable` is
-/// shared with other refusals and the trace has no guard-specific event, so
-/// recognize the complete guard message, never a substring or error prefix.
-fn unicode_guard_refusal(message: &str) -> bool {
-    let Some(message) = message.strip_suffix("; write refused, file unchanged") else {
-        return false;
-    };
-    let Some((location, separators)) = message
-        .rsplit_once(", is read differently by the saphyr loader and writer in input containing ")
-    else {
-        return false;
-    };
-    let Some(location) = location
-        .strip_prefix("config scalar at line ")
-        .or_else(|| location.strip_prefix("config value at line "))
-    else {
-        return false;
-    };
-    let Some((line, path)) = location.split_once(", path ") else {
-        return false;
-    };
-    if line.is_empty()
-        || !line.bytes().all(|b| b.is_ascii_digit())
-        || !line.parse::<usize>().is_ok_and(|n| n > 0)
-        || !path.starts_with('$')
-    {
-        return false;
-    }
-    let names = [
-        "U+2028 (LINE SEPARATOR)",
-        "U+2029 (PARAGRAPH SEPARATOR)",
-        "U+0085 (NEXT LINE)",
-    ];
-    (1..8).any(|mask| {
-        names
-            .iter()
-            .enumerate()
-            .filter_map(|(i, name)| (mask & (1 << i) != 0).then_some(*name))
-            .collect::<Vec<_>>()
-            .join(", ")
-            == separators
-    })
 }
 
 pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
