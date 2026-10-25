@@ -1040,9 +1040,9 @@ fn source_owner_destination_matches(
         }
         None
     }
-    fn at<'a>(doc: &'a Node, owner: &Owner) -> Option<&'a Node> {
+    fn at<'a>(doc: &'a Node, owner: &Owner) -> Option<(&'a Node, Option<&'a Node>)> {
         if owner.side == Side::Document {
-            return owner.path.is_empty().then_some(doc);
+            return owner.path.is_empty().then_some((doc, None));
         }
         let mut node = doc.content.first()?;
         let mut key_node = None;
@@ -1075,14 +1075,24 @@ fn source_owner_destination_matches(
             }
         }
         if owner.side == Side::Key {
-            key_node
+            Some((key_node?, Some(node)))
         } else {
-            Some(node)
+            Some((node, None))
         }
     }
-    at(source, original)
-        .and_then(|node| source_owner_signature(node, true))
-        .zip(at(go, destination).and_then(|node| source_owner_signature(node, true)))
+    fn signature(doc: &Node, owner: &Owner) -> Option<Value> {
+        let (node, value) = at(doc, owner)?;
+        let node = source_owner_signature(node, true)?;
+        Some(if let Some(value) = value {
+            // A key name alone cannot distinguish equal-named keys under
+            // different nodes. Keep its associated value in the comparison.
+            json!(["key-value", node, source_owner_signature(value, true)?])
+        } else {
+            node
+        })
+    }
+    signature(source, original)
+        .zip(signature(go, destination))
         .is_some_and(|(source, destination)| source == destination)
 }
 
@@ -1423,27 +1433,6 @@ pub fn retained_source_owner(
     let gc = counts(&g);
     let r_groups = groups(&r);
     let projected: Vec<_> = modeled.iter().map(|(c, _)| c.clone()).collect();
-    let source_owners = groups(&native_r) == groups(&r)
-        && modeled
-            .iter()
-            .zip(&bindings)
-            .all(|((item, tracked), (original, _, _, _))| {
-                rc.get(&item.text) == Some(&1)
-                    && r.iter()
-                        .any(|actual| actual.text == item.text && actual.owner == item.owner)
-                    && (!*tracked
-                        || source_owner_destination_matches(
-                            &source_doc,
-                            &go_doc,
-                            original,
-                            &item.owner,
-                        ))
-            })
-        && groups(&projected).iter().all(|(owner, wanted)| {
-            groups(&r)
-                .get(owner)
-                .is_some_and(|actual| subsequence(wanted, actual))
-        });
     let mut changed = false;
     let mut excused = BTreeSet::new();
     let go_owners = bindings
@@ -1466,6 +1455,28 @@ pub fn retained_source_owner(
         })
         && changed
         && frame["go_inventory"]["values"] == frame["marked_go_inventory"]["values"];
+    let source_owners = groups(&native_r) == groups(&r)
+        && modeled
+            .iter()
+            .zip(&bindings)
+            .all(|((item, tracked), (original, _, _, _))| {
+                rc.get(&item.text) == Some(&1)
+                    && r.iter()
+                        .any(|actual| actual.text == item.text && actual.owner == item.owner)
+                    && (!*tracked
+                        || !excused.contains(&item.text)
+                        || source_owner_destination_matches(
+                            &source_doc,
+                            &go_doc,
+                            original,
+                            &item.owner,
+                        ))
+            })
+        && groups(&projected).iter().all(|(owner, wanted)| {
+            groups(&r)
+                .get(owner)
+                .is_some_and(|actual| subsequence(wanted, actual))
+        });
     let values = source_owner_values(&go, protected)
         && frame["go_inventory"]["values"] == frame["protected_inventory"]["values"];
     let stable = crate::config::Config::load_bytes(protected.as_bytes()).is_ok()
@@ -1586,6 +1597,27 @@ mod tests {
         let proof = retained_source_owner(&source, third, &operation, &evidence);
         assert_eq!(proof.conditions, [false, true, true, true, true]);
         assert!(!proof.accepted(), "third-owner comment was certified");
+    }
+    #[test]
+    fn source_owner_key_destination_includes_its_value() {
+        let doc = unmarshal(b"a:\n  k: 1 # c\nb:\n  k: 2\n").unwrap();
+        let owner = |parent: &str| {
+            parse_owner(&json!({
+                "path":[{"key":parent,"tag":"!!str"},{"key":"k","tag":"!!str"}],
+                "node":"key","slot":"line"
+            }))
+            .unwrap()
+        };
+        assert!(source_owner_destination_matches(
+            &doc,
+            &doc,
+            &owner("a"),
+            &owner("a")
+        ));
+        assert!(
+            !source_owner_destination_matches(&doc, &doc, &owner("a"), &owner("b")),
+            "equal key names hid different destination values"
+        );
     }
     #[test]
     fn source_owner_destination_matches_the_real_go_node() {

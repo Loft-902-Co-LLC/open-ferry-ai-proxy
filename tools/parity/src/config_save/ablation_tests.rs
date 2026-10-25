@@ -20,7 +20,7 @@ fn case(fixture: &Value) -> Case {
 }
 
 fn subsets() -> Vec<Vec<Protection>> {
-    let mut masks: Vec<u16> = (1_u16..(1_u16 << ALL.len())).collect();
+    let mut masks: Vec<u8> = (1..=(u8::MAX >> (8 - ALL.len()))).collect();
     masks.sort_by_key(|mask| mask.count_ones());
     masks
         .into_iter()

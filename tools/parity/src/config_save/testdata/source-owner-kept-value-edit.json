@@ -1,0 +1,598 @@
+{
+  "case": "native-kept-comment-value-edit",
+  "provenance": {
+    "case": "r2-040-nested#0",
+    "go_pin": "0db19025571684b198a2ef508f99b41c717337e8",
+    "writer": "0138ba2ee30eb908a6aa971d8ecccdc73d4bf38f",
+    "repeat": "observed in the frozen writer replay"
+  },
+  "source": "# top\nauth-dir: /a # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b}\n    # f0\n\n    - {name: c, alias: d}\n    # f1\n\noauth-request-scoped-errors: {}\n",
+  "operation": {
+    "keys": [
+      "auth-dir"
+    ],
+    "op": "nested",
+    "value": "/x"
+  },
+  "protected": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n    # f0\n\n    - {name: c, alias: d,}\n    # f1\noauth-request-scoped-errors: {}\n",
+  "evidence": {
+    "archives": [],
+    "moves": [
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "auth-dir",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "head"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "auth-dir",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "head"
+        },
+        "text": "# top",
+        "via": "observed"
+      },
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "auth-dir",
+              "tag": "!!str"
+            }
+          ],
+          "node": "value",
+          "slot": "line"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "auth-dir",
+              "tag": "!!str"
+            }
+          ],
+          "node": "value",
+          "slot": "line"
+        },
+        "text": "# where",
+        "via": "observed"
+      },
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "proxy-url",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "head"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "proxy-url",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "head"
+        },
+        "text": "# proxy note",
+        "via": "observed"
+      },
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "oauth-model-alias",
+              "tag": "!!str"
+            },
+            {
+              "key": "antigravity",
+              "tag": "!!str"
+            },
+            {
+              "index": 0
+            }
+          ],
+          "node": "item",
+          "slot": "foot"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "oauth-model-alias",
+              "tag": "!!str"
+            },
+            {
+              "key": "antigravity",
+              "tag": "!!str"
+            },
+            {
+              "index": 0
+            }
+          ],
+          "node": "item",
+          "slot": "foot"
+        },
+        "text": "# f0",
+        "via": "observed"
+      },
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "oauth-model-alias",
+              "tag": "!!str"
+            },
+            {
+              "key": "antigravity",
+              "tag": "!!str"
+            },
+            {
+              "index": 1
+            }
+          ],
+          "node": "item",
+          "slot": "foot"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "oauth-model-alias",
+              "tag": "!!str"
+            },
+            {
+              "key": "antigravity",
+              "tag": "!!str"
+            },
+            {
+              "index": 1
+            }
+          ],
+          "node": "item",
+          "slot": "foot"
+        },
+        "text": "# f1",
+        "via": "observed"
+      }
+    ],
+    "operation": {
+      "keys": [
+        "auth-dir"
+      ],
+      "op": "nested",
+      "value": "/x"
+    },
+    "retained_source_owner": {
+      "go": {
+        "files": [
+          "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n# f0\n\n    - {name: c, alias: d,}\n# f1\noauth-request-scoped-errors: {}\n"
+        ]
+      },
+      "go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# top"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "value",
+              "slot": "line"
+            },
+            "text": "# where"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "proxy-url",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# proxy note"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-request-scoped-errors",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# f1"
+          }
+        ],
+        "source": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n# f0\n\n    - {name: c, alias: d,}\n# f1\noauth-request-scoped-errors: {}\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"auth-dir\":\"/x\", \"oauth-model-alias\":map[string]interface {}{\"antigravity\":[]interface {}{map[string]interface {}{\"alias\":\"b\", \"name\":\"a\"}, map[string]interface {}{\"alias\":\"d\", \"name\":\"c\"}}}, \"oauth-request-scoped-errors\":map[string]interface {}{}, \"proxy-url\":\"http://p\"}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+          ]
+        }
+      },
+      "identity": {
+        "masked_source": "# parity-source-0ac9c0d2a0537c7a-00000000\nauth-dir: /a # parity-source-0ac9c0d2a0537c7a-00000001\n# parity-source-0ac9c0d2a0537c7a-00000002\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b}\n    # parity-source-0ac9c0d2a0537c7a-00000003\n\n    - {name: c, alias: d}\n    # parity-source-0ac9c0d2a0537c7a-00000004\n\noauth-request-scoped-errors: {}\n",
+        "occurrences": [
+          {
+            "id": "# parity-source-0ac9c0d2a0537c7a-00000000",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# top"
+          },
+          {
+            "id": "# parity-source-0ac9c0d2a0537c7a-00000001",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "value",
+              "slot": "line"
+            },
+            "text": "# where"
+          },
+          {
+            "id": "# parity-source-0ac9c0d2a0537c7a-00000002",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "proxy-url",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# proxy note"
+          },
+          {
+            "id": "# parity-source-0ac9c0d2a0537c7a-00000003",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-model-alias",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "antigravity",
+                  "tag": "!!str"
+                },
+                {
+                  "index": 0
+                }
+              ],
+              "node": "item",
+              "slot": "foot"
+            },
+            "text": "# f0"
+          },
+          {
+            "id": "# parity-source-0ac9c0d2a0537c7a-00000004",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-model-alias",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "antigravity",
+                  "tag": "!!str"
+                },
+                {
+                  "index": 1
+                }
+              ],
+              "node": "item",
+              "slot": "foot"
+            },
+            "text": "# f1"
+          }
+        ],
+        "operation": {
+          "keys": [
+            "auth-dir"
+          ],
+          "op": "nested",
+          "value": "/x"
+        },
+        "source": "# top\nauth-dir: /a # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b}\n    # f0\n\n    - {name: c, alias: d}\n    # f1\n\noauth-request-scoped-errors: {}\n"
+      },
+      "marked_go": {
+        "files": [
+          "# parity-source-0ac9c0d2a0537c7a-00000000\nauth-dir: /x # parity-source-0ac9c0d2a0537c7a-00000001\n# parity-source-0ac9c0d2a0537c7a-00000002\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n# parity-source-0ac9c0d2a0537c7a-00000003\n\n    - {name: c, alias: d,}\n# parity-source-0ac9c0d2a0537c7a-00000004\noauth-request-scoped-errors: {}\n"
+        ]
+      },
+      "marked_go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# parity-source-0ac9c0d2a0537c7a-00000000"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "value",
+              "slot": "line"
+            },
+            "text": "# parity-source-0ac9c0d2a0537c7a-00000001"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "proxy-url",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# parity-source-0ac9c0d2a0537c7a-00000002"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-request-scoped-errors",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# parity-source-0ac9c0d2a0537c7a-00000004"
+          }
+        ],
+        "source": "# parity-source-0ac9c0d2a0537c7a-00000000\nauth-dir: /x # parity-source-0ac9c0d2a0537c7a-00000001\n# parity-source-0ac9c0d2a0537c7a-00000002\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n# parity-source-0ac9c0d2a0537c7a-00000003\n\n    - {name: c, alias: d,}\n# parity-source-0ac9c0d2a0537c7a-00000004\noauth-request-scoped-errors: {}\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"auth-dir\":\"/x\", \"oauth-model-alias\":map[string]interface {}{\"antigravity\":[]interface {}{map[string]interface {}{\"alias\":\"b\", \"name\":\"a\"}, map[string]interface {}{\"alias\":\"d\", \"name\":\"c\"}}}, \"oauth-request-scoped-errors\":map[string]interface {}{}, \"proxy-url\":\"http://p\"}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+          ]
+        }
+      },
+      "protected_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# top"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "auth-dir",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "value",
+              "slot": "line"
+            },
+            "text": "# where"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "proxy-url",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# proxy note"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-model-alias",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "antigravity",
+                  "tag": "!!str"
+                },
+                {
+                  "index": 0
+                }
+              ],
+              "node": "item",
+              "slot": "foot"
+            },
+            "text": "# f0"
+          },
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "oauth-model-alias",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "antigravity",
+                  "tag": "!!str"
+                },
+                {
+                  "index": 1
+                }
+              ],
+              "node": "item",
+              "slot": "foot"
+            },
+            "text": "# f1"
+          }
+        ],
+        "source": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n    # f0\n\n    - {name: c, alias: d,}\n    # f1\noauth-request-scoped-errors: {}\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"auth-dir\":\"/x\", \"oauth-model-alias\":map[string]interface {}{\"antigravity\":[]interface {}{map[string]interface {}{\"alias\":\"b\", \"name\":\"a\"}, map[string]interface {}{\"alias\":\"d\", \"name\":\"c\"}}}, \"oauth-request-scoped-errors\":map[string]interface {}{}, \"proxy-url\":\"http://p\"}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"auth-dir\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"alias\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1},{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!map\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"},{\"key\":\"antigravity\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-model-alias\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"oauth-request-scoped-errors\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"proxy-url\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]"
+          ]
+        }
+      },
+      "protected": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n    # f0\n\n    - {name: c, alias: d,}\n    # f1\noauth-request-scoped-errors: {}\n",
+      "repeat_input": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n    # f0\n\n    - {name: c, alias: d,}\n    # f1\noauth-request-scoped-errors: {}\n",
+      "repeat_operation": {
+        "op": "nested",
+        "keys": [
+          "auth-dir"
+        ],
+        "value": "/x"
+      },
+      "repeat_ok": true,
+      "repeated": "# top\nauth-dir: /x # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b,}\n    # f0\n\n    - {name: c, alias: d,}\n    # f1\noauth-request-scoped-errors: {}\n"
+    },
+    "source": "# top\nauth-dir: /a # where\n# proxy note\nproxy-url: http://p\noauth-model-alias:\n  antigravity:\n    - {name: a, alias: b}\n    # f0\n\n    - {name: c, alias: d}\n    # f1\n\noauth-request-scoped-errors: {}\n"
+  }
+}
