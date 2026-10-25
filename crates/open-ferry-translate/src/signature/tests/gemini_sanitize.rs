@@ -500,3 +500,74 @@ fn sanitize_gemini_request_thought_signatures_mixed_tool_call_and_unsigned_funct
         "functionCall signature should be the bypass. Output: {out}"
     );
 }
+
+#[test]
+fn sanitize_function_call_groups_restart_after_non_thought_parts() {
+    let native = test_gemini3_thought_signature(&[0x01, 0x0c, 0x39]);
+    for separator in [
+        serde_json::json!({"text":"more"}),
+        serde_json::json!({"text":""}),
+        serde_json::json!({"text":"","thoughtSignature":native}),
+        serde_json::json!({"inlineData":{"mimeType":"image/png","data":""}}),
+        serde_json::json!({"text":"hidden","thought":true}),
+    ] {
+        for signature in [
+            None,
+            Some(GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR),
+            Some(native.as_str()),
+        ] {
+            let call = |name| {
+                let mut part = serde_json::json!({"functionCall":{"name":name,"args":{}}});
+                if let Some(signature) = signature {
+                    part["thoughtSignature"] = serde_json::json!(signature);
+                }
+                part
+            };
+            let mut out = serde_json::json!({"contents":[{"role":"model","parts":[
+                call("first"), call("second"), separator, call("third"),
+                {"functionCall":{"name":"fourth","args":{}}}]}]});
+            sanitize_gemini_request_thought_signatures(&mut out, "contents");
+            let parts = &out["contents"][0]["parts"];
+            let signed = signature == Some(native.as_str());
+            let first = if signed {
+                native.as_str()
+            } else {
+                GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+            };
+            assert_eq!(parts[0]["thoughtSignature"], first);
+            let third_starts_group = separator.get("thought") != Some(&serde_json::json!(true));
+            if signed {
+                assert_eq!(parts[1]["thoughtSignature"], native);
+                assert_eq!(parts[3]["thoughtSignature"], native);
+            } else {
+                assert!(parts[1].get("thoughtSignature").is_none());
+                if third_starts_group {
+                    assert_eq!(
+                        parts[3]["thoughtSignature"],
+                        GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+                    );
+                } else {
+                    assert!(parts[3].get("thoughtSignature").is_none());
+                }
+            }
+            assert!(parts[4].get("thoughtSignature").is_none());
+            assert!(
+                validate_gemini_thought_signatures(
+                    &out,
+                    GeminiValidationOptions {
+                        allow_bypass_sentinel: true,
+                        require_known_envelope: true,
+                        ..Default::default()
+                    }
+                )
+                .is_ok(),
+                "{out}"
+            );
+            let once = out.clone();
+            assert!(!sanitize_gemini_request_thought_signatures(
+                &mut out, "contents"
+            ));
+            assert_eq!(out, once);
+        }
+    }
+}
