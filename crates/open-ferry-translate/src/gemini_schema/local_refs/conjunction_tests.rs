@@ -117,7 +117,12 @@ fn ref_sibling_conjunctions_retain_assertion_scopes() {
             "closed_object_scopes",
             r##"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false}"##,
             r##"{"properties":{"b":{"type":"string"}},"additionalProperties":false}"##,
-            vec![],
+            vec![
+                (r##"/allOf/0/properties"##, r##"{"a":{"type":"string"}}"##),
+                (r##"/properties"##, r##"{"b":{"type":"string"}}"##),
+                (r##"/allOf/0/additionalProperties"##, r##"false"##),
+                (r##"/additionalProperties"##, r##"false"##),
+            ],
         ),
         (
             "equal_closed_object_constraints",
@@ -187,6 +192,7 @@ fn ref_sibling_conjunctions_retain_assertion_scopes() {
         ),
     ];
     for (name, target, sibling, checks) in cases {
+        assert!(!checks.is_empty(), "{name} has no constraint checks");
         for root_ref in [false, true] {
             let mut node: Value = serde_json::from_str(sibling).unwrap();
             node["$ref"] = json!("#/$defs/A");
@@ -216,6 +222,47 @@ fn ref_sibling_conjunctions_retain_assertion_scopes() {
                     );
                 }
                 assert_eq!(clean(&out), clean(&clean(&out)), "{name}: {out}");
+            }
+        }
+    }
+}
+
+#[test]
+fn numeric_assertions_compare_number_spellings() {
+    // Upstream uses Decoder.UseNumber and reflect.DeepEqual, so differently
+    // spelled json.Number strings conflict even when their numeric values agree.
+    for (target, sibling, conjoined) in [
+        ("1", "1.0", true),
+        ("1.0", "1", true),
+        ("1", "1", false),
+        ("1.0", "1.0", false),
+        ("9007199254740992", "9007199254740993", true),
+    ] {
+        for root_ref in [false, true] {
+            let mut node = json!({"$ref":"#/$defs/A"});
+            node["minimum"] = serde_json::from_str(sibling).unwrap();
+            let mut schema = if root_ref {
+                node
+            } else {
+                json!({"properties":{"x":node}})
+            };
+            schema["$defs"] = json!({"A":{
+                "type":"number","minimum":serde_json::from_str::<Value>(target).unwrap()
+            }});
+            for out in [
+                inline_for_clean(&schema, &mut SchemaCopyBudget::default()),
+                clean(&schema),
+            ] {
+                let node = if root_ref {
+                    &out
+                } else {
+                    &out["properties"]["x"]
+                };
+                assert_eq!(node.get("allOf").is_some(), conjoined, "{out}");
+                assert_eq!(node["minimum"].to_string(), sibling, "{out}");
+                if conjoined {
+                    assert_eq!(node["allOf"][0]["minimum"].to_string(), target, "{out}");
+                }
             }
         }
     }

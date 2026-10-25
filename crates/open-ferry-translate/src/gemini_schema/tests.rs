@@ -1179,7 +1179,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string"}},"oneOf":[{"properties":{"z":{"type":"number"}}},{"type":"null"}]}}}"#,
-            r#"{"properties":{"x":{"properties":{"y":{"type":"string"},"z":{"type":"number"}},"type":"object"}},"type":"object"}"#,
+            r#"{"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string"},"z":{"type":"number"}}}}}"#,
         ),
         // A key that is an index makes upstream build an array.
         (
@@ -1204,10 +1204,10 @@ fn matches_upstream_output() {
             r#"{"properties":{"c":{"const":1.50}},"type":"object"}"#,
             r#"{"properties":{"c":{"enum":["1.5"],"type":"string"}},"type":"object"}"#,
         ),
-        // A repaired schema comes out with sorted keys.
+        // Repair sorts existing keys; deferred array items are appended later.
         (
             r#"{"type":"object","properties":{"a":{"type":"array"}},"x":{"type":"string","required":true}}"#,
-            r#"{"properties":{"a":{"items":{"type":"string"},"type":"array"},"x":{"type":"string"}},"required":["x"],"type":"object"}"#,
+            r#"{"properties":{"a":{"type":"array","items":{"type":"string"}},"x":{"type":"string"}},"required":["x"],"type":"object"}"#,
         ),
         (
             r#"{"schema":{"type":"object","properties":{"a":{"type":"string","required":true}}}}"#,
@@ -1280,7 +1280,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"o":{"oneOf":[{"type":"array"},{"items":{"type":"string"}},{"description":"d"}]}}}"#,
-            r#"{"properties":{"o":{"oneOf":[{"items":{"type":"string"},"type":"array"},{"items":{"type":"string"},"type":"array"},{"description":"d"}]}},"type":"object"}"#,
+            r#"{"type":"object","properties":{"o":{"oneOf":[{"type":"array","items":{"type":"string"}},{"items":{"type":"string"},"type":"array"},{"description":"d"}]}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"n":{"type":"object","properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"}]}}}"#,
@@ -1292,7 +1292,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","description":"x","properties":{"a":{"type":"string"}},"else":{"properties":{"a":{"type":"integer"},"b":{"type":"boolean"}}}}"#,
-            r#"{"description":"x","properties":{"a":{"type":"string"},"b":{"type":"boolean"}},"type":"object"}"#,
+            r#"{"type":"object","description":"x","properties":{"a":{"type":"string"},"b":{"type":"boolean"}}}"#,
         ),
         (
             r##"{"type":"object","properties":{"r":{"$ref":"#/x/"}}}"##,
@@ -1312,8 +1312,7 @@ fn matches_upstream_output() {
         ),
     ];
     for (input, expected) in cases {
-        // Deferred shape repair need not sort keys; compare schema constraints.
-        assert_eq!(clean(input), parse(expected), "{input}");
+        assert_eq!(clean(input).to_string(), expected, "{input}");
     }
 }
 
@@ -1586,7 +1585,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":null,"properties":{"a":{"type":"string"}},"oneOf":[{"properties":{"b":{"type":"integer"}}}]}}}"#,
-            r#"{"properties":{"e":{"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"type":"object"}},"type":"object"}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}}}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"e":{"type":5,"properties":{"a":{"type":"string"}}}}}"#,
@@ -1606,7 +1605,7 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"l":{"type":"array","items":{"type":null,"properties":{"a":{"type":"string"}},"oneOf":[{"type":"null"},{"properties":{"b":{"type":"integer"}}}]}}}}"#,
-            r#"{"properties":{"l":{"items":{"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"type":"object"},"type":"array"}},"type":"object"}"#,
+            r#"{"type":"object","properties":{"l":{"type":"array","items":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}}}}}}"#,
         ),
         (
             r#"{"type":"object","properties":{"a.b":{"type":"string","properties":{"c":{"type":"string"}}}}}"#,
@@ -1630,12 +1629,11 @@ fn object_type_for_properties_in_detail() {
         ),
         (
             r#"{"type":"object","properties":{"e":{"properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"},{"type":"string"}]}}}"#,
-            r#"{"properties":{"e":{"properties":{"a":{"type":"string"}},"type":"object"}},"type":"object"}"#,
+            r#"{"type":"object","properties":{"e":{"properties":{"a":{"type":"string"}},"type":"object"}}}"#,
         ),
     ];
     for (input, expected) in cases {
-        // Deferred shape repair need not sort keys; compare schema constraints.
-        assert_eq!(clean(input), parse(expected), "{input}");
+        assert_eq!(clean(input).to_string(), expected, "{input}");
     }
 }
 
