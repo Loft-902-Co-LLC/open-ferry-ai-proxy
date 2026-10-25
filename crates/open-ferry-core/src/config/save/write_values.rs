@@ -252,7 +252,104 @@ fn canonical(doc: &Node, generated: Option<&Node>, migrate: bool) -> Result<Sema
     merge::prune_routing_quota(&mut root, generated);
     merge::prune_mapping_to_generated_keys(&mut root, generated, "self-update");
     merge::merge_mapping_preserve(&mut root, generated, &mut Vec::new());
+    let mut cfg = config_from_node(&Node {
+        kind: Kind::Document,
+        content: vec![root.clone()],
+        ..Node::default()
+    })?;
+    post_process(&mut cfg).map_err(check_error)?;
+    let normalized = generated_node(&cfg)?;
+    normalize_values(&mut root, &normalized, &mut Vec::new(), false);
     semantic(&root)
+}
+
+// These paths are preserved from the source by merge::UNTYPED. The typed
+// config only supplies their defaults, so it cannot normalize their values.
+const PRESERVED_SOURCE_PATHS: &[&[&str]] = &[
+    &["claude-code"],
+    &["gpt-image-2-base-model"],
+    &["video-result-auth-cache-ttl"],
+    &["credential-concurrency"],
+    &["credential-in-flight"],
+    &["plugins"],
+    &["pprof"],
+    &["discovery"],
+    &["antigravity-signature-cache-enabled"],
+    &["antigravity-signature-bypass-strict"],
+    &["antigravity"],
+    &["devin"],
+    &["claude-header-defaults", "user-agent"],
+    &["claude-header-defaults", "package-version"],
+    &["claude-header-defaults", "runtime-version"],
+    &["claude-header-defaults", "os"],
+    &["claude-header-defaults", "arch"],
+    &["claude-header-defaults", "timeout"],
+    &["claude-header-defaults", "timezone"],
+    &["claude-header-defaults", "stabilize-device-profile"],
+    &["disable-claude-cloak-mode"],
+    &["codex", "disable-codex-cloaking"],
+    &["codex", "live-media-relay"],
+    &["codex-header-defaults", "user-agent"],
+    &["claude-api-key", "cloak"],
+    &["claude-api-key", "fingerprint-profile"],
+    &["claude-api-key", "experimental-cch-signing"],
+    &["codex-api-key", "disable-codex-cloaking"],
+    &["xai-api-key", "disable-codex-cloaking"],
+    &["meta-api-key", "disable-codex-cloaking"],
+];
+
+fn preserved_source_path(path: &[String]) -> bool {
+    PRESERVED_SOURCE_PATHS.iter().any(|prefix| {
+        path.len() >= prefix.len() && prefix.iter().zip(path).all(|(a, b)| *a == b.as_str())
+    })
+}
+
+/// Use the loader's values for typed fields, including null collections and
+/// trimmed model aliases. Keep source fields that the config does not type.
+fn normalize_values(dst: &mut Node, src: &Node, path: &mut Vec<String>, in_sequence: bool) {
+    if preserved_source_path(path) {
+        return;
+    }
+    match (dst.kind, src.kind) {
+        (Kind::Mapping, Kind::Mapping) => {
+            let mut index = 0;
+            while index + 1 < dst.content.len() {
+                let key = dst.content[index].value.clone();
+                path.push(key.clone());
+                if let Some(i) = tree::find_map_key_index(src, &key) {
+                    normalize_values(
+                        &mut dst.content[index + 1],
+                        &src.content[i + 1],
+                        path,
+                        in_sequence,
+                    );
+                } else if in_sequence && !preserved_source_path(path) {
+                    dst.content.drain(index..index + 2);
+                    path.pop();
+                    continue;
+                }
+                path.pop();
+                index += 2;
+            }
+            for (key, value) in src.pairs() {
+                if tree::find_map_key_index(dst, &key.value).is_none() {
+                    dst.content.push(key.clone());
+                    dst.content.push(value.clone());
+                }
+            }
+        }
+        (Kind::Sequence, Kind::Sequence) => {
+            dst.content.truncate(src.content.len());
+            for (i, value) in src.content.iter().enumerate() {
+                if let Some(old) = dst.content.get_mut(i) {
+                    normalize_values(old, value, path, true);
+                } else {
+                    dst.content.push(value.clone());
+                }
+            }
+        }
+        _ => *dst = src.clone(),
+    }
 }
 
 enum Semantic {

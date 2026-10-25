@@ -419,6 +419,28 @@ fn review_r15_value_check_accepts_shadowed_legacy_structs() {
 }
 
 #[test]
+fn review_r15_value_check_normalizes_typed_collections_but_checks_plugin_values() {
+    for (source, output) in [
+        ("port: 8317\nws-auth: null\n", "port: 8317\nws-auth: true\n"),
+        (
+            "payload: {default: [{models: [{name: x, exist: null}], params: {probe: x}}]}\n",
+            "payload: {default: [{models: [{name: x, exist: []}], params: {probe: x}}]}\n",
+        ),
+    ] {
+        let config = Config::parse(source).unwrap();
+        assert!(config == Config::parse(output).unwrap());
+        let intended = IntendedValues::settings(source.as_bytes(), &config, false).unwrap();
+        check_values(output.as_bytes(), &intended).unwrap();
+    }
+    let source = b"plugins: {configs: {probe: null}}\n";
+    let config = Config::load_bytes(source).unwrap();
+    let intended = IntendedValues::settings(source, &config, false).unwrap();
+    let error = check_values(b"plugins: {configs: {probe: []}}\n", &intended)
+        .expect_err("an untyped plugin value must not use typed collection normalization");
+    assert!(error.to_string().contains("$.plugins.configs.probe"));
+}
+
+#[test]
 fn review_r15_value_check_preserves_omitted_source_settings() {
     let source = b"port: 8317\nrouting: {strategy: round-robin}\n";
     let config = Config::parse("port: 8317\n").unwrap();
