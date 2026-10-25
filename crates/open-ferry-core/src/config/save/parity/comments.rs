@@ -1503,9 +1503,12 @@ mod tests {
     }
     #[test]
     fn source_owner_condition_one_rejects_a_third_owner() {
-        let (source, go, operation, mut evidence) = source_owner_fixture();
-        replace_source_owner_output(&mut evidence, &operation, &go);
-        let proof = retained_source_owner(&source, &go, &operation, &evidence);
+        let (source, _, operation, mut evidence) = source_owner_fixture();
+        // Source: the first value's line. Go: the next key's head. This
+        // candidate chooses a third owner, the next value's line.
+        let third = "auth-dir: fixture\nnext: fixture # retained\n";
+        replace_source_owner_output(&mut evidence, &operation, third);
+        let proof = retained_source_owner(&source, third, &operation, &evidence);
         assert_eq!(proof.conditions, [false, true, true, true, true]);
         assert!(!proof.accepted(), "third-owner comment was certified");
     }
