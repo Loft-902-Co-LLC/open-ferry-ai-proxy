@@ -207,6 +207,112 @@ async fn model_list_uses_the_configured_display_name() {
 }
 
 #[tokio::test]
+async fn model_list_and_detail_expose_positive_token_limit_fallbacks() {
+    for (input, output, context, completion, expected_input, expected_output) in [
+        (123, 45, 1000, 500, Some(123), Some(45)),
+        (0, 0, 1_048_576, 65_536, Some(1_048_576), Some(65_536)),
+        (123, 0, 1000, 500, Some(123), Some(500)),
+        (0, 45, 1000, 500, Some(1000), Some(45)),
+        (0, 0, 0, 0, None, None),
+    ] {
+        let models = vec![ModelInfo {
+            id: "limits".into(),
+            name: "models/limits".into(),
+            input_token_limit: input,
+            output_token_limit: output,
+            context_length: context,
+            max_completion_tokens: completion,
+            ..ModelInfo::default()
+        }];
+        let (app, _) = server(ServerConfig::default(), models, vec![]);
+        for path in [
+            "/v1beta/models",
+            "/v1beta/models/limits",
+            "/v1beta/models/models/limits",
+        ] {
+            let (status, _, body) = send(&app, get(path)).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let entry = if path == "/v1beta/models" {
+                &value["models"][0]
+            } else {
+                &value
+            };
+            assert_eq!(
+                entry
+                    .get("inputTokenLimit")
+                    .and_then(serde_json::Value::as_u64),
+                expected_input,
+                "{path}"
+            );
+            assert_eq!(
+                entry
+                    .get("outputTokenLimit")
+                    .and_then(serde_json::Value::as_u64),
+                expected_output,
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn model_token_limits_refresh_through_registry_list_and_detail() {
+    let registry = Arc::new(open_ferry_core::registry::ModelRegistry::new());
+    let dispatcher = FakeDispatcher::new(vec![]);
+    let config = ServerConfig {
+        api_keys: vec!["sk-test".into()],
+        ..ServerConfig::default()
+    };
+    let app = router(crate::state::AppState::new(
+        config,
+        dispatcher,
+        registry.clone(),
+    ));
+    for (input, output) in [(1000, 100), (2000, 200), (0, 0)] {
+        let model = ModelInfo {
+            id: "limits".into(),
+            context_length: input,
+            max_completion_tokens: output,
+            ..ModelInfo::default()
+        };
+        registry.register_client("client", "gemini", &[model.clone(), model]);
+        for path in ["/v1beta/models", "/v1beta/models/limits"] {
+            let (status, _, body) = send(&app, get(path)).await;
+            assert_eq!(status, StatusCode::OK);
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let entry = if path == "/v1beta/models" {
+                assert_eq!(value["models"].as_array().unwrap().len(), 1);
+                &value["models"][0]
+            } else {
+                &value
+            };
+            assert_eq!(
+                entry
+                    .get("inputTokenLimit")
+                    .and_then(serde_json::Value::as_u64),
+                (input > 0).then_some(input)
+            );
+            assert_eq!(
+                entry
+                    .get("outputTokenLimit")
+                    .and_then(serde_json::Value::as_u64),
+                (output > 0).then_some(output)
+            );
+        }
+    }
+    registry.unregister_client("client");
+    assert_eq!(
+        send(&app, get("/v1beta/models")).await.2,
+        r#"{"models":[]}"#
+    );
+    assert_eq!(
+        send(&app, get("/v1beta/models/limits")).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn gets_one_model_by_name() {
     let (app, _) = app(vec![]);
     let full = go(concat!(
