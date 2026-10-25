@@ -70,6 +70,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Changed
 
+- **Quota recovery after an upstream reset**: a fresh, successful Claude usage probe can end a cached quota cooldown before its deadline when it confirms capacity for the limit that caused it. Failed or ambiguous reads, authentication failures, other backoffs and unrelated credentials stay unchanged. The dashboard's per-credential **Clear proxy cooldown** action asks for confirmation and distinguishes a proxy reset from a provider quota reset.
 - **Fewer streaming allocations** per event for Chat Completions and Claude Messages, and no commit-header allocation when pre-first-token keepalive is disabled. Shared-host measurements did not establish an end-to-end speedup.
 - **Config writer refusals** now answer `409 config_unwritable` with a safe reason. The CLI shows that reason, says nothing was changed, and distinguishes the refusal from an I/O failure in JSON output.
 - **Smaller, faster release binaries**, built with fat link-time optimization and one codegen unit: about 11% less CPU per request and 31% smaller in the measured Linux build.
