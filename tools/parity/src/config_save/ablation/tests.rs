@@ -61,6 +61,110 @@ fn frame_go(evidence: &Value) -> Value {
 }
 
 #[test]
+fn retained_source_owner_accepts_an_edited_value_go_kept_at_its_owner() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../testdata/source-owner-kept-value-edit.json"
+    ))
+    .unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let operation = &fixture["operation"];
+    let evidence = &fixture["evidence"];
+    // These are pinned-Go receipts and an observed writer repeat for
+    // r2-040-nested#0. The edited line comment is kept by Go, not excused.
+    let proof = core::retained_source_owner(source, protected, operation, evidence);
+    assert!(
+        proof.accepted(),
+        "a Go-kept edited value prevented the source-owner proof: {:?}",
+        proof.conditions
+    );
+    assert_eq!(proof.conditions, [true; 5]);
+    let case = Case::new("native-kept-comment-value-edit", "", "").with_options(json!({
+        "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+    }));
+    let go = frame_go(evidence);
+    let analysis = ownership::analyze(
+        &case,
+        0,
+        source,
+        go["files"][0].as_str(),
+        protected,
+        &[],
+        true,
+    );
+    assert!(analysis.accepted());
+    assert!(analysis.rules.contains(&"retained-source-owner"));
+    let protected = json!({"files":[protected]});
+    let replay = Replay {
+        output: go.clone(),
+        traces: vec![],
+    };
+    let result = checks(Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &go,
+        mask: 1,
+        matches: &[(1, true)],
+    });
+    assert_eq!(result, [true; 5]);
+}
+
+#[test]
+fn retained_source_owner_refuses_a_different_real_go_key_value_destination() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../testdata/source-owner-wrong-destination.json"
+    ))
+    .unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let operation = &fixture["operation"];
+    let evidence = &fixture["evidence"];
+    // Go's source, output and inventories are real. Only the replay destination
+    // is redirected to another equal-named key; repeat is granted to isolate it.
+    let proof = core::retained_source_owner(source, protected, operation, evidence);
+    assert!(
+        !proof.accepted(),
+        "a replay destination at a different real Go key/value was certified"
+    );
+    assert_eq!(proof.conditions, [false, true, true, true, true]);
+    let case = Case::new("native-wrong-key-destination", "", "").with_options(json!({
+        "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+    }));
+    let go = frame_go(evidence);
+    assert!(
+        !ownership::analyze(
+            &case,
+            0,
+            source,
+            go["files"][0].as_str(),
+            protected,
+            &[],
+            true
+        )
+        .accepted()
+    );
+    let protected = json!({"files":[protected]});
+    let replay = Replay {
+        output: go.clone(),
+        traces: vec![],
+    };
+    let result = checks(Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &go,
+        mask: 1,
+        matches: &[(1, true)],
+    });
+    assert_eq!(result, [true, true, false, true, true]);
+}
+
+#[test]
 fn retained_source_owner_byte_gap_b1_reorder() {
     source_owner_byte_gap("B1-reorder");
 }
@@ -288,8 +392,8 @@ fn evaluate_boundary(
     protected: &Value,
     oracle: &Value,
     replay: &Replay,
-    mask: u16,
-    matches: &[(u16, bool)],
+    mask: u8,
+    matches: &[(u8, bool)],
 ) -> [bool; 5] {
     checks(Proof {
         case,

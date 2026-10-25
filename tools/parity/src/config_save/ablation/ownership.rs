@@ -138,7 +138,10 @@ pub(super) fn source_owner_evidence(case: &Case, protected: &Value) -> Vec<Value
         }
         let Some(file) = file.as_str() else { break };
         if let Some(proof) = source_owner(case, index, source, file) {
-            result.push(json!({"step":index,"rule":"retained-source-owner","checks":proof.conditions,"accepted":proof.accepted()}));
+            // These conditions describe a possible proof, not a rule that
+            // was needed. Used rule names come from strict-first analyze().
+            result
+                .push(json!({"step":index,"checks":proof.conditions,"accepted":proof.accepted()}));
         }
         source = file;
     }

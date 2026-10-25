@@ -24,7 +24,7 @@ pub struct Replay {
 
 /// Invalid candidates are observed at the existing refusal boundary, never
 /// written. Their exact bytes form the diagnostic attempted snapshot.
-pub fn replay(case: &Case, mask: u16) -> Option<Replay> {
+pub fn replay(case: &Case, mask: u8) -> Option<Replay> {
     let dir = TempDir::new().ok()?;
     let path = dir.0.join("config.yaml");
     fs::write(&path, case.options["file"].as_str()?).ok()?;
@@ -234,16 +234,13 @@ fn placement_right(case: &Case, protected: &Value, replay: &Replay) -> bool {
     true
 }
 
-fn nothing_else_changed(case: &Case, protected: &Value, replay: &Replay) -> bool {
+fn nothing_else_changed(protected: &Value, replay: &Replay) -> bool {
     let (Some(r), Some(g)) = (
         protected["files"].as_array(),
         replay.output["files"].as_array(),
     ) else {
         return false;
     };
-    if case.options["file"].as_str().is_none() {
-        return false;
-    }
     g.iter().zip(r).all(|(g, r)| {
         let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
             return false;
@@ -260,14 +257,14 @@ fn nothing_else_changed(case: &Case, protected: &Value, replay: &Replay) -> bool
     })
 }
 
-fn minimal(mask: u16, matches: &[(u16, bool)]) -> bool {
+fn minimal(mask: u8, matches: &[(u8, bool)]) -> bool {
     mask != 0
         && !matches
             .iter()
             .any(|(m, yes)| *yes && *m != mask && *m & mask == *m)
 }
 
-fn deviations(mask: u16) -> BTreeSet<Deviation> {
+fn deviations(mask: u8) -> BTreeSet<Deviation> {
     [
         Deviation::RetainedUpstreamEmptyMappingComment,
         Deviation::RetainedCanonicalVersionComment,
@@ -291,8 +288,8 @@ struct Proof<'a> {
     ablated: &'a Replay,
     go_trace: Option<&'a Value>,
     expectation: &'a Value,
-    mask: u16,
-    matches: &'a [(u16, bool)],
+    mask: u8,
+    matches: &'a [(u8, bool)],
 }
 
 fn checks(proof: Proof<'_>) -> [bool; 5] {
@@ -311,7 +308,7 @@ fn checks(proof: Proof<'_>) -> [bool; 5] {
         reproduces(go, ablated, go_trace),
         documents && values_right(case, protected, expectation),
         documents && comments_right(case, protected, ablated),
-        documents && nothing_else_changed(case, protected, ablated),
+        documents && nothing_else_changed(protected, ablated),
         minimal(mask, matches),
     ]
 }
@@ -434,7 +431,9 @@ pub fn certify(
     if go.get("error").is_some() && go_trace.is_none() {
         return Ok(refused("Go trace mismatch"));
     }
-    let mut masks: Vec<u16> = (1..(1 << ALL.len())).collect();
+    // Eight protection bits fit u8; an inclusive maximum also fits when
+    // all eight are registered, unlike the exclusive upper bound 1 << 8.
+    let mut masks: Vec<u8> = (1..=(u8::MAX >> (8 - ALL.len()))).collect();
     masks.sort_by_key(|m| m.count_ones());
     let mut matches = Vec::new();
     let mut dominated = Vec::new();
@@ -510,10 +509,7 @@ pub fn certify(
             oracle = Some((clean, expectation));
         }
         let (clean, expectation) = oracle.as_ref().unwrap();
-        if bound_case.is_none()
-            && (diagnostics::comments(case, protected, &ablated).is_err()
-                || !nothing_else_changed(case, protected, &ablated))
-        {
+        if bound_case.is_none() && diagnostics::comments(case, protected, &ablated).is_err() {
             bound_case = Some(ownership::bind(case, protected, &mut run_go)?);
         }
         let proof_case = bound_case.as_ref().unwrap_or(case);
@@ -529,15 +525,8 @@ pub fn certify(
         };
         let checks = checks(proof);
         let failures = diagnostics::failures(proof, checks);
-        let mut owner_rules =
+        let owner_rules =
             checks[2].then(|| diagnostics::comments(proof_case, protected, &ablated).unwrap());
-        if let Some(rules) = &mut owner_rules {
-            for detail in ownership::source_owner_evidence(proof_case, protected) {
-                if detail["accepted"] == true {
-                    rules.insert("retained-source-owner");
-                }
-            }
-        }
         trials.push(
             json!({"mask":mask,"checks":checks,"failures":failures,"owner_rules":owner_rules}),
         );

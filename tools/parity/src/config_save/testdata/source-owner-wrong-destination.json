@@ -1,0 +1,260 @@
+{
+  "case": "native-wrong-key-destination",
+  "provenance": {
+    "go_pin": "0db19025571684b198a2ef508f99b41c717337e8",
+    "go_receipts": "native source, operation, output, masked output and protected inventories",
+    "deliberate_changes": [
+      "replay destination redirected to another equal-named key with a different value",
+      "repeat granted to isolate the destination guard"
+    ]
+  },
+  "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\nother:\n  host: different\ntail: end\n",
+  "operation": {
+    "op": "nested",
+    "keys": [
+      "name"
+    ],
+    "value": "m"
+  },
+  "protected": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\nother:\n  host: different\n  # note-a\ntail: end\n",
+  "evidence": {
+    "archives": [],
+    "moves": [
+      {
+        "destination": {
+          "path": [
+            {
+              "key": "other",
+              "tag": "!!str"
+            },
+            {
+              "key": "host",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "foot"
+        },
+        "ordinal": 0,
+        "source": {
+          "path": [
+            {
+              "key": "srv",
+              "tag": "!!str"
+            },
+            {
+              "key": "host",
+              "tag": "!!str"
+            }
+          ],
+          "node": "key",
+          "slot": "foot"
+        },
+        "text": "# note-a",
+        "via": "observed"
+      }
+    ],
+    "operation": {
+      "keys": [
+        "name"
+      ],
+      "op": "nested",
+      "value": "m"
+    },
+    "retained_source_owner": {
+      "go": {
+        "files": [
+          "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\nother:\n  host: different\ntail: end\n"
+        ]
+      },
+      "go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "name",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\nother:\n  host: different\ntail: end\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"other\":map[string]interface {}{\"host\":\"different\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}, \"tail\":\"end\", \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "identity": {
+        "masked_source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # parity-source-3c696006fe56b166-00000000\nname: n\nother:\n  host: different\ntail: end\n",
+        "occurrences": [
+          {
+            "id": "# parity-source-3c696006fe56b166-00000000",
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "srv",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "host",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "foot"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "operation": {
+          "keys": [
+            "name"
+          ],
+          "op": "nested",
+          "value": "m"
+        },
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\nother:\n  host: different\ntail: end\n"
+      },
+      "marked_go": {
+        "files": [
+          "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-3c696006fe56b166-00000000\nname: m\nother:\n  host: different\ntail: end\n"
+        ]
+      },
+      "marked_go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "name",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# parity-source-3c696006fe56b166-00000000"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# parity-source-3c696006fe56b166-00000000\nname: m\nother:\n  host: different\ntail: end\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"other\":map[string]interface {}{\"host\":\"different\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}, \"tail\":\"end\", \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "protected_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "other",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "host",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "foot"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\nother:\n  host: different\n  # note-a\ntail: end\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"other\":map[string]interface {}{\"host\":\"different\"}, \"srv\":map[string]interface {}{\"host\":\"h\"}, \"tail\":\"end\", \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"other\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"tail\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "protected": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\nother:\n  host: different\n  # note-a\ntail: end\n",
+      "repeat_input": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\nother:\n  host: different\n  # note-a\ntail: end\n",
+      "repeat_operation": {
+        "op": "nested",
+        "keys": [
+          "name"
+        ],
+        "value": "m"
+      },
+      "repeat_ok": true,
+      "repeated": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\nother:\n  host: different\n  # note-a\ntail: end\n"
+    },
+    "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\nother:\n  host: different\ntail: end\n"
+  }
+}
