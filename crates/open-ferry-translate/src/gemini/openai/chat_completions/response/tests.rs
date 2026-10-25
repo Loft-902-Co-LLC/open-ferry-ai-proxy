@@ -197,6 +197,15 @@ fn filtered_finish_reasons_preserve_native_reason_and_usage() {
 }
 
 #[test]
+fn non_stream_content_filter_checks_the_raw_finish_reason() {
+    // Lowercasing the Kelvin sign first would turn it into an ASCII K on the filter's uppercase pass.
+    let response = json!({"candidates":[{"finishReason":"BLOC\u{212a}LIST"}]});
+    let out = convert_gemini_response_to_openai_non_stream(&Value::Null, &response);
+    assert_eq!(out["choices"][0]["finish_reason"], "blocklist");
+    assert_eq!(out["choices"][0]["native_finish_reason"], "blocklist");
+}
+
+#[test]
 fn finishes_without_inline_usage_keep_metadata_and_emit_once() {
     for (pending, late_usage) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut stream = GeminiToOpenAIStream::new(&Value::Null);
