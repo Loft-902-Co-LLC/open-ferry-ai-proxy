@@ -550,28 +550,11 @@ fn flow_item_foot_lines(data: &[u8]) -> std::collections::BTreeSet<usize> {
                         }
                     }
                 }
-                let mut head = key
-                    .head_comment
-                    .lines()
-                    .filter(|s| !s.is_empty())
-                    .peekable();
-                let mut paragraph = Vec::new();
-                for (at, line) in source
-                    .iter()
-                    .enumerate()
-                    .take(key.line.saturating_sub(1))
-                    .skip(head_start)
+                if let Some(head) =
+                    comment_lines_before(&key.head_comment, key.line.saturating_sub(1), source)
+                    && head.first().is_none_or(|at| *at >= head_start)
                 {
-                    if head
-                        .peek()
-                        .is_some_and(|s| line.trim_start_matches([' ', '\t']) == *s)
-                    {
-                        paragraph.push(at);
-                        head.next();
-                    }
-                }
-                if head.peek().is_none() {
-                    lines.extend(paragraph);
+                    lines.extend(head);
                 }
             }
         }
