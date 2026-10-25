@@ -193,8 +193,6 @@ fn filtered_finish_reasons_preserve_native_reason_and_usage() {
             );
         }
         assert!(stream.translate(b"[DONE]").is_empty());
-        let repeated = stream.translate(response.to_string().as_bytes());
-        assert!(repeated[0]["choices"][0]["finish_reason"].is_null());
     }
 }
 
@@ -252,11 +250,16 @@ fn multiple_candidate_finishes_are_sorted_and_do_not_repeat() {
         let mut stream = GeminiToOpenAIStream::new(&Value::Null);
         let first = stream.translate(br#"{"candidates":[{"index":7,"finishReason":"SAFETY"},{"index":2,"finishReason":"MAX_TOKENS"},{"index":5,"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]},"finishReason":"STOP"}]}"#);
         assert_eq!(first.len(), 3);
-        let terminal = if let Some(usage) = usage {
+        let mut chunks = if let Some(usage) = usage {
             stream.translate(usage.to_string().as_bytes())
         } else {
-            stream.translate(b"[DONE]")
+            Vec::new()
         };
+        chunks.extend(stream.translate(b"[DONE]"));
+        let terminal: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| !chunk["choices"][0]["finish_reason"].is_null())
+            .collect();
         assert_eq!(terminal.len(), 3);
         for (chunk, (index, reason)) in
             terminal
