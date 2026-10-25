@@ -149,6 +149,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Initialize and finalize empty Claude and claude-cli Responses patch streams** as upstream does.
 - **Credential-file model exclusions override provider-global OAuth rules.** Clearing them resumes the latest globals without replacing runtime tokens; malformed existing lists load leniently while uploads and field patches reject invalid rules before saving.
 - **Credential field/status edits reject replacement registrations**, retain concurrent refreshes and field edits, and return 404 for config-sourced file fields.
+- **The page shown when the dashboard wasn't built lists the Node.js versions that can build it.** The README's build instructions list those ranges too.
 - **Replay routed reasoning only to matching model families**, keeping OpenRouter suffixes private to OpenRouter, including destinations with a trailing DNS dot.
 - **Preserve SDK-safe Gemini thought signatures**, streamed function-call ordering and done-only summaries, including function-call signatures carried through OpenAI Chat Completions.
 - **Close duplicate Interactions reasoning steps** before subsequent thoughts and preserve late signatures across intervening output.
