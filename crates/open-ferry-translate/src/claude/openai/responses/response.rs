@@ -790,9 +790,6 @@ impl ClaudeToOpenAIResponsesStream {
         if let Some(details) = incomplete_details(&self.stop_reason) {
             response.insert("incomplete_details".into(), details);
         }
-        if context_window_exceeded(&self.stop_reason) {
-            response.insert("error".into(), context_window_error());
-        }
         if pause_turn(&self.stop_reason) {
             response.insert("end_turn".into(), false.into());
         }
@@ -1656,7 +1653,7 @@ fn non_stream_with_tool_search<'r>(
     }
 
     let (_, status) = terminal_state(&stop_reason);
-    let incomplete = matches!(status, "incomplete" | "failed");
+    let incomplete = status == "incomplete";
     let mut out = json!({
         "id": response_id,
         "object": "response",
@@ -1674,9 +1671,6 @@ fn non_stream_with_tool_search<'r>(
             "total_tokens": 0,
         },
     });
-    if context_window_exceeded(&stop_reason) {
-        out["error"] = context_window_error();
-    }
     if pause_turn(&stop_reason) {
         out["end_turn"] = false.into();
     }
@@ -1927,9 +1921,7 @@ fn reasoning_carrier(block: &Value) -> String {
 /// `claudeResponsesTerminalState`: the final event and the response status.
 /// A stop that has [`incomplete_details`] leaves the response incomplete.
 fn terminal_state(stop_reason: &str) -> (&'static str, &'static str) {
-    if context_window_exceeded(stop_reason) {
-        ("response.failed", "failed")
-    } else if incomplete_details(stop_reason).is_some() {
+    if incomplete_details(stop_reason).is_some() {
         ("response.incomplete", "incomplete")
     } else {
         ("response.completed", "completed")
@@ -1938,7 +1930,7 @@ fn terminal_state(stop_reason: &str) -> (&'static str, &'static str) {
 
 /// `claudeResponsesOutputStatus`
 fn output_status(stop_reason: &str) -> &'static str {
-    if context_window_exceeded(stop_reason) || incomplete_details(stop_reason).is_some() {
+    if incomplete_details(stop_reason).is_some() {
         "incomplete"
     } else {
         "completed"
@@ -1951,20 +1943,16 @@ fn output_status(stop_reason: &str) -> &'static str {
 /// which also turns the Kelvin sign into `k`.
 fn incomplete_details(stop_reason: &str) -> Option<Value> {
     match crate::go::to_lower(stop_reason.trim()).as_str() {
-        "max_tokens" => Some(json!({"reason": "max_output_tokens"})),
+        "max_tokens" | "model_context_window_exceeded" => {
+            Some(json!({"reason": "max_output_tokens"}))
+        }
         "refusal" => Some(json!({"reason":"content_filter"})),
         _ => None,
     }
 }
 
-fn context_window_exceeded(reason: &str) -> bool {
-    crate::go::equal_fold(reason.trim(), "model_context_window_exceeded")
-}
 fn pause_turn(reason: &str) -> bool {
     crate::go::equal_fold(reason.trim(), "pause_turn")
-}
-fn context_window_error() -> Value {
-    json!({"code":"context_length_exceeded","message":"Claude stopped because the conversation filled the model context window (stop_reason: model_context_window_exceeded)."})
 }
 fn web_search_status(reason: &str, status: &'static str, results: Option<&Value>) -> &'static str {
     if pause_turn(reason) && results.is_none() {
