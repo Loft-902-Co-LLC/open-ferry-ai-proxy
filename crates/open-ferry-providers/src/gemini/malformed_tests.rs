@@ -194,7 +194,7 @@ async fn claude_stream_requires_gemini_finish_signal() {
         for (tail, fails) in [
             ("", true),
             (r#"{"candidates":[{"finishReason":"STOP"}]}"#, false),
-            (r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#, false),
+            (r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#, true),
         ] {
             let body = format!(
                 "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"hi\"}}]}}}}]}}\n\ndata: {USAGE}\n\ndata: {tail}\n\n"
