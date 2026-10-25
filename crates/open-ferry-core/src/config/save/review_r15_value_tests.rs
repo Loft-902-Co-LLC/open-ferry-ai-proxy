@@ -376,11 +376,33 @@ fn review_r15_value_check_accepts_loader_normalization() {
 
 #[test]
 fn review_r15_value_check_accepts_shadowed_legacy_structs() {
-    for source in [
-        "config-version: 8\nserver: {tls: {}}\ntls: bad\n",
-        "config-version: 8\nmanagement: {}\nremote-management: bad\n",
+    for (source, source_loads, tls, remote) in [
+        (
+            "config-version: 8\nserver: {tls: {}}\ntls: bad\n",
+            false,
+            false,
+            false,
+        ),
+        (
+            "config-version: 8\nmanagement: {}\nremote-management: bad\n",
+            false,
+            false,
+            false,
+        ),
+        (
+            "config-version: 8\nserver: {tls: {}}\ntls: {enable: true}\n",
+            true,
+            true,
+            false,
+        ),
+        (
+            "config-version: 8\nmanagement: {}\nremote-management: {allow-remote: true}\n",
+            true,
+            false,
+            true,
+        ),
     ] {
-        assert!(Config::parse(source).is_err());
+        assert_eq!(Config::parse(source).is_ok(), source_loads);
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
         std::fs::write(&path, "port: 1\n").unwrap();
@@ -388,7 +410,11 @@ fn review_r15_value_check_accepts_shadowed_legacy_structs() {
             write_file(&path, source.as_bytes()).is_ok(),
             "the canonical mapping must replace the shadowed legacy value"
         );
-        assert!(Config::load(&path).is_ok());
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(
+            (loaded.tls.enable, loaded.remote_management.allow_remote),
+            (tls, remote)
+        );
     }
 }
 
