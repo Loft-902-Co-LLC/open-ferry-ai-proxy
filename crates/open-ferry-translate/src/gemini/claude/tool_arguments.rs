@@ -240,6 +240,8 @@ struct AnalysisMemo<T> {
     targets: HashMap<*const Value, [Option<CachedAnalysis<T>>; 17]>,
     #[cfg(test)]
     target_analyses: usize,
+    #[cfg(test)]
+    cache_hits: usize,
 }
 
 impl<T: Clone> AnalysisMemo<T> {
@@ -262,6 +264,10 @@ impl<T: Clone> AnalysisMemo<T> {
             .and_then(|depths| depths[depth].as_ref())
             .filter(|cached| cached.references.followed.is_disjoint(visited))
         {
+            #[cfg(test)]
+            {
+                self.cache_hits += 1;
+            }
             references
                 .followed
                 .extend(cached.references.followed.iter().cloned());
