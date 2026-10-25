@@ -265,6 +265,31 @@ pub(crate) fn protected_node(
     Ok((encoder.emitter.into_output(), protected))
 }
 
+/// The trailing sequence whose feet can all be located as flow mappings.
+pub(crate) fn pending_flow_item_feet(node: &Node) -> Option<&Node> {
+    match node.kind {
+        Kind::Mapping => node.content.last().and_then(pending_flow_item_feet),
+        Kind::Sequence => {
+            let footed = |item: &&Node| {
+                item.kind == Kind::Mapping
+                    && item.style.has(Style::FLOW)
+                    && !item.foot_comment.is_empty()
+            };
+            // Only flow mapping feet have a matching end in the paragraph
+            // search. A foot on any other item makes this boundary unsafe.
+            let other_foot = node
+                .content
+                .iter()
+                .any(|item| !item.foot_comment.is_empty() && !footed(&item));
+            (node.content.last().is_some_and(|last| footed(&last))
+                && node.content.iter().filter(footed).count() > 1
+                && !other_foot)
+                .then_some(node)
+        }
+        _ => None,
+    }
+}
+
 /// A mapping item's foot cannot reload on the item in block style: yaml.v3
 /// attaches a block mapping's terminal foot to its last key. At the protected
 /// empty-value boundary, retain the item's flow form as well as its indentation.
@@ -733,7 +758,7 @@ impl Encoder {
                 // the entirety of the value is streamed. The last tail is
                 // processed with the mapping end event.
                 let mut tail = "";
-                for [key, value] in node.content.as_chunks::<2>().0 {
+                for (index, [key, value]) in node.content.as_chunks::<2>().0.iter().enumerate() {
                     let key_foot = key.foot_comment.as_str();
                     self.empty_block_mapping_value = key.kind == Kind::Scalar
                         && value.kind == Kind::Mapping
@@ -747,6 +772,24 @@ impl Encoder {
                             && short_tag(&value.tag) == super::NULL_TAG
                             && value.value.is_empty())
                             || (value.kind == Kind::Mapping && value.content.is_empty()));
+                    let separate_head = self.emitter.protect_config_comments
+                        && self.empty_collection_value
+                        && key.head_comment.contains("\n\n")
+                        && index > 0
+                        && pending_flow_item_feet(&node.content[index * 2 - 1]).is_some();
+                    #[cfg(feature = "parity")]
+                    let separate_head = separate_head
+                        && crate::config::save::parity::ablation::enabled(
+                            crate::config::save::parity::ablation::Protection::MultipleFlowItemFeet,
+                        )
+                        && crate::config::save::parity::ablation::enabled(
+                            crate::config::save::parity::ablation::Protection::EmptyMappingPendingComment,
+                        );
+                    if separate_head {
+                        self.emitter
+                            .flow_item_head_keys
+                            .insert(self.node_serial + 1);
+                    }
                     self.node(key, tail, !key_foot.is_empty(), depth)?;
                     tail = key_foot;
                     self.node(value, "", false, depth)?;

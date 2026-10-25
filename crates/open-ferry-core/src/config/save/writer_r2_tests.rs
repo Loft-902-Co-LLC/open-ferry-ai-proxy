@@ -189,16 +189,31 @@ fn writer_r2_capture() {
     std::fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
 }
 
-fn receipt(result: &Value) -> Value {
-    json!({
+pub(super) fn receipt(result: &Value) -> Value {
+    let summary = json!({
         "files": result["files"].as_array().unwrap().iter().map(|s| sha256_hex(s.as_str().unwrap().as_bytes())).collect::<Vec<_>>(),
         "refused": result["refused"].as_bool().unwrap_or(false),
         "error": result["error"].as_str().map(|s| sha256_hex(s.as_bytes())),
-    })
+    });
+    let ordered: std::collections::BTreeMap<_, _> = summary.as_object().unwrap().iter().collect();
+    Value::String(sha256_hex(&serde_json::to_vec(&ordered).unwrap())[..16].to_owned())
+}
+
+pub(super) fn main_rows() -> Vec<Value> {
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_r2_main.json")).unwrap();
+    rows.into_iter()
+        .map(|r| json!({"case":r[0],"op":r[1],"normal":r[2],"old_off":r.get(3).unwrap_or(&r[2])}))
+        .collect()
 }
 
 fn source(case: &str) -> String {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("writer_r2_cases.json")).unwrap();
+    let mut cases: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_r2_cases.json")).unwrap();
+    cases.extend(
+        serde_json::from_str::<Vec<Value>>(include_str!("../testdata/writer/writer_cases.json"))
+            .unwrap(),
+    );
     cases.into_iter().find(|r| r["case"] == case).unwrap()["source"]
         .as_str()
         .unwrap()
@@ -259,13 +274,12 @@ fn config_values(config: &Config) -> Value {
 }
 
 fn crlf_exception(case: &str, op: &str) -> bool {
-    ["C8_crlf", "wc:C8_crlf"].contains(&case)
-        && ["raw", "raw2", "normalize", "normalize2"].contains(&op)
+    case == "C8_crlf" && ["raw", "raw2", "normalize", "normalize2"].contains(&op)
 }
 
 #[test]
 fn writer_r2_review_shapes_preserve_main_or_prove_new_outputs() {
-    let golden: Vec<Value> = serde_json::from_str(include_str!("writer_r2_main.json")).unwrap();
+    let golden = main_rows();
     for row in golden {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
@@ -289,7 +303,13 @@ fn writer_r2_review_shapes_preserve_main_or_prove_new_outputs() {
             );
             let mut expected = Config::parse(&source).unwrap();
             if ["save", "migrate", "nested", "patch", "put"].contains(&op.trim_end_matches('2')) {
-                expected.auth_dir = if i == 0 { "/x" } else { "/y" }.into();
+                expected.auth_dir =
+                    if i > 0 && !["patch", "put"].contains(&op.trim_end_matches('2')) {
+                        "/y"
+                    } else {
+                        "/x"
+                    }
+                    .into();
             }
             let actual = Config::parse(output).unwrap();
             assert!(
@@ -316,17 +336,18 @@ fn writer_r2_review_shapes_preserve_main_or_prove_new_outputs() {
 #[test]
 fn writer_r2_each_switch_retains_main_bytes_and_refusals() {
     use parity::ablation::{Protection, with_disabled};
-    let golden: Vec<Value> = serde_json::from_str(include_str!("writer_r2_main.json")).unwrap();
+    let golden = main_rows();
     for row in golden {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
         let expected = if crlf_exception(case, op) {
-            let go: Vec<Value> = serde_json::from_str(include_str!("writer_go.json")).unwrap();
+            let go: Vec<Value> =
+                serde_json::from_str(include_str!("../testdata/writer/writer_go.json")).unwrap();
             let row = go
                 .iter()
                 .find(|r| r["case"] == "C8_crlf" && r["op"] == op)
                 .unwrap();
-            receipt(&row["result"])
+            row["receipt"].clone()
         } else {
             row["normal"].clone()
         };
@@ -382,7 +403,7 @@ fn writer_r2_layout_restore_keeps_legacy_positions() {
 
 #[test]
 fn writer_r2_nonboundary_and_excluded_model_saves_keep_main_bytes() {
-    let golden: Vec<Value> = serde_json::from_str(include_str!("writer_r2_main.json")).unwrap();
+    let golden = main_rows();
     for row in golden {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
@@ -408,7 +429,7 @@ fn writer_r2_nonboundary_and_excluded_model_saves_keep_main_bytes() {
 
 #[test]
 fn writer_r2_quoted_scalar_probes_keep_main_refusals() {
-    let golden: Vec<Value> = serde_json::from_str(include_str!("writer_r2_main.json")).unwrap();
+    let golden = main_rows();
     for row in golden
         .into_iter()
         .filter(|r| ["f1", "f1b"].contains(&r["case"].as_str().unwrap()))
@@ -452,7 +473,7 @@ fn writer_r2_following_empty_key_keeps_its_head() {
 
 #[test]
 fn writer_r2_already_faithful_normalized_heads_keep_main_bytes() {
-    let golden: Vec<Value> = serde_json::from_str(include_str!("writer_r2_main.json")).unwrap();
+    let golden = main_rows();
     for row in golden {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
@@ -470,5 +491,71 @@ fn writer_r2_already_faithful_normalized_heads_keep_main_bytes() {
                 "{case} {op}"
             );
         }
+    }
+}
+
+#[test]
+fn writer_r3_two_paragraph_head_keeps_its_owner() {
+    let source = source("lp2_keyhead_two");
+    for op in ["nested2", "raw2"] {
+        let result = op_run(&source, op, false);
+        assert!(
+            !result["refused"].as_bool().unwrap_or(false),
+            "{op} refuses"
+        );
+        assert_eq!(result["files"].as_array().unwrap().len(), 2, "{op}");
+        for file in result["files"].as_array().unwrap() {
+            let output = file.as_str().unwrap();
+            assert!(
+                inventory(output) == inventory(&source),
+                "{op} moved a comment"
+            );
+            let doc = unmarshal(output.as_bytes()).unwrap();
+            let demo = yaml_path(&doc.content[0], "plugins.configs.demo").unwrap();
+            let key = find_map_key_index(demo, "empty").unwrap();
+            assert_eq!(
+                demo.content[key].head_comment.trim(),
+                "# r1\n\n# r2",
+                "{op} following head paragraphs"
+            );
+        }
+        assert!(
+            result["files"][0] == result["files"][1],
+            "{op} does not settle"
+        );
+    }
+}
+
+#[test]
+fn writer_r3_separator_requires_the_flow_foot_boundary() {
+    for row in main_rows().into_iter().filter(|r| {
+        ["r3_multi_head_nonempty", "r3_multi_head_one_foot"].contains(&r["case"].as_str().unwrap())
+    }) {
+        let case = row["case"].as_str().unwrap();
+        let op = row["op"].as_str().unwrap();
+        assert_eq!(
+            receipt(&op_run(&source(case), op, true)),
+            row["normal"],
+            "{case} {op} must keep main's bytes"
+        );
+    }
+}
+
+#[cfg(feature = "parity")]
+#[test]
+fn writer_r3_separator_does_not_change_faithful_yaml() {
+    use parity::ablation::{Protection, with_disabled};
+    let doc = unmarshal(source("lp2_keyhead_two").as_bytes()).unwrap();
+    let faithful = || crate::config::yaml3::encode::faithful_node(&doc, 2).unwrap();
+    let expected = sha256_hex(&faithful());
+    for protection in [
+        Protection::MultipleFlowItemFeet,
+        Protection::EmptyMappingPendingComment,
+    ] {
+        assert_eq!(
+            sha256_hex(&with_disabled(&[protection], faithful)),
+            expected,
+            "config protection leaked into faithful YAML"
+        );
     }
 }

@@ -20,7 +20,7 @@ fn case(fixture: &Value) -> Case {
 }
 
 fn subsets() -> Vec<Vec<Protection>> {
-    let mut masks: Vec<u8> = (1_u8..16).collect();
+    let mut masks: Vec<u8> = (1_u8..32).collect();
     masks.sort_by_key(|mask| mask.count_ones());
     masks
         .into_iter()
@@ -63,12 +63,12 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
         Config::load_bytes(file.as_str().unwrap().as_bytes()).unwrap();
     }
     let subsets = subsets();
-    assert_eq!(subsets.len(), 15);
+    assert_eq!(subsets.len(), 31);
     let mut attempts = Vec::new();
     for disabled in subsets {
         let ablated = with_disabled(&disabled, || Translator::ConfigSave.run_rust(&case)).unwrap();
         // No subset even reproduces the FIRST snapshot. The scalar-value
-        // protection is outside the four permitted comment switches.
+        // protection is outside the five permitted comment switches.
         assert_eq!(ablated["files"][0], protected["files"][0], "{disabled:?}");
         assert_ne!(ablated["files"][0], raw_go["files"][0], "{disabled:?}");
         assert_ne!(ablated, raw_go, "{disabled:?}");
@@ -94,7 +94,7 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
                 "protected_rust": protected,
                 "attempts": attempts,
                 "check_1": false,
-                "checks_2_3_4": "not evaluated: check 1 fails for all 15 subsets",
+                "checks_2_3_4": "not evaluated: check 1 fails for all 31 subsets",
                 "outcome": "Different",
             }))
             .unwrap(),
