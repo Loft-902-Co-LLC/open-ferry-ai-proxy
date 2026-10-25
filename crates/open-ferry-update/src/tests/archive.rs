@@ -133,6 +133,70 @@ fn an_oversize_entry_is_refused() {
 }
 
 #[test]
+fn a_tar_with_ten_thousand_entries_is_allowed_but_one_more_is_refused() {
+    let mut entries = vec![binary()];
+    entries.extend((1..10_000).map(|index| file(&format!("{DIR}/extra-{index}"), b"")));
+    // Even 10,001 entries take under 6 MiB with tar headers and padding.
+    let limit = 16 * LIMIT;
+    let extract = |entries: &[Entry]| {
+        extract_binary(
+            &tar_gz(entries),
+            ArchiveKind::TarGz,
+            DIR,
+            "open-ferry",
+            limit,
+        )
+    };
+    assert_eq!(extract(&entries).unwrap(), b"the binary");
+
+    entries.push(file(&format!("{DIR}/one-too-many"), b""));
+    assert_eq!(extract(&entries), Err(ArchiveError::TooManyEntries));
+}
+
+#[test]
+fn a_zip_with_ten_thousand_entries_is_allowed_but_one_more_is_refused() {
+    let mut entries = vec![file(&format!("{DIR}/open-ferry.exe"), b"the binary")];
+    entries.extend((1..10_000).map(|index| file(&format!("{DIR}/extra-{index}"), b"")));
+    let limit = 16 * LIMIT;
+    let extract = |entries: &[Entry]| {
+        extract_binary(
+            &zip(entries),
+            ArchiveKind::Zip,
+            DIR,
+            "open-ferry.exe",
+            limit,
+        )
+    };
+    assert_eq!(extract(&entries).unwrap(), b"the binary");
+
+    entries.push(file(&format!("{DIR}/one-too-many"), b""));
+    assert_eq!(extract(&entries), Err(ArchiveError::TooManyEntries));
+}
+
+#[test]
+fn a_tar_with_many_small_entries_is_refused_when_it_expands_too_far() {
+    let limit = 16 * 1024;
+    let small = vec![0u8; 8 * 1024];
+    let mut entries = vec![binary()];
+    entries.extend((0..6).map(|index| file(&format!("{DIR}/extra-{index}"), &small)));
+    // Two small entries fit with headers and padding; six exceed twice
+    // the limit, although every entry is below the per-entry limit.
+    let archive = tar_gz(&entries[..3]);
+    assert_eq!(
+        extract_binary(&archive, ArchiveKind::TarGz, DIR, "open-ferry", limit).unwrap(),
+        b"the binary"
+    );
+
+    let archive = tar_gz(&entries);
+    assert_eq!(
+        extract_binary(&archive, ArchiveKind::TarGz, DIR, "open-ferry", limit),
+        Err(ArchiveError::TooLarge(
+            "it expands to more than twice the limit".into()
+        ))
+    );
+}
+
+#[test]
 fn a_missing_or_repeated_binary_is_refused() {
     let result = from_tar(&[file(&format!("{DIR}/LICENSE"), b"MIT")]);
     assert!(
