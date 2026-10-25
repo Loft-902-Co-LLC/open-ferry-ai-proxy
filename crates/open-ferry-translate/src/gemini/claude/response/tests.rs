@@ -1236,7 +1236,6 @@ fn deferred_empty_tool_input_preserves_real_arguments_once() {
 
 // Ported from TestConvertGeminiResponseToClaude_ImplicitOpenToolContinuationOrdering.
 #[test]
-#[ignore = "needs the p42 argument helper"]
 fn implicit_open_tool_continuation_ordering() {
     let request =
         json!({"tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]});
