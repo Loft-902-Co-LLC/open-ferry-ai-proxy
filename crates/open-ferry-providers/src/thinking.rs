@@ -487,7 +487,10 @@ fn apply<T: Target>(
     // Compatibility registrations have configured levels without a bound snapshot.
     let map_high = resolved
         || (matches!(T::NAME, "openai" | "codex")
-            && go::equal_fold(info.model_type.trim(), "openai-compatibility"));
+            && go::equal_fold(
+                info.model_type.trim(),
+                open_ferry_core::auth::compat::OPENAI_COMPATIBILITY,
+            ));
     if map_high && config.mode == Mode::Level && maps_high_intent(&plan.from, T::NAME, &info) {
         config.level = map_high_intent(&config.level, support);
     }
@@ -1813,6 +1816,83 @@ mod shared_hardening_tests {
                     .unwrap_err();
                 assert_eq!(error.http_status(), 400);
                 assert!(error.message.contains("minimal"));
+            }
+        }
+    }
+
+    #[test]
+    fn responses_client_to_compatibility_chat_uses_registered_levels() {
+        let catalog = registered(compatibility_model());
+        for effort in ["xhigh", "max", "minimal"] {
+            let source = Body::Json(json!({"reasoning":{"effort":effort}}));
+            let mut body = json!({});
+            let result = apply_lookup_to(
+                "openai",
+                &mut body,
+                &source,
+                "m",
+                "openai-response",
+                &catalog,
+            );
+            if effort == "minimal" {
+                assert_eq!(result.unwrap_err().http_status(), 400);
+            } else {
+                result.unwrap();
+                assert_eq!(json::str_at(&body, "reasoning_effort"), "high");
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_lookup_high_intent_is_scoped_to_chat_and_responses_targets() {
+        let catalog = registered(compatibility_model());
+        for effort in ["xhigh", "max"] {
+            let mut gemini =
+                json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":effort}}});
+            let source = Body::Json(gemini.clone());
+            let error = crate::gemini::thinking::apply_request(
+                &mut gemini,
+                "m",
+                "gemini",
+                &source,
+                &Body::Empty,
+                Some(&catalog),
+                "compat-test",
+            )
+            .unwrap_err();
+            assert_eq!(error.http_status(), 400);
+
+            let mut claude = json!({"output_config":{"effort":effort}});
+            let source = Body::Json(claude.clone());
+            let error = crate::claude::thinking::apply_request_with_models(
+                &mut claude,
+                "m",
+                "claude",
+                &source,
+                &Body::Empty,
+                Some(&catalog),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.http_status(), 400);
+
+            for provider in ["codex", "meta"] {
+                let mut chat = json!({"reasoning_effort":effort});
+                let source = Body::Json(chat.clone());
+                crate::openai_compat::thinking::apply_request(
+                    &mut chat,
+                    Route {
+                        model: "m",
+                        from: "openai",
+                        to: "openai",
+                        provider,
+                    },
+                    &source,
+                    &Body::Empty,
+                    Some(&catalog),
+                )
+                .unwrap();
+                assert_eq!(json::str_at(&chat, "reasoning_effort"), "high");
             }
         }
     }
