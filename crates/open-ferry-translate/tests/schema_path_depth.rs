@@ -108,10 +108,7 @@ fn external_ref_escaped_paths_fit_two_mib_stack() {
 
 #[test]
 fn array_without_items_escaped_paths_fit_two_mib_stack() {
-    check_central_gate(
-        json!({"type":"array"}),
-        json!({"type":"array","items":{"type":"string"}}),
-    );
+    check_central_gate(json!({"type":"array"}), json!({"type":"array"}));
 }
 
 #[test]
@@ -137,4 +134,44 @@ fn chat_all_of_escaped_paths_fit_two_mib_stack() {
 #[test]
 fn responses_all_of_escaped_paths_fit_two_mib_stack() {
     check("responses", "allOf");
+}
+
+#[test]
+fn ref_sibling_conjunctions_survive_each_gemini_request_route() {
+    for route in ["claude", "chat", "responses"] {
+        let out = translate(
+            route,
+            json!({"type":"object","properties":{"x":{
+            "$ref":"#/$defs/A","minLength":1}},"$defs":{"A":{"type":"string","minLength":5}}}),
+        );
+        let schema = &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+        assert_eq!(schema["properties"]["x"]["minLength"], 1);
+        assert_eq!(schema["properties"]["x"]["allOf"][0]["minLength"], 5);
+        assert!(schema.get("$defs").is_none());
+        assert!(schema["properties"]["x"].get("$ref").is_none());
+    }
+}
+
+#[test]
+fn ref_sibling_conjunction_depth_fits_two_mib_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            for levels in [30, 60, 63] {
+                let mut target = json!({"type":"integer"});
+                for _ in 0..levels {
+                    target = json!({"type":"array","items":target});
+                }
+                for route in ["claude", "chat", "responses"] {
+                    let out = translate(
+                        route,
+                        json!({"$ref":"#/$defs/A","type":"string","$defs":{"A":target}}),
+                    );
+                    assert!(structural_depth(&out) <= 128);
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
