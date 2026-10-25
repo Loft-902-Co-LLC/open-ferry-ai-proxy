@@ -45,6 +45,10 @@ use sha2::{Digest as _, Sha256};
 use super::super::load::load_bytes;
 use super::{SaveError, SaveErrorKind};
 
+#[path = "write_values.rs"]
+mod values;
+pub(crate) use values::IntendedValues;
+
 /// The most of a record file read.
 const RECORD_LIMIT: u64 = 4096;
 
@@ -317,7 +321,16 @@ pub(crate) fn commit_expecting(
     data: &[u8],
     expected: Option<&[u8]>,
 ) -> Result<(), SaveError> {
-    check(data)?;
+    commit_expecting_values(path, data, expected, &IntendedValues::unchanged(data))
+}
+
+pub(crate) fn commit_expecting_values(
+    path: &Path,
+    data: &[u8],
+    expected: Option<&[u8]>,
+    intended: &IntendedValues,
+) -> Result<(), SaveError> {
+    check(data, intended)?;
     let lock = WriteLock::acquire(path)?;
     write_locked(&lock, path, data, expected)
 }
@@ -330,15 +343,33 @@ pub(crate) fn commit_locked(
     data: &[u8],
     expected: Option<&[u8]>,
 ) -> Result<(), SaveError> {
-    check(data)?;
+    commit_locked_values(lock, path, data, expected, &IntendedValues::unchanged(data))
+}
+
+pub(crate) fn commit_locked_values(
+    lock: &WriteLock,
+    path: &Path,
+    data: &[u8],
+    expected: Option<&[u8]>,
+    intended: &IntendedValues,
+) -> Result<(), SaveError> {
+    check(data, intended)?;
     write_locked(lock, path, data, expected)
 }
 
-/// Fails when `data` doesn't load as a config.
-fn check(data: &[u8]) -> Result<(), SaveError> {
+/// Fails when the file cannot load or would give different values.
+pub(crate) fn check(data: &[u8], intended: &IntendedValues) -> Result<(), SaveError> {
     let result = load_bytes(data)
-        .map(|_| ())
-        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()));
+        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))
+        .and_then(|config| {
+            if let Some(path) = intended.difference(data, &config)? {
+                return Err(SaveError::new(
+                    SaveErrorKind::Check,
+                    format!("the file would read back differently at {path}"),
+                ));
+            }
+            Ok(())
+        });
     #[cfg(feature = "parity")]
     if result.is_err() {
         super::parity::ablation::record_rejected("write", data);

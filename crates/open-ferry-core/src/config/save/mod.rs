@@ -71,6 +71,7 @@ pub(crate) use merge::normalize_collection_node_styles;
 mod tree;
 mod v8;
 mod write;
+pub(crate) use write::{IntendedValues, check as check_values};
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -246,9 +247,10 @@ pub fn save_preserving_comments_expecting(
             ),
         ));
     }
+    let intended = IntendedValues::settings(&data, cfg, migrate_v8)?;
     let out = render_preserving_comments(&data, cfg, migrate_v8)?;
     let expected = expected_sha256.map(|_| data.as_slice());
-    write::commit_locked(&lock, path, &out, expected)?;
+    write::commit_locked_values(&lock, path, &out, expected, &intended)?;
     Ok(sha256_hex(&out))
 }
 
@@ -433,6 +435,7 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 
 /// The bytes [`write_file`] writes for `data`.
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
+    let intended = IntendedValues::bytes(data)?;
     let doc = unmarshal(data)?;
     let mut out = Cow::Borrowed(data);
     if let Some(root) = doc.content.first()
@@ -440,7 +443,9 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     {
         out = Cow::Owned(normalize_config_layout(data, true)?.0);
     }
-    Ok(normalize_comment_indentation(&out))
+    let out = normalize_comment_indentation(&out);
+    check_values(&out, &intended)?;
+    Ok(out)
 }
 
 fn rebind_generated_comments(node: &mut Node, emitted: &[super::yaml3::CommentEmission]) {
@@ -689,7 +694,10 @@ pub(crate) fn render_nested_scalar(
         }
         node = next;
     }
-    Ok(normalize_comment_indentation(&marshal_config(&doc)?))
+    let intended = IntendedValues::node(&doc, false)?;
+    let out = normalize_comment_indentation(&marshal_config(&doc)?);
+    check_values(&out, &intended)?;
+    Ok(out)
 }
 
 #[cfg(test)]

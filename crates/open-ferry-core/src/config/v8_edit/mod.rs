@@ -371,6 +371,7 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
         doc.head_comment = replacement.head_comment;
         doc.foot_comment = replacement.foot_comment;
     }
+    let intended = save::IntendedValues::node(&doc, true).map_err(rendered_error)?;
     super::yaml3::encode::quote_config_unicode(&mut doc);
     let data = marshal(&doc).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let config =
@@ -378,6 +379,7 @@ pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8
     validate_v8_config(&data).map_err(|error| V8EditError::InvalidConfig(error.to_string()))?;
     let (data, _) =
         save_step!(rendered, normalize_config_layout(&data, true)).map_err(rendered_error)?;
+    save::check_values(&data, &intended).map_err(rendered_error)?;
     Ok((data, config))
 }
 
