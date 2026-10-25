@@ -347,11 +347,11 @@ impl CodexToClaudeStream {
             self.start_thinking(out);
             self.thinking_delta(&text, out);
             self.finalize_commentary(out);
-        } else {
-            self.start_text(out);
-            self.text_delta(&text, out);
-            self.stop_text(out);
+            return false;
         }
+        self.start_text(out);
+        self.text_delta(&text, out);
+        self.stop_text(out);
         true
     }
 
