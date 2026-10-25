@@ -6,15 +6,20 @@
 //! through `POST /v0/management/quota/fetch` (or, for the races, straight
 //! to the manager).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use open_ferry_core::auth::{Auth, AuthError};
+use open_ferry_core::config::Config;
+use open_ferry_core::manager::cooldown_store;
 use open_ferry_core::manager::{
     CallResult, QuotaRecoveryToken, UsageReading, UsageWindow, UsageWindowReading,
 };
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 
 use super::{Api, Upstream, http_response};
 
@@ -852,4 +857,147 @@ fn a_reading_older_than_its_token_is_refused() {
     let token = api.manager.quota_recovery_token(ID).unwrap();
     assert!(!apply(&api, &token, &stale));
     assert!(blocked(&api));
+}
+
+/// A usage upstream that tells the test when it has read the request and
+/// answers it only when released, so a change can land while a read is in
+/// flight. The answer is made when it is sent, so its `Date` is of that
+/// moment.
+struct Gated {
+    url: String,
+    received: tokio::sync::mpsc::UnboundedReceiver<()>,
+    release: Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Gated {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, received) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::clone(&release);
+        let task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                if super::read_request(&mut stream).await.is_none() {
+                    continue;
+                }
+                let _ = sender.send(());
+                gate.notified().await;
+                let _ = stream
+                    .write_all(&usage_response(&healthy_usage(), &[]))
+                    .await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        Self {
+            url,
+            received,
+            release,
+            task,
+        }
+    }
+}
+
+impl Drop for Gated {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Starts a fetch of `index`, waits until the upstream has the request, runs
+/// `change`, then lets the upstream answer. The fetch's status.
+async fn fetch_across(
+    api: &Api,
+    upstream: &mut Gated,
+    index: &str,
+    change: impl FnOnce(),
+) -> StatusCode {
+    let fetching = fetch(api, index);
+    tokio::pin!(fetching);
+    tokio::select! {
+        Some(()) = upstream.received.recv() => {}
+        answer = &mut fetching => panic!("the fetch ended before the upstream saw it: {}", answer.status),
+    }
+    change();
+    upstream.release.notify_one();
+    fetching.await.status
+}
+
+// A credential removed while its usage is being read stays removed.
+#[tokio::test]
+async fn a_read_in_flight_does_not_outlive_the_credentials_removal() {
+    let mut upstream = Gated::start().await;
+    let api = Api::new();
+    let index = api.register(credential(ID, &upstream.url, true));
+    api.manager
+        .mark_result(&credential_429(SONNET, weekly_headers(), SEVEN_DAYS));
+    fetch_across(&api, &mut upstream, &index, || api.manager.remove(ID)).await;
+    assert!(api.manager.get(ID).is_none());
+}
+
+// A credential registered again while its usage is being read keeps the
+// cooldown the new registration got, whatever the old read shows.
+#[tokio::test]
+async fn a_read_in_flight_does_not_end_a_reregistered_credentials_cooldown() {
+    let mut upstream = Gated::start().await;
+    let api = Api::new();
+    let url = upstream.url.clone();
+    let index = api.register(credential(ID, &url, true));
+    api.manager
+        .mark_result(&credential_429(SONNET, weekly_headers(), SEVEN_DAYS));
+    let status = fetch_across(&api, &mut upstream, &index, || {
+        api.register(credential(ID, &url, true));
+        // A call made with the new registration says so, or is dropped.
+        let new = api.manager.get(ID).unwrap();
+        api.manager.mark_result(&CallResult {
+            registration_epoch: new.registration_epoch,
+            credential_version: new.credential_version,
+            ..credential_429(SONNET, weekly_headers(), SEVEN_DAYS)
+        });
+        assert!(blocked(&api), "the new registration's 429 did not block it");
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(blocked(&api), "a read of the old registration ended it");
+}
+
+// Saved cooldowns put back while a usage read is in flight are not ones the
+// read speaks for.
+#[tokio::test]
+async fn a_read_in_flight_does_not_end_a_cooldown_restored_meanwhile() {
+    let dir = super::scratch_dir();
+    let mut upstream = Gated::start().await;
+    let api = Api::new();
+    let mut claude = credential(ID, &upstream.url, true);
+    claude.attributes.insert(
+        "path".into(),
+        dir.path()
+            .join("claude.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let index = api.register(claude);
+    let config = |on: bool| {
+        let mut config = Config::default();
+        config.auth_dir = dir.path().to_string_lossy().into_owned();
+        config.save_cooldown_status = on;
+        config
+    };
+    let (on, off) = (config(true), config(false));
+    cooldown_store::reconfigure(&api.manager, None, &on);
+    cooldown_store::restore(&api.manager, &on);
+    api.manager
+        .mark_result(&credential_429(SONNET, weekly_headers(), SEVEN_DAYS));
+    cooldown_store::flush(&api.manager);
+    assert!(blocked(&api));
+
+    let status = fetch_across(&api, &mut upstream, &index, || {
+        cooldown_store::reconfigure(&api.manager, Some(&on), &off);
+        cooldown_store::reconfigure(&api.manager, Some(&off), &on);
+        cooldown_store::restore(&api.manager, &on);
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(blocked(&api), "a read from before the restore ended it");
 }

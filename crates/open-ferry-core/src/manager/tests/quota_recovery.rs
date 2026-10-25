@@ -8,7 +8,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::TimeDelta;
@@ -651,8 +651,7 @@ async fn a_capped_foreign_hold_keeps_its_provider_deadline() {
         ..Settings::default()
     });
     h.add(auth(ID, "claude"), &[OPUS]);
-    h.manager
-        .mark_result(&other_failure(OPUS, 429, SEVEN_DAYS));
+    h.manager.mark_result(&other_failure(OPUS, 429, SEVEN_DAYS));
     h.clock.advance(Duration::from_secs(10));
     h.manager
         .mark_result(&quota_429(OPUS, opus_headers(), SEVEN_DAYS));
@@ -784,4 +783,69 @@ async fn an_unrelated_models_outcome_leaves_a_read_in_flight_valid() {
     assert!(blocked(&h, SONNET));
 }
 
-/
+/// A clock that reads true until its call number `stale_on` (counted from the
+/// first call once armed), which it and every later one answers 5 minutes on.
+fn aging_clock(
+    clock: &TestClock,
+    armed: &Arc<AtomicBool>,
+    calls: &Arc<AtomicUsize>,
+    stale_on: usize,
+) -> crate::manager::Clock {
+    let (clock, armed, calls) = (clock.clone(), armed.clone(), calls.clone());
+    Arc::new(move || {
+        if !armed.load(Ordering::SeqCst) {
+            return clock.now();
+        }
+        let call = calls.fetch_add(1, Ordering::SeqCst);
+        if call >= stale_on {
+            clock.now() + TimeDelta::minutes(5)
+        } else {
+            clock.now()
+        }
+    })
+}
+
+/// A reading that ages past its 120 seconds while the apply waits (for the
+/// mutation gate, or for the state lock) recovers nothing. The clock answers
+/// fresh up to a given call and stale after, so the apply must get past the
+/// checks before it and fail the one it stops at.
+#[tokio::test(start_paused = true)]
+async fn a_reading_that_ages_while_the_apply_waits_recovers_nothing() {
+    for stale_on in [0usize, 1] {
+        let test_clock = TestClock::new();
+        let armed = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let models = Arc::new(FakeModels::default());
+        let h = Harness {
+            manager: crate::manager::Manager::with_clock(
+                Settings::default(),
+                models.clone(),
+                None,
+                aging_clock(&test_clock, &armed, &calls, stale_on),
+            ),
+            models,
+            store: Arc::new(FakeStore::default()),
+            clock: test_clock,
+        };
+        h.add(auth(ID, "claude"), &[OPUS]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        let token = h.manager.quota_recovery_token(ID).expect("token");
+        h.clock.advance(Duration::from_secs(5));
+        let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+
+        armed.store(true, Ordering::SeqCst);
+        let recovery = h
+            .manager
+            .apply_quota_usage_recovery(&token, &healthy)
+            .expect("apply");
+        armed.store(false, Ordering::SeqCst);
+        assert!(recovery.is_empty(), "stale on call {stale_on} recovered");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            stale_on + 1,
+            "the apply stopped before the check under test"
+        );
+        assert!(blocked(&h, OPUS));
+    }
+}
