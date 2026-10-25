@@ -442,7 +442,17 @@ fn apply<T: Target>(
     };
 
     let mut config = match suffix {
-        Some(raw) => suffix_config(raw),
+        Some(raw) => {
+            let mut config = suffix_config(raw);
+            if !config.is_set()
+                && !native_responses
+                && !raw.trim().is_empty()
+                && !go::equal_fold(info.id.trim(), route.model.trim())
+            {
+                config = Config::level(raw.trim());
+            }
+            config
+        }
         None => {
             let mut config = source_config;
             if !config.is_set() && resolved {
@@ -457,6 +467,9 @@ fn apply<T: Target>(
             }
             if !config.is_set() {
                 config = extract_config(body, T::NAME);
+            }
+            if !config.is_set() && plan.from != T::NAME {
+                config = extract_config(body, &plan.from);
             }
             config
         }
@@ -896,6 +909,25 @@ fn same_family(from: &str, to: &str) -> bool {
     from == to || (gemini(from) && gemini(to)) || (openai(from) && openai(to))
 }
 
+fn known_family(provider: &str) -> bool {
+    matches!(
+        provider,
+        "gemini"
+            | "antigravity"
+            | "claude"
+            | "openai"
+            | "openai-response"
+            | "codex"
+            | "kimi"
+            | "kimi-ai"
+            | "kimi.ai"
+            | "kimi.com"
+            | "xai"
+            | "interactions"
+            | "devin"
+    )
+}
+
 fn thinking_error(message: String) -> ExecError {
     ExecError::upstream(400, message)
 }
@@ -916,7 +948,7 @@ fn validate(
     // A model served over another provider's protocol may clamp levels its
     // own family wouldn't.
     let model_type = json::lower_trim(&model.model_type);
-    let family_mismatch = !model_type.is_empty()
+    let family_mismatch = known_family(&model_type)
         && ((!from.is_empty() && !same_family(from, &model_type))
             || (!to.is_empty() && !same_family(to, &model_type)));
     // A level from another provider's request may be clamped to the nearest
@@ -1643,6 +1675,340 @@ mod standalone_effort_tests {
             )
             .unwrap();
             assert_eq!(openai["reasoning_effort"], expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_hardening_tests {
+    use super::*;
+    use open_ferry_core::models::ModelInfo;
+    use serde_json::json;
+
+    fn model(target: &str) -> ModelInfo {
+        ModelInfo {
+            id: "m".into(),
+            model_type: target.into(),
+            thinking: Some(ThinkingSupport {
+                min: 1024,
+                max: 8192,
+                levels: vec!["low".into(), "medium".into(), "high".into()],
+                zero_allowed: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn effort_path(target: &str) -> &str {
+        if target == "codex" {
+            "reasoning.effort"
+        } else {
+            "reasoning_effort"
+        }
+    }
+
+    fn body(target: &str, effort: &str) -> Value {
+        let mut body = json!({});
+        json::set(&mut body, effort_path(target), json!(effort));
+        body
+    }
+
+    fn apply_to(
+        target: &str,
+        body: &mut Value,
+        source: &[u8],
+        requested: &str,
+        from: &str,
+        info: Option<ModelInfo>,
+    ) -> Result<(), String> {
+        match target {
+            "codex" => crate::codex::thinking::apply_with_model_info(
+                body, source, requested, from, target, target, info,
+            ),
+            "openai" => crate::openai_compat::thinking::apply_with_model_info(
+                body, source, requested, from, target, target, info,
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn unknown_suffixes_are_validated_for_known_non_native_models() {
+        for target in ["codex", "openai"] {
+            for requested in ["m(bogus)", "m( bogus )"] {
+                let mut body = body(target, "low");
+                let error = apply_to(
+                    target,
+                    &mut body,
+                    b"",
+                    requested,
+                    target,
+                    Some(model(target)),
+                )
+                .unwrap_err();
+                assert!(error.contains("bogus"), "{target}: {error}");
+                assert_eq!(json::str_at(&body, effort_path(target)), "low");
+            }
+            for (requested, expected) in [
+                ("m()", "low"),
+                ("m( \t )", "low"),
+                ("m( high )", "high"),
+                ("m(high)", "high"),
+            ] {
+                let mut body = body(target, "low");
+                apply_to(
+                    target,
+                    &mut body,
+                    b"",
+                    requested,
+                    target,
+                    Some(model(target)),
+                )
+                .unwrap();
+                assert_eq!(
+                    json::str_at(&body, effort_path(target)),
+                    expected,
+                    "{requested}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_suffix_exceptions_keep_literal_unknown_and_nonthinking_models() {
+        for target in ["codex", "openai"] {
+            for (requested, literal_id) in [("m(bogus)", " M(BOGUS) "), ("ſ(bogus)", " S(BOGUS) ")]
+            {
+                let mut body = body(target, "low");
+                let info = ModelInfo {
+                    id: literal_id.into(),
+                    ..model(target)
+                };
+                apply_to(target, &mut body, b"", requested, target, Some(info)).unwrap();
+                assert_eq!(json::str_at(&body, effort_path(target)), "low");
+            }
+            for info in [
+                None,
+                Some(ModelInfo {
+                    user_defined: true,
+                    ..model(target)
+                }),
+            ] {
+                let mut body = body(target, "low");
+                apply_to(target, &mut body, b"", "m(bogus)", target, info).unwrap();
+                assert_eq!(json::str_at(&body, effort_path(target)), "low");
+            }
+            let mut body = body(target, "low");
+            let info = ModelInfo {
+                thinking: None,
+                ..model(target)
+            };
+            apply_to(target, &mut body, b"", "m(bogus)", target, Some(info)).unwrap();
+            assert!(json::get(&body, effort_path(target)).is_none());
+        }
+    }
+
+    #[test]
+    fn native_responses_keep_unknown_suffixes_and_configuration_updates() {
+        let original = json!({
+            "reasoning":{"effort":"low"},
+            "input":[{"type":"configuration_update","reasoning":{"effort":"medium"}}]
+        });
+        let info = ModelInfo {
+            support_configuration_update: true,
+            ..model("codex")
+        };
+        for requested in ["m", "m(bogus)", "m( )"] {
+            let mut body = original.clone();
+            apply_to(
+                "codex",
+                &mut body,
+                b"",
+                requested,
+                "openai-response",
+                Some(info.clone()),
+            )
+            .unwrap();
+            assert_eq!(body, original, "{requested}");
+        }
+        let mut body = original.clone();
+        apply_to(
+            "codex",
+            &mut body,
+            b"",
+            "m(high)",
+            "openai-response",
+            Some(info.clone()),
+        )
+        .unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["input"], original["input"]);
+
+        let mut body = original.clone();
+        apply_to("codex", &mut body, b"", "m(bogus)", "openai", Some(info)).unwrap_err();
+        let mut body = original;
+        apply_to(
+            "codex",
+            &mut body,
+            b"",
+            "m(bogus)",
+            "openai-response",
+            Some(model("codex")),
+        )
+        .unwrap_err();
+        assert_eq!(body["input"], json!([]));
+    }
+
+    #[test]
+    fn translated_bodies_fall_back_to_the_source_format_after_existing_sources() {
+        for (target, from, source_fields, source) in [
+            (
+                "codex",
+                "openai",
+                json!({"reasoning_effort":"high"}),
+                br#"{"reasoning_effort":"high"}"#.as_slice(),
+            ),
+            (
+                "openai",
+                "claude",
+                json!({"output_config":{"effort":"high"}}),
+                br#"{"output_config":{"effort":"high"}}"#.as_slice(),
+            ),
+        ] {
+            let mut body = source_fields.clone();
+            apply_to(target, &mut body, b"", "m", from, Some(model(target))).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "high", "{target}");
+
+            let mut body = source_fields.clone();
+            json::set(&mut body, effort_path(target), json!("medium"));
+            apply_to(target, &mut body, b"", "m", from, Some(model(target))).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "medium");
+
+            let mut body = source_fields.clone();
+            json::set(&mut body, effort_path(target), json!("medium"));
+            apply_to(target, &mut body, source, "m", from, Some(model(target))).unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "high");
+
+            let mut body = source_fields;
+            apply_to(
+                target,
+                &mut body,
+                source,
+                "m(low)",
+                from,
+                Some(model(target)),
+            )
+            .unwrap();
+            assert_eq!(json::str_at(&body, effort_path(target)), "low");
+        }
+    }
+
+    #[test]
+    fn compatibility_model_types_do_not_infer_a_family_mismatch() {
+        let support = ThinkingSupport {
+            min: 1024,
+            max: 8192,
+            levels: vec!["low".into(), "medium".into(), "high".into()],
+            ..Default::default()
+        };
+        for model_type in ["", "custom-compatible", "openai-compatibility", " ClAuDe "] {
+            let model = Model {
+                model_type: model_type.into(),
+                ..gemini_model(support.clone())
+            };
+            let error = validate(
+                Config::level("xhigh"),
+                &model,
+                &support,
+                "claude",
+                "claude",
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                error.message.contains("not supported"),
+                "{model_type}: {error:?}"
+            );
+            let error = validate(
+                Config::budget(9000),
+                &model,
+                &support,
+                "claude",
+                "claude",
+                false,
+            )
+            .unwrap_err();
+            assert!(
+                error.message.contains("out of range"),
+                "{model_type}: {error:?}"
+            );
+            let suffix = validate(
+                Config::budget(9000),
+                &model,
+                &support,
+                "claude",
+                "claude",
+                true,
+            )
+            .unwrap();
+            assert_eq!(suffix, Config::budget(8192));
+            let cross_format = validate(
+                Config::level("xhigh"),
+                &model,
+                &support,
+                "claude",
+                "openai",
+                false,
+            )
+            .unwrap();
+            assert_eq!(cross_format, Config::level("high"));
+        }
+        for model_type in [
+            "gemini",
+            " OpenAI ",
+            "codex",
+            "xai",
+            "interactions",
+            "devin",
+        ] {
+            let model = Model {
+                model_type: model_type.into(),
+                ..gemini_model(support.clone())
+            };
+            assert_eq!(
+                validate(
+                    Config::level("xhigh"),
+                    &model,
+                    &support,
+                    "claude",
+                    "claude",
+                    false
+                )
+                .unwrap(),
+                Config::level("high")
+            );
+            assert_eq!(
+                validate(
+                    Config::budget(9000),
+                    &model,
+                    &support,
+                    "claude",
+                    "claude",
+                    false
+                )
+                .unwrap(),
+                Config::budget(8192)
+            );
+        }
+    }
+
+    fn gemini_model(support: ThinkingSupport) -> Model {
+        Model {
+            id: "m".into(),
+            model_type: "gemini".into(),
+            thinking: Some(support),
+            ..Model::default()
         }
     }
 }
