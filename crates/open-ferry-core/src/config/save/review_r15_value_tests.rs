@@ -260,3 +260,145 @@ fn review_r15_quoted_continuation_fallback_keeps_refusals_and_limits() {
     // Typed values must still charge every owned alias string to the budget.
     assert!(Config::parse(&source.replace("refs:", "api-keys:")).is_err());
 }
+
+#[test]
+fn review_r15_quoted_fallback_aliases_share_anchor_text() {
+    let source = format!(
+        "auth-dir: 'a\n\nz'\nshared: &a {}\nrefs: [{}]\n",
+        "x".repeat(256 << 10),
+        vec!["*a"; 1000].join(", ")
+    );
+    let root = crate::config::yaml::parse_document(&source)
+        .unwrap()
+        .unwrap();
+    let value = |key: &str| {
+        root.content
+            .chunks_exact(2)
+            .find(|pair| pair[0].value == key)
+            .map(|pair| &pair[1])
+            .unwrap()
+    };
+    let anchor = value("shared");
+    assert!(
+        value("refs")
+            .content
+            .iter()
+            .all(|node| node.value.shares(&anchor.value))
+    );
+}
+
+#[test]
+fn review_r15_value_check_refuses_changed_typed_values_before_backup() {
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    let source = "auth-dir: /x\n";
+    std::fs::write(&path, source).unwrap();
+    let mut config = Config::load(&path).unwrap();
+    config.auth_dir = "synthetic-intended-text".into();
+    let intended = IntendedValues::settings(source.as_bytes(), &config, false).unwrap();
+    let lock = WriteLock::acquire(&path).unwrap();
+    let error = write::commit_locked_values(
+        &lock,
+        &path,
+        b"auth-dir: synthetic-other-text\n",
+        None,
+        &intended,
+    )
+    .expect_err("a changed value must be refused");
+    assert_eq!(error.kind(), SaveErrorKind::Check);
+    assert_eq!(
+        error.to_string(),
+        "the file would read back differently at $.auth-dir"
+    );
+    assert!(!error.to_string().contains("synthetic-intended-text"));
+    assert!(!error.to_string().contains("synthetic-other-text"));
+    assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+    assert!(!backup_path(&path).exists());
+    assert!(recorded_sha256(&path).is_none());
+}
+
+#[test]
+fn review_r15_value_check_covers_plugin_and_non_string_mapping_values() {
+    for (source, changed) in [
+        (
+            "plugins: {configs: {demo: {text: x}}}\n",
+            "plugins: {configs: {demo: {text: y}}}\n",
+        ),
+        (
+            "payload: {default: [{models: [{name: '*'}], params: {probe: {1: x}}}]}\n",
+            "payload: {default: [{models: [{name: '*'}], params: {probe: {1: y}}}]}\n",
+        ),
+    ] {
+        let intended = IntendedValues::bytes(source.as_bytes()).unwrap();
+        check_values(source.as_bytes(), &intended).unwrap();
+        let error = check_values(changed.as_bytes(), &intended)
+            .expect_err("opaque values must also be compared");
+        assert_eq!(error.kind(), SaveErrorKind::Check);
+        assert!(
+            error
+                .to_string()
+                .starts_with("the file would read back differently at $.")
+        );
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "port: 1\n").unwrap();
+        write_file(&path, source.as_bytes()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+    }
+}
+
+#[test]
+fn review_r15_value_check_accepts_loader_normalization() {
+    let source = "openai-compatibility:\n  - name: '  n  '\n    base-url: ' https://example.invalid '\n    api-key-entries: [{api-key: k}]\nclaude-api-key:\n  - api-key: k\n    headers: {X-A: '  v  '}\noauth-excluded-models: {'  ChAnNeL  ': ['  M  ']}\n";
+    for op in ["settings", "migrate", "put"] {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        save_operation(&path, op).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.openai_compatibility[0].name, "n");
+        assert!(loaded.oauth_excluded_models.contains_key("channel"));
+    }
+}
+
+#[test]
+fn review_r15_safety_net_preserves_values_or_refuses_without_writing() {
+    for mapping in [true, false] {
+        let source = if mapping {
+            "claude-api-key:\n  - api-key: \"      x\\n\\L\"\n"
+        } else {
+            "api-keys:\n  - |-\n    x\n"
+        };
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        let wanted = "      x\n\u{2028}";
+        if !mapping {
+            config.api_keys = vec![wanted.into()];
+        }
+        let result = save_preserving_comments(&path, &config, !mapping);
+        match result {
+            Ok(()) => {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let actual = AnyValue::parse_yaml(&text).unwrap();
+                if mapping {
+                    assert!(named(&actual, "api-key") == Some(&AnyValue::Str(wanted.into())));
+                } else {
+                    assert!(Config::load(&path).unwrap().api_keys == [wanted]);
+                }
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), SaveErrorKind::Check);
+                assert!(
+                    error
+                        .to_string()
+                        .starts_with("the file would read back differently at $.")
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), source.as_bytes());
+                assert!(!backup_path(&path).exists());
+                eprintln!("{}; original file and backup state verified", error);
+            }
+        }
+    }
+}
