@@ -489,8 +489,17 @@ fn candidate_write_file(
     data: &[u8],
 ) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
     let (doc, source) = tree::read_comment_source(data)?;
-    let out = tree::source_yaml(data, &doc);
-    Ok((candidate_write_file_receipted(out)?, source))
+    let (out, source) = if let Some(root) = doc.content.first()
+        && is_v8_config_layout(root)?
+    {
+        // Re-parsing loses receipts inside alias targets. Normalize the
+        // annotated tree so expanded copies also enter this source catalog.
+        let (out, source, _) = v8::layout_candidate_from_source(data, doc, source, true)?;
+        (out, source)
+    } else {
+        (tree::source_yaml(data, &doc), source)
+    };
+    Ok((tree::normalize_receipted(out), source))
 }
 
 /// The edit path also crosses this final write stage. Keep the original

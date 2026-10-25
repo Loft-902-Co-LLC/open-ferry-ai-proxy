@@ -299,7 +299,16 @@ fn layout_candidate(
     data: &[u8],
     migrate: bool,
 ) -> Result<(super::tree::ReceiptedYaml, super::tree::CommentSource, bool), SaveError> {
-    let (doc, mut source) = super::tree::read_comment_source(data)?;
+    let (doc, source) = super::tree::read_comment_source(data)?;
+    layout_candidate_from_source(data, doc, source, migrate)
+}
+
+pub(super) fn layout_candidate_from_source(
+    data: &[u8],
+    doc: Node,
+    mut source: super::tree::CommentSource,
+    migrate: bool,
+) -> Result<(super::tree::ReceiptedYaml, super::tree::CommentSource, bool), SaveError> {
     let input = super::tree::source_yaml(data, &doc);
     let (doc, changed) = normalize_layout_tree(doc, data, migrate)?;
     source.include_copies(&doc);
