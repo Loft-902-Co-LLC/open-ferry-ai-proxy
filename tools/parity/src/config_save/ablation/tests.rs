@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn retained_source_owner_accepts_native_replay_and_an_observed_writer_repeat() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../testdata/source-owner-retained.json")).unwrap();
+    let source = fixture["source"].as_str().unwrap();
+    let protected = fixture["protected"].as_str().unwrap();
+    let operation = &fixture["operation"];
+    let evidence = &fixture["evidence"];
+    let go = evidence["retained_source_owner"]["go"]["files"][0]
+        .as_str()
+        .unwrap();
+    assert!(!core::comment_ownership_analysis(source, Some(go), protected, &[]).accepted());
+    assert_eq!(
+        core::retained_source_owner(source, protected, operation, evidence).conditions,
+        [true; 5]
+    );
+    let case = Case::new("native-retained-source-owner", "", "").with_options(json!({
+        "file":source,"steps":[operation],"_ownership_evidence":[evidence]
+    }));
+    let accepted = ownership::analyze(&case, 0, source, Some(go), protected, &[], true);
+    assert!(accepted.accepted());
+    assert!(accepted.rules.contains(&"retained-source-owner"));
+}
+
+#[test]
 fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
     // Pinned Go receipts were captured on these exact first-step sources and
     // operations. Even a generously granted stable-repeat witness cannot
