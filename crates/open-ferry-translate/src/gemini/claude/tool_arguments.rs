@@ -225,36 +225,34 @@ fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
 #[derive(Clone, Default)]
 struct AnalysisReferences {
     followed: BTreeSet<String>,
-    cyclic: bool,
+    cut: BTreeSet<String>,
 }
 
-struct CachedAnalysis<'a> {
-    info: Info<'a>,
+struct CachedAnalysis<T> {
+    info: T,
     references: AnalysisReferences,
 }
 
 #[derive(Default)]
-struct AnalysisMemo<'a> {
+struct AnalysisMemo<T> {
     // Depth is bounded by 16, so each target has at most 17 cached results.
-    targets: HashMap<*const Value, [Option<CachedAnalysis<'a>>; 17]>,
+    targets: HashMap<*const Value, [Option<CachedAnalysis<T>>; 17]>,
     #[cfg(test)]
     target_analyses: usize,
 }
 
-impl<'a> AnalysisMemo<'a> {
-    fn resolve(
+impl<T: Clone> AnalysisMemo<T> {
+    fn resolve_with(
         &mut self,
-        target: &'a Value,
-        root: &'a Value,
+        target: &Value,
         depth: usize,
         visited: &mut BTreeSet<String>,
         references: &mut AnalysisReferences,
-    ) -> Info<'a> {
+        walk: impl FnOnce(&mut Self, &mut BTreeSet<String>, &mut AnalysisReferences) -> T,
+        cacheable: fn(&T) -> bool,
+    ) -> T {
         if depth > 16 {
-            return Info {
-                complex: true,
-                ..Info::default()
-            };
+            return walk(self, visited, references);
         }
         let identity = std::ptr::from_ref(target);
         if let Some(cached) = self
@@ -266,27 +264,50 @@ impl<'a> AnalysisMemo<'a> {
             references
                 .followed
                 .extend(cached.references.followed.iter().cloned());
+            references.cut.extend(cached.references.cut.iter().cloned());
             return cached.info.clone();
         }
         #[cfg(test)]
         {
             self.target_analyses += 1;
         }
-        let mut followed = AnalysisReferences::default();
-        let info = analyze_depth_memo(target, root, depth, visited, self, &mut followed);
-        // A cycle can truncate properties or closed-object flags. Keep only
-        // acyclic results, and reuse them only when no followed ref is active.
-        if !followed.cyclic {
+        let mut own = AnalysisReferences::default();
+        let info = walk(self, visited, &mut own);
+        // A cut inactive at entry was pushed by this walk and repeats whenever
+        // its followed refs are inactive. Cuts already active at entry depend
+        // on the caller, so those results stay uncached. Cacheable walks restore
+        // visited; items failures, which can leave refs active, are not cached.
+        if cacheable(&info) && own.cut.is_disjoint(visited) {
             self.targets
                 .entry(identity)
                 .or_insert_with(|| std::array::from_fn(|_| None))[depth] = Some(CachedAnalysis {
                 info: info.clone(),
-                references: followed.clone(),
+                references: own.clone(),
             });
         }
-        references.followed.extend(followed.followed);
-        references.cyclic |= followed.cyclic;
+        references.followed.extend(own.followed);
+        references.cut.extend(own.cut);
         info
+    }
+}
+
+impl<'a> AnalysisMemo<Info<'a>> {
+    fn resolve(
+        &mut self,
+        target: &'a Value,
+        root: &'a Value,
+        depth: usize,
+        visited: &mut BTreeSet<String>,
+        references: &mut AnalysisReferences,
+    ) -> Info<'a> {
+        self.resolve_with(
+            target,
+            depth,
+            visited,
+            references,
+            |memo, visited, own| analyze_depth_memo(target, root, depth, visited, memo, own),
+            |_| true,
+        )
     }
 }
 
@@ -317,7 +338,7 @@ fn analyze_depth_memo<'a>(
     root: &'a Value,
     depth: usize,
     visited: &mut BTreeSet<String>,
-    memo: &mut AnalysisMemo<'a>,
+    memo: &mut AnalysisMemo<Info<'a>>,
     references: &mut AnalysisReferences,
 ) -> Info<'a> {
     let mut info = Info::default();
@@ -366,7 +387,9 @@ fn analyze_depth_memo<'a>(
             info.merge(memo.resolve(target, root, depth + 1, visited, references));
             visited.remove(&reference);
         } else {
-            references.cyclic |= visited.contains(&reference);
+            if visited.contains(&reference) {
+                references.cut.insert(reference);
+            }
             if !multi_branch_union {
                 info.complex = true;
                 return info;
@@ -513,16 +536,51 @@ fn items<'a>(
     depth: usize,
     visited: &mut BTreeSet<String>,
 ) -> Option<Vec<&'a Value>> {
+    #[cfg(test)]
+    if analysis_memo_tests::legacy_enabled() {
+        return walk_memo_tests::legacy_items(schema, root, depth, visited);
+    }
+    items_memo(
+        schema,
+        root,
+        depth,
+        visited,
+        &mut AnalysisMemo::default(),
+        &mut AnalysisReferences::default(),
+    )
+}
+
+fn items_memo<'a>(
+    schema: &'a Value,
+    root: &'a Value,
+    depth: usize,
+    visited: &mut BTreeSet<String>,
+    memo: &mut AnalysisMemo<Option<Vec<&'a Value>>>,
+    references: &mut AnalysisReferences,
+) -> Option<Vec<&'a Value>> {
     if depth > 16 || !schema.is_object() {
         return None;
     }
     let mut result = Schemas::default();
     if let Some(reference) = schema.get("$ref") {
         let reference = str_of(Some(reference)).into_owned();
-        if !reference.starts_with("#/") || !visited.insert(reference.clone()) {
+        if !reference.starts_with("#/") {
             return None;
         }
-        for item in items(local_ref(root, &reference)?, root, depth + 1, visited)? {
+        if !visited.insert(reference.clone()) {
+            references.cut.insert(reference);
+            return None;
+        }
+        let target = local_ref(root, &reference)?;
+        references.followed.insert(reference.clone());
+        for item in memo.resolve_with(
+            target,
+            depth + 1,
+            visited,
+            references,
+            |memo, visited, own| items_memo(target, root, depth + 1, visited, memo, own),
+            Option::is_some,
+        )? {
             unique(&mut result, item);
         }
         visited.remove(&reference);
@@ -532,13 +590,13 @@ fn items<'a>(
         if branches.len() != 1 {
             return None;
         }
-        for item in items(branches[0], root, depth + 1, visited)? {
+        for item in items_memo(branches[0], root, depth + 1, visited, memo, references)? {
             unique(&mut result, item);
         }
     }
     if let Some(all) = schema.get("allOf") {
         for branch in all.as_array()? {
-            for item in items(branch, root, depth + 1, visited)? {
+            for item in items_memo(branch, root, depth + 1, visited, memo, references)? {
                 unique(&mut result, item);
             }
         }
@@ -605,18 +663,56 @@ fn declares_deep(
     depth: usize,
     visited: &mut BTreeSet<String>,
 ) -> bool {
+    #[cfg(test)]
+    if analysis_memo_tests::legacy_enabled() {
+        return walk_memo_tests::legacy_declares_deep(schema, root, key, depth, visited);
+    }
+    // The root and property name stay fixed for this memo's lifetime.
+    declares_deep_memo(
+        schema,
+        root,
+        key,
+        depth,
+        visited,
+        &mut AnalysisMemo::default(),
+        &mut AnalysisReferences::default(),
+    )
+}
+
+fn declares_deep_memo(
+    schema: &Value,
+    root: &Value,
+    key: &str,
+    depth: usize,
+    visited: &mut BTreeSet<String>,
+    memo: &mut AnalysisMemo<bool>,
+    references: &mut AnalysisReferences,
+) -> bool {
     if depth > 16 || !schema.is_object() {
         return false;
     }
     if let Some(reference) = schema.get("$ref") {
         let reference = str_of(Some(reference)).into_owned();
         if visited.insert(reference.clone()) {
-            let declared = local_ref(root, &reference)
-                .is_some_and(|target| declares_deep(target, root, key, depth + 1, visited));
+            let declared = local_ref(root, &reference).is_some_and(|target| {
+                references.followed.insert(reference.clone());
+                memo.resolve_with(
+                    target,
+                    depth + 1,
+                    visited,
+                    references,
+                    |memo, visited, own| {
+                        declares_deep_memo(target, root, key, depth + 1, visited, memo, own)
+                    },
+                    |_| true,
+                )
+            });
             visited.remove(&reference);
             if declared {
                 return true;
             }
+        } else {
+            references.cut.insert(reference);
         }
     }
     if schema
@@ -628,8 +724,9 @@ fn declares_deep(
         return true;
     }
     ["allOf", "anyOf", "oneOf"].iter().any(|keyword| {
-        gjson_array(schema.get(*keyword))
-            .any(|branch| declares_deep(branch, root, key, depth + 1, visited))
+        gjson_array(schema.get(*keyword)).any(|branch| {
+            declares_deep_memo(branch, root, key, depth + 1, visited, memo, references)
+        })
     })
 }
 
@@ -789,3 +886,6 @@ mod tests;
 
 #[cfg(test)]
 mod analysis_memo_tests;
+
+#[cfg(test)]
+mod walk_memo_tests;
