@@ -8,7 +8,7 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 - Add opt-in preview updates across the CLI, dashboard, services, and installers, with verified release pointers and stable as the default. Switching back to stable never downgrades.
 
-The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.38.
+The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. The reference remains CLIProxyAPI v8.0.38; the changes below also include the listed ports prepared for v8.0.42.
 
 ### Security
 
@@ -19,6 +19,11 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 - **A README quick start** from installation through an API-key provider and client setup to a verified model reply, using the installer's config and keys, with key recovery and port-conflict guidance. The Status section is shorter; its full feature inventory is in [docs/features.md](docs/features.md).
 - **Generated compatibility evidence matrix** separates reviewed Open Ferry fixture assertions, tested refusals, scripted routes and translation parity. CI checks exact test definitions and normalized body digests, requires explicit acceptance after body changes, exports every classified parity suite with explicit exclusions, and reuses workspace test harnesses without extra feature-resolution builds ([matrix](docs/compatibility.md)).
+- Enable mixed Gemini built-in and function tools for Chat Completions and Responses requests.
+- Show Gemini model token limits in lists and details, using positive context and completion limits when explicit Gemini limits are absent.
+- Usage records now show the service tier sent to the provider after payload rules, separately from the requested tier and the tier in the reply.
+- Claude usage records now take the reply's service tier from `usage.speed` (`fast` or `standard`), for whole replies and streams.
+
 - **Config-save parity proofs follow comments that upstream moves.** The parity tool replays the pinned Go edits on the exact input to find where each comment ends up, and accepts a moved comment block only if every line is kept there, in order. Partial or misplaced blocks stay Different. The recalibrated baseline records the measured counts.
 - **Config-save parity can prove comments retained at their source owners when
   Go moved or dropped them.** A separate Go run checks each comment against
@@ -102,6 +107,9 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 - New releases go to the preview channel first. The maintainer can promote the same signed build to stable without rebuilding, or withdraw it from channel discovery while keeping its downloads for rollback and investigation. Until a channel-aware release is installed, test a preview by explicit version using that release's own `releases/download/vX.Y.Z/install.sh` or `install.ps1` script, rather than latest's (see [Releasing](RELEASING.md#steps)).
 - **Quota recovery after an upstream reset**: a fresh, successful Claude usage probe can end a cached quota cooldown before its deadline when it confirms capacity for the limit that caused it. Failed or ambiguous reads, authentication failures, other backoffs and unrelated credentials stay unchanged. The dashboard's per-credential **Clear proxy cooldown** action asks for confirmation and distinguishes a proxy reset from a provider quota reset.
+- Thinking models now return 400 for unrecognized model-name suffixes such as `(fast)`; native Responses requests keep their existing suffix behavior. Padded levels such as `( high )` now apply, and thinking settings left in the client's format after translation are now read.
+- For OpenAI Chat Completions and Responses clients, a thinking level the OpenAI-compatible, Meta or other custom catalog model does not list, such as `minimal`, now returns 400 instead of being changed to the nearest level. OpenAI-compatible models still map `xhigh` and `max` to their own `xhigh`/`max` or `high` level. Claude and Gemini clients still clamp unsupported levels.
+
 - **Fewer streaming allocations** per event for Chat Completions and Claude Messages, and no commit-header allocation when pre-first-token keepalive is disabled. Shared-host measurements did not establish an end-to-end speedup.
 - **Config writer refusals** now answer `409 config_unwritable` with a safe reason. The CLI shows that reason, says nothing was changed, and distinguishes the refusal from an I/O failure in JSON output.
 - **Smaller, faster release binaries**, built with fat link-time optimization and one codegen unit: about 11% less CPU per request and 31% smaller in the measured Linux build.
@@ -146,6 +154,19 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
 
 ### Fixed
+
+- Preserve Gemini tool schema reference sibling constraints and conjunction scopes without weakening schema resource limits.
+- Preserve Claude tool arguments for implicitly open empty object schemas; clear arguments only for explicitly closed empty objects.
+- Restart Gemini function-call signature groups after text, including empty signature carriers, while retaining unsigned parallel calls.
+- Defer empty Gemini-to-Claude tool inputs until completion so later argument chunks form one JSON value.
+- Preserve Gemini safety and malformed-response outcomes, usage sent in later chunks, and response metadata in translated replies.
+- Preserve supplied Gemini function-call IDs and each candidate's tool-call indices across stream chunks.
+- Route Vertex AI US/EU multi-region requests to regional endpoint hosts and recognize REP hosts for OpenAPI location selection while retaining destination restrictions.
+- Return 502 for Gemini/Vertex prompt blocks without candidates while preserving observed usage, and reject truncated Chat Completions and Claude streams without a finish reason, including when prompt feedback accompanies candidates.
+- Preserve partial Claude content, tool calls and token usage when its context window fills: Chat Completions finish with `length`, and Responses finish incomplete with reason `max_output_tokens`.
+- Keep Claude searches deferred by a client tool call open across tool outputs, pairing later results without inventing empty search results.
+- Add missing Responses context-overflow error codes for Claude prompt-too-long failures while preserving explicit codes.
+- Translate Codex commentary as unsigned Claude thinking while retaining final-answer order and reasoning signatures.
 
 - **Reduce repeated schema walks when cleaning Gemini tool arguments**, with cycle-aware caching for object analysis, placeholder-declaration checks, and array-item lookup.
 - **Keep config comments on their source settings and list items** during
@@ -220,7 +241,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Read Unicode YAML line breaks as CLIProxyAPI does**: files with U+0085, U+2028 or U+2029 read values, keys and comments the same way. This also covers repeated byte order marks and quoted strings continued at the first column. Values that span several lines are written in double quotes when CLIProxyAPI would write them in a form that reads back differently, including values inside lists of mappings. Very large alias expansions are refused during reading or saving, including in files without these characters; existing nesting and other safety limits remain.
 - **Refuse config writes that would read back differently.** Saves compare the values before writing, after the same cleanups used by the loader. A refusal names the first changed setting without printing its value, and leaves the file and backup unchanged.
 - **Preserve Claude tool_use stops and parallel tool calls** from providers that omit stream indexes.
-- **Map Claude refusals and context-window exhaustion correctly**, retaining failed Responses output/usage and avoiding duplicate terminal stream errors.
+- **Map Claude refusals correctly**, retaining Responses output and usage and avoiding duplicate terminal stream errors. Context-window exhaustion retains partial output and usage with the length/incomplete outcomes described above.
 - **Preserve paused Claude server searches and continuations**, and honor Responses parallel_tool_calls=false for effective tools.
 - Machine-wide installs and later machine commands on Windows work when run from the built-in Administrator account (for example on cloud Windows Server VMs), including when new objects default to the installing account as owner.
 - Whole-file v8 YAML saves preserve the replacement document's trailing comments, including a dashboard edit that only adds a final comment.
