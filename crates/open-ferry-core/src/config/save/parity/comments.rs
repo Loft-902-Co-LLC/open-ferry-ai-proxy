@@ -1022,6 +1022,70 @@ fn source_owner_signature(node: &Node, values: bool) -> Option<Value> {
     signature(node, values, &mut 30_000, 0)
 }
 
+fn source_owner_destination_matches(
+    source: &Node,
+    go: &Node,
+    original: &Owner,
+    destination: &Owner,
+) -> bool {
+    fn resolve(mut node: &Node) -> Option<&Node> {
+        for _ in 0..128 {
+            if node.kind != super::super::Kind::Alias {
+                return Some(node);
+            }
+            let Some(crate::config::yaml3::AliasTarget::Node(target)) = &node.alias else {
+                return None;
+            };
+            node = target;
+        }
+        None
+    }
+    fn at<'a>(doc: &'a Node, owner: &Owner) -> Option<&'a Node> {
+        if owner.side == Side::Document {
+            return owner.path.is_empty().then_some(doc);
+        }
+        let mut node = doc.content.first()?;
+        let mut key_node = None;
+        for part in &owner.path {
+            node = resolve(node)?;
+            key_node = None;
+            match part {
+                Part::Key(tag, name) => {
+                    if node.kind != super::super::Kind::Mapping {
+                        return None;
+                    }
+                    let mut selected = node.pairs().filter(|(key, _)| {
+                        key.kind == super::super::Kind::Scalar
+                            && key.tag == *tag
+                            && key.value == *name
+                    });
+                    let (key, value) = selected.next()?;
+                    if selected.next().is_some() {
+                        return None;
+                    }
+                    key_node = Some(key);
+                    node = value;
+                }
+                Part::Index(index) => {
+                    if node.kind != super::super::Kind::Sequence {
+                        return None;
+                    }
+                    node = node.content.get(*index)?;
+                }
+            }
+        }
+        if owner.side == Side::Key {
+            key_node
+        } else {
+            Some(node)
+        }
+    }
+    at(source, original)
+        .and_then(|node| source_owner_signature(node, true))
+        .zip(at(go, destination).and_then(|node| source_owner_signature(node, true)))
+        .is_some_and(|(source, destination)| source == destination)
+}
+
 fn source_owner_inventory(text: &str) -> Option<Vec<Occurrence>> {
     if !super::single_document(text) {
         return None;
@@ -1344,6 +1408,10 @@ pub fn retained_source_owner(
     if unmask(&marked_go) != go {
         return refused();
     }
+    let (Ok(source_doc), Ok(go_doc)) = (unmarshal(source.as_bytes()), unmarshal(go.as_bytes()))
+    else {
+        return refused();
+    };
     let (Some(g), Some(marked), Some(native_r)) = (
         source_owner_native_inventory(&frame["go_inventory"], &go),
         source_owner_native_inventory(&frame["marked_go_inventory"], &marked_go),
@@ -1356,14 +1424,21 @@ pub fn retained_source_owner(
     let r_groups = groups(&r);
     let projected: Vec<_> = modeled.iter().map(|(c, _)| c.clone()).collect();
     let source_owners = groups(&native_r) == groups(&r)
-        && modeled.iter().all(|(item, tracked)| {
-            rc.get(&item.text) == Some(&1)
-                && r.iter().any(|actual| {
-                    actual.text == item.text
-                        && actual.owner == item.owner
-                        && (*tracked || actual.sequences == item.sequences)
-                })
-        })
+        && modeled
+            .iter()
+            .zip(&bindings)
+            .all(|((item, tracked), (original, _, _, _))| {
+                rc.get(&item.text) == Some(&1)
+                    && r.iter()
+                        .any(|actual| actual.text == item.text && actual.owner == item.owner)
+                    && (!*tracked
+                        || source_owner_destination_matches(
+                            &source_doc,
+                            &go_doc,
+                            original,
+                            &item.owner,
+                        ))
+            })
         && groups(&projected).iter().all(|(owner, wanted)| {
             groups(&r)
                 .get(owner)
@@ -1512,6 +1587,42 @@ mod tests {
         assert_eq!(proof.conditions, [false, true, true, true, true]);
         assert!(!proof.accepted(), "third-owner comment was certified");
     }
+    #[test]
+    fn source_owner_destination_matches_the_real_go_node() {
+        let (source, go, operation, mut evidence) = source_owner_fixture();
+        let text = source_owner_inventory(&source).unwrap()[0].text.clone();
+        let extra = "destination: [different]\n";
+        let go = format!("{go}{extra}");
+        let marked = evidence["retained_source_owner"]["marked_go"]["files"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        evidence["retained_source_owner"]["go"] = json!({"files":[go]});
+        evidence["retained_source_owner"]["marked_go"] =
+            json!({"files":[format!("{marked}{extra}")]});
+        let third = go
+            .replace(&text, "")
+            .replace(extra, &format!("destination: [different] {text}\n"));
+        replace_source_owner_output(&mut evidence, &operation, &third);
+        let destination = source_owner_inventory(&third).unwrap()[0].owner.clone();
+        let original = source_owner_inventory(&source).unwrap()[0].owner.clone();
+        assert_eq!(destination.side, original.side);
+        assert_eq!(destination.slot, original.slot);
+        assert!(!source_owner_destination_matches(
+            &unmarshal(source.as_bytes()).unwrap(),
+            &unmarshal(go.as_bytes()).unwrap(),
+            &original,
+            &destination,
+        ));
+        evidence["moves"][0]["destination"] = destination.json();
+        let proof = retained_source_owner(&source, &third, &operation, &evidence);
+        assert!(
+            !proof.accepted(),
+            "a replay destination with a different real Go value was certified"
+        );
+        assert_eq!(proof.conditions, [false, true, true, true, true]);
+    }
+
     #[test]
     fn source_owner_condition_two_requires_a_go_move_or_loss() {
         let (source, _, operation, mut evidence) = source_owner_fixture();
