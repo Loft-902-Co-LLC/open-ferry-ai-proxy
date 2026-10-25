@@ -444,6 +444,18 @@ fn review_r15_value_check_normalizes_typed_collections_but_checks_plugin_values(
     let error = check_values(b"plugins: {enabled: false}\n", &intended)
         .expect_err("the typed config's plugin default must not hide a changed source value");
     assert!(error.to_string().contains("$.plugins.enabled"));
+    let dir = TempDir::new();
+    let path = dir.join("config.yaml");
+    std::fs::write(&path, "oauth-excluded-models: {k: [m]}\n").unwrap();
+    let mut config = Config::load(&path).unwrap();
+    config.oauth_excluded_models = [("\nx".into(), vec!["m".into()])].into();
+    assert!(save_preserving_comments(&path, &config, false).is_ok());
+    assert!(
+        Config::load(&path)
+            .unwrap()
+            .oauth_excluded_models
+            .contains_key("x")
+    );
 }
 
 #[test]
