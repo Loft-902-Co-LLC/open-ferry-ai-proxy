@@ -37,6 +37,30 @@ fn owner_source_positions_bind_distinct_occurrences() {
 }
 
 #[test]
+fn owner_raw_write_catalog_includes_expanded_alias_comments() {
+    let data = b"oauth: {}\nplugins:\n    configs:\n        example:\n            anchor: &value\n                # scalar head\n                null\n            copy: *value\n";
+    let (doc, original) = tree::read_comment_source(data).unwrap();
+    assert_eq!(original.comments.len(), 1);
+    let mut expanded_source = original;
+    expanded_source.include_copies(&expand_config_aliases(&doc).unwrap());
+    assert_eq!(expanded_source.comments.len(), 2);
+    let (candidate, source) = candidate_write_file(data).unwrap();
+    assert_eq!(
+        source.comments.len(),
+        expanded_source.comments.len(),
+        "raw write discarded an expanded alias comment"
+    );
+    let main = tree::without_owner_protection(|| render_write_file(data)).unwrap();
+    assert!(main == candidate.bytes);
+    let actual = render_write_file(data).unwrap();
+    assert!(
+        actual == main || independent_owners(data) == independent_owners(&actual),
+        "raw alias output changed a source owner"
+    );
+    assert!(Config::load_bytes(&actual).is_ok());
+}
+
+#[test]
 fn owner_tracking_survives_a_generated_emit_parse() {
     let data = b"plugins:\n  configs:\n    example:\n      x: # repeated\n        - a # repeated\n";
     let (doc, source) = tree::read_comment_source(data).unwrap();
