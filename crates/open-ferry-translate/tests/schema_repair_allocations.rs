@@ -96,6 +96,21 @@ fn repair_peak_allocation_stays_within_four_requests() {
             assert!(!serde_json::to_vec(&out).unwrap().is_empty());
             drop(out);
             drop(request);
+            let request = json!({"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"name":"T","input_schema":{"$ref":"#/$defs/A","minLength":1,
+                    "default":"x".repeat(1 << 20),"$defs":{"A":{"type":"string","minLength":5}}}}]});
+            let bytes = serde_json::to_vec(&request).unwrap().len();
+            let base = CURRENT.load(Ordering::Relaxed);
+            PEAK.store(base, Ordering::Relaxed);
+            let (out, error) = convert_claude_request_to_gemini(
+                "gemini-2.5-pro", &request, false, catalog);
+            let extra = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+            eprintln!("conjunction_request_bytes={bytes} peak_extra_bytes={extra}");
+            assert!(error.is_none());
+            assert!(extra <= 4 * bytes, "{extra} extra bytes for {bytes} conjunction bytes");
+            let schema = &out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"];
+            assert_eq!(schema["allOf"][0]["minLength"], 5);
+            assert_eq!(schema["default"], request["tools"][0]["input_schema"]["default"]);
         })
         .unwrap()
         .join()
