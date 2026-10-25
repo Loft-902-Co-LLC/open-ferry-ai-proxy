@@ -3331,8 +3331,12 @@ impl Manager {
                 }
                 // A cooldown folded into its target model is one no claim of
                 // quota recovery was recorded against.
+                // The mark's bound comes from what the credential held before
+                // the merge folded its layers together.
+                let rest_reset = state.quota_checks.latest_reset(id);
+                let bound = super::quota_recovery::merge_bound(&entry.auth, rest_reset, now);
                 for (alias, target) in &merged {
-                    state.quota_recovery.merged(id, alias, target);
+                    state.quota_recovery.merged(id, alias, target, bound);
                 }
                 let auth = Arc::make_mut(&mut entry.auth);
                 auth.model_states = states;

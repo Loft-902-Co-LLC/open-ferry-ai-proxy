@@ -2982,3 +2982,221 @@ async fn an_edit_or_update_that_leaves_the_cooldowns_alone_still_lets_the_recove
         assert!(!blocked(&h, OPUS), "variant {variant}");
     }
 }
+
+// Round 11: the mark of a merge under a wrap keeps a bound recorded when the
+// merge happened, which later outcomes (a check's answer taking the rest away,
+// an unwrapping onto a shorter shadow) can't erase.
+
+/// What a refused read must leave alone, and that the restored state selects
+/// and dispatches as the live one does.
+fn assert_restart_agrees(captured: &str) {
+    let selection: Vec<&str> = captured
+        .lines()
+        .filter(|line| line.trim_start().starts_with("selection"))
+        .collect();
+    assert_eq!(selection.len(), 2, "{captured}");
+    assert_eq!(selection[0], selection[1], "restored selects differently");
+    let reached = captured
+        .lines()
+        .find(|line| line.starts_with("reached live"))
+        .expect("reached line");
+    let counts: Vec<&str> = reached.split_whitespace().collect();
+    assert_eq!(counts[2], counts[4], "restored dispatches differently");
+}
+
+/// The capped merge, then 70 minutes on, a due check is really leased and
+/// dispatched and `answer` comes back; the answer is taken for a quota answer
+/// by the check, which takes the five day rest away. Twenty seconds later
+/// another credential-wide 429 arrives, and a read a minute on shows Opus full.
+async fn a_check_answer_erases_the_rest(message: &'static str) {
+    let mut seen = Vec::new();
+    for read in [true, false] {
+        let dir = temp_dir();
+        let h = saving(dir.path(), Settings::default(), &[OPUS, ROUTE, SONNET]);
+        capped_merge(&h);
+        h.clock.advance(Duration::from_secs(70 * 60));
+        let mut answer = rejection(weekly(h.now()), true, Duration::from_secs(10));
+        answer.message = message.into();
+        let executor = FakeExecutor::with("claude", move |_: &Call| Reply::Err(answer.clone()));
+        h.executor(&executor);
+        h.models.register(ID, &[OPUS, ROUTE, SONNET]);
+        let outcome = call(&h, OPUS).await.map(|_| ());
+        settle().await;
+        assert_eq!(
+            executor.ids(Kind::Execute).len(),
+            1,
+            "the due check was leased and dispatched: {outcome:?}; checks {:?}",
+            h.manager.quota_checks(ID)
+        );
+        h.clock.advance(Duration::from_secs(20));
+        wrap(&h, FIVE_DAYS);
+        h.clock.advance(Duration::from_secs(60));
+        if read {
+            assert!(
+                !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+                "the credential's recovery went ahead while the alias's five days run"
+            );
+        }
+        seen.push(capture(&h, dir.path(), alias_settings(HOUR)).await);
+    }
+    assert_eq!(seen[0], seen[1], "a refused read changed something");
+    assert_restart_agrees(&seen[0]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cloudflare_answer_to_a_check_that_erases_the_rest_keeps_the_merge_mark() {
+    a_check_answer_erases_the_rest("cloudflare challenge").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_model_support_answer_to_a_check_that_erases_the_rest_keeps_the_merge_mark() {
+    a_check_answer_erases_the_rest(
+        "{\"error\":{\"code\":\"model_not_found\",\"message\":\"no such model\"}}",
+    )
+    .await;
+}
+
+/// The reviewer's sequence, with nothing but wraps: an alias with a 120 second
+/// Opus cooldown and a target with a newer 10 second one under a 10 second
+/// wrap; the merge keeps the alias's 120 seconds in the outer state and the
+/// target's 10 in the shadow; a second wrap unwraps onto that shadow and a
+/// third finds nothing live. The alias's 120 seconds still run.
+#[tokio::test(start_paused = true)]
+async fn unwrapping_onto_a_shorter_shadow_keeps_the_merge_mark() {
+    let secs = Duration::from_secs;
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(ROUTE, opus_headers(), secs(120)));
+            h.clock.advance(secs(1));
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), secs(10)));
+            wrap(h, secs(10));
+            h.clock.advance(secs(1));
+            merge_with(h, route_alias());
+            h.clock.advance(secs(10));
+            wrap(h, secs(10));
+            h.clock.advance(secs(11));
+            wrap(h, secs(10));
+        },
+        secs(5),
+    )
+    .await;
+}
+
+/// The control: the same, but the read comes once the bound (the alias's five
+/// days) has passed and nothing is live, so a new wrap recovers.
+#[tokio::test(start_paused = true)]
+async fn once_the_bound_has_passed_an_erased_rest_no_longer_refuses() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE, SONNET]);
+    capped_merge(&h);
+    h.clock.advance(Duration::from_secs(70 * 60));
+    wrap(&h, 2 * HOUR);
+    h.clock.advance(FIVE_DAYS + HOUR);
+    wrap(&h, 2 * HOUR);
+    h.clock.advance(Duration::from_secs(20 * 60));
+    assert!(
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+        "everything the merge touched ran out"
+    );
+    assert!(!blocked(&h, OPUS));
+    assert!(!blocked(&h, SONNET));
+}
+
+/// A refresh that returns the credential with `changed` applied to its Opus
+/// state while a usage read taken before it is in flight; `changed` false is
+/// the control.
+async fn refresh_around_a_read(changed: bool) {
+    let mut seen = Vec::new();
+    for read in [true, false] {
+        let dir = temp_dir();
+        let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
+        let executor = FakeExecutor::new("claude");
+        let clock = h.clock.clone();
+        executor.set_refresh(move |auth: &Auth| {
+            let mut refreshed = auth.clone();
+            refreshed
+                .metadata
+                .insert("access_token".into(), serde_json::json!("fresh"));
+            if changed {
+                let end = clock.now() + TimeDelta::days(10);
+                let state = refreshed.model_states.get_mut(OPUS).expect("opus state");
+                state.next_retry_after = Some(end);
+                state.quota.next_recover_at = Some(end);
+            }
+            Ok(refreshed)
+        });
+        h.executor(&executor);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+        let token = h.manager.quota_recovery_token(ID).expect("token");
+        h.clock.advance(Duration::from_secs(5));
+        executor.set_refresh_delay(Duration::from_secs(1));
+        let manager = h.manager.clone();
+        let task = tokio::spawn(async move { manager.force_refresh(ID).await });
+        settle().await;
+        assert_eq!(executor.refresh_count(), 1, "the refresh started");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        task.await.expect("task").expect("refreshed");
+        h.clock.advance(Duration::from_secs(55));
+        let held = h
+            .get(ID)
+            .model_states
+            .get(OPUS)
+            .is_some_and(|state| state.next_retry_after > Some(h.now() + TimeDelta::days(9)));
+        assert_eq!(held, changed, "the refresh published the longer cooldown");
+        if read {
+            let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+            // A read taken before the refresh is fenced by it either way.
+            let stale = h
+                .manager
+                .apply_quota_usage_recovery(&token, &healthy)
+                .expect("apply");
+            assert!(
+                stale.is_empty(),
+                "a read from before the refresh ended {stale:?}"
+            );
+            // One taken after it recovers only if the refresh left the
+            // cooldowns as they were.
+            assert_eq!(
+                recover(&h, &healthy),
+                !changed,
+                "a read from after the refresh {}",
+                if changed {
+                    "ended the longer cooldown"
+                } else {
+                    "was refused"
+                }
+            );
+        }
+        seen.push(capture(&h, dir.path(), Settings::default()).await);
+    }
+    if changed {
+        assert_eq!(seen[0], seen[1], "a refused read changed something");
+        assert_restart_agrees(&seen[0]);
+    } else {
+        assert!(!blocked_in(&seen[0]), "the control recovered Opus");
+    }
+}
+
+/// Whether the capture's live selection blocks Opus.
+fn blocked_in(captured: &str) -> bool {
+    captured
+        .lines()
+        .find(|line| line.trim_start().starts_with("selection"))
+        .is_some_and(|line| line.contains("opus true"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_that_changes_no_cooldown_leaves_a_read_in_flight_valid() {
+    refresh_around_a_read(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refresh_that_changes_the_opus_cooldown_fences_a_read_in_flight() {
+    refresh_around_a_read(true).await;
+}
