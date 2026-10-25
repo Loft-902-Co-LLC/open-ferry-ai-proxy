@@ -13,9 +13,8 @@
 //! front. A name already taken gets `_<n>` before its last `-`.
 //!
 //! Deviations from upstream:
-//! - [`sanitize_for_filename`] also replaces `\`, and keeps at most
-//!   [`MAX_SANITIZED`] characters, so a long path can't make a name Windows
-//!   can't open.
+//! - [`sanitize_for_filename`] keeps at most [`MAX_SANITIZED`] characters,
+//!   so a long path can't make a name Windows can't open.
 //! - A log file is made with mode 0600 on Unix, where upstream's is 0644.
 
 use std::fs::{File, OpenOptions};
@@ -46,12 +45,18 @@ static REQUEST_LOG_ID: AtomicU64 = AtomicU64::new(0);
 
 /// `path` made safe for a file name (upstream's `sanitizeForFilename`):
 /// `/`, `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` and white space become `-`,
-/// runs of `-` become one, `-` is trimmed from both ends, and the result is
-/// cut to [`MAX_SANITIZED`] characters; nothing left gives `root`.
+/// pairs of dots become `-`, runs of `-` become one, `-` and `.` are trimmed
+/// from both ends, and the result is cut to [`MAX_SANITIZED`] characters;
+/// nothing left gives `root`.
 pub fn sanitize_for_filename(path: &str) -> String {
     let mut sanitized = String::with_capacity(path.len());
-    for c in path.chars() {
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
         let c = match c {
+            '.' if chars.peek() == Some(&'.') => {
+                chars.next();
+                '-'
+            }
             '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*' => '-',
             // Go's `\s`.
             '\t' | '\n' | '\x0C' | '\r' | ' ' => '-',
@@ -62,9 +67,12 @@ pub fn sanitize_for_filename(path: &str) -> String {
         }
         sanitized.push(c);
     }
-    let trimmed = sanitized.trim_matches('-');
+    let trimmed = sanitized.trim_matches(['-', '.']);
     let cut = match trimmed.char_indices().nth(MAX_SANITIZED) {
-        Some((end, _)) => trimmed.get(..end).unwrap_or(trimmed).trim_end_matches('-'),
+        Some((end, _)) => trimmed
+            .get(..end)
+            .unwrap_or(trimmed)
+            .trim_end_matches(['-', '.']),
         None => trimmed,
     };
     if cut.is_empty() {
@@ -83,7 +91,7 @@ pub(crate) fn filename(url: &str, request_id: &str, now: DateTime<Local>) -> Str
     let id = if request_id.is_empty() {
         (REQUEST_LOG_ID.fetch_add(1, Ordering::Relaxed) + 1).to_string()
     } else {
-        short_request_id(request_id).to_owned()
+        sanitize_for_filename(short_request_id(request_id))
     };
     format!(
         "{}-{}-{id}.log",
@@ -115,6 +123,17 @@ fn extension(name: &str) -> &str {
 /// The file is made only if it doesn't exist, so a log is never written
 /// over; it has mode 0600 on Unix.
 pub(crate) fn create_unique_log_file(dir: &Path, filename: &str) -> io::Result<(File, PathBuf)> {
+    if filename.is_empty()
+        || filename == "."
+        || filename.contains("..")
+        || filename.contains(['/', '\\', '\0'])
+        || Path::new(filename).file_name() != Some(filename.as_ref())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid log filename",
+        ));
+    }
     let ext = extension(filename);
     let base = filename.strip_suffix(ext).unwrap_or(filename);
     let (prefix, id) = match base.rfind('-') {
@@ -125,16 +144,15 @@ pub(crate) fn create_unique_log_file(dir: &Path, filename: &str) -> io::Result<(
         _ => (base, ""),
     };
 
-    let target = dir.join(filename);
-    match create_new(&target) {
-        Ok(file) => return Ok((file, target)),
+    match create_new(dir, filename) {
+        Ok(created) => return Ok(created),
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
         Err(_) => {}
     }
     for seq in 1..=MAX_SEQUENCE {
-        let candidate = dir.join(format!("{prefix}_{seq}-{id}{ext}"));
-        match create_new(&candidate) {
-            Ok(file) => return Ok((file, candidate)),
+        let candidate = format!("{prefix}_{seq}-{id}{ext}");
+        match create_new(dir, &candidate) {
+            Ok(created) => return Ok(created),
             Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
             Err(_) => {}
         }
@@ -145,9 +163,16 @@ pub(crate) fn create_unique_log_file(dir: &Path, filename: &str) -> io::Result<(
     ))
 }
 
-/// Opens `path` for writing if it doesn't exist yet, with mode 0600 on
-/// Unix.
-fn create_new(path: &Path) -> io::Result<File> {
+/// Opens a file directly within `dir` if it doesn't exist yet, with mode
+/// 0600 on Unix. Check containment even after validating the original name.
+fn create_new(dir: &Path, name: &str) -> io::Result<(File, PathBuf)> {
+    let path = dir.join(name);
+    if path.parent() != Some(dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log path escapes its directory",
+        ));
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -155,7 +180,7 @@ fn create_new(path: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)
+    options.open(&path).map(|file| (file, path))
 }
 
 /// What a log's name says of it (upstream's `logFileMeta`).
@@ -287,8 +312,7 @@ mod tests {
 
     use super::*;
 
-    // Not upstream's: sanitizing follows upstream's rules, and also
-    // replaces `\` and cuts long paths.
+    // Not upstream's: sanitizing follows upstream's rules and cuts long paths.
     #[test]
     fn sanitizes_paths() {
         for (path, want) in [
@@ -302,6 +326,17 @@ mod tests {
             ("a\\b", "a-b"),
             ("", "root"),
             ("///", "root"),
+            ("a/../b", "a-b"),
+            (r"a\..\b", "a-b"),
+            ("a..b", "a-b"),
+            ("a...b", "a-.b"),
+            ("a....b", "a-b"),
+            ("a.b", "a.b"),
+            (".a.-.", "a"),
+            (".", "root"),
+            ("..", "root"),
+            ("...", "root"),
+            ("....", "root"),
         ] {
             assert_eq!(sanitize_for_filename(path), want, "{path:?}");
         }
@@ -312,6 +347,108 @@ mod tests {
             sanitize_for_filename(&dashed),
             "x".repeat(MAX_SANITIZED - 1)
         );
+        let dotted = format!("{}.y", "x".repeat(MAX_SANITIZED - 1));
+        assert_eq!(
+            sanitize_for_filename(&dotted),
+            "x".repeat(MAX_SANITIZED - 1)
+        );
+        assert_eq!(
+            sanitize_for_filename(&"é".repeat(300)).chars().count(),
+            MAX_SANITIZED
+        );
+    }
+
+    #[test]
+    fn generated_names_stay_within_the_log_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Local.with_ymd_and_hms(2026, 9, 23, 12, 0, 5).unwrap();
+        for url in [
+            r"/v1beta/models/x\..\..\..\..\probe:generateContent",
+            r"/v1/realtime/calls/x\..\..\..\probe/hangup",
+            "/v1/models/../../etc/passwd",
+            r"/v1/models/..\..\..\..\windows\win.ini",
+            r"/v1/\..\..\..\root",
+            "/v1/models/a//b//c",
+            "/.",
+            "/..",
+            "/...",
+        ] {
+            for id in [
+                "deadbeef",
+                "client/../../bad",
+                r"client\..\..\bad",
+                "client........",
+            ] {
+                for name in [filename(url, id, now), error_filename(url, id, now)] {
+                    assert!(!name.contains(['/', '\\']), "{name}");
+                    assert!(!name.contains(".."), "{name}");
+                    assert!(name.ends_with(".log"), "{name}");
+                    let (file, path) = create_unique_log_file(dir.path(), &name).unwrap();
+                    drop(file);
+                    assert_eq!(path.parent(), Some(dir.path()));
+                }
+            }
+        }
+        let long = error_filename(&format!("/{}", "x".repeat(300)), "deadbeef", now);
+        assert_eq!(
+            long.len(),
+            "error-".len() + MAX_SANITIZED + 1 + NAME_TIME_LEN + 1 + 8 + 4
+        );
+        let (file, path) = create_unique_log_file(dir.path(), &long).unwrap();
+        drop(file);
+        assert_eq!(path.file_name().unwrap(), long.as_str());
+    }
+
+    #[test]
+    fn unique_log_files_reject_invalid_names_before_creating_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        let absolute = root.path().join("outside.log");
+        for name in [
+            "",
+            ".",
+            "..",
+            "...",
+            "../outside.log",
+            r"..\outside.log",
+            "sub/inside.log",
+            r"sub\inside.log",
+            "a..b.log",
+            "bad\0.log",
+            absolute.to_str().unwrap(),
+        ] {
+            let error = create_unique_log_file(&dir, name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(!absolute.exists());
+    }
+
+    #[test]
+    fn containment_is_checked_before_opening_each_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        let absolute = root.path().join("outside.log");
+        for name in ["../outside.log", absolute.to_str().unwrap()] {
+            let error = create_new(&dir, name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}");
+            assert!(!absolute.exists());
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unique_log_files_are_private_including_collisions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            let (file, _) = create_unique_log_file(dir.path(), "request-deadbeef.log").unwrap();
+            assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     // Not upstream's: a name has the path, the local time and the short

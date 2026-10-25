@@ -299,6 +299,43 @@ fn writes_error_logs_only_on_errors() {
     assert!(!log.contains(SECRET), "{log}");
 }
 
+#[test]
+fn traversal_paths_stay_inside_the_log_directory_in_both_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("a/b/c/logs");
+    for full in [false, true] {
+        let logger = logger(&dir, full);
+        let path = r"/v1beta/models/x\..\..\..\..\probe:generateContent";
+        let context = context(path);
+        logger.start(&context).unwrap();
+        finish(
+            &context,
+            downstream(path, b"{}"),
+            answer(400, "application/json", b"{}"),
+        );
+        logger.flush();
+    }
+    let logs = files(&dir);
+    assert_eq!(logs.len(), 2);
+    assert!(logs.iter().any(|(name, _)| name.starts_with("error-")));
+    assert!(logs.iter().any(|(name, _)| !name.starts_with("error-")));
+    for (name, _) in logs {
+        assert!(!name.contains(['/', '\\']));
+        assert!(!name.contains(".."));
+    }
+    fn check_files(root: &Path, logs: &Path) {
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                check_files(&path, logs);
+            } else {
+                assert_eq!(path.parent(), Some(logs));
+            }
+        }
+    }
+    check_files(root.path(), &dir);
+}
+
 // Not upstream's: with `request-log` off, an error log has each attempt's
 // answer: a stream's error status and body, a failed send's error, and of
 // a stream that failed after its head, the status, the headers and the
