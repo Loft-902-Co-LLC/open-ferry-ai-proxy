@@ -115,7 +115,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Fixed
 
-- **Keep consecutive flow-item foot comments on their items** during nested and raw config writes before an empty collection, preserve the following key's head comment, and avoid adding a separator before a CRLF version-comment paragraph. Retain existing refusals for saves that cannot keep their comments.
+- **Keep comments under consecutive `{…}` list items** on their items during nested and raw config writes, when an empty value follows the list, and keep the following key's head comment in place. Raw writes and layout normalization now handle the blank line before a `config-version` comment in CRLF files as in LF files.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
 - **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
 - **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.
