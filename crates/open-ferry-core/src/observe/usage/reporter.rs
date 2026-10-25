@@ -115,8 +115,7 @@
 //!   attempt's upstream format selects Vertex's parser, preserving its
 //!   `vertex` provider name; its Gemini bridge uses the Gemini parser.
 //!   Calls delegated to the Gemini executor are recorded as `gemini`'s.
-//! - `reasoning_effort` remains empty. Only the service tier is read from
-//!   the final outbound request for usage metadata.
+//! - `reasoning_effort` stays empty for compatibility with existing usage records.
 //! - A failure's body is the error's text, scrubbed of every secret the
 //!   attempts sent, the credential's own keys and tokens (also for a call
 //!   that failed before it sent anything) and the client's key, each
@@ -715,22 +714,12 @@ fn image_generation_tool_model(body: &[u8]) -> String {
 
 /// The tier in the final outbound payload, after translation and payload
 /// rules (upstream's `extractEffectiveServiceTier`).
+/// The literal key check matches the client's metadata precheck.
 fn effective_service_tier(payload: &[u8]) -> String {
-    if payload.is_empty() || !json::valid(payload) {
+    if !contains(payload, br#""service_tier""#) {
         return String::new();
     }
-    let doc = Doc::parse(payload);
-    [
-        "service_tier",
-        "request.service_tier",
-        "interaction.service_tier",
-    ]
-    .into_iter()
-    .map(|path| doc.get(path))
-    .filter(|node| node.is_string())
-    .map(|node| node.string().trim().to_owned())
-    .find(|tier| !tier.is_empty())
-    .unwrap_or_default()
+    super::request_tier::read(payload)
 }
 
 /// The executor call being read.
@@ -845,13 +834,19 @@ impl Call {
     }
 
     /// Another attempt is sent: its answer starts afresh.
-    fn attempt(&mut self, request: &AttemptRequest<'_>, client_key: &str, now: Instant) {
+    fn attempt(
+        &mut self,
+        request: &AttemptRequest<'_>,
+        effective_service_tier: String,
+        client_key: &str,
+        now: Instant,
+    ) {
         self.mode = Mode::of(request.provider, request.kind, request.format);
         self.image_stream = request.kind == AttemptKind::Stream
             && request.format.as_str() == Format::OPENAI_IMAGE.as_str();
         self.provider = request.provider.to_owned();
         self.model = request.model.to_owned();
-        self.effective_service_tier = effective_service_tier(request.body);
+        self.effective_service_tier = effective_service_tier;
         self.executor_type = executor_type(request.provider, Some(request.kind));
         self.credential = Credential::of(request.auth, client_key);
         self.secrets.extend(request.secrets);
@@ -1461,12 +1456,11 @@ impl UsageTap {
     }
 
     fn record(&self, call: &Call, publication: Publication) -> Record {
+        let mut secrets = call.secrets.clone();
+        secrets.add(self.client_key());
+        let scrub = |body| secrets.text(body, Policy::Disk);
         let (failed, fail_status, fail_body) = match publication.failure {
-            Some(failure) => (
-                true,
-                failure.status,
-                self.scrub(failure.body, &call.secrets),
-            ),
+            Some(failure) => (true, failure.status, scrub(failure.body)),
             None => (false, 0, String::new()),
         };
         let context = &self.context;
@@ -1474,7 +1468,7 @@ impl UsageTap {
             request_id: context.id.as_str().to_owned(),
             provider: call.provider.clone(),
             executor_type: call.executor_type.to_owned(),
-            model: self.scrub(call.model.clone(), &call.secrets),
+            model: scrub(call.model.clone()),
             alias: self.shared.alias.clone(),
             source: call.credential.source.clone(),
             api_key: self.client_key().to_owned(),
@@ -1485,8 +1479,8 @@ impl UsageTap {
             access_token_sha256: call.credential.access_token_sha256.clone(),
             auth_type: call.credential.auth_type.to_owned(),
             service_tier: self.shared.service_tier.clone(),
-            effective_service_tier: self.scrub(call.effective_service_tier.clone(), &call.secrets),
-            response_model: self.scrub(call.response_model.get().to_owned(), &call.secrets),
+            effective_service_tier: scrub(call.effective_service_tier.clone()),
+            response_model: scrub(call.response_model.get().to_owned()),
             generate: self.shared.generate,
             stream: self.shared.stream,
             requested_at: Some(call.requested_at),
@@ -1644,6 +1638,7 @@ impl Tap for UsageTap {
     fn attempt_request(&self, request: &AttemptRequest<'_>) {
         let now = (self.inner.clock)();
         let client_key = self.client_key();
+        let effective_service_tier = effective_service_tier(request.body);
         let mut state = self.lock();
         let call = state.call.get_or_insert_with(|| {
             Call::new(
@@ -1655,7 +1650,7 @@ impl Tap for UsageTap {
                 now,
             )
         });
-        call.attempt(request, client_key, now);
+        call.attempt(request, effective_service_tier, client_key, now);
     }
 
     fn request_sent(&self) {

@@ -61,6 +61,7 @@ mod parse;
 mod queue;
 mod record_json;
 mod reporter;
+mod request_tier;
 mod response_model;
 mod ttft;
 
