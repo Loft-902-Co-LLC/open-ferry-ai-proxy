@@ -283,7 +283,9 @@ fn review_r15_quoted_fallback_aliases_share_anchor_text() {
         .unwrap();
     let value = |key: &str| {
         root.content
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .find(|pair| pair[0].value == key)
             .map(|pair| &pair[1])
             .unwrap()
