@@ -644,3 +644,41 @@ fn validate_gemini_function_call_pairing_rejects_same_content_interleaving() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn validate_function_call_groups_restart_after_non_thought_parts() {
+    for separator in [
+        serde_json::json!({"text":"more"}),
+        serde_json::json!({"text":""}),
+        serde_json::json!({"text":"hidden","thought":true}),
+    ] {
+        let mut input = serde_json::json!({"contents":[{"role":"model","parts":[
+            {"functionCall":{"name":"first","args":{}},"thoughtSignature":GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR},
+            separator, {"functionCall":{"name":"second","args":{}}}]}]});
+        let thought = separator.get("thought") == Some(&serde_json::json!(true));
+        let result = validate_gemini_thought_signatures(&input, allow_bypass_sentinel());
+        if thought {
+            assert!(result.is_ok());
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("missing thoughtSignature on first functionCall")
+            );
+        }
+        input["contents"][0]["parts"][2]["thoughtSignature"] =
+            serde_json::json!(GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR);
+        let result = validate_gemini_thought_signatures(&input, allow_bypass_sentinel());
+        if thought {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("only on the first model functionCall")
+            );
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+}
