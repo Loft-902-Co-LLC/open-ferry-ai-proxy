@@ -3085,10 +3085,8 @@ impl Manager {
             let rests = state.quota_checks.live_rests(&auth.id, &model_key, now);
             state.quota_checks.before_result(auth);
             let dispatched = self.current_execution_seq();
-            let scope_before = {
-                let (_, scope) = super::quota_recovery::scope_of(result, &model_key);
-                super::quota_recovery::scope_deadline(auth, &scope)
-            };
+            let (_, recovery_scope) = super::quota_recovery::scope_of(result, &model_key);
+            let scope_before = super::quota_recovery::scope_deadline(auth, &recovery_scope);
             let stale = apply_result(
                 &state.settings,
                 auth,
@@ -3098,6 +3096,9 @@ impl Manager {
                 dispatched,
                 rests,
             );
+            // The scope's deadline as the outcome set it, before the quota
+            // check's cap shortens it to the next check.
+            let scope_after = super::quota_recovery::scope_deadline(auth, &recovery_scope);
             let cap = state.settings.quota_check_after;
             schedule_unauthorized_refresh =
                 super::refresh::schedule_unauthorized_refresh(auth, result, now, was_terminal);
@@ -3111,6 +3112,7 @@ impl Manager {
                 result,
                 &model_key,
                 scope_before,
+                scope_after,
                 now,
             );
             auth.updated_at = Some(now);

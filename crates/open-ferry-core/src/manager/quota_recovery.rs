@@ -302,7 +302,9 @@ impl Recoveries {
 
     /// Notes the outcome just applied to `auth`: any failure that touched its
     /// cooldowns fences the claims, and a Claude 429 records its own.
-    /// `before` is the deadline of the outcome's scope before it applied.
+    /// `before` and `after` are the deadline of the outcome's scope around
+    /// it, as the outcome set them: not as the quota check's cap shortened
+    /// them to its next check, which is no end of the provider's cooldown.
     pub(crate) fn observe(
         &mut self,
         settings: &Settings,
@@ -310,6 +312,7 @@ impl Recoveries {
         result: &CallResult,
         model_key: &str,
         before: Option<Timestamp>,
+        after: Option<Timestamp>,
         now: Timestamp,
     ) {
         // A claim whose cooldown layer the outcome ended (a success, an
@@ -338,10 +341,7 @@ impl Recoveries {
             self.touch(&auth.id, &scope)
         };
         let key = (auth.id.clone(), scope.clone());
-        let own = || {
-            let after = scope_deadline(auth, &scope);
-            own_hold(settings, result, status, now, before, after)
-        };
+        let own = || own_hold(settings, result, status, now, before, after);
         // A claim stays through a failure it can't be told apart from: its
         // cooldown layer stands (the retain above ends it when it doesn't),
         // and the windows it names stay owed. The failure's sequence number
