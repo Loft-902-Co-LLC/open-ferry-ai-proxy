@@ -87,9 +87,9 @@ fn stop_reasons_preserve_output_usage_and_terminal_status() {
         ),
         (
             "model_context_window_exceeded",
-            "response.failed",
-            "failed",
-            Value::Null,
+            "response.incomplete",
+            "incomplete",
+            json!({"reason":"max_output_tokens"}),
         ),
         ("pause_turn", "response.completed", "completed", Value::Null),
         (
@@ -126,9 +126,11 @@ fn stop_reasons_preserve_output_usage_and_terminal_status() {
                 3
             );
             assert_eq!(response["usage"]["output_tokens"], 4);
-            if status == "failed" {
-                assert_eq!(response["error"]["code"], "context_length_exceeded");
-            }
+            assert!(
+                response.get("error").is_none_or(Value::is_null),
+                "{response}"
+            );
+            assert_eq!(response["output"][0]["status"], status);
             if crate::go::equal_fold(reason.trim(), "pause_turn") {
                 assert_eq!(response["end_turn"], false);
             } else {
@@ -428,5 +430,40 @@ fn parallel_guard_resolves_forced_names_and_preserves_exact_string_choices() {
             compat,
         );
         assert!(out.get("tool_choice").is_none(), "{out}");
+    }
+}
+
+#[test]
+fn context_window_preserves_tools_and_marks_only_unfinished_output_incomplete() {
+    for reason in [
+        "model_context_window_exceeded",
+        " MODEL_CONTEXT_WINDOW_EXCEEDED ",
+    ] {
+        let (events, complete) = translate(&native(
+            json!([
+                {"type":"tool_use","id":"toolu_1","name":"exec","input":{"cmd":"pwd"}},
+                {"type":"text","text":"Partial answer"}
+            ]),
+            reason,
+        ));
+        let terminal = terminal(&events);
+        assert_eq!(terminal["type"], "response.incomplete");
+        for response in [&terminal["response"], &complete] {
+            assert_eq!(response["status"], "incomplete");
+            assert_eq!(
+                response["incomplete_details"]["reason"],
+                "max_output_tokens"
+            );
+            assert!(response.get("error").is_none_or(Value::is_null));
+            let output = response["output"].as_array().unwrap();
+            assert_eq!(output.len(), 2);
+            assert_eq!(output[0]["type"], "function_call");
+            assert_eq!(output[0]["call_id"], "toolu_1");
+            assert_eq!(output[0]["status"], "completed");
+            assert_eq!(output[1]["status"], "incomplete");
+            assert_eq!(output[1]["content"][0]["text"], "Partial answer");
+            assert_eq!(response["usage"]["input_tokens"], 10);
+            assert_eq!(response["usage"]["output_tokens"], 4);
+        }
     }
 }
