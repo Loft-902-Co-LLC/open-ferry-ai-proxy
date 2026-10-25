@@ -250,7 +250,30 @@ export function ServerLog() {
         className="max-w-md"
       />
       {log.isError && (
-        <ProblemNotice problem={callProblem(log.error)} live className="text-sm" />
+        <ProblemNotice
+          problem={callProblem(log.error)}
+          live
+          className="text-sm"
+          action={
+            <>
+              <p className="basis-full">
+                {follow
+                  ? "Following stopped. Try again to resume."
+                  : "Reading stopped. Try again to read new lines."}
+              </p>
+              <Button
+                size="sm"
+                disabled={log.isFetching}
+                onClick={() => {
+                  void log.refetch();
+                }}
+              >
+                {log.isFetching ? <Spinner /> : <RotateCw aria-hidden="true" className="size-4" />}
+                Try again
+              </Button>
+            </>
+          }
+        />
       )}
       {/* Says what needs saying: the rotation notice as it appears, and the
           filter's outcome. Out of the flow while it shows nothing. */}
