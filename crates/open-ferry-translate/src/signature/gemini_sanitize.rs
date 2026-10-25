@@ -12,7 +12,7 @@ use super::{
     decide_signature_compatibility, is_gemini_thought_signature_bypass,
     signature_payload_without_provider_prefix,
 };
-use crate::json::{self, str_of};
+use crate::json::{self, bool_of, str_of};
 
 /// Where a Gemini part may carry its thought signature. The first is canonical.
 const THOUGHT_SIGNATURE_PATHS: [&str; 7] = [
@@ -50,9 +50,9 @@ pub fn gemini_replay_signature_or_bypass(raw: &str, block_kind: BlockKind) -> St
 ///
 /// Provider signatures stay on their model parts, moved to the canonical
 /// `thoughtSignature` field. Server-side tool blocks are left untouched. Only a
-/// missing or foreign signature on a turn's first `functionCall` becomes the
-/// bypass sentinel; other parts with one lose it, so parallel calls stay
-/// unsigned as Gemini returns them. `functionResponse` parts never keep one.
+/// missing or foreign signature on the first `functionCall` in each parallel
+/// group becomes the bypass sentinel. Non-thought parts end a group; unsigned
+/// siblings stay unsigned. `functionResponse` parts never keep a signature.
 ///
 /// Upstream first scans for whether anything needs changing, to avoid
 /// rewriting the request. That is the same as whether this changes anything,
@@ -98,7 +98,10 @@ fn sanitize_part(
 
     let has_function_call = part.get("functionCall").is_some();
     let is_first_function_call = has_function_call && !*first_function_call_seen;
-    *first_function_call_seen |= has_function_call;
+    // Empty text carriers end the group too; thought parts keep it open.
+    if has_function_call || !part.get("thought").is_some_and(bool_of) {
+        *first_function_call_seen = has_function_call;
+    }
     let replay = if is_first_function_call {
         gemini_replay_signature_or_bypass(
             signature.as_deref().unwrap_or_default(),
