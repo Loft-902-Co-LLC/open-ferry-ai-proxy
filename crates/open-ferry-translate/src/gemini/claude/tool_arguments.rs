@@ -14,7 +14,7 @@ use crate::common::gemini::sanitize_gemini_function_name;
 use crate::common::tool_names::canonical_tool_name;
 use crate::json::{path, str_of};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 mod reclean;
 
@@ -222,7 +222,79 @@ fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     Some(current)
 }
 
+#[derive(Clone, Default)]
+struct AnalysisReferences {
+    followed: BTreeSet<String>,
+    cyclic: bool,
+}
+
+struct CachedAnalysis<'a> {
+    info: Info<'a>,
+    references: AnalysisReferences,
+}
+
+#[derive(Default)]
+struct AnalysisMemo<'a> {
+    // Depth is bounded by 16, so each target has at most 17 cached results.
+    targets: HashMap<*const Value, [Option<CachedAnalysis<'a>>; 17]>,
+    #[cfg(test)]
+    target_analyses: usize,
+}
+
+impl<'a> AnalysisMemo<'a> {
+    fn resolve(
+        &mut self,
+        target: &'a Value,
+        root: &'a Value,
+        depth: usize,
+        visited: &mut BTreeSet<String>,
+        references: &mut AnalysisReferences,
+    ) -> Info<'a> {
+        if depth > 16 {
+            return Info {
+                complex: true,
+                ..Info::default()
+            };
+        }
+        let identity = std::ptr::from_ref(target);
+        if let Some(cached) = self
+            .targets
+            .get(&identity)
+            .and_then(|depths| depths[depth].as_ref())
+            .filter(|cached| cached.references.followed.is_disjoint(visited))
+        {
+            references
+                .followed
+                .extend(cached.references.followed.iter().cloned());
+            return cached.info.clone();
+        }
+        #[cfg(test)]
+        {
+            self.target_analyses += 1;
+        }
+        let mut followed = AnalysisReferences::default();
+        let info = analyze_depth_memo(target, root, depth, visited, self, &mut followed);
+        // A cycle can truncate properties or closed-object flags. Keep only
+        // acyclic results, and reuse them only when no followed ref is active.
+        if !followed.cyclic {
+            self.targets
+                .entry(identity)
+                .or_insert_with(|| std::array::from_fn(|_| None))[depth] = Some(CachedAnalysis {
+                info: info.clone(),
+                references: followed.clone(),
+            });
+        }
+        references.followed.extend(followed.followed);
+        references.cyclic |= followed.cyclic;
+        info
+    }
+}
+
 fn analyze<'a>(schema: &'a Value, root: &'a Value) -> Info<'a> {
+    #[cfg(test)]
+    if analysis_memo_tests::legacy_enabled() {
+        return analysis_memo_tests::legacy_analyze(schema, root);
+    }
     analyze_depth(schema, root, 0, &mut BTreeSet::new())
 }
 fn analyze_depth<'a>(
@@ -230,6 +302,23 @@ fn analyze_depth<'a>(
     root: &'a Value,
     depth: usize,
     visited: &mut BTreeSet<String>,
+) -> Info<'a> {
+    analyze_depth_memo(
+        schema,
+        root,
+        depth,
+        visited,
+        &mut AnalysisMemo::default(),
+        &mut AnalysisReferences::default(),
+    )
+}
+fn analyze_depth_memo<'a>(
+    schema: &'a Value,
+    root: &'a Value,
+    depth: usize,
+    visited: &mut BTreeSet<String>,
+    memo: &mut AnalysisMemo<'a>,
+    references: &mut AnalysisReferences,
 ) -> Info<'a> {
     let mut info = Info::default();
     let Some(map) = schema.as_object().filter(|_| depth <= 16) else {
@@ -257,7 +346,8 @@ fn analyze_depth<'a>(
         let multiple = branches.len() > 1;
         multi_branch_union = multiple;
         for branch in branches {
-            let branch_info = analyze_depth(branch, root, depth + 1, visited);
+            let branch_info =
+                analyze_depth_memo(branch, root, depth + 1, visited, memo, references);
             if multiple {
                 info.branches.push(branch_info.clone());
             }
@@ -271,18 +361,29 @@ fn analyze_depth<'a>(
             .then(|| local_ref(root, &reference))
             .flatten();
         if let Some(target) = target {
+            references.followed.insert(reference.clone());
             visited.insert(reference.clone());
-            info.merge(analyze_depth(target, root, depth + 1, visited));
+            info.merge(memo.resolve(target, root, depth + 1, visited, references));
             visited.remove(&reference);
-        } else if !multi_branch_union {
-            info.complex = true;
-            return info;
+        } else {
+            references.cyclic |= visited.contains(&reference);
+            if !multi_branch_union {
+                info.complex = true;
+                return info;
+            }
         }
     }
     if let Some(all) = schema.get("allOf") {
         if let Some(all) = all.as_array() {
             for branch in all {
-                info.merge(analyze_depth(branch, root, depth + 1, visited));
+                info.merge(analyze_depth_memo(
+                    branch,
+                    root,
+                    depth + 1,
+                    visited,
+                    memo,
+                    references,
+                ));
             }
         } else {
             info.complex = true;
@@ -685,3 +786,6 @@ pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod analysis_memo_tests;
