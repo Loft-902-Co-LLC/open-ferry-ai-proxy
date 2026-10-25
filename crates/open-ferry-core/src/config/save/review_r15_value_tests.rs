@@ -212,3 +212,51 @@ fn review_r15_duplicate_key_errors_have_load_prefixes() {
         );
     }
 }
+
+#[test]
+fn review_r15_quoted_column_zero_continuations_match_go() {
+    for (source, key) in [
+        ("auth-dir: 'a\n\nz'\n", "auth-dir"),
+        (
+            "plugins:\n  configs:\n    demo:\n      text: 'a\n\nz'\n",
+            "text",
+        ),
+    ] {
+        // Actual yaml.v3 v3.0.1 and ParseConfigBytes both give a LF z.
+        let (actual, extras) = AnyValue::parse_yaml_with_extras(source).unwrap();
+        assert!(named(&actual, key) == Some(&AnyValue::Str("a\nz".into())));
+        assert!(!extras.more_documents);
+        Config::parse(source).unwrap();
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        Config::load(&path).unwrap();
+        let (_, extras) =
+            AnyValue::parse_yaml_with_extras(&format!("{source}---\nport: 3\n")).unwrap();
+        assert!(extras.more_documents);
+    }
+}
+
+#[test]
+fn review_r15_quoted_continuation_fallback_keeps_refusals_and_limits() {
+    for source in ["auth-dir: 'a\n\nz\n", "auth-dir: 'a\n\nz'\n#\0"] {
+        assert!(Config::parse(source).is_err());
+    }
+    let source = "auth-dir: 'a\n\nz'\nnull: &a [*a]\n";
+    assert!(Config::parse(source).is_err());
+    let source = format!(
+        "auth-dir: 'a\n\nz'\nx: {}x{}\n",
+        "[".repeat(257),
+        "]".repeat(257)
+    );
+    assert!(Config::parse(&source).is_err());
+    let source = format!(
+        "auth-dir: 'a\n\nz'\nbig: &a {}\nrefs: [{}]\n",
+        "x".repeat(128 << 10),
+        vec!["*a"; 520].join(", ")
+    );
+    // Unknown values share the anchor's text and aren't decoded into strings.
+    assert!(Config::parse(&source).is_ok());
+    // Typed values must still charge every owned alias string to the budget.
+    assert!(Config::parse(&source.replace("refs:", "api-keys:")).is_err());
+}
