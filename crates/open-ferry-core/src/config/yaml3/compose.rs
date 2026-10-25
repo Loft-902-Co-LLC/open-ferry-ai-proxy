@@ -41,7 +41,7 @@ use super::{AliasTarget, Kind, MAP_TAG, MAX_DEPTH, MERGE_TAG, Node, SEQ_TAG, STR
 pub(crate) const MAX_ALIAS_COPIES: usize = 1 << 20;
 
 /// The most owned text bytes the copies of aliased anchors may add up to.
-const MAX_ALIAS_COPY_TEXT: usize = 64 << 20;
+pub(crate) const MAX_ALIAS_COPY_TEXT: usize = 64 << 20;
 
 /// A YAML error, worded as yaml.v3 words it (`yaml: ...`).
 #[derive(Clone, PartialEq, Eq)]

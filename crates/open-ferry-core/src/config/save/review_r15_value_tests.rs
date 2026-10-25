@@ -189,3 +189,26 @@ fn review_r15_existing_blocks_keep_their_values_or_stay_unchanged() {
         }
     }
 }
+
+#[test]
+fn review_r15_duplicate_key_errors_have_load_prefixes() {
+    for source in ["port: 1\nport: 2\n", "# \u{2028}\nport: 1\nport: 2\n"] {
+        let error = Config::parse(source).unwrap_err();
+        assert_eq!(error.kind(), crate::config::ConfigErrorKind::Decode);
+        assert!(
+            error
+                .to_string()
+                .starts_with("parse config payload: yaml: ")
+        );
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, source).unwrap();
+        let error = Config::load(&path).unwrap_err();
+        assert_eq!(error.kind(), crate::config::ConfigErrorKind::Decode);
+        assert!(
+            error
+                .to_string()
+                .starts_with("failed to parse config file: yaml: ")
+        );
+    }
+}
