@@ -268,7 +268,7 @@ fn review_r15_quoted_continuation_fallback_keeps_refusals_and_limits() {
     // Unknown values share the anchor's text and aren't decoded into strings.
     assert!(Config::parse(&source).is_ok());
     // Typed values must still charge every owned alias string to the budget.
-    assert!(Config::parse(&source.replace("refs:", "api-keys:")).is_err());
+    assert!(Config::parse(source.replace("refs:", "api-keys:")).is_err());
 }
 
 #[test]
