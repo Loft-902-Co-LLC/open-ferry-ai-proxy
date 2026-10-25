@@ -80,6 +80,7 @@ pub struct GeminiToClaudeStream {
     current_tool: String,
     current_parameterless: bool,
     current_input_emitted: bool,
+    current_pending_empty: bool,
     /// Sanitized function names → the names the client declared.
     sanitized_names: Option<SanitizedToolNames>,
     /// Canonical names and their collision policy, pinned even when empty.
@@ -108,6 +109,7 @@ impl GeminiToClaudeStream {
             current_tool: String::new(),
             current_parameterless: false,
             current_input_emitted: false,
+            current_pending_empty: false,
             sanitized_names: sanitized_tool_name_map(original_request),
             tool_names: unambiguous_tool_name_map_from_claude_request(original_request),
             has_first_response: false,
@@ -182,6 +184,7 @@ impl GeminiToClaudeStream {
         let finish_reason = str_of(get(&response, "candidates.0.finishReason"));
         if !finish_reason.is_empty() {
             self.finish_reason = finish_reason.into_owned();
+            self.flush_pending_tool_input(&mut out);
         }
         let usage = response.get("usageMetadata");
         if let Some(usage) = usage {
@@ -341,6 +344,7 @@ impl GeminiToClaudeStream {
             self.current_parameterless = parameterless(&self.original_request, &client_name);
             self.current_tool = client_name.clone();
             self.current_input_emitted = false;
+            self.current_pending_empty = false;
             let n = TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             self.push_block_start(
                 json!({
@@ -394,7 +398,8 @@ impl GeminiToClaudeStream {
         );
     }
 
-    fn push_block_stop(&self, out: &mut String) {
+    fn push_block_stop(&mut self, out: &mut String) {
+        self.flush_pending_tool_input(out);
         push_event(
             out,
             "content_block_stop",
@@ -419,14 +424,32 @@ impl GeminiToClaudeStream {
         );
         let partial = if self.current_parameterless && self.current_input_emitted {
             String::new()
+        } else if !self.current_parameterless
+            && cleaned.as_object().is_some_and(|fields| fields.is_empty())
+        {
+            if !self.current_input_emitted {
+                self.current_pending_empty = true;
+                return;
+            }
+            String::new()
         } else {
             self.current_input_emitted = true;
+            self.current_pending_empty = false;
             cleaned.to_string()
         };
         self.push_delta(
             json!({"type": "input_json_delta", "partial_json": partial}),
             out,
         );
+    }
+
+    fn flush_pending_tool_input(&mut self, out: &mut String) {
+        if self.block == Block::ToolUse && self.current_pending_empty && !self.current_input_emitted
+        {
+            self.push_delta(json!({"type":"input_json_delta","partial_json":"{}"}), out);
+            self.current_input_emitted = true;
+            self.current_pending_empty = false;
+        }
     }
 
     /// Sends a thought signature: to the open thinking block, or else in a
