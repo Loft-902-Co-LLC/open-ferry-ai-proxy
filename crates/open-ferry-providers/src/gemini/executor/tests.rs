@@ -340,6 +340,49 @@ async fn execute_replaces_claude_signature_of_function_call_with_bypass() {
 }
 
 #[tokio::test]
+#[ignore = "requires p42-schema-signatures signature-group changes"]
+async fn execute_preserves_signature_groups_across_claude_text() {
+    let mock = Mock::start(Reply::json(OK_ANSWER)).await;
+    let payload = json!({
+        "model":"gemini-2.5-flash",
+        "max_tokens":64,
+        "tools":[{"name":"Read","input_schema":{
+            "type":"object","properties":{"p":{"type":"string"}},"required":["p"]
+        }}],
+        "messages":[
+            {"role":"assistant","content":[
+                {"type":"tool_use","id":"read_1","name":"Read","input":{"p":"/x1"}},
+                {"type":"text","text":"more"},
+                {"type":"tool_use","id":"read_2","name":"Read","input":{"p":"/x2"}}
+            ]},
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"read_1","content":"first result"},
+                {"type":"tool_result","tool_use_id":"read_2","content":"second result"}
+            ]}
+        ]
+    });
+    executor()
+        .execute(
+            auth(&mock),
+            request("gemini-2.5-flash", &payload.to_string()),
+            options(&Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    let parts = &body["contents"][1]["parts"];
+    assert_eq!(
+        parts[0]["thoughtSignature"], GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+        "{body}"
+    );
+    assert_eq!(parts[1]["text"], "more", "{body}");
+    assert_eq!(
+        parts[2]["thoughtSignature"], GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn execute_preserves_native_gemini_signature() {
     let mock = Mock::start(Reply::json(OK_ANSWER)).await;
     let native = native_gemini_signature();
