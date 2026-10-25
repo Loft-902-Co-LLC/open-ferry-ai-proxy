@@ -94,7 +94,20 @@ async fn prompt_blocks_return_502_and_keep_observed_usage() {
                     } else {
                         "upstream blocked the prompt: SAFETY"
                     };
-                    run_case(provider, &format, &body, stream, Some(message), 413751, 0).await;
+                    for wrapped in [false, true] {
+                        let body = if wrapped {
+                            let mut response = body.clone();
+                            let usage = response
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("usageMetadata")
+                                .unwrap();
+                            json!({"response":response,"usageMetadata":usage})
+                        } else {
+                            body.clone()
+                        };
+                        run_case(provider, &format, &body, stream, Some(message), 413751, 0).await;
+                    }
                 }
             }
         }
@@ -176,16 +189,28 @@ async fn chat_and_claude_truncation_fail_and_keep_observed_usage() {
     });
     for provider in PROVIDERS {
         for format in [Format::OPENAI, Format::CLAUDE] {
-            run_case(
-                provider,
-                &format,
-                &body,
-                true,
-                Some("upstream stream closed before finishReason"),
-                20,
-                5,
-            )
-            .await;
+            for finish in [None, Some(""), Some("   ")] {
+                let mut body = body.clone();
+                if let Some(finish) = finish {
+                    body["candidates"][0]["finishReason"] = finish.into();
+                }
+                for with_feedback in [false, true] {
+                    let mut body = body.clone();
+                    if with_feedback {
+                        body["promptFeedback"] = json!({"blockReason":"SAFETY"});
+                    }
+                    run_case(
+                        provider,
+                        &format,
+                        &body,
+                        true,
+                        Some("upstream stream closed before finishReason"),
+                        20,
+                        5,
+                    )
+                    .await;
+                }
+            }
         }
     }
 }
@@ -261,6 +286,12 @@ async fn run_case(
         let (chunks, error) = tokio::time::timeout(Duration::from_secs(5), collect(response))
             .await
             .unwrap_or_else(|_| panic!("{label}: stream did not end"));
+        if expected_error.is_some() {
+            assert!(
+                !chunks.iter().any(|chunk| chunk.contains("[DONE]")),
+                "{label}: failed stream emitted DONE: {chunks:?}"
+            );
+        }
         if expected_error.is_some_and(|message| message.starts_with("upstream blocked")) {
             assert!(
                 chunks.is_empty(),
