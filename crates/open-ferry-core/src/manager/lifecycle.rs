@@ -146,9 +146,10 @@ pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) 
         if clear_cooldown_state_for_auth(auth, now) {
             auth.generation += 1;
             cleared.push(id.clone());
-        } else if state.quota_recovery.marked(id) {
-            // Already clean, but carrying a merge's mark: ending the unknown
-            // one is not left to a cooldown that happened to be there.
+        } else if state.quota_recovery.keeps(id) {
+            // Already clean, but recovery still keeps a claim, a hold or a
+            // mark for it (a hold that aggregation hid exists nowhere else):
+            // ending them is not left to a cooldown that happened to be there.
             marked.push(id.clone());
         }
     }
@@ -1593,9 +1594,9 @@ impl Manager {
             if cleared {
                 generation = generation.saturating_add(1);
             }
-            // As in `clear_disabled_cooldown_states`: a clean credential's
-            // mark is ended (an unknown one) all the same.
-            if cleared || state.quota_recovery.marked(&auth.id) {
+            // As in `clear_disabled_cooldown_states`: whatever recovery keeps
+            // for a clean credential is ended all the same.
+            if cleared || state.quota_recovery.keeps(&auth.id) {
                 state.quota_recovery.reset(&auth.id);
             }
         }

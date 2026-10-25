@@ -344,6 +344,32 @@ impl QuotaChecks {
         }
     }
 
+    /// A copy holding only credential `id`'s rests (and the claim counter), for
+    /// a change that is stored with [`Self::put_back`] or dropped: the table
+    /// is every credential's, so cloning all of it for one is not needed.
+    pub(crate) fn only(&self, id: &str) -> Self {
+        Self {
+            rests: self
+                .scopes(id)
+                .into_iter()
+                .filter_map(|scope| {
+                    let key = Self::key(id, &scope);
+                    self.rests.get(&key).map(|rest| (key, rest.clone()))
+                })
+                .collect(),
+            last_claim: self.last_claim,
+        }
+    }
+
+    /// Stores a copy [`Self::only`] made of credential `id`'s rests, changed.
+    pub(crate) fn put_back(&mut self, id: &str, part: Self) {
+        for scope in self.scopes(id) {
+            self.rests.remove(&Self::key(id, &scope));
+        }
+        self.rests.extend(part.rests);
+        self.last_claim = self.last_claim.max(part.last_claim);
+    }
+
     /// Takes the leases of `auth`'s checks in flight off, before an outcome
     /// is applied to it.
     pub(crate) fn before_result(&mut self, auth: &mut Auth) {
