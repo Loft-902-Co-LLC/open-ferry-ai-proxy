@@ -89,6 +89,120 @@ fn completion_tokens_include_thoughts() {
 }
 
 #[test]
+fn filtered_finish_reasons_preserve_native_reason_and_usage() {
+    for reason in [
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "MALFORMED_RESPONSE",
+        "MALFORMED_FUNCTION_CALL",
+        " safety ",
+    ] {
+        let response = json!({"candidates":[{"content":{"role":"model"},"finishReason":reason}],
+            "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":16,
+                "thoughtsTokenCount":4,"totalTokenCount":120,"cachedContentTokenCount":80},
+            "modelVersion":"gemini-test","responseId":"resp-filter"});
+        let mut stream = GeminiToOpenAIStream::new(&Value::Null);
+        let chunks = stream.translate(response.to_string().as_bytes());
+        assert_eq!(chunks.len(), 1);
+        let out = convert_gemini_response_to_openai_non_stream(&Value::Null, &response);
+        for result in [&chunks[0], &out] {
+            assert_eq!(
+                result["choices"][0]["finish_reason"], "content_filter",
+                "{result}"
+            );
+            assert_eq!(
+                result["choices"][0]["native_finish_reason"],
+                go::to_lower(reason)
+            );
+            assert_eq!(result["usage"]["completion_tokens"], 20);
+            assert_eq!(
+                result["usage"]["prompt_tokens_details"]["cached_tokens"],
+                80
+            );
+        }
+        assert!(stream.translate(b"[DONE]").is_empty());
+        let repeated = stream.translate(response.to_string().as_bytes());
+        assert!(repeated[0]["choices"][0]["finish_reason"].is_null());
+    }
+}
+
+#[test]
+fn finishes_without_inline_usage_keep_metadata_and_emit_once() {
+    for (pending, late_usage) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut stream = GeminiToOpenAIStream::new(&Value::Null);
+        let mut response = json!({"candidates":[{"finishReason":"MALFORMED_RESPONSE"}],
+            "modelVersion":"gemini-test","responseId":"resp-split",
+            "createTime":"2024-05-06T07:08:09Z"});
+        if pending {
+            response["cpaUsageMetadata"] =
+                json!({"promptTokenCount":200,"candidatesTokenCount":8,"totalTokenCount":208});
+        }
+        let first = stream.translate(response.to_string().as_bytes());
+        assert!(first[0]["choices"][0]["finish_reason"].is_null());
+        let mut chunks = first;
+        if late_usage {
+            chunks.extend(stream.translate(br#"{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105}}"#));
+        }
+        chunks.extend(stream.translate(b"data: [DONE]"));
+        assert!(stream.translate(b"[DONE]").is_empty());
+        let terminal: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| !chunk["choices"][0]["finish_reason"].is_null())
+            .collect();
+        assert_eq!(terminal.len(), 1, "{chunks:?}");
+        let terminal = terminal[0];
+        assert_eq!(terminal["choices"][0]["finish_reason"], "content_filter");
+        assert_eq!(
+            terminal["choices"][0]["native_finish_reason"],
+            "malformed_response"
+        );
+        assert_eq!(terminal["model"], "gemini-test");
+        assert_eq!(terminal["id"], "resp-split");
+        assert_eq!(terminal["created"], 1714979289);
+        if late_usage || pending {
+            assert_eq!(
+                terminal["usage"]["prompt_tokens"],
+                if late_usage { 100 } else { 200 }
+            );
+        } else {
+            assert!(terminal.get("usage").is_none());
+        }
+    }
+}
+
+#[test]
+fn multiple_candidate_finishes_are_sorted_and_do_not_repeat() {
+    for usage in [
+        None,
+        Some(json!({"usageMetadata":{"promptTokenCount":10}})),
+        Some(json!({"candidates":[],"usageMetadata":{"promptTokenCount":10}})),
+    ] {
+        let mut stream = GeminiToOpenAIStream::new(&Value::Null);
+        let first = stream.translate(br#"{"candidates":[{"index":7,"finishReason":"SAFETY"},{"index":2,"finishReason":"MAX_TOKENS"},{"index":5,"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]},"finishReason":"STOP"}]}"#);
+        assert_eq!(first.len(), 3);
+        let terminal = if let Some(usage) = usage {
+            stream.translate(usage.to_string().as_bytes())
+        } else {
+            stream.translate(b"[DONE]")
+        };
+        assert_eq!(terminal.len(), 3);
+        for (chunk, (index, reason)) in
+            terminal
+                .iter()
+                .zip([(2, "max_tokens"), (5, "tool_calls"), (7, "content_filter")])
+        {
+            assert_eq!(chunk["choices"][0]["index"], index);
+            assert_eq!(chunk["choices"][0]["finish_reason"], reason);
+        }
+        assert!(stream.translate(b"[DONE]").is_empty());
+    }
+}
+
+#[test]
 fn non_stream_completion_tokens_include_thoughts() {
     let result = non_stream_value(
         r#"{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}"#,
@@ -252,7 +366,7 @@ fn stream_in_detail() {
                 r#""finishReason":"max_tokens"}],"usageMetadata":{"promptTokenCount":3}}"#
             ),
             concat!(
-                r#"[{"id":"","object":"chat.completion.chunk","created":1714979289,"model":"model","#,
+                r#"[{"id":"r1","object":"chat.completion.chunk","created":1714979289,"model":"gm","#,
                 r#""choices":[{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"#,
                 r#""tool_calls":[{"id":"e-ID","index":0,"type":"function","function":{"name":"e","#,
                 r#""arguments":"\"str\""}}]},"finish_reason":"tool_calls","native_finish_reason":"max_tokens"}],"#,
@@ -266,7 +380,7 @@ fn stream_in_detail() {
                 r#""thoughtsTokenCount":2,"totalTokenCount":17,"cachedContentTokenCount":4}}"#
             ),
             concat!(
-                r#"[{"id":"","object":"chat.completion.chunk","created":1714979289,"model":"model","#,
+                r#"[{"id":"r1","object":"chat.completion.chunk","created":1714979289,"model":"gm","#,
                 r#""choices":[{"index":0,"delta":{"role":"assistant","content":"t","reasoning_content":null,"#,
                 r#""tool_calls":null},"finish_reason":"tool_calls","native_finish_reason":"stop"}],"#,
                 r#""usage":{"completion_tokens":7,"total_tokens":17,"prompt_tokens":10,"completion_tokens_details":{"reasoning_tokens":2},"#,
@@ -279,7 +393,7 @@ fn stream_in_detail() {
         (
             r#"{"usageMetadata":{"promptTokenCount":1}}"#,
             concat!(
-                r#"[{"id":"","object":"chat.completion.chunk","created":1714979289,"model":"model","#,
+                r#"[{"id":"r1","object":"chat.completion.chunk","created":1714979289,"model":"gm","#,
                 r#""choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"#,
                 r#""tool_calls":null},"finish_reason":null,"native_finish_reason":null}],"usage":{"completion_tokens":0,"#,
                 r#""prompt_tokens":1}}]"#

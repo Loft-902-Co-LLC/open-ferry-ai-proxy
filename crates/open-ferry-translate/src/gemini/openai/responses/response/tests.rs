@@ -26,6 +26,58 @@ use crate::json::exact;
 /// The model Go's signature tests stream from and replay to.
 const MODEL: &str = "gemini-3.6-flash-high";
 
+#[test]
+fn filtered_finish_reasons_are_incomplete_with_content_filter() {
+    let request = json!({"model":MODEL});
+    for reason in [
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "MALFORMED_RESPONSE",
+        "MALFORMED_FUNCTION_CALL",
+        " safety ",
+    ] {
+        for parts in [None, Some(json!([])), Some(json!([{"text":""}]))] {
+            let mut response = json!({"candidates":[{"finishReason":reason}],
+                "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},
+                "modelVersion":MODEL,"responseId":"resp-filter"});
+            if let Some(parts) = parts {
+                response["candidates"][0]["content"] = json!({"role":"model","parts":parts});
+            }
+            let raw = response.to_string();
+            let out = convert_gemini_response_to_openai_responses_non_stream(
+                Some(&request),
+                &Value::Null,
+                raw.as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(out["status"], "incomplete", "{out}");
+            assert_eq!(out["incomplete_details"]["reason"], "content_filter");
+            let mut stream = GeminiToOpenAIResponsesStream::new(MODEL, &request, &Value::Null);
+            let mut events = translate(&mut stream, &format!("data: {raw}"));
+            events.extend(translate(&mut stream, "data: [DONE]"));
+            let terminal = last_event(&events, "response.incomplete").unwrap();
+            assert_eq!(terminal["response"]["status"], "incomplete");
+            assert_eq!(
+                terminal["response"]["incomplete_details"]["reason"],
+                "content_filter"
+            );
+            assert_eq!(terminal["response"]["usage"]["output_tokens"], 1);
+            assert!(last_event(&events, "response.completed").is_none());
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|(name, _)| name == "response.incomplete")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
 // Not upstream's: valid JSON null selects an empty original request, not the
 // translated request's fields, regardless of the translated model's spelling.
 #[test]
