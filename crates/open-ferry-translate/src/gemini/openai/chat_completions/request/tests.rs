@@ -942,7 +942,7 @@ fn tool_declarations_in_detail() {
             r#""parametersJsonSchema":{"type":"object","properties":{},"z":1}},{"description":"no name","#,
             r#""parametersJsonSchema":{"type":"object","properties":{}},"name":""},{"name":"ts","#,
             r#""parametersJsonSchema":null}]},{"googleSearch":{"a":1}},{"googleSearch":null},{"codeExecution":{}},"#,
-            r#"{"urlContext":{"b":2}}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["a_b"]}}}"#
+            r#"{"urlContext":{"b":2}}],"toolConfig":{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["a_b"]}}}"#
         )
     );
 }
@@ -958,7 +958,7 @@ fn allowed_tools_object_form_in_detail() {
         )),
         concat!(
             r#"{"contents":[],"model":"m","tools":[{"functionDeclarations":[{"name":"b","parametersJsonSchema":{"type":"object","#,
-            r#""properties":{}}}]},{"codeExecution":{}}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","#,
+            r#""properties":{}}}]},{"codeExecution":{}}],"toolConfig":{"includeServerSideToolInvocations":true,"functionCallingConfig":{"mode":"ANY","#,
             r#""allowedFunctionNames":["b"]}}}"#
         )
     );
