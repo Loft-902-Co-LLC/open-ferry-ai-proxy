@@ -6,6 +6,7 @@ use super::*;
 use crate::claude::openai::responses::request::{
     convert_openai_responses_request_to_claude,
     convert_openai_responses_request_to_claude_with_compat,
+    convert_openai_responses_request_to_claude_with_tool_search,
 };
 use crate::models::ModelCatalog;
 
@@ -476,7 +477,13 @@ fn deferred_search_replays_and_coalesces_across_tool_outputs() {
             ]),
             reason,
         ));
-        let continued = continuation("srvtoolu_deferred", "end_turn", None);
+        let (_, continued) = translate(&native(
+            json!([
+                {"type":"web_search_tool_result","tool_use_id":"srvtoolu_deferred","content":[{"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"dummy-result"}]},
+                {"type":"text","text":"Final answer."}
+            ]),
+            "end_turn",
+        ));
         for response in [&terminal(&events)["response"], &complete] {
             assert_eq!(response["output"][0]["status"], "in_progress");
             assert!(response["output"][0].get("results").is_none());
@@ -486,9 +493,38 @@ fn deferred_search_replays_and_coalesces_across_tool_outputs() {
                 json!({"type":"custom_tool_call_output","call_id":"toolu_exec","output":"Linux"}),
                 json!({"type":"tool_search_output","call_id":"toolu_exec","tools":[]}),
             ] {
+                let kind = output["type"].as_str().unwrap();
+                let tool_search = kind == "tool_search_output";
+                let mut deferred = response.clone();
+                if tool_search {
+                    deferred["output"][1] = json!({"type":"tool_search_call",
+                        "call_id":"toolu_exec","execution":"client","arguments":{"query":"exec"}});
+                } else if kind == "custom_tool_call_output" {
+                    deferred["output"][1] = json!({"type":"custom_tool_call",
+                        "call_id":"toolu_exec","name":"exec","input":"uname"});
+                }
                 for compat in [false, true] {
-                    let mut req = history(&[response.clone(), json!({"output":[output]})]);
-                    let out = request("claude-test", &req, compat);
+                    let replay = |req: &Value| {
+                        let (out, error) =
+                            convert_openai_responses_request_to_claude_with_tool_search(
+                                "claude-test",
+                                req,
+                                true,
+                                &ModelCatalog::default(),
+                                compat,
+                                tool_search,
+                            );
+                        assert!(error.is_none(), "{error:?}");
+                        out
+                    };
+                    let mut req = history(&[deferred.clone(), json!({"output":[output]})]);
+                    if tool_search {
+                        req["tools"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"type":"tool_search","execution":"client"}));
+                    }
+                    let out = replay(&req);
                     let blocks = assistant_blocks(&out);
                     let types: Vec<_> = blocks
                         .iter()
@@ -503,8 +539,23 @@ fn deferred_search_replays_and_coalesces_across_tool_outputs() {
                         .as_array_mut()
                         .unwrap()
                         .push(json!({"role":"user","content":"thanks"}));
-                    let out = request("claude-test", &req, compat);
+                    let out = replay(&req);
                     let blocks = assistant_blocks(&out);
+                    let types: Vec<_> = blocks
+                        .iter()
+                        .map(|block| block["type"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        types,
+                        [
+                            "tool_use",
+                            "server_tool_use",
+                            "web_search_tool_result",
+                            "text"
+                        ],
+                        "kind={kind}, compat={compat}, reason={reason}: {out}"
+                    );
+                    assert_eq!(blocks[3]["text"], "Final answer.");
                     let uses: Vec<_> = blocks
                         .iter()
                         .filter(|b| b["type"] == "server_tool_use")
