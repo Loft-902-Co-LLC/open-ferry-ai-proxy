@@ -25,6 +25,12 @@
 //!   as well as hyper's and Go's texts (see
 //!   [`is_http2_closed_connection_message`]). Executors preserve unambiguous
 //!   EOF and socket error types before flattening their messages.
+//! - A body that fails after a success status is typed
+//!   [`TransportFault::ResponseBody`]. It keeps the credential out of
+//!   cooldown but, by its type alone, is not a transient failure and starts
+//!   no round, because the provider may already have done the work. Upstream
+//!   (Go) retries it, as `io.ErrUnexpectedEOF` is transient there; here only
+//!   text that main already matched still does.
 //! - The manager's own errors carry their cause as a summary, so the
 //!   classifiers don't look through to it.
 
@@ -206,6 +212,14 @@ pub(crate) fn result_error_from_error(err: ErrView<'_>) -> AuthError {
         && (result.code.is_empty() || result.code == CODE_TRANSIENT_TRANSPORT)
     {
         result.code = CODE_TRANSIENT_TRANSPORT.into();
+    } else if err.transport() == Some(TransportFault::ResponseBody)
+        && err.status() == 0
+        && (result.code.is_empty() || result.code == CODE_CONNECTION_LIFECYCLE)
+    {
+        // Not transient (it must not start a round), but still not the
+        // credential's fault, so it stays out of cooldown. Text main already
+        // matched took one of the branches above and keeps its own code.
+        result.code = CODE_CONNECTION_LIFECYCLE.into();
     }
     result
 }
@@ -305,7 +319,12 @@ pub(crate) fn is_transient_transport_error(err: ErrView<'_>) -> bool {
     if err.is_context_error() {
         return false;
     }
-    if err.transport().is_some() {
+    // Only a call that ended early counts by its type alone. A body that
+    // failed after a success status ([`TransportFault::ResponseBody`]) is
+    // judged by its text, as before the type existed: the provider may have
+    // done the work, so a round that resends it needs words that main already
+    // matched.
+    if err.transport() == Some(TransportFault::Lifecycle) {
         return true;
     }
     is_transient_transport_message(&err.text())
@@ -981,6 +1000,139 @@ mod tests {
         let lifecycle = upstream(0, "x").with_transport(TransportFault::Lifecycle);
         assert!(is_connection_lifecycle_error(ErrView::Exec(&lifecycle)));
         assert!(is_transient_transport_error(ErrView::Exec(&lifecycle)));
+    }
+
+    /// A body that failed after the provider sent a success status, as an
+    /// executor reports it.
+    fn body_failed(status: u16, message: &str) -> ExecError {
+        ExecError::upstream(status, message).with_transport(TransportFault::ResponseBody)
+    }
+
+    /// Everything the manager decides about one failure: whether another
+    /// round may start and what is recorded on the credential.
+    #[derive(Debug, PartialEq)]
+    struct Decisions {
+        transient: bool,
+        lifecycle: bool,
+        retry_round: bool,
+        skips_cooldown: bool,
+        result_transient: bool,
+        result_lifecycle: bool,
+        code: String,
+    }
+
+    fn decisions(err: &ExecError) -> Decisions {
+        let view = ErrView::Exec(err);
+        let result = result_error_from_error(view);
+        Decisions {
+            transient: is_transient_transport_error(view),
+            lifecycle: is_connection_lifecycle_error(view),
+            retry_round: crate::manager::retry::is_request_retry_round_error(err),
+            skips_cooldown: should_skip_credential_cooldown(Some(&result)),
+            result_transient: is_transient_transport_result_error(&result),
+            result_lifecycle: is_connection_lifecycle_result_error(&result),
+            code: result.code,
+        }
+    }
+
+    /// Text main already matched decides a body failure exactly as it decides
+    /// the same text without the marker: the retry, the cooldown skip and the
+    /// recorded code. Resets, aborts, broken pipes and EOFs are the kinds the
+    /// executors promote.
+    #[test]
+    fn response_body_keeps_decisions_for_text_main_matched() {
+        let transient = [
+            "read tcp 127.0.0.1:1->127.0.0.1:2: connection reset by peer (os error 104)",
+            "error decoding response body: connection reset",
+            "wsarecv: an existing connection was forcibly closed by the remote host",
+            "error reading a body from connection: connection aborted",
+            "write tcp 127.0.0.1:1->127.0.0.1:2: broken pipe",
+            "stream closed because of a broken pipe",
+        ];
+        let lifecycle_and_transient = [
+            "unexpected EOF during chunk size line",
+            "error decoding response body: unexpected EOF",
+            "connection closed before message completed",
+        ];
+        let check = |text: &str, code: &str, retries: bool| {
+            let plain = decisions(&upstream(0, text));
+            assert_eq!(decisions(&body_failed(0, text)), plain, "{text}");
+            assert_eq!(plain.code, code, "{text}");
+            assert_eq!(plain.transient, retries, "{text}");
+            assert_eq!(plain.retry_round, retries, "{text}");
+            assert!(plain.skips_cooldown, "{text}");
+        };
+        for text in transient {
+            check(text, CODE_TRANSIENT_TRANSPORT, true);
+        }
+        for text in lifecycle_and_transient {
+            check(text, CODE_CONNECTION_LIFECYCLE, true);
+        }
+        // A bare EOF is a lifecycle failure but never transient.
+        check("eof", CODE_CONNECTION_LIFECYCLE, false);
+    }
+
+    /// A typed body failure whose text main didn't match starts no round and
+    /// takes no transient code, but is recorded so the credential isn't
+    /// cooled. Without the marker the same text cools it, as on main.
+    #[test]
+    fn response_body_without_matched_text_does_not_retry_but_skips_cooldown() {
+        let unmatched = [
+            "end of file before message length reached",
+            "error decoding response body",
+            "peer closed connection without sending tls close_notify",
+            "an existing connection was forcibly closed by the remote host. (os error 10054)",
+            "an established connection was aborted by the software in your host. (os error 10053)",
+            "x",
+        ];
+        for text in unmatched {
+            let plain = decisions(&upstream(0, text));
+            assert!(!plain.retry_round, "{text}");
+            assert!(!plain.skips_cooldown, "{text}");
+            assert!(plain.code.is_empty(), "{text}");
+
+            let marked = decisions(&body_failed(0, text));
+            assert!(!marked.transient, "{text}");
+            assert!(!marked.lifecycle, "{text}");
+            assert!(!marked.retry_round, "{text}");
+            assert!(!marked.result_transient, "{text}");
+            assert!(marked.result_lifecycle, "{text}");
+            assert!(marked.skips_cooldown, "{text}");
+            assert_eq!(marked.code, CODE_CONNECTION_LIFECYCLE, "{text}");
+        }
+    }
+
+    /// The marker changes nothing once the failure carries a status, and
+    /// nothing for a canceled call.
+    #[test]
+    fn response_body_with_a_status_is_decided_as_before() {
+        let cases = [
+            (200, "end of file before message length reached"),
+            (502, "end of file before message length reached"),
+            (502, "connection reset"),
+            (429, "unexpected EOF during chunk size line"),
+        ];
+        for (status, text) in cases {
+            assert_eq!(
+                decisions(&body_failed(status, text)),
+                decisions(&upstream(status, text)),
+                "{status} {text}"
+            );
+        }
+        let marked = ExecError::canceled().with_transport(TransportFault::ResponseBody);
+        assert_eq!(decisions(&marked), decisions(&ExecError::canceled()));
+    }
+
+    /// A fault before any answer still counts by its type, as before.
+    #[test]
+    fn faults_before_a_response_keep_deciding_by_type() {
+        let transient = decisions(&upstream(0, "x").with_transport(TransportFault::Transient));
+        assert!(transient.retry_round);
+        assert_eq!(transient.code, CODE_TRANSIENT_TRANSPORT);
+        let lifecycle = decisions(&upstream(0, "x").with_transport(TransportFault::Lifecycle));
+        assert!(lifecycle.retry_round);
+        assert!(lifecycle.lifecycle);
+        assert_eq!(lifecycle.code, CODE_CONNECTION_LIFECYCLE);
     }
 
     #[test]

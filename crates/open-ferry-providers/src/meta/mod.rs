@@ -194,10 +194,11 @@ impl MetaExecutor {
     /// request sent redacted.
     async fn failure(response: reqwest::Response, secrets: &Secrets) -> ExecError {
         let status = response.status().as_u16();
+        let response_body = crate::transport::ResponseBody::new(&response);
         let tap = BodyTap::of(&response);
         let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
         if let Some(error) = error {
-            let error = crate::transport::classify(
+            let error = response_body.classify(
                 &error,
                 ExecError::new(ErrorKind::Upstream, error_chain(&error)),
             );
@@ -250,8 +251,9 @@ impl MetaExecutor {
             return Err(Self::failure(response, &secrets).await);
         }
         let response_headers = response.headers().clone();
+        let response_body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(ErrorKind::Upstream, error.to_string()),
             )

@@ -141,8 +141,9 @@ impl XaiExecutor {
             return Err(errors::status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
+        let response_body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(
                     ErrorKind::Upstream,

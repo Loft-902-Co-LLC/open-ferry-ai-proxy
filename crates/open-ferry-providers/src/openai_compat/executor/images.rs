@@ -100,8 +100,9 @@ impl OpenAiCompatExecutor {
             let body = error_body(response, status, &secrets).await?;
             return Err(status_error(status, &headers, &body).into());
         }
+        let response_body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(
                     ErrorKind::Upstream,
@@ -252,12 +253,13 @@ async fn error_body(
     status: u16,
     secrets: &Secrets,
 ) -> Result<Vec<u8>, ExecError> {
+    let response_body = crate::transport::ResponseBody::new(&response);
     let tap = BodyTap::of(&response);
     let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
     if let Some(error) = error {
         let error = {
             let error = error.without_url();
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(
                     ErrorKind::Upstream,

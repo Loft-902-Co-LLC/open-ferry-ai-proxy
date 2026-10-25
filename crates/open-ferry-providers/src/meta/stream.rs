@@ -71,6 +71,7 @@ pub(super) struct Setup {
 }
 
 struct State {
+    response_body: crate::transport::ResponseBody,
     reader: LineReader,
     telemetry: super::telemetry::Filter,
     translator: ResponseStream,
@@ -103,6 +104,7 @@ impl State {
         let claude =
             claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
         Self {
+            response_body: crate::transport::ResponseBody::new(&response),
             reader: LineReader::new(response),
             telemetry: super::telemetry::Filter::default(),
             translator: setup.translator,
@@ -261,10 +263,9 @@ impl State {
             tracing::debug!("meta: stream read failed: {error}");
             self.reader.report(&error);
             let text = self.secrets.text(error.to_string(), Policy::Client);
-            return Err(crate::transport::classify(
-                &error,
-                ExecError::new(ErrorKind::Upstream, text),
-            ));
+            return Err(self
+                .response_body
+                .classify(&error, ExecError::new(ErrorKind::Upstream, text)));
         }
         Ok(())
     }

@@ -181,6 +181,7 @@ fn rewrite_form(
 pub(crate) fn raw_stream(response: reqwest::Response, secrets: Secrets) -> ChunkStream {
     let state = Raw {
         tap: BodyTap::of(&response),
+        body_context: crate::transport::ResponseBody::new(&response),
         response,
         held: Vec::new(),
         secrets,
@@ -215,7 +216,7 @@ pub(crate) fn raw_stream(response: reqwest::Response, secrets: Secrets) -> Chunk
                     state.done = true;
                     let error = {
                         let error = error.without_url();
-                        crate::transport::classify(
+                        state.body_context.classify(
                             &error,
                             ExecError::new(
                                 ErrorKind::Upstream,
@@ -239,6 +240,7 @@ pub(crate) fn raw_stream(response: reqwest::Response, secrets: Secrets) -> Chunk
 /// Where [`raw_stream`] is.
 struct Raw {
     response: reqwest::Response,
+    body_context: crate::transport::ResponseBody,
     tap: Option<BodyTap>,
     /// What was read of a line not yet passed on.
     held: Vec<u8>,
@@ -492,6 +494,38 @@ mod tests {
                 b"tail".as_slice()
             ]
         );
+    }
+
+    // Both Codex and OpenAI-compatible image streams use this reader. A typed
+    // socket failure before any output must retain the accepted-body marker,
+    // rather than give stream bootstrap a new reason to resend the POST.
+    #[tokio::test]
+    async fn raw_stream_bootstrap_keeps_the_accepted_body_marker() {
+        for kind in [
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            let body = reqwest::Body::wrap_stream(stream::iter([Err::<Bytes, _>(
+                std::io::Error::new(kind, "synthetic body failure"),
+            )]));
+            let response = reqwest::Response::from(
+                http::Response::builder()
+                    .version(http::Version::HTTP_11)
+                    .status(200)
+                    .body(body)
+                    .unwrap(),
+            );
+            let mut chunks = raw_stream(response, Secrets::default());
+            let error = chunks.next().await.unwrap().unwrap_err();
+            assert_eq!(
+                error.transport,
+                Some(open_ferry_core::exec::TransportFault::ResponseBody),
+                "{kind:?}: {error:?}",
+            );
+            assert!(chunks.next().await.is_none());
+        }
     }
 
     // Not upstream's: a failed connection gives what was read, then the

@@ -817,8 +817,9 @@ impl CodexExecutor {
                 return Err(self.status_failure(response, status, &secrets).await);
             }
             let headers = response.headers().clone();
+            let body_context = crate::transport::ResponseBody::new(&response);
             let data = read_body(response, MAX_LINE).await.map_err(|error| {
-                crate::transport::classify(
+                body_context.classify(
                     &error,
                     ExecError::new(
                         ErrorKind::Upstream,
@@ -848,7 +849,7 @@ impl CodexExecutor {
                 Ok(line) => line,
                 Err(error) => {
                     reader.report(&error);
-                    return Err(crate::transport::classify(
+                    return Err(reader.body_context.classify(
                         &error,
                         ExecError::new(
                             ErrorKind::Upstream,
@@ -1070,11 +1071,12 @@ impl CodexExecutor {
         secrets: &Secrets,
     ) -> ExecError {
         let tap = BodyTap::of(&response);
+        let body_context = crate::transport::ResponseBody::new(&response);
         let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
         if let Some(error) = error {
             let error = {
                 let error = error.without_url();
-                crate::transport::classify(
+                body_context.classify(
                     &error,
                     ExecError::new(
                         ErrorKind::Upstream,
@@ -1159,7 +1161,7 @@ fn tool_stream(state: ToolStream) -> ChunkStream {
                 Some(Err(error)) => {
                     state.reader.report(&error);
                     state.done = true;
-                    let error = crate::transport::classify(
+                    let error = state.reader.body_context.classify(
                         &error,
                         ExecError::new(
                             ErrorKind::Upstream,

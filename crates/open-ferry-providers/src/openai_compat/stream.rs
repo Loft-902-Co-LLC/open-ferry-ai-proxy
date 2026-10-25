@@ -78,6 +78,7 @@ pub(crate) struct StreamSetup {
 
 /// The state of one translated stream.
 struct State {
+    response_body: crate::transport::ResponseBody,
     reader: LineReader,
     setup: StreamSetup,
     claude: claude_tokens::State,
@@ -104,6 +105,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         &setup.response_format,
     );
     let state = State {
+        response_body: crate::transport::ResponseBody::new(&response),
         reader: LineReader::new(response),
         setup,
         claude,
@@ -347,7 +349,7 @@ impl State {
         if let Some(error) = error {
             tracing::debug!("openai compat executor: stream read failed: {error}");
             self.reader.report(&error);
-            self.pending.push_back(Err(crate::transport::classify(
+            self.pending.push_back(Err(self.response_body.classify(
                 &error,
                 ExecError::new(ErrorKind::Upstream, error.to_string()),
             )));
