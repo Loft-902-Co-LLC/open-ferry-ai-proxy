@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/logging/request_logger_writer.go
 // (generateFilename, generateErrorFilename, createUniqueLogFile,
 // sanitizeForFilename) and internal/api/handlers/management/logs.go
-// (parseLogMetadata, logFileIsNewer) (v8.0.38, MIT).
+// (parseLogMetadata, logFileIsNewer) (v8.0.42, MIT).
+// Filename hardening follows upstream 179d43dc ahead of the v8.0.38 pin.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The names of the request log's files: how a log is named when it is
@@ -16,6 +17,10 @@
 //! - [`sanitize_for_filename`] keeps at most [`MAX_SANITIZED`] characters,
 //!   so a long path can't make a name Windows can't open.
 //! - A log file is made with mode 0600 on Unix, where upstream's is 0644.
+//! - The request ID is sanitized where upstream uses `filepath.Base` on the
+//!   complete name.
+//! - NUL is refused before opening a file.
+//! - Every open checks that the file's parent is the log directory.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -91,6 +96,7 @@ pub(crate) fn filename(url: &str, request_id: &str, now: DateTime<Local>) -> Str
     let id = if request_id.is_empty() {
         (REQUEST_LOG_ID.fetch_add(1, Ordering::Relaxed) + 1).to_string()
     } else {
+        // IDs are server-generated today; sanitize the tail as extra care.
         sanitize_for_filename(short_request_id(request_id))
     };
     format!(
@@ -420,9 +426,20 @@ mod tests {
         ] {
             let error = create_unique_log_file(&dir, name).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+            assert_eq!(error.to_string(), "invalid log filename", "{name:?}");
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         assert!(!absolute.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unique_log_files_reject_drive_relative_names_before_opening() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = create_unique_log_file(dir.path(), "C:x.log").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "invalid log filename");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]

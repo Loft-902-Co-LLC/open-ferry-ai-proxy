@@ -119,7 +119,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Reduce repeated schema walks when cleaning Gemini tool arguments**, with cycle-aware caching for object analysis, placeholder-declaration checks, and array-item lookup.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
-- **Request-log file names** normalize dot runs, sanitize client-supplied request ID tails, and reject unsafe names before creating files inside the log directory.
+- **Request-log file names can't point outside the log directory.** A `..` in the request path becomes `-`, dots are trimmed from the ends, and a name that isn't a plain file name is refused, following CLIProxyAPI v8.0.42 ahead of the v8.0.38 pin.
 - **Preserve tool-call number spelling** in streamed and complete tool inputs across Claude, Gemini and OpenAI translations, including integer, decimal and exponent forms and tool-search event envelopes.
 - **Keep original Responses tool identities** by preserving the original request's presence and raw bytes, including JSON null and readable truncated requests, so a fallback request cannot change custom-tool identities or apply-patch routing.
 - **Read the first complete Interactions response value** before trailing data consistently in the Chat Completions, Codex and Claude pairs.

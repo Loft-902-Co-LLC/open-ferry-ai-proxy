@@ -204,6 +204,7 @@ fn serve_by_id(dir: &FsPath, id: &str) -> Response {
         }
         Err(error) => return internal(&format!("failed to list log directory: {error}")),
     };
+    // This unsanitized suffix matches the writer only while IDs stay server-generated.
     let suffix = format!("-{}.log", short_request_id(id));
     let mut matched: Option<(Entry, Option<SystemTime>)> = None;
     for entry in entries {
