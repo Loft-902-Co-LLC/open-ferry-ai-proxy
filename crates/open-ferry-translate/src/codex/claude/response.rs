@@ -45,6 +45,7 @@ pub struct CodexToClaudeStream {
     has_emitted_tool_use: bool,
     has_text_delta: bool,
     text_open: bool,
+    commentary_message_open: bool,
     thinking_open: bool,
     thinking_signature: String,
     thinking_summary_seen: bool,
@@ -93,6 +94,7 @@ impl CodexToClaudeStream {
             has_emitted_tool_use: false,
             has_text_delta: false,
             text_open: false,
+            commentary_message_open: false,
             thinking_open: false,
             thinking_signature: String::new(),
             thinking_summary_seen: false,
@@ -159,6 +161,8 @@ impl CodexToClaudeStream {
             }
             "response.reasoning_summary_part.added" => {
                 self.stop_text(out);
+                self.finalize_commentary(out);
+                self.commentary_message_open = false;
                 // One reasoning item arrives as several summary parts, but only its
                 // output_item.done carries the final signature. Keep a single
                 // thinking block open for the whole item.
@@ -171,25 +175,42 @@ impl CodexToClaudeStream {
             }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 self.stop_text(out);
+                self.finalize_commentary(out);
+                self.commentary_message_open = false;
                 self.start_thinking(out);
                 self.thinking_delta(&str_of(event.get("delta")), out);
                 self.thinking_summary_seen = true;
             }
             "response.content_part.added" => {
-                self.finalize_thinking(out);
                 if str_of(path(event, "part.type")) == "output_text" {
-                    self.start_text(out);
+                    if self.commentary_message_open {
+                        self.start_thinking(out);
+                    } else {
+                        self.finalize_thinking(out);
+                        self.start_text(out);
+                    }
+                } else {
+                    self.finalize_thinking(out);
                 }
             }
             "response.output_text.delta" => {
                 self.has_text_delta = true;
-                self.finalize_thinking(out);
-                self.start_text(out);
-                self.text_delta(&str_of(event.get("delta")), out);
+                if self.commentary_message_open {
+                    self.start_thinking(out);
+                    self.thinking_delta(&str_of(event.get("delta")), out);
+                } else {
+                    self.finalize_thinking(out);
+                    self.start_text(out);
+                    self.text_delta(&str_of(event.get("delta")), out);
+                }
             }
             "response.content_part.done" => {
                 if str_of(path(event, "part.type")) == "output_text" {
-                    self.stop_text(out);
+                    if self.commentary_message_open {
+                        self.finalize_commentary(out);
+                    } else {
+                        self.stop_text(out);
+                    }
                 }
             }
             "response.completed" | "response.incomplete" => self.finish(event, out),
@@ -216,9 +237,16 @@ impl CodexToClaudeStream {
     fn item_added(&mut self, event: &Value, out: &mut String) {
         let item = event.get("item").unwrap_or(&NONE);
         match &*str_of(item.get("type")) {
+            "message" => {
+                self.finalize_thinking(out);
+                self.stop_text(out);
+                self.has_text_delta = false;
+                self.commentary_message_open = str_of(item.get("phase")) == "commentary";
+            }
             "function_call" => {
                 self.finalize_thinking(out);
                 self.stop_text(out);
+                self.commentary_message_open = false;
                 let call = self.record_call(event, item);
                 self.update_identity(call, event, item);
                 if !self.calls[call].name.is_empty() {
@@ -231,6 +259,7 @@ impl CodexToClaudeStream {
                 // A reasoning item that never reported output_item.done must not
                 // leave its block open into this one.
                 self.finalize_thinking(out);
+                self.commentary_message_open = false;
                 self.thinking_summary_seen = false;
                 // A fallback for when output_item.done has no encrypted_content.
                 self.thinking_signature = str_of(item.get("encrypted_content")).into_owned();
@@ -243,26 +272,10 @@ impl CodexToClaudeStream {
         let item = event.get("item").unwrap_or(&NONE);
         match &*str_of(item.get("type")) {
             "message" => {
-                // Text already streamed as deltas. Otherwise the message carries it.
-                if self.has_text_delta {
-                    return false;
-                }
-                let Some(Value::Array(parts)) = item.get("content") else {
-                    return false;
-                };
-                let text: String = parts
-                    .iter()
-                    .filter(|part| str_of(part.get("type")) == "output_text")
-                    .map(|part| str_of(part.get("text")))
-                    .collect();
-                if text.is_empty() {
-                    return false;
-                }
-                self.finalize_thinking(out);
-                self.start_text(out);
-                self.text_delta(&text, out);
-                self.stop_text(out);
-                self.has_text_delta = true;
+                let replay = self.message_done(item, out);
+                self.commentary_message_open = false;
+                self.has_text_delta = false;
+                return replay;
             }
             "function_call" => {
                 self.finalize_thinking(out);
@@ -275,6 +288,8 @@ impl CodexToClaudeStream {
             }
             "reasoning" => {
                 self.stop_text(out);
+                self.finalize_commentary(out);
+                self.commentary_message_open = false;
                 let signature = str_of(item.get("encrypted_content"));
                 if !signature.is_empty() {
                     self.thinking_signature = signature.into_owned();
@@ -302,6 +317,40 @@ impl CodexToClaudeStream {
             }
             "web_search_call" => self.web_search_result(event, item, out),
             _ => {}
+        }
+        true
+    }
+
+    fn message_done(&mut self, item: &Value, out: &mut String) -> bool {
+        let commentary = self.commentary_message_open || str_of(item.get("phase")) == "commentary";
+        if self.has_text_delta {
+            if commentary {
+                self.finalize_commentary(out);
+            }
+            return false;
+        }
+        let Some(Value::Array(parts)) = item.get("content") else {
+            return false;
+        };
+        let text: String = parts
+            .iter()
+            .filter(|part| str_of(part.get("type")) == "output_text")
+            .map(|part| str_of(part.get("text")))
+            .collect();
+        if text.is_empty() {
+            return false;
+        }
+        self.finalize_thinking(out);
+        if commentary {
+            self.stop_text(out);
+            self.commentary_message_open = true;
+            self.start_thinking(out);
+            self.thinking_delta(&text, out);
+            self.finalize_commentary(out);
+        } else {
+            self.start_text(out);
+            self.text_delta(&text, out);
+            self.stop_text(out);
         }
         true
     }
@@ -390,17 +439,24 @@ impl CodexToClaudeStream {
         push_event(out, "content_block_delta", &delta);
     }
 
+    fn finalize_commentary(&mut self, out: &mut String) {
+        if self.commentary_message_open && self.thinking_open {
+            self.finalize_thinking(out);
+        }
+    }
+
     fn finalize_thinking(&mut self, out: &mut String) {
         if !self.thinking_open {
             return;
         }
-        if !self.thinking_signature.is_empty() {
+        if !self.commentary_message_open && !self.thinking_signature.is_empty() {
             let delta = json!({
                 "type": "content_block_delta",
                 "index": self.block_index,
                 "delta": { "type": "signature_delta", "signature": self.thinking_signature }
             });
             push_event(out, "content_block_delta", &delta);
+            self.thinking_signature.clear();
         }
         push_block_stop(out, self.block_index);
         self.block_index += 1;
@@ -734,14 +790,14 @@ pub fn convert_codex_response_to_claude_non_stream(
                     for part in parts {
                         let text = str_of(part.get("text"));
                         if str_of(part.get("type")) == "output_text" && !text.is_empty() {
-                            content.push(json!({ "type": "text", "text": text }));
+                            content.push(message_text_block(item, &text));
                         }
                     }
                 }
                 other => {
                     let text = str_of(other);
                     if !text.is_empty() {
-                        content.push(json!({ "type": "text", "text": text }));
+                        content.push(message_text_block(item, &text));
                     }
                 }
             },
@@ -1032,6 +1088,18 @@ fn push_input_json_delta(out: &mut String, index: usize, partial_json: &str) {
     });
     push_event(out, "content_block_delta", &delta);
 }
+
+fn message_text_block(item: &Value, text: &str) -> Value {
+    if str_of(item.get("phase")) == "commentary" {
+        json!({"type":"thinking","thinking":text})
+    } else {
+        json!({"type":"text","text":text})
+    }
+}
+
+#[cfg(test)]
+#[path = "response/commentary_tests.rs"]
+mod commentary_tests;
 
 #[cfg(test)]
 mod tests;
