@@ -126,6 +126,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 - **Preserve multiline config values on every write path**, including Markdown headings, folded line breaks and trailing blank lines, tab-leading block values and archived Unicode line separators. Keep block styles where possible, quote scalars whose multiline header comments would damage their values, and transfer conflicting key comments only when their deferred recipient would damage or lose data.
 - **Make v8 config previews match written bytes**, including final comment normalization.
 
+- **The server log offers a retry after it loses contact with the server,** instead of stopping until the page is reloaded. Retained lines stay visible, and following resumes after a successful retry when Follow is on.
 - **Keep observed counts when Gemini and Vertex AI streams are cancelled or fail to read.** A `generateContent` stream cancelled after its final chunk reaches the manager counts as a success; cancellation before that is recorded as a 499 with the counts observed so far. A read failure is recorded as a failure with the observed counts.
 - **Deliver Vertex AI streamed text, thoughts, function calls and arguments, and completion usage** to Interactions clients.
 - **Record token counts for native Vertex AI Interactions calls**, streamed or not, retaining observed counts on cancellation and the `vertex` provider name.
