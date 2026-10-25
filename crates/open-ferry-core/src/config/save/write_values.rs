@@ -138,10 +138,10 @@ impl IntendedValues {
         } else {
             None
         };
-        if let (Some(wanted), Some(generated)) = (&expected.typed, &actual_generated) {
-            if let Some(path) = wanted.difference(&semantic(generated)?, "$") {
-                return Ok(Some(path));
-            }
+        if let (Some(wanted), Some(generated)) = (&expected.typed, &actual_generated)
+            && let Some(path) = wanted.difference(&semantic(generated)?, "$")
+        {
+            return Ok(Some(path));
         }
         let mut schema = expected.schema.clone();
         if let Some(generated) = &actual_generated {
@@ -282,11 +282,11 @@ fn prune_normalized(dst: &mut Node, src: Option<&Node>, schema: &Schema, path: &
             path.pop();
             index += 2;
         }
-    } else if dst.kind == Kind::Sequence {
-        if let Some(item) = &schema.item {
-            for (i, child) in dst.content.iter_mut().enumerate() {
-                prune_normalized(child, src.and_then(|src| src.content.get(i)), item, path);
-            }
+    } else if dst.kind == Kind::Sequence
+        && let Some(item) = &schema.item
+    {
+        for (i, child) in dst.content.iter_mut().enumerate() {
+            prune_normalized(child, src.and_then(|src| src.content.get(i)), item, path);
         }
     }
 }
@@ -298,10 +298,10 @@ fn canonical(
     migrate: bool,
 ) -> Result<Semantic, SaveError> {
     let mut doc = doc.clone();
-    if doc.kind == Kind::Document {
-        if let Some(root) = doc.content.first_mut() {
-            *root = tree::expand_config_aliases(root)?;
-        }
+    if doc.kind == Kind::Document
+        && let Some(root) = doc.content.first_mut()
+    {
+        *root = tree::expand_config_aliases(root)?;
     }
     quoted_node(&mut doc);
     if migrate {
@@ -350,17 +350,28 @@ fn semantic(node: &Node) -> Result<Semantic, SaveError> {
     fn visit(node: &yaml::Node) -> Semantic {
         match node.kind {
             yaml::Kind::Sequence => Semantic::Seq(node.content.iter().map(visit).collect()),
-            yaml::Kind::Mapping if node.content.chunks_exact(2).all(|p| p[0].tag == STR_TAG) => {
+            yaml::Kind::Mapping
+                if node
+                    .content
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|p| p[0].tag == STR_TAG) =>
+            {
                 Semantic::Map(
                     node.content
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|p| (p[0].value.to_string(), visit(&p[1])))
                         .collect(),
                 )
             }
             yaml::Kind::Mapping => Semantic::Pairs(
                 node.content
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|p| (visit(&p[0]), visit(&p[1])))
                     .collect(),
             ),
