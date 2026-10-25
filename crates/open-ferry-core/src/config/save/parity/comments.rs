@@ -1265,6 +1265,258 @@ fn source_owner_archives(source: &str, evidence: &Value) -> Option<Vec<Occurrenc
     Some(out)
 }
 
+type LayoutAnchor = (String, usize);
+type LayoutLine = (Option<LayoutAnchor>, Option<LayoutAnchor>, String, usize);
+type LayoutGap = (Option<LayoutAnchor>, Option<LayoutAnchor>);
+
+#[derive(Default)]
+struct SourceLayout {
+    trailing: BTreeMap<LayoutLine, String>,
+    blanks: BTreeMap<LayoutGap, Vec<String>>,
+}
+
+struct PhysicalLayout {
+    codes: Vec<String>,
+    trailing: Vec<Option<String>>,
+    gaps: Vec<Vec<String>>,
+}
+
+fn physical_layout(text: &str) -> Option<PhysicalLayout> {
+    use crate::config::yaml3::parser::Parser;
+    use crate::config::yaml3::types::{ScalarStyle, TokenType};
+
+    // A top-level key remains a region boundary when its anchor, scalar value
+    // or explicit-key spelling changes. NUL cannot occur in physical YAML, so
+    // these virtual boundaries cannot collide with a real code line.
+    let doc = unmarshal(text.as_bytes()).ok()?;
+    let mut top_keys = BTreeMap::<usize, Option<String>>::new();
+    if let Some(root) = doc
+        .content
+        .first()
+        .filter(|n| n.kind == super::super::Kind::Mapping)
+    {
+        for (key, _) in root
+            .pairs()
+            .filter(|(key, _)| key.kind == super::super::Kind::Scalar)
+        {
+            let marker = format!("\0top-key\0{}\0{}", key.tag, key.value);
+            top_keys
+                .entry(key.line)
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(marker));
+        }
+    }
+    // Scanner marks count Unicode characters, not UTF-8 bytes. Protect scalar
+    // and property tokens so a quoted/plain '#' or block data is never erased
+    // as a comment. A block scalar's header comment is outside its data.
+    let chars: Vec<_> = text.char_indices().collect();
+    let mut opaque = vec![false; chars.len()];
+    let mut parser = Parser::new(text.as_bytes());
+    loop {
+        let token = parser.scan().ok()?;
+        if token.typ == TokenType::StreamEnd {
+            break;
+        }
+        if token.typ == TokenType::No {
+            return None;
+        }
+        if !matches!(
+            token.typ,
+            TokenType::Scalar | TokenType::Tag | TokenType::Anchor | TokenType::Alias
+        ) {
+            continue;
+        }
+        let mut start = token.start_mark.index;
+        let end = token.end_mark.index;
+        if start > end || end > chars.len() {
+            return None;
+        }
+        if token.typ == TokenType::Scalar
+            && matches!(token.style, ScalarStyle::Literal | ScalarStyle::Folded)
+        {
+            start += chars[start..end]
+                .iter()
+                .position(|(_, c)| matches!(c, '\r' | '\n' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+                .unwrap_or(end - start);
+        }
+        opaque[start..end].fill(true);
+    }
+
+    let mut codes = Vec::<String>::new();
+    let mut trailing = Vec::<Option<String>>::new();
+    let mut gaps = vec![Vec::<String>::new()];
+    let mut first = 0;
+    let mut line_number = 1;
+    while first < chars.len() {
+        let mut end = first;
+        while end < chars.len()
+            && !matches!(
+                chars[end].1,
+                '\r' | '\n' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            )
+        {
+            end += 1;
+        }
+        let byte_end = chars.get(end).map_or(text.len(), |(byte, _)| *byte);
+        let content_first = first + usize::from(first == 0 && chars[first].1 == '\u{feff}');
+        let byte_first = chars
+            .get(content_first)
+            .map_or(byte_end, |(byte, _)| *byte)
+            .min(byte_end);
+        let line = &text[byte_first..byte_end];
+        let comment = (content_first..end).find(|i| {
+            chars[*i].1 == '#'
+                && !opaque[*i]
+                && (*i == content_first || matches!(chars[*i - 1].1, ' ' | '\t'))
+        });
+        let code = comment.map_or(line, |i| &text[byte_first..chars[i].0]);
+        let code = code.trim_end_matches([' ', '\t']);
+        if code.is_empty() {
+            // Comment-only lines are not blank layout, even if their comment
+            // text ends in whitespace. Their text cannot change a region.
+            if comment.is_none() {
+                gaps.last_mut()?.push(line.to_owned());
+            }
+        } else {
+            if let Some(Some(marker)) = top_keys.get(&line_number) {
+                codes.push(marker.clone());
+                trailing.push(None);
+                gaps.push(vec![]);
+            }
+            codes.push(code.to_owned());
+            trailing.push(
+                (comment.is_none() && line.len() != code.len())
+                    .then(|| line[code.len()..].to_owned()),
+            );
+            gaps.push(vec![]);
+        }
+        first = end;
+        if first < chars.len() {
+            let cr = chars[first].1 == '\r';
+            first += 1;
+            if cr && first < chars.len() && chars[first].1 == '\n' {
+                first += 1;
+            }
+        }
+        line_number += 1;
+    }
+
+    Some(PhysicalLayout {
+        codes,
+        trailing,
+        gaps,
+    })
+}
+
+fn layout_regions(physical: PhysicalLayout, anchors: &BTreeSet<String>) -> SourceLayout {
+    let PhysicalLayout {
+        codes,
+        trailing,
+        gaps,
+    } = physical;
+    let mut occurrences = BTreeMap::new();
+    let ids: Vec<_> = codes
+        .iter()
+        .map(|code| {
+            let ordinal = occurrences.entry(code).or_insert(0);
+            let id = anchors.contains(code).then(|| (code.clone(), *ordinal));
+            *ordinal += 1;
+            id
+        })
+        .collect();
+    let mut next = vec![None; codes.len() + 1];
+    for i in (0..codes.len()).rev() {
+        next[i] = ids[i].clone().or_else(|| next[i + 1].clone());
+    }
+    let mut previous = None;
+    let mut layout = SourceLayout::default();
+    let mut ordinals = BTreeMap::new();
+    for (i, blanks) in gaps.into_iter().enumerate() {
+        if !blanks.is_empty() {
+            layout
+                .blanks
+                .entry((previous.clone(), next[i].clone()))
+                .or_default()
+                .extend(blanks);
+        }
+        let Some(code) = codes.get(i) else { break };
+        let region = if ids[i].is_some() {
+            (ids[i].clone(), ids[i].clone())
+        } else {
+            (previous.clone(), next[i].clone())
+        };
+        let site = (region.0, region.1, code.clone());
+        let ordinal = ordinals.entry(site.clone()).or_insert(0);
+        if let Some(suffix) = &trailing[i] {
+            layout
+                .trailing
+                .insert((site.0, site.1, site.2, *ordinal), suffix.clone());
+        }
+        // Count every line, not only whitespace defects. Equal repeated lines
+        // therefore cannot trade a removed suffix for one at another site.
+        *ordinal += 1;
+        if ids[i].is_some() {
+            previous = ids[i].clone();
+        }
+    }
+    layout
+}
+
+/// Check physical blank lines and trailing whitespace without re-encoding.
+/// Regions lie between code lines shared with equal counts by all three
+/// documents. Every occurrence is numbered, including defect-free ones.
+/// Blank runs need a counterpart in the source or Go in that region; a trailing
+/// suffix also needs the same code line and occurrence. The inputs' blank
+/// budgets are never added together. Explicit-key syntax is not itself a
+/// layout defect. Other ownership rules do not call this guard.
+pub fn source_owner_layout(source: &str, go: &str, protected: &str) -> bool {
+    let (Some(source), Some(go), Some(protected)) = (
+        physical_layout(source),
+        physical_layout(go),
+        physical_layout(protected),
+    ) else {
+        return false;
+    };
+    let counts = |physical: &PhysicalLayout| {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for code in &physical.codes {
+            *counts.entry(code.clone()).or_default() += 1;
+        }
+        counts
+    };
+    let sc = counts(&source);
+    let gc = counts(&go);
+    let rc = counts(&protected);
+    let anchors: BTreeSet<_> = sc
+        .iter()
+        .filter(|(code, n)| gc.get(*code) == Some(*n) && rc.get(*code) == Some(*n))
+        .map(|(code, _)| code.clone())
+        .collect();
+    if anchors.is_empty()
+        && (protected.trailing.iter().any(Option::is_some)
+            || protected.gaps.iter().any(|gap| !gap.is_empty()))
+    {
+        return false;
+    }
+    let source = layout_regions(source, &anchors);
+    let go = layout_regions(go, &anchors);
+    let protected = layout_regions(protected, &anchors);
+    protected.trailing.iter().all(|(site, suffix)| {
+        source.trailing.get(site) == Some(suffix) || go.trailing.get(site) == Some(suffix)
+    }) && protected.blanks.iter().all(|(site, blanks)| {
+        let within = |layout: &SourceLayout| {
+            let mut wanted = blanks.iter().peekable();
+            for line in layout.blanks.get(site).into_iter().flatten() {
+                if wanted.peek().is_some_and(|next| *next == line) {
+                    wanted.next();
+                }
+            }
+            wanted.next().is_none()
+        };
+        within(&source) || within(&go)
+    })
+}
+
 /// Prove retention at independently bound source nodes, with original sides and
 /// slots. Opaque IDs travel through the actual pinned Go operation and reload;
 /// unmasking must reproduce its complete uninstrumented bytes. Equal-text
@@ -1433,27 +1685,32 @@ pub fn retained_source_owner(
     let gc = counts(&g);
     let r_groups = groups(&r);
     let projected: Vec<_> = modeled.iter().map(|(c, _)| c.clone()).collect();
-    let mut changed = false;
-    let mut excused = BTreeSet::new();
-    let go_owners = bindings
+    // Populate every exemption independently of validation's short circuit.
+    // Invalid Go witnesses still fail condition two, but must not hide a later
+    // destination mismatch in the recorded condition zero.
+    let excused: BTreeSet<_> = bindings
         .iter()
         .zip(&modeled)
-        .all(|((_, _, id, text), (own, _))| {
+        .filter_map(|((_, _, id, text), (own, _))| {
             let at: Vec<_> = marked.iter().filter(|c| c.text == *id).collect();
-            let original: Vec<_> = g.iter().filter(|c| c.text == *text).collect();
-            if at.len() != original.len()
-                || at.len() > 1
-                || at.iter().zip(original).any(|(a, b)| a.owner != b.owner)
-            {
-                return false;
+            if at.len() != 1 || at[0].owner != own.owner {
+                Some(text.clone())
+            } else {
+                None
             }
-            if at.first().is_none_or(|c| c.owner != own.owner) {
-                changed = true;
-                excused.insert(text.clone());
-            }
-            true
         })
-        && changed
+        .collect();
+    let go_owners = bindings.iter().all(|(_, _, id, text)| {
+        let at: Vec<_> = marked.iter().filter(|c| c.text == *id).collect();
+        let original: Vec<_> = g.iter().filter(|c| c.text == *text).collect();
+        if at.len() != original.len()
+            || at.len() > 1
+            || at.iter().zip(original).any(|(a, b)| a.owner != b.owner)
+        {
+            return false;
+        }
+        true
+    }) && !excused.is_empty()
         && frame["go_inventory"]["values"] == frame["marked_go_inventory"]["values"];
     let source_owners = groups(&native_r) == groups(&r)
         && modeled
@@ -1476,7 +1733,8 @@ pub fn retained_source_owner(
             groups(&r)
                 .get(owner)
                 .is_some_and(|actual| subsequence(wanted, actual))
-        });
+        })
+        && source_owner_layout(source, &go, protected);
     let values = source_owner_values(&go, protected)
         && frame["go_inventory"]["values"] == frame["protected_inventory"]["values"];
     let stable = crate::config::Config::load_bytes(protected.as_bytes()).is_ok()
@@ -1522,6 +1780,85 @@ pub fn retained_source_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_owner_layout_ignores_comment_text_and_accepts_explicit_keys() {
+        let source = "x: one # source text  \ny: two\n";
+        let go = "x: one # Go text\ny: two\n";
+        let protected = "? x # retained text   \n: one\ny: two\n";
+        assert!(source_owner_layout(source, go, protected));
+        let block = "x: | # header text  \n  # scalar data\n";
+        assert!(source_owner_layout(block, block, block));
+    }
+
+    #[test]
+    fn source_owner_layout_refuses_added_trailing_and_blank_lines() {
+        let text = "a: one\nb: two\nc: three\n";
+        for protected in [
+            "a: one \nb: two\nc: three\n",
+            "a: one\n\nb: two\nc: three\n",
+        ] {
+            assert!(!source_owner_layout(text, text, protected));
+        }
+    }
+
+    #[test]
+    fn source_owner_layout_requires_a_counterpart_and_exact_suffixes() {
+        let plain = "a: one\nb: two\n";
+        let spaces = "a: one \n\nb: two\n";
+        assert!(source_owner_layout(spaces, spaces, spaces));
+        assert!(source_owner_layout(spaces, spaces, plain));
+        assert!(source_owner_layout(spaces, plain, spaces));
+        assert!(source_owner_layout(plain, spaces, spaces));
+        assert!(!source_owner_layout(spaces, spaces, "a: one\t\n\nb: two\n"));
+        // The inputs' differently indented blanks cannot combine into two.
+        assert!(!source_owner_layout(
+            "a: one\n\nb: two\n",
+            "a: one\n \nb: two\n",
+            "a: one\n\n \nb: two\n"
+        ));
+    }
+
+    #[test]
+    fn source_owner_layout_cannot_pay_for_a_defect_elsewhere() {
+        let source = "a: one \nb: two\nc: three\n";
+        let moved = "a: one\nb: two \nc: three\n";
+        assert!(!source_owner_layout(source, source, moved));
+        let source = "a: one\n\nb: two\nc: three\n";
+        let moved = "a: one\nb: two\n\nc: three\n";
+        assert!(!source_owner_layout(source, source, moved));
+        // The last two x lines have identical adjacent code. Their ordinal
+        // counts every site, including the one that originally had no suffix.
+        let source = "items:\n  - x\n  - y\n  - x \n  - y\n  - x\n  - y\n";
+        let moved = "items:\n  - x\n  - y\n  - x\n  - y\n  - x \n  - y\n";
+        assert!(!source_owner_layout(source, source, moved));
+        let source = "items:\n  - x\n\n  - y\n  - x\n  - y\n";
+        let moved = "items:\n  - x\n  - y\n  - x\n\n  - y\n";
+        assert!(!source_owner_layout(source, source, moved));
+    }
+
+    #[test]
+    fn source_owner_layout_does_not_mask_hashes_in_scalar_data() {
+        let source = "x: \"literal # not a comment\"\ny: end\n";
+        let protected = "x: \"literal # not a comment\" \ny: end\n";
+        assert!(!source_owner_layout(source, source, protected));
+        let source = "x: | # header\n  # literal data\ny: end\n";
+        let protected = "x: | # header\n  # literal data \ny: end\n";
+        assert!(!source_owner_layout(source, source, protected));
+    }
+
+    #[test]
+    fn source_owner_layout_handles_unicode_bom_and_yaml_line_breaks() {
+        for newline in ["\n", "\r\n", "\r", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let source =
+                format!("\u{feff}# source  {newline}x: \"é # data\"{newline}y: end{newline}");
+            let protected =
+                format!("# different comment{newline}x: \"é # data\"{newline}y: end{newline}");
+            assert!(source_owner_layout(&source, &source, &protected));
+            let protected = protected.replace("y: end", "y: end ");
+            assert!(!source_owner_layout(&source, &source, &protected));
+        }
+    }
 
     fn source_owner_test_snapshot(text: &str) -> Value {
         let snapshot = (|| {

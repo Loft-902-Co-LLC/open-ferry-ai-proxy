@@ -19,7 +19,8 @@ mod comments;
 pub use comments::{
     CommentOwnership, SourceOwnerProof, comment_occurrences, comment_ownership_analysis,
     comment_ownership_with_provenance, retained_comment_ownership, retained_source_owner,
-    retained_unloadable_comments, source_owner_candidate, unobserved_comment_ownership,
+    retained_unloadable_comments, source_owner_candidate, source_owner_layout,
+    unobserved_comment_ownership,
 };
 
 mod folded;
