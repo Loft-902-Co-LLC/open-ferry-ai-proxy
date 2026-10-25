@@ -665,4 +665,68 @@ async fn a_capped_foreign_hold_keeps_its_provider_deadline() {
     assert!(h.get(ID).model_states[OPUS].quota.exceeded);
 }
 
+/// The selection a request that names no model makes of the credential.
+fn no_model_blocked(h: &Harness) -> bool {
+    is_auth_blocked_for_model(&h.get(ID), "", h.now()).0
+}
+
+/// A 429 naming no model holds the credential for 14 days; a recognized 429
+/// of Opus comes after it, and a read ends Opus's. The independent hold must
+/// still keep a request that names no model off the credential, and the
+/// saved cooldowns must still carry it into a new manager.
+#[tokio::test(start_paused = true)]
+async fn an_independent_no_model_hold_still_blocks_selection_and_storage_after_a_model_recovers() {
+    let dir = temp_dir();
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    h.manager
+        .register_unsaved(credential(dir.path()))
+        .expect("register");
+    let on = config(dir.path(), true);
+    reconfigure(&h.manager, None, &on);
+    restore(&h.manager, &on);
+
+    h.manager
+        .mark_result(&other_failure("", 429, 2 * SEVEN_DAYS));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    assert!(no_model_blocked(&h));
+
+    h.clock.advance(Duration::from_secs(5));
+    assert!(recover(
+        &h,
+        &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+    ));
+    assert!(!blocked(&h, OPUS), "the model's own quota is over");
+    let current = h.get(ID);
+    assert!(
+        no_model_blocked(&h),
+        "selection picks a credential held for 14 days: unavailable {} next retry {:?} quota {:?}",
+        current.unavailable,
+        current.next_retry_after,
+        current.quota
+    );
+
+    flush(&h.manager);
+    let saved = FileStore::new(dir.path().to_path_buf())
+        .load()
+        .expect("load");
+    assert!(
+        saved.iter().any(|record| record.model.trim().is_empty()),
+        "the independent hold is not saved: {saved:?}"
+    );
+
+    let next = Harness::new(Settings::default());
+    next.manager
+        .register_unsaved(credential(dir.path()))
+        .expect("register");
+    reconfigure(&next.manager, None, &on);
+    restore(&next.manager, &on);
+    assert!(
+        no_model_blocked(&next),
+        "the restored credential is selectable: {:?}",
+        next.get(ID).quota
+    );
+}
+
 /

@@ -802,6 +802,19 @@ fn clear_model(auth: &mut Auth, scope: &str, now: Timestamp, independent: bool) 
             apply_cooldown_fields(&mut auth.quota, QuotaState::default());
             update_aggregated_availability(auth, now);
         }
+        // The aggregate above is the models' alone. The independent hold the
+        // credential keeps still blocks it, in selection and in storage
+        // (which saves a record for an unavailable credential only).
+        if independent
+            && auth.quota.exceeded
+            && auth
+                .quota
+                .next_recover_at
+                .is_some_and(|until| until > now)
+        {
+            auth.unavailable = true;
+            auth.next_retry_after = auth.quota.next_recover_at;
+        }
         if !has_model_error(auth, now)
             && !auth.unavailable
             && auth
