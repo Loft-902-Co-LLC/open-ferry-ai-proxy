@@ -17,7 +17,8 @@
 //! declared, which upstream reads from `tools[].name`, so Chat Completions
 //! tools, named in `tools[].function.name`, keep their sanitized names.
 //!
-//! Tool call IDs are the tool's name, the time in nanoseconds and a counter.
+//! Supplied tool call IDs are kept; missing IDs use the tool's name, the time
+//! in nanoseconds and a counter. Call indices continue across chunks.
 //!
 //! Deviations from upstream:
 //! - A chunk or response that isn't valid JSON is read as having no fields.
@@ -209,20 +210,20 @@ impl GeminiToOpenAIStream {
                 } else if let Some(function_call) = part.get("functionCall") {
                     self.saw_tool_call.insert(index);
                     let made = self.function_index.entry(index).or_default();
-                    let mut call_index = *made;
+                    let call_index = *made;
                     *made += 1;
-                    // A second call in the same chunk takes its place in the
-                    // list instead.
-                    match &mut delta["tool_calls"] {
-                        Value::Array(calls) => call_index = calls.len() as i64,
-                        calls => *calls = json!([]),
+                    if !delta["tool_calls"].is_array() {
+                        delta["tool_calls"] = json!([]);
                     }
                     let name = restore_sanitized_tool_name(
                         self.sanitized_names.as_ref(),
                         &str_of(function_call.get("name")),
                     );
                     let mut call = object([
-                        ("id", Value::String(function_call_id(&name))),
+                        (
+                            "id",
+                            Value::String(supplied_or_generated_call_id(function_call, &name)),
+                        ),
                         ("index", Value::from(call_index)),
                         ("type", Value::from("function")),
                         (
@@ -335,7 +336,10 @@ fn choice(candidate: &Value, names: Option<&SanitizedToolNames>) -> Value {
                 has_function_call = true;
                 let name = restore_sanitized_tool_name(names, &str_of(function_call.get("name")));
                 let mut call = object([
-                    ("id", Value::String(function_call_id(&name))),
+                    (
+                        "id",
+                        Value::String(supplied_or_generated_call_id(function_call, &name)),
+                    ),
                     ("type", Value::from("function")),
                     (
                         "function",
@@ -468,6 +472,16 @@ fn usage_of(usage: &Value) -> Value {
 }
 
 /// A tool call ID: the tool's name, the time in nanoseconds and a counter.
+fn supplied_or_generated_call_id(call: &Value, name: &str) -> String {
+    let id = str_of(call.get("id"));
+    let id = id.trim();
+    if id.is_empty() {
+        function_call_id(name)
+    } else {
+        id.to_owned()
+    }
+}
+
 fn function_call_id(name: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
