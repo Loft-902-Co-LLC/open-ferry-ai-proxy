@@ -20,7 +20,7 @@ fn case(fixture: &Value) -> Case {
 }
 
 fn subsets() -> Vec<Vec<Protection>> {
-    let mut masks: Vec<u8> = (1_u8..32).collect();
+    let mut masks: Vec<u16> = (1_u16..(1_u16 << ALL.len())).collect();
     masks.sort_by_key(|mask| mask.count_ones());
     masks
         .into_iter()
@@ -63,7 +63,7 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
         Config::load_bytes(file.as_str().unwrap().as_bytes()).unwrap();
     }
     let subsets = subsets();
-    assert_eq!(subsets.len(), 31);
+    assert_eq!(subsets.len(), (1_usize << ALL.len()) - 1);
     let mut attempts = Vec::new();
     for disabled in subsets {
         let ablated = with_disabled(&disabled, || Translator::ConfigSave.run_rust(&case)).unwrap();

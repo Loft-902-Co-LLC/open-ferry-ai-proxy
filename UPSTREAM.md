@@ -560,6 +560,8 @@ on the parsed tree
 without the save's write-and-reload step, so a comment that step drops still
 has a destination; the archive replay includes that step.
 
+The `retained-source-owner` rule accepts a deliberate comment difference only when an independent inventory finds every uniquely identified source occurrence exactly once at its own node, key/value/item side and head/line/foot slot, following bound node moves through the edit. A replay of the exact input and operation through pinned Go, with opaque comment identities, must show that Go moved or dropped the occurrence; comments Go kept retain their existing owner checks. Every decoded value and tag must equal Go, the output must load and repeat without changing bytes, and extra comments need the existing bound Go archive or migration proof. Lost, duplicated, misplaced, ambiguous, value-changing or unstable outputs stay Different. Proofs record the rule and the minimal registered protections needed for the complete case.
+
 For archives of unknown keys, a separate replay computes the exact comment
 lines and their places from each original entry and the requested write.
 Each generated line must appear once there, in addition to any equal comments
@@ -568,7 +570,9 @@ Matching text in Go's actual output is not enough: changed text, duplicates,
 another place or a re-encode that loses values still fails. The other checks
 of values, counts, order, exact file bytes and the smallest set of necessary
 writer changes remain in force.
-Rust must also keep comments in a loadable Go result at the places Go wrote them.
+The existing relocation rule also requires comments in a loadable Go result at
+the places Go wrote them; only the separate `retained-source-owner` proof can
+excuse an occurrence Go moved or dropped.
 If a fallback move has the same text as a comment Go kept at that destination,
 or any line in an unloadable step’s written trace, the strict check applies.
 Equal text cannot prove that two source copies survived.
