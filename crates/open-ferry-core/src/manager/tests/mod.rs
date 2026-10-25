@@ -87,6 +87,7 @@ mod oauth_model_alias;
 mod openai_compat_pool;
 mod persist_policy;
 mod quota_check;
+mod quota_recovery;
 mod quota_routing;
 mod quota_signals;
 mod response_model_rewriter;

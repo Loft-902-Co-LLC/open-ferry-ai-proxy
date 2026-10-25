@@ -93,6 +93,7 @@ mod gjson;
 mod http_date;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -103,17 +104,21 @@ use bytes::Bytes;
 use chrono::Utc;
 use http::StatusCode;
 use open_ferry_core::auth::Auth;
+use open_ferry_core::manager::{UsageReading, UsageWindow, UsageWindowReading};
 use open_ferry_providers::is_identity_header;
 use open_ferry_translate::go::{json_valid, parse_float_checked, quote, trim_space};
-use serde::de::MapAccess;
+use serde::Deserialize;
+use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
 use crate::Route;
 use crate::api_call::{self, CallError, Hop, Received, token_value_for_auth, valid_method};
+use crate::auth_files::run_blocking;
 use crate::bind::{self, GoStruct, Nullable, set_string};
 use crate::go::{canonical_header_key, equal_fold, lossy, to_upper};
 use crate::go_url;
 use crate::json::{self, Json};
+use crate::owned::owned;
 use crate::proxy;
 use crate::quota::auth_by_index;
 use crate::quota_types::{
@@ -203,21 +208,99 @@ async fn fetch_credential_quota(State(state): State<ManagementState>, body: Body
     };
 
     if let Some(Value::Object(probe)) = auth.metadata.get("quota_probe") {
-        match execute_quota_probe(&state, &auth, probe).await {
-            Probe::Fetched(answer) => return answer_response(&answer),
-            Probe::Failed(reason) => {
-                let mut message = b"quota probe failed: ".to_vec();
-                message.extend_from_slice(&reason);
-                let body = Json::map([("error", Json::Bytes(message))]);
-                return json::response(StatusCode::BAD_GATEWAY, &body);
-            }
-            Probe::NotHandled => {}
+        if official_probe(&auth, probe) {
+            // Claude's own usage request may end a cooldown, which changes
+            // and saves the credential: the whole fetch, from the token to
+            // the save, runs as a task the gate owns, so a switch or a client
+            // that goes away can't leave it half done.
+            let gated = state.clone();
+            return owned(&gated, official_fetch(state, auth)).await;
+        }
+        let outcome = execute_quota_probe(&state, &auth, probe).await;
+        if let Some(response) = probe_response(&outcome) {
+            return response;
         }
     }
     json::error(
         StatusCode::NOT_IMPLEMENTED,
         "no quota provider available for credential",
     )
+}
+
+/// The answer a probe's outcome gives, or `None` when it isn't handled.
+fn probe_response(outcome: &Probe) -> Option<Response> {
+    match outcome {
+        Probe::Fetched(answer, _) => Some(answer_response(answer)),
+        Probe::Failed(reason) => {
+            let mut message = b"quota probe failed: ".to_vec();
+            message.extend_from_slice(reason);
+            let body = Json::map([("error", Json::Bytes(message))]);
+            Some(json::response(StatusCode::BAD_GATEWAY, &body))
+        }
+        Probe::NotHandled => None,
+    }
+}
+
+/// The fetch of a credential whose probe is Claude's official usage request:
+/// the answer, and the cooldowns the reading confirms are over, ended before
+/// it. A failed save is logged: the cooldown is over, and what was read is
+/// still the answer.
+async fn official_fetch(state: ManagementState, auth: Arc<Auth>) -> Response {
+    let Some(Value::Object(probe)) = auth.metadata.get("quota_probe") else {
+        return json::error(
+            StatusCode::NOT_IMPLEMENTED,
+            "no quota provider available for credential",
+        );
+    };
+    // What the read is applied against, taken before it starts, and only if
+    // it is of the very credential the request resolved (not one that
+    // replaced it in between).
+    let token = state
+        .manager()
+        .quota_recovery_token(&auth.id)
+        .filter(|token| token.matches(&auth));
+    let outcome = execute_quota_probe(&state, &auth, probe).await;
+    if let (Probe::Fetched(_, Some(reading)), Some(token)) = (&outcome, token) {
+        let manager = state.manager().clone();
+        let reading = reading.clone();
+        match run_blocking(move || manager.apply_quota_usage_recovery(&token, &reading)).await {
+            Ok(recovery) if !recovery.is_empty() => {
+                tracing::info!(
+                    credential = recovery.credential,
+                    models = recovery.models.len(),
+                    "a usage read ended a stale quota cooldown"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("saving the credential after a quota recovery failed: {error}");
+            }
+        }
+    }
+    probe_response(&outcome).unwrap_or_else(|| {
+        json::error(
+            StatusCode::NOT_IMPLEMENTED,
+            "no quota provider available for credential",
+        )
+    })
+}
+
+/// Whether the credential's `quota_probe` is Claude's official usage request
+/// (see [`official_source`]), judged on the probe as the file writes it.
+fn official_probe(auth: &Auth, probe: &Map<String, Value>) -> bool {
+    let text = |key: &str| probe.get(key).and_then(Value::as_str).unwrap_or_default();
+    let mut method = to_upper(text("method").trim());
+    if method.is_empty() {
+        "GET".clone_into(&mut method);
+    }
+    let headers = match probe.get("header") {
+        Some(Value::Object(headers)) => Some(headers),
+        _ => match probe.get("headers") {
+            Some(Value::Object(headers)) => Some(headers),
+            _ => None,
+        },
+    };
+    official_source(auth, text("url"), &method, text("data"), headers)
 }
 
 /// The 200 answer. Where Go's encoder fails, on an infinite fraction, gin
@@ -240,7 +323,9 @@ fn answer_response(answer: &QuotaFetchResponse) -> Response {
 enum Probe {
     /// The probe can't be made: the credential is answered as unprobed.
     NotHandled,
-    Fetched(QuotaFetchResponse),
+    /// The answer, and the credential's own usage when the read may speak
+    /// for it (see [`official_source`]).
+    Fetched(QuotaFetchResponse, Option<UsageReading>),
     /// The reason, which may quote the response's body.
     Failed(Vec<u8>),
 }
@@ -272,6 +357,10 @@ async fn execute_quota_probe(
             _ => None,
         },
     };
+
+    // Whether this is the official usage request, judged as the credential
+    // file writes it, before its token is put in.
+    let official = official_probe(auth, probe);
 
     let needs_token = url.contains(TOKEN)
         || data.contains(TOKEN)
@@ -326,7 +415,7 @@ async fn execute_quota_probe(
         headers: fields,
         body: (!data.is_empty()).then(|| Bytes::from(data)),
     };
-    let outcome = send_probe(state, auth, probe, hop).await;
+    let outcome = send_probe(state, auth, probe, hop, official).await;
     let Some(token) = &token else {
         return outcome;
     };
@@ -335,9 +424,9 @@ async fn execute_quota_probe(
     let forms = TokenForms::new(token);
     match outcome {
         Probe::Failed(reason) => Probe::Failed(forms.scrub(&reason)),
-        Probe::Fetched(mut answer) => {
+        Probe::Fetched(mut answer, reading) => {
             forms.answer(&mut answer);
-            Probe::Fetched(answer)
+            Probe::Fetched(answer, reading)
         }
         Probe::NotHandled => Probe::NotHandled,
     }
@@ -349,6 +438,7 @@ async fn send_probe(
     auth: &Auth,
     probe: &Map<String, Value>,
     mut hop: Hop,
+    official: bool,
 ) -> Probe {
     // What Go's transport checks before it sends anything (roundTrip).
     let scheme = hop.go.scheme.as_str();
@@ -383,7 +473,12 @@ async fn send_probe(
     });
 
     let route = proxy::api_call_route(&state.config(), Some(auth), "");
-    let received = match api_call::exchange(state, &route, hop).await {
+    let exchanged = if official {
+        exchange_official(state, &route, &hop).await
+    } else {
+        api_call::exchange(state, &route, hop).await
+    };
+    let received = match exchanged {
         Ok(received) => received,
         Err(CallError::Request(reason)) => {
             return failed(format!("probe request failed: {reason}"));
@@ -403,18 +498,38 @@ async fn send_probe(
         Some(Value::Object(mapping)) => Some(mapping),
         _ => None,
     };
-    read_answer(&received.body, offset, mapping)
+    // The windows of Claude's own usage report, for the official source
+    // alone: any other probe is read for display and nothing else.
+    let windows = if official {
+        usage_windows(&received.body)
+    } else {
+        BTreeMap::new()
+    };
+    let display = (!windows.is_empty()).then(|| usage_display(&windows));
+    let reading = (official && received.status == 200)
+        .then(|| fresh_reading(&received, windows))
+        .flatten();
+    match read_answer(&received.body, offset, mapping, display) {
+        Probe::Fetched(answer, _) => Probe::Fetched(answer, reading),
+        other => other,
+    }
 }
 
 /// The answer a probe's JSON body gives, `offset` being the server's clock
-/// less this one's, in milliseconds.
-fn read_answer(body: &[u8], offset: i64, mapping: Option<&Map<String, Value>>) -> Probe {
+/// less this one's, in milliseconds. Without a mapping, a body that isn't in
+/// the answer's own shape is shown from `display`, Claude's usage report.
+fn read_answer(
+    body: &[u8],
+    offset: i64,
+    mapping: Option<&Map<String, Value>>,
+    display: Option<QuotaFetchResponse>,
+) -> Probe {
     let answer = match mapping {
         Some(mapping) => match map_probe_response(body, mapping) {
             Ok(answer) => answer,
             Err(reason) => return failed(format!("probe response mapping failed: {reason}")),
         },
-        None => match normalized(body) {
+        None => match normalized(body).or(display) {
             Some(answer) => answer,
             None => return failed(NO_MATCH),
         },
@@ -423,7 +538,358 @@ fn read_answer(body: &[u8], offset: i64, mapping: Option<&Map<String, Value>>) -
     if answer.server_time_offset_ms == 0 {
         answer.server_time_offset_ms = offset;
     }
-    Probe::Fetched(answer)
+    Probe::Fetched(answer, None)
+}
+
+/// Where Claude's usage report comes from.
+const OFFICIAL_USAGE_SOURCE: &str = "https://api.anthropic.com/api/oauth/usage";
+
+/// Local fakes the tests read a usage report from, in place of the official
+/// source; nothing in production names one.
+#[cfg(test)]
+static TEST_SOURCES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Lets a test's fake at `url` stand for the official source.
+#[cfg(test)]
+pub(crate) fn allow_test_source(url: &str) {
+    TEST_SOURCES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(url.to_owned());
+}
+
+fn is_usage_source(url: &str) -> bool {
+    if url == OFFICIAL_USAGE_SOURCE {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        return TEST_SOURCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|allowed| allowed == url);
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
+/// Whether the probe is Claude's own usage request for this credential: a
+/// plain GET of the official source with the credential's own token as the
+/// bearer and nothing else for an `Authorization`. Only then may what it
+/// reads end a quota cooldown (see `open_ferry_core::manager`'s recovery);
+/// any other probe is for display, whatever its body looks like.
+fn official_source(
+    auth: &Auth,
+    url: &str,
+    method: &str,
+    data: &str,
+    headers: Option<&Map<String, Value>>,
+) -> bool {
+    if !auth.provider.trim().eq_ignore_ascii_case("claude")
+        || !is_usage_source(url.trim())
+        || method != "GET"
+        || !data.is_empty()
+    {
+        return false;
+    }
+    // The bearer must be the very token the executor sends for this
+    // credential (its API key, else its OAuth access token), on the official
+    // base: the generic probe token picks differently, and an account it
+    // reads is not then the one that was limited.
+    let executor = match auth.attribute("api_key").unwrap_or_default() {
+        "" => auth.metadata_str("access_token").unwrap_or_default(),
+        key => key,
+    };
+    if executor.is_empty()
+        || token_value_for_auth(auth) != executor
+        || !auth.attribute("base_url").unwrap_or_default().is_empty()
+    {
+        return false;
+    }
+    // The executor applies a credential's `header:<Name>` attributes after
+    // its own authentication, so one can replace the key the probe's check
+    // above matched (another account's, a client-derived value included):
+    // none that could carry an identity may stand.
+    if auth
+        .attributes
+        .iter()
+        .any(|(name, value)| overrides_authentication(name, value))
+    {
+        return false;
+    }
+    let mut bearers = headers
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| equal_fold(name, "authorization"));
+    matches!(
+        (bearers.next(), bearers.next()),
+        (Some((_, Value::String(value))), None) if value == "Bearer $TOKEN$"
+    )
+}
+
+/// Whether the attribute is a custom header that could replace or add to the
+/// credential's authentication (`Authorization`, `X-Api-Key`, a token, key or
+/// cookie header, in any case), or any whose value is copied from the client
+/// request (`$Name`): judged by name and form alone, so it fails closed.
+fn overrides_authentication(attribute: &str, value: &str) -> bool {
+    let lower = attribute.trim().to_ascii_lowercase();
+    let Some(name) = lower.strip_prefix("header:") else {
+        return false;
+    };
+    value.trim().starts_with('$')
+        || [
+            "auth",
+            "key",
+            "token",
+            "cookie",
+            "secret",
+            "bearer",
+            "credential",
+            "signature",
+        ]
+        .iter()
+        .any(|word| name.contains(word))
+}
+
+/// The official request, sent once by the client the probe would use and
+/// read as [`api_call`] reads a response (a minute, 16 MiB), but without
+/// following a redirect: the answer is the requested source's or nothing.
+async fn exchange_official(
+    state: &ManagementState,
+    route: &proxy::Route,
+    hop: &Hop,
+) -> Result<Received, CallError> {
+    let request_error = |reason: &str| CallError::Request(reason.to_owned());
+    let url = url::Url::parse(&hop.url).map_err(|_| request_error("invalid URL"))?;
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::USER_AGENT,
+        HeaderValue::from_static(open_ferry_providers::codex::USER_AGENT),
+    );
+    headers.insert(http::header::ACCEPT, HeaderValue::from_static("*/*"));
+    for (name, value) in &hop.headers {
+        if name == "User-Agent" {
+            continue;
+        }
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| request_error("invalid header field name"))?;
+        let value = HeaderValue::from_str(value.trim_matches([' ', '\t']))
+            .map_err(|_| request_error("invalid header field value"))?;
+        headers.insert(name, value);
+    }
+    let client = state
+        .clients()
+        .get(route, false)
+        .map_err(|error| CallError::Request(api_call::error_chain(&error.without_url())))?;
+    let mut request = reqwest::Request::new(http::Method::GET, url.clone());
+    *request.headers_mut() = headers;
+    let exchange = async {
+        let mut response = client
+            .execute(request)
+            .await
+            .map_err(|error| CallError::Request(api_call::error_chain(&error.without_url())))?;
+        if *response.url() != url {
+            return Err(request_error("response is not from the requested source"));
+        }
+        let status = response.status().as_u16();
+        let mut received: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+        for (name, value) in response.headers() {
+            received
+                .entry(canonical_header_key(name.as_str()))
+                .or_default()
+                .push(value.as_bytes().to_vec());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| CallError::Read)? {
+            if body.len() + chunk.len() > api_call::MAX_RESPONSE_BODY {
+                return Err(CallError::Read);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Received {
+            status,
+            headers: received,
+            body,
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), exchange)
+        .await
+        .map_err(|_| request_error("timed out"))?
+}
+
+/// Reads a JSON document only to check that no object, at any depth, names a
+/// key twice (the value is read separately).
+struct NoRepeats;
+
+impl<'de> Deserialize<'de> for NoRepeats {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Reader;
+
+        impl<'de> Visitor<'de> for Reader {
+            type Value = NoRepeats;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any JSON value without a repeated object key")
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_str<E>(self, _: &str) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_unit<E>(self) -> Result<NoRepeats, E> {
+                Ok(NoRepeats)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<NoRepeats, A::Error> {
+                while seq.next_element::<NoRepeats>()?.is_some() {}
+                Ok(NoRepeats)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<NoRepeats, A::Error> {
+                let mut seen = std::collections::BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key) {
+                        return Err(serde::de::Error::custom("a repeated object key"));
+                    }
+                    map.next_value::<NoRepeats>()?;
+                }
+                Ok(NoRepeats)
+            }
+        }
+
+        deserializer.deserialize_any(Reader)
+    }
+}
+
+/// The windows of Claude's raw usage report that are present and well
+/// formed: a percent used from 0 to 100, and a reset time, or a null one.
+/// One of another shape is left out, and the report is read by no mapping
+/// (a plan, a display bucket and the like prove nothing of a window).
+fn usage_windows(body: &[u8]) -> BTreeMap<UsageWindow, UsageWindowReading> {
+    // A report that names a window or field twice is ambiguous (a parser may
+    // keep either): it proves nothing.
+    if serde_json::from_slice::<NoRepeats>(body).is_err() {
+        return BTreeMap::new();
+    }
+    let Ok(Value::Object(report)) = serde_json::from_slice::<Value>(body) else {
+        return BTreeMap::new();
+    };
+    let mut windows = BTreeMap::new();
+    for (key, window) in [
+        ("five_hour", UsageWindow::FiveHour),
+        ("seven_day", UsageWindow::SevenDay),
+        ("seven_day_sonnet", UsageWindow::SevenDaySonnet),
+        ("seven_day_opus", UsageWindow::SevenDayOpus),
+    ] {
+        let Some(Value::Object(raw)) = report.get(key) else {
+            continue;
+        };
+        let Some(percent) = raw
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
+        else {
+            continue;
+        };
+        let resets_at = match raw.get("resets_at") {
+            // Only an explicit null is an unused window; a missing time
+            // leaves the window out.
+            Some(Value::Null) => None,
+            None => continue,
+            Some(Value::String(text)) => match chrono::DateTime::parse_from_rfc3339(text) {
+                Ok(at) => Some(at.with_timezone(&Utc)),
+                Err(_) => continue,
+            },
+            Some(_) => continue,
+        };
+        windows.insert(
+            window,
+            UsageWindowReading {
+                utilization_percent: percent,
+                resets_at,
+            },
+        );
+    }
+    windows
+}
+
+/// A usage report as the answer's display: each window a bucket.
+fn usage_display(windows: &BTreeMap<UsageWindow, UsageWindowReading>) -> QuotaFetchResponse {
+    let buckets = windows
+        .iter()
+        .map(|(window, reading)| QuotaBucket {
+            window: match window {
+                UsageWindow::FiveHour => "five_hour",
+                UsageWindow::SevenDay => "seven_day",
+                UsageWindow::SevenDaySonnet => "seven_day_sonnet",
+                UsageWindow::SevenDayOpus => "seven_day_opus",
+            }
+            .as_bytes()
+            .to_vec(),
+            remaining_fraction: 1.0 - reading.utilization_percent / 100.0,
+            reset_time: reading
+                .resets_at
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .unwrap_or_default()
+                .into_bytes(),
+            description: Vec::new(),
+        })
+        .collect();
+    QuotaFetchResponse {
+        groups: vec![QuotaGroup {
+            display_name: b"Claude usage".to_vec(),
+            buckets,
+        }],
+        ..QuotaFetchResponse::default()
+    }
+}
+
+/// The reading, if the response is exactly one fresh answer: its own single
+/// `Date`, and no `Age` over zero, `Warning` or conflicting copy of either
+/// that says a cache or a proxy served an older one.
+fn fresh_reading(
+    received: &Received,
+    windows: BTreeMap<UsageWindow, UsageWindowReading>,
+) -> Option<UsageReading> {
+    let single = |name: &str| -> Option<Option<&[u8]>> {
+        match received.headers.get(name).map(Vec::as_slice) {
+            None => Some(None),
+            Some([one]) => Some(Some(one.as_slice())),
+            Some(_) => None,
+        }
+    };
+    let date = single("Date")??;
+    let observed_at = http_date::parse_time(date)?;
+    if received.headers.contains_key("Warning") {
+        return None;
+    }
+    if let Some(age) = single("Age")? {
+        let age = std::str::from_utf8(age).ok()?.trim();
+        if age.parse::<u64>().ok()? != 0 {
+            return None;
+        }
+    }
+    Some(UsageReading {
+        observed_at: Some(observed_at),
+        windows,
+    })
 }
 
 /// The response's `Date` less this clock, in milliseconds, or 0 without a

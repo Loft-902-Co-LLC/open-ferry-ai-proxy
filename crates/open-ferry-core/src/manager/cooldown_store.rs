@@ -844,8 +844,11 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
 /// [`apply`] on the state `manager` has locked, at `now`.
 fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: Timestamp) -> usize {
     let settings = state.settings.clone();
+    // A record older than a recovery of its scope is the cooldown that
+    // recovery ended, not a newer one (storage turned off, then on).
     let (model_records, auth_records): (Vec<&Record>, Vec<&Record>) = records
         .iter()
+        .filter(|record| !ended_by_recovery(&state.quota_recovery, record, now))
         .partition(|record| !record.model.trim().is_empty());
     // Taken before the models are restored, which move a credential's own
     // cooldown too.
@@ -861,6 +864,8 @@ fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: T
     let mut checks = Vec::new();
     for record in model_records.into_iter().chain(auth_records) {
         if let Some(id) = restore_record(&settings, &mut state.auths, &held, record, now) {
+            // No claim or read that began before speaks for what came back.
+            state.quota_recovery.restored(&id, &record_scopes(record));
             if let Some(check) = &record.quota_check {
                 checks.push((id.clone(), record.model.trim(), check));
             }
@@ -882,6 +887,46 @@ fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: T
     changed.len()
 }
 
+/// Whether `record` is a cooldown that a usage read since ended: it was last
+/// changed no later than the recovery of its scope. A model's record under a
+/// credential-wide wrap belongs to the credential's scope too.
+fn ended_by_recovery(
+    recoveries: &super::quota_recovery::Recoveries,
+    record: &Record,
+    now: Timestamp,
+) -> bool {
+    let id = record.auth_id.trim();
+    let updated_at = record::nonzero(record.updated_at);
+    // The credential's own record, when it only gathers its models'
+    // cooldowns (reason "quota"), is obsolete once one of them recovered: the
+    // models' records, restored first, make it again. A credential-wide
+    // cooldown (reason "credential_quota"), any other, or one an independent
+    // 429 naming no model stands on (it has the same reason and can't be told
+    // apart by the record), stays its own.
+    let derived = record.model.trim().is_empty()
+        && record.quota.reason.trim() == "quota"
+        && !recoveries.foreign_live(id, "", now);
+    recoveries.supersedes(id, &record_scopes(record), updated_at)
+        || (derived && recoveries.supersedes_derived(id, updated_at))
+}
+
+/// The recovery scopes a saved cooldown belongs to: the credential's, or a
+/// model's and, under a credential-wide wrap, the credential's too.
+fn record_scopes(record: &Record) -> Vec<String> {
+    let model = record.model.trim();
+    if model.is_empty() {
+        return vec![String::new()];
+    }
+    let mut scopes = vec![canonical_model_key(model)];
+    let wrapped = record.credential_quota_propagated
+        || record.independent_state.is_some()
+        || record.quota.reason.trim() == "credential_quota";
+    if wrapped {
+        scopes.push(String::new());
+    }
+    scopes
+}
+
 /// Clears every cooldown the credentials hold, their own and their models',
 /// for a restore that makes the file the authority (see [`Thaw::Restore`]).
 /// Unlike `clear_cooldown_state_for_auth` it leaves no time on what it
@@ -893,6 +938,9 @@ fn clear_cooldowns_locked(manager: &Manager, state: &mut State, now: Timestamp) 
     // credentials that look clean too; the snapshot's own are installed
     // after, and a stale one must not fire later on a cleared model.
     state.quota_checks.clear(&mut state.auths);
+    // What the live cooldowns allowed of recovery goes with them, and the
+    // marks of older recoveries too: the file is the authority now.
+    state.quota_recovery.clear();
     let mut cleared = Vec::new();
     for (id, entry) in &mut state.auths {
         let auth = &entry.auth;
