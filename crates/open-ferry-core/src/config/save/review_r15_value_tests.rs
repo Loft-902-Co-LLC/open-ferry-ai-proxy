@@ -438,6 +438,12 @@ fn review_r15_value_check_normalizes_typed_collections_but_checks_plugin_values(
     let error = check_values(b"plugins: {configs: {probe: []}}\n", &intended)
         .expect_err("an untyped plugin value must not use typed collection normalization");
     assert!(error.to_string().contains("$.plugins.configs.probe"));
+    let source = b"plugins: {enabled: true}\n";
+    let config = Config::load_bytes(source).unwrap();
+    let intended = IntendedValues::settings(source, &config, false).unwrap();
+    let error = check_values(b"plugins: {enabled: false}\n", &intended)
+        .expect_err("the typed config's plugin default must not hide a changed source value");
+    assert!(error.to_string().contains("$.plugins.enabled"));
 }
 
 #[test]
