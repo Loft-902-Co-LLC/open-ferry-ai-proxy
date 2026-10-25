@@ -731,6 +731,7 @@ fn non_stream_safety_and_malformed_function_call_refusal() {
         ("PROHIBITED_CONTENT", "refusal"),
         ("SPII", "refusal"),
         ("BLOCKLIST", "refusal"),
+        ("MALFORMED_RESPONSE", "refusal"),
         ("MAX_TOKENS", "max_tokens"),
         ("STOP", "end_turn"),
     ] {
@@ -747,6 +748,23 @@ fn non_stream_safety_and_malformed_function_call_refusal() {
         );
         assert_eq!(output["stop_reason"], want, "{finish_reason}: {output}");
     }
+}
+
+#[test]
+fn filtered_finish_malformed_response_streams_refusal_without_content() {
+    let output = stream(
+        &hi_request(),
+        &[
+            r#"{"candidates":[{"finishReason":"MALFORMED_RESPONSE"}]}"#,
+            r#"{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}"#,
+            "[DONE]",
+        ],
+    )
+    .concat();
+    assert_eq!(message_delta(&output)["delta"]["stop_reason"], "refusal");
+    assert_eq!(message_delta(&output)["usage"]["output_tokens"], 2);
+    assert_eq!(output.matches("event: message_delta\n").count(), 1);
+    assert_eq!(output.matches("event: message_stop\n").count(), 1);
 }
 
 fn lite_request() -> Value {
