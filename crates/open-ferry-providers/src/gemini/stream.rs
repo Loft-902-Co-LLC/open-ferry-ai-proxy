@@ -123,7 +123,17 @@ impl State {
             Some(Err(error)) => return self.end(Some(error)).await,
             None => return self.end(None).await,
         };
-        if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+        if let Some(message) = json_payload(&line).and_then(super::prompt_block_error_message) {
+            let error = ExecError::upstream(502, message).with_usage_kept();
+            self.reader.report(&error);
+            self.finished = true;
+            self.pending.push_back(Err(error));
+            return;
+        }
+        if (self.setup.response_format == Format::CLAUDE
+            || self.setup.response_format == Format::OPENAI)
+            && !self.saw_finish_reason
+        {
             self.saw_finish_reason = json_payload(&line).is_some_and(has_finish_signal);
         }
         match self.setup.lines {
@@ -232,7 +242,10 @@ impl State {
             ));
             return;
         }
-        if self.setup.response_format == Format::CLAUDE && !self.saw_finish_reason {
+        if (self.setup.response_format == Format::CLAUDE
+            || self.setup.response_format == Format::OPENAI)
+            && !self.saw_finish_reason
+        {
             let error = ExecError::upstream(502, "upstream stream closed before finishReason")
                 .with_usage_kept();
             self.reader.report(&error);

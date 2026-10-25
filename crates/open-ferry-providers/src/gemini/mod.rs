@@ -68,6 +68,8 @@ mod image;
 pub mod interactions;
 #[cfg(test)]
 mod malformed_tests;
+#[cfg(test)]
+mod prompt_block_tests;
 mod sse;
 mod stream;
 #[cfg(test)]
@@ -322,6 +324,9 @@ fn translate_answer(
     headers: HeaderMap,
     data: Vec<u8>,
 ) -> Result<Response, ExecError> {
+    if let Some(message) = prompt_block_error_message(&data) {
+        return Err(ExecError::upstream(502, message).with_usage_kept());
+    }
     let format = response_format(options);
     let original = crate::json::response_request(request, options);
     let context = ResponseContext {
@@ -345,6 +350,33 @@ fn translate_answer(
         payload: Bytes::from(payload),
         headers,
     })
+}
+
+fn prompt_block_error_message(payload: &[u8]) -> Option<String> {
+    let root: Value = serde_json::from_slice(payload).ok()?;
+    let roots = [&root, &root["response"]];
+    if roots.iter().any(|root| {
+        root["candidates"]
+            .as_array()
+            .is_some_and(|candidates| !candidates.is_empty())
+    }) {
+        return None;
+    }
+    for root in roots {
+        let reason = json::str_at(root, "promptFeedback.blockReason");
+        let reason = reason.trim();
+        if reason.is_empty() {
+            continue;
+        }
+        let detail = json::str_at(root, "promptFeedback.blockReasonMessage");
+        let detail = detail.trim();
+        return Some(if detail.is_empty() {
+            format!("upstream blocked the prompt: {reason}")
+        } else {
+            format!("upstream blocked the prompt: {reason} - {detail}")
+        });
+    }
+    None
 }
 
 /// Translates Gemini's stream in `response`, to the request `sent` with
