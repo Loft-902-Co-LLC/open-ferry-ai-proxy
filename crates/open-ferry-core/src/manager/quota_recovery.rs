@@ -32,11 +32,17 @@
 //! wrap over it. The quota-check rests and leases of that scope go with it.
 //! It never calls the broad manual reset, so other cooldowns stay.
 //!
-//! Independent holds, including a no-model 429, stay separate from a
+//! Independent holds, including a no-model 429 or 503, stay separate from a
 //! model-derived credential aggregate. Each keeps its own deadline, not the
-//! merged quota deadline; an unknown deadline fails closed. An expired hold
-//! stops blocking recovery. Reset, removal or registration discards old holds
-//! while preserving the fence against reads already in flight.
+//! merged quota deadline; an unknown deadline fails closed. While the
+//! credential has a hold of its own that is live (or whose end is unknown), a
+//! model's recovery is refused and changes nothing: the credential's fields
+//! are merged with its models', so taking the model out from under the hold
+//! could not give the hold back as it was, and selection skips the credential
+//! until the hold ends anyway. Once it ends (it expires, a success or a
+//! manual reset clears it), a fresh read recovers the model. Reset, removal,
+//! registration and every clearing of the cooldowns discard old holds while
+//! preserving the fence against reads already in flight.
 //!
 //! # Fences
 //!
@@ -70,13 +76,11 @@ use chrono::TimeDelta;
 use http::HeaderMap;
 use sha2::{Digest, Sha256};
 
-use super::classify::{CODE_FORCE_COOLDOWN, should_skip_credential_cooldown};
+use super::classify::should_skip_credential_cooldown;
 use super::cooldown::{
-    CallResult, apply_auth_failure_state, cooldown_disabled_for_auth, has_model_error,
-    is_credential_quota_active, recoverable_failure_retry_after, reset_model_state,
-    unwrap_expired_quota, update_aggregated_availability,
+    CallResult, has_model_error, is_credential_quota_active, recoverable_failure_retry_after,
+    reset_model_state, unwrap_expired_quota, update_aggregated_availability,
 };
-use super::cooldown_store::QuotaCheckRecord;
 use super::lifecycle::Save;
 use super::quota_signals::apply_cooldown_fields;
 use super::text::canonical_model_key;
@@ -274,59 +278,9 @@ fn own_hold(
     }
 }
 
-/// What the failures that named no model (an independent cooldown of the
-/// credential's own) left on it, as they alone set it: the credential's
-/// fields are merged with its models', so a model coming out from under them
-/// cannot tell this layer's own deadline, quota fields and backoff from the
-/// model's. The times are the provider's, before the quota check's cap.
-#[derive(Clone, Debug)]
-pub(crate) struct Layer {
-    unavailable: bool,
-    next_retry_after: Option<Timestamp>,
-    quota: QuotaState,
-}
-
-impl Layer {
-    /// When the layer's cooldown ends, if it does.
-    fn end(&self) -> Option<Timestamp> {
-        self.next_retry_after.max(self.quota.next_recover_at)
-    }
-
-    /// The layer with its times brought back to the quota check's next
-    /// check where the cap held them, as they were on the credential.
-    fn capped(&self, rest: Option<&QuotaCheckRecord>) -> Self {
-        let cap = |time: Option<Timestamp>| match (time, rest) {
-            (Some(time), Some(rest)) if time > rest.check_at && time <= rest.reset_at => {
-                Some(rest.check_at)
-            }
-            _ => time,
-        };
-        let mut layer = self.clone();
-        layer.next_retry_after = cap(layer.next_retry_after);
-        layer.quota.next_recover_at = cap(layer.quota.next_recover_at);
-        layer
-    }
-
-    /// Puts the layer back over what the models leave on `auth`.
-    fn lay_over(&self, auth: &mut Auth) {
-        if self.unavailable {
-            auth.unavailable = true;
-            auth.next_retry_after = auth.next_retry_after.max(self.next_retry_after);
-        }
-        if self.quota.exceeded {
-            auth.quota.exceeded = true;
-            auth.quota.reason.clone_from(&self.quota.reason);
-            auth.quota.next_recover_at = auth.quota.next_recover_at.max(self.quota.next_recover_at);
-            auth.quota.backoff_level = auth.quota.backoff_level.max(self.quota.backoff_level);
-        }
-    }
-}
-
 /// Runtime state of the recovery, kept with the manager's state.
 #[derive(Debug, Default)]
 pub(crate) struct Recoveries {
-    /// By credential: the independent cooldown its no-model failures set.
-    layers: BTreeMap<String, Layer>,
     /// By credential and scope (empty for the whole credential).
     claims: BTreeMap<(String, String), Claim>,
     /// Numbers the failures that touched cooldowns, across credentials.
@@ -436,19 +390,11 @@ impl Recoveries {
         // The same for a cooldown nothing could have recovered.
         self.foreign
             .retain(|(id, scope), _| id != &auth.id || blocked(auth, scope));
-        // And the independent layer, once nothing holds the credential any
-        // more. An ended one stays with its backoff, as the credential's own
-        // quota fields do, until a success clears them.
-        self.layers
-            .retain(|id, _| id != &auth.id || blocked(auth, ""));
         if result.success {
             return;
         }
         if should_skip_credential_cooldown(result.error.as_ref()) {
             return;
-        }
-        if model_key.is_empty() {
-            self.lay(settings, auth, result, now);
         }
         let status = result.error.as_ref().map_or(0, |error| error.http_status);
         let (credential, scope) = scope_of(result, model_key);
@@ -499,41 +445,11 @@ impl Recoveries {
         }
     }
 
-    /// Adds a failure that named no model to the credential's independent
-    /// layer, as it would apply to the layer alone.
-    fn lay(&mut self, settings: &Settings, auth: &Auth, result: &CallResult, now: Timestamp) {
-        let mut own = Auth::default();
-        if let Some(layer) = self.layers.get(&auth.id) {
-            own.unavailable = layer.unavailable;
-            own.next_retry_after = layer.next_retry_after;
-            own.quota = layer.quota.clone();
-        }
-        let forced = result
-            .error
-            .as_ref()
-            .is_some_and(|error| error.code == CODE_FORCE_COOLDOWN);
-        apply_auth_failure_state(
-            settings,
-            &mut own,
-            result.error.as_ref(),
-            result.retry_after,
-            now,
-            cooldown_disabled_for_auth(settings, auth) && !forced,
-        );
-        let layer = Layer {
-            unavailable: own.unavailable,
-            next_retry_after: own.next_retry_after,
-            quota: own.quota,
-        };
-        self.layers.insert(auth.id.clone(), layer);
-    }
-
     /// Forgets everything of credential `id`: it was replaced, removed or
     /// reset, and a read started before can't speak for it. The cooldowns it
     /// had went with it, so the foreign ones noted no longer taint a claim
     /// recorded after; the fence against reads in flight stays.
     pub(crate) fn forget(&mut self, id: &str) {
-        self.layers.remove(id);
         self.claims.retain(|(claim_id, _), _| claim_id != id);
         self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
@@ -545,9 +461,6 @@ impl Recoveries {
     pub(crate) fn restored(&mut self, id: &str, scopes: &[String]) {
         for scope in scopes {
             self.claims.remove(&(id.to_owned(), scope.clone()));
-            if scope.is_empty() {
-                self.layers.remove(id);
-            }
             // A cooldown that came back from the file has no provenance.
             self.hold((id.to_owned(), scope.clone()), None);
             if scope.is_empty() {
@@ -561,7 +474,6 @@ impl Recoveries {
     /// Forgets everything, for a restore that makes the saved cooldowns the
     /// authority.
     pub(crate) fn clear(&mut self) {
-        self.layers.clear();
         self.claims.clear();
         self.foreign.clear();
         self.recovered.clear();
@@ -806,6 +718,9 @@ impl Manager {
                 .take_while(|((claim_id, _), _)| claim_id == id)
                 .filter(|((_, scope), claim)| {
                     !state.quota_recovery.foreign_live(id, scope, now)
+                        // A model stays in cooldown while the credential has
+                        // a hold of its own (live, or of unknown end).
+                        && !state.quota_recovery.foreign_live(id, "", now)
                         && claim.seq <= token.seq
                         && state.quota_recovery.untouched_since(id, scope, claim)
                         && observed + DATE_GRACE >= claim.recorded_at
@@ -838,23 +753,8 @@ impl Manager {
                 recovery.credential = true;
                 scopes.push(String::new());
             }
-            // The credential's own quota is derived from its models' unless an
-            // independent cooldown (a 429 naming no model) stands on it.
-            let independent = state.quota_recovery.foreign_live(id, "", now);
-            // Its own layer comes out as it went in: with its own deadline,
-            // quota fields and quota-check cap, not the model's.
-            let rest = state
-                .quota_checks
-                .records(&state.settings, now)
-                .remove(&(id.to_owned(), String::new()));
-            let layer = state
-                .quota_recovery
-                .layers
-                .get(id)
-                .filter(|layer| layer.end().is_none_or(|end| end > now))
-                .map(|layer| layer.capped(rest.as_ref()));
             for scope in confirmed.iter().filter(|scope| !scope.is_empty()) {
-                if clear_model(auth, scope, now, independent, layer.as_ref()) {
+                if clear_model(auth, scope, now) {
                     recovery.models.push(scope.clone());
                     scopes.push(scope.clone());
                 }
@@ -931,23 +831,11 @@ fn clear_credential(auth: &mut Auth, now: Timestamp) {
 }
 
 /// Takes the model `scope`'s own quota cooldown off `auth`, leaving the
-/// credential-wide one over it, and says whether there was one. An
-/// `independent` cooldown of the credential's own is left standing, as its
-/// `layer` (when known) set it; one whose layer isn't known can't be told
-/// apart from the model's in the credential's merged fields, so the model is
-/// left as it was.
-fn clear_model(
-    auth: &mut Auth,
-    scope: &str,
-    now: Timestamp,
-    independent: bool,
-    layer: Option<&Layer>,
-) -> bool {
+/// credential-wide one over it, and says whether there was one. The caller
+/// has refused it while the credential has a hold of its own.
+fn clear_model(auth: &mut Auth, scope: &str, now: Timestamp) -> bool {
     let wrap_live = is_credential_quota_active(&auth.quota, now);
     let wrap_next = auth.quota.next_recover_at;
-    if independent && layer.is_none() && !wrap_live {
-        return false;
-    }
     let mut cleared = false;
     for (name, state) in &mut auth.model_states {
         if canonical_model_key(name) != scope {
@@ -974,34 +862,14 @@ fn clear_model(
     }
     if cleared {
         update_aggregated_availability(auth, now);
-        let layered = layer.filter(|_| !wrap_live);
-        if let Some(layer) = layered {
-            // The aggregate above still carries the cleared model's merged
-            // times: derive it again from the models left alone, and lay the
-            // independent layer over that.
-            apply_cooldown_fields(&mut auth.quota, QuotaState::default());
-            update_aggregated_availability(auth, now);
-            layer.lay_over(auth);
-        } else if !independent
-            // The credential's own quota, derived from its models', outlives
-            // the last of them: derive it again from none.
-            && auth.quota.exceeded
+        // The credential's own quota, derived from its models', outlives the
+        // last of them: derive it again from none.
+        if auth.quota.exceeded
             && auth.quota.reason == "quota"
             && !auth.model_states.values().any(|state| state.quota.exceeded)
         {
             apply_cooldown_fields(&mut auth.quota, QuotaState::default());
             update_aggregated_availability(auth, now);
-        }
-        // The aggregate above is the models' alone. The independent hold the
-        // credential keeps still blocks it, in selection and in storage
-        // (which saves a record for an unavailable credential only).
-        if independent
-            && layered.is_none()
-            && auth.quota.exceeded
-            && auth.quota.next_recover_at.is_some_and(|until| until > now)
-        {
-            auth.unavailable = true;
-            auth.next_retry_after = auth.quota.next_recover_at;
         }
         if !has_model_error(auth, now)
             && !auth.unavailable

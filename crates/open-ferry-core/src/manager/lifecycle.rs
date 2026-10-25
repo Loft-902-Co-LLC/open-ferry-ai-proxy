@@ -147,6 +147,11 @@ pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) 
             cleared.push(id.clone());
         }
     }
+    // The cooldowns are gone with no failure to show for it: what the quota
+    // recovery noted of them goes too, and a read in flight is fenced.
+    for id in &cleared {
+        state.quota_recovery.forget(id);
+    }
     cleared
 }
 
@@ -1578,6 +1583,8 @@ impl Manager {
             && clear_cooldown_state_for_auth(&mut auth, now)
         {
             generation = generation.saturating_add(1);
+            // As in `clear_disabled_cooldown_states`.
+            state.quota_recovery.forget(&auth.id);
         }
         auth.ensure_index();
         auth.registration_epoch = live_epoch;
