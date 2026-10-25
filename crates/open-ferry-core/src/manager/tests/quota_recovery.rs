@@ -2483,7 +2483,9 @@ async fn a_credential_429_after_the_merged_wrap_ran_out_starts_a_wrap_that_can_r
     wrap(&h, 2 * HOUR);
     h.clock.advance(Duration::from_secs(5));
     merge_with(&h, route_alias());
-    h.clock.advance(3 * HOUR);
+    // Every layer the merge could have touched, the alias's 5 days included,
+    // runs out before the next credential-wide 429.
+    h.clock.advance(FIVE_DAYS + HOUR);
     wrap(&h, 2 * HOUR);
     h.clock.advance(Duration::from_secs(20 * 60));
     assert!(
@@ -2628,4 +2630,355 @@ async fn a_clean_registration_still_lets_the_normal_recovery_work() {
         &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
     ));
     assert!(!blocked(&h, OPUS));
+}
+
+// Round 10: a failure application classified is held under the scope it
+// changed; a merge's mark outlives the wrap until every layer has run out; an
+// update that stores other cooldowns than the live ones gives them no
+// provenance.
+
+/// A success of `model`.
+fn success(model: &str) -> CallResult {
+    CallResult {
+        auth_id: ID.into(),
+        provider: "claude".into(),
+        model: model.into(),
+        success: true,
+        ..CallResult::default()
+    }
+}
+
+/// `result` classified by application, reported with the credential-scope
+/// flag the Claude executor sets from the unified rejection headers alone;
+/// then a success of the sibling model; then an ordinary recognised Opus 429
+/// that asks for `claim`, shorter than the classified hold. A read showing
+/// the windows healthy, `step` after that, must not clear the hold.
+async fn classified_credential_scoped_then_a_claim(
+    result: CallResult,
+    step: Duration,
+    claim: Duration,
+) {
+    refused_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager.mark_result(&CallResult {
+                credential_scope: true,
+                ..result.clone()
+            });
+            let state = h.get(ID).model_states.get(OPUS).cloned().expect("opus");
+            assert!(
+                state.next_retry_after > Some(h.now() + claim + 4 * step),
+                "the classified hold outlasts the claim: {state:?}"
+            );
+            assert!(!blocked(h, SONNET), "the sibling is untouched");
+            h.clock.advance(step);
+            h.manager.mark_result(&success(SONNET));
+            h.clock.advance(step);
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), claim));
+            h.clock.advance(step);
+        },
+        step,
+        2.0,
+    )
+    .await;
+}
+
+/// Finding 1: a model-support failure (an explicit `model_not_found` code)
+/// that carries the credential-scope flag is held under its model, not under
+/// the credential's `""`, which the sibling's success prunes.
+#[tokio::test(start_paused = true)]
+async fn a_credential_scoped_model_support_failure_is_held_under_its_model() {
+    classified_credential_scoped_then_a_claim(
+        classified_429(OPUS, "model_not_found", "no such model", 12 * HOUR),
+        Duration::from_secs(5),
+        HOUR,
+    )
+    .await;
+}
+
+/// The Cloudflare arm, credential-scoped by the same headers: a hold of its
+/// own ten seconds, so the whole sequence runs inside it.
+#[tokio::test(start_paused = true)]
+async fn a_credential_scoped_cloudflare_failure_is_held_under_its_model() {
+    classified_credential_scoped_then_a_claim(
+        classified_429(OPUS, "", "cloudflare challenge", 12 * HOUR),
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+    )
+    .await;
+}
+
+/// The invalid-grant arm: never a 429, but a credential-scoped flag can come
+/// with it all the same.
+#[tokio::test(start_paused = true)]
+async fn a_credential_scoped_invalid_grant_failure_is_held_under_its_model() {
+    let mut result = other_failure(OPUS, 400, 12 * HOUR);
+    if let Some(error) = result.error.as_mut() {
+        error.code = "invalid_grant".into();
+        error.message = "invalid_grant".into();
+    }
+    classified_credential_scoped_then_a_claim(
+        result,
+        Duration::from_secs(5),
+        Duration::from_secs(600),
+    )
+    .await;
+}
+
+/// An alias with a 5 day quota cooldown and a target with a newer 1 hour one
+/// are recorded without a cap; a check cap of an hour is turned on; a 5 day
+/// credential-wide 429 wraps both; the reconcile merges the alias into the
+/// target and sets the mark.
+fn capped_merge(h: &Harness) {
+    h.manager
+        .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+    h.clock.advance(Duration::from_secs(5));
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+    h.clock.advance(Duration::from_secs(5));
+    h.manager.set_settings(alias_settings(HOUR));
+    wrap(h, FIVE_DAYS);
+    h.clock.advance(Duration::from_secs(5));
+    merge_with(h, alias_settings(HOUR));
+    h.clock.advance(Duration::from_secs(5));
+}
+
+/// Finding 3: 70 minutes on, the cap's check time has passed but the
+/// provider's 5 day reset has not; another credential-wide 429 must not drop
+/// the mark.
+#[tokio::test(start_paused = true)]
+async fn a_capped_check_time_that_has_passed_keeps_the_merge_mark() {
+    refused_credential_read(
+        Settings::default(),
+        alias_settings(HOUR),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            capped_merge(h);
+            h.clock.advance(Duration::from_secs(70 * 60));
+            wrap(h, FIVE_DAYS);
+        },
+        Duration::from_secs(60),
+    )
+    .await;
+}
+
+/// The same, with the second 429 the result of a check that was really
+/// leased and dispatched.
+#[tokio::test(start_paused = true)]
+async fn a_leased_check_that_returns_a_wrap_keeps_the_merge_mark() {
+    let mut seen = Vec::new();
+    for read in [true, false] {
+        let dir = temp_dir();
+        let h = saving(dir.path(), Settings::default(), &[OPUS, ROUTE, SONNET]);
+        capped_merge(&h);
+        h.clock.advance(Duration::from_secs(70 * 60));
+        let reset = weekly(h.now());
+        let executor = FakeExecutor::with("claude", move |_: &Call| {
+            Reply::Err(rejection(reset.clone(), true, FIVE_DAYS))
+        });
+        h.executor(&executor);
+        // The merge's registration listed the alias alone.
+        h.models.register(ID, &[OPUS, ROUTE, SONNET]);
+        let outcome = call(&h, OPUS).await.map(|_| ());
+        settle().await;
+        assert_eq!(
+            executor.ids(Kind::Execute).len(),
+            1,
+            "the due check was leased and dispatched: {outcome:?}; checks {:?}; credential {:?}",
+            h.manager.quota_checks(ID),
+            h.get(ID).model_states
+        );
+        h.clock.advance(Duration::from_secs(60));
+        if read {
+            assert!(
+                !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+                "the credential's recovery went ahead"
+            );
+        }
+        seen.push(capture(&h, dir.path(), alias_settings(HOUR)).await);
+    }
+    assert_eq!(seen[0], seen[1], "a refused read changed something");
+}
+
+/// The control: every layer the merge touched, the alias's 5 days included,
+/// has run out before the next credential-wide 429, so a new wrap may recover.
+#[tokio::test(start_paused = true)]
+async fn a_capped_wrap_after_every_layer_ran_out_can_recover() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE, SONNET]);
+    capped_merge(&h);
+    h.clock.advance(FIVE_DAYS + HOUR);
+    wrap(&h, 2 * HOUR);
+    h.clock.advance(Duration::from_secs(20 * 60));
+    assert!(
+        recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 100.0)])),
+        "a new wrap, made after everything the merge touched ran out"
+    );
+    assert!(!blocked(&h, SONNET), "the new wrap is gone");
+    assert!(!blocked(&h, OPUS));
+}
+
+/// Finding 4: the same merge without a cap, then `failure` names no model.
+/// 70 minutes on, the failure's own hold and the target's hour have run out
+/// but the alias's 5 days have not; another credential-wide 429 must not make
+/// the credential recoverable.
+async fn merged_wrap_then_a_no_model_failure(failure: CallResult) {
+    refused_credential_read(
+        Settings::default(),
+        route_alias(),
+        &[OPUS, ROUTE, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(ROUTE, opus_headers(), FIVE_DAYS));
+            h.clock.advance(Duration::from_secs(5));
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, FIVE_DAYS);
+            h.clock.advance(Duration::from_secs(5));
+            merge_with(h, route_alias());
+            h.clock.advance(Duration::from_secs(5));
+            h.manager.mark_result(&failure);
+            h.clock.advance(Duration::from_secs(70 * 60));
+            wrap(h, FIVE_DAYS);
+        },
+        Duration::from_secs(60),
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_no_model_cloudflare_failure_keeps_the_merge_mark() {
+    let mut failure = other_failure("", 429, Duration::from_secs(90));
+    if let Some(error) = failure.error.as_mut() {
+        error.message = "cloudflare challenge".into();
+    }
+    merged_wrap_then_a_no_model_failure(failure).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_no_model_invalid_grant_failure_keeps_the_merge_mark() {
+    let mut failure = other_failure("", 400, Duration::from_secs(90));
+    if let Some(error) = failure.error.as_mut() {
+        error.code = "invalid_grant".into();
+        error.message = "invalid_grant".into();
+    }
+    merged_wrap_then_a_no_model_failure(failure).await;
+}
+
+/// Finding 2(a): an update whose model states carry two keys of one model
+/// under a credential-wide wrap. Normalization keeps the newer key's expired
+/// shadow in place of the model's own live hour, so the credential's recovery
+/// would lift the wrap onto it.
+#[tokio::test(start_paused = true)]
+async fn an_update_that_merges_two_keys_of_one_model_under_a_wrap_refuses_the_recovery() {
+    let twin_key = format!("{OPUS}(8192)");
+    refused_credential_read(
+        Settings::default(),
+        Settings::default(),
+        &[OPUS, SONNET],
+        |h| {
+            h.manager
+                .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+            h.clock.advance(Duration::from_secs(5));
+            wrap(h, FIVE_DAYS);
+            h.clock.advance(Duration::from_secs(5));
+            let mut incoming = (*h.get(ID)).clone();
+            let mut twin = incoming.model_states[OPUS].clone();
+            twin.updated_at = Some(h.now() + TimeDelta::seconds(1));
+            twin.credential_quota_shadow = Some(Box::new(crate::auth::ModelState::default()));
+            incoming.model_states.insert(twin_key.clone(), twin);
+            h.manager.update_unsaved(incoming).expect("update");
+            let merged = h.get(ID);
+            assert!(!merged.model_states.contains_key(&twin_key), "merged");
+            assert!(
+                merged.model_states[OPUS]
+                    .credential_quota_shadow
+                    .as_ref()
+                    .is_some_and(|shadow| shadow.next_retry_after.is_none()),
+                "the newer key's expired shadow was kept"
+            );
+        },
+        Duration::from_secs(20 * 60),
+    )
+    .await;
+}
+
+/// Finding 2(b): a read in flight across an update that publishes a longer
+/// Opus cooldown. The credential version is the same, so the token matched.
+#[tokio::test(start_paused = true)]
+async fn a_read_in_flight_across_an_update_of_the_opus_cooldown_is_fenced() {
+    let mut seen = Vec::new();
+    for read in [true, false] {
+        let dir = temp_dir();
+        let h = saving(dir.path(), Settings::default(), &[OPUS, SONNET]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), HOUR));
+        let token = h.manager.quota_recovery_token(ID).expect("token");
+        h.clock.advance(Duration::from_secs(5));
+        let end = h.now() + TimeDelta::days(10);
+        let mut longer = (*h.get(ID)).clone();
+        let state = longer.model_states.get_mut(OPUS).expect("opus state");
+        state.next_retry_after = Some(end);
+        state.quota.next_recover_at = Some(end);
+        h.manager.update_unsaved(longer).expect("update");
+        h.clock.advance(Duration::from_secs(55));
+        if read {
+            let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+            assert!(
+                h.manager
+                    .apply_quota_usage_recovery(&token, &healthy)
+                    .expect("apply")
+                    .is_empty(),
+                "a read from before the update ended the longer cooldown"
+            );
+        }
+        seen.push(capture(&h, dir.path(), Settings::default()).await);
+    }
+    assert_eq!(seen[0], seen[1], "a refused read changed something");
+}
+
+/// An edit or an update that leaves every cooldown as it is does not touch
+/// the normal recovery: a label, an update of the live credential's own copy,
+/// and an update with no model states (the live ones are kept).
+#[tokio::test(start_paused = true)]
+async fn an_edit_or_update_that_leaves_the_cooldowns_alone_still_lets_the_recovery_work() {
+    for variant in 0..3 {
+        let h = Harness::new(Settings::default());
+        h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+        h.manager
+            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+        h.clock.advance(Duration::from_secs(5));
+        match variant {
+            0 => {
+                h.manager
+                    .edit(ID, |auth| {
+                        auth.label = "renamed".into();
+                        Ok::<_, ()>(true)
+                    })
+                    .expect("edit");
+            }
+            1 => {
+                let mut copy = (*h.get(ID)).clone();
+                copy.label = "renamed".into();
+                h.manager.update_unsaved(copy).expect("update");
+            }
+            _ => {
+                let mut bare = (*h.get(ID)).clone();
+                bare.label = "renamed".into();
+                bare.model_states.clear();
+                h.manager.update_unsaved(bare).expect("update");
+            }
+        }
+        h.clock.advance(Duration::from_secs(55));
+        assert!(blocked(&h, OPUS), "variant {variant}");
+        assert!(
+            recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+            "variant {variant}: the normal recovery was refused"
+        );
+        assert!(!blocked(&h, OPUS), "variant {variant}");
+    }
 }

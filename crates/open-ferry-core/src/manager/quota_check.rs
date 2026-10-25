@@ -450,6 +450,16 @@ impl QuotaChecks {
         self.lease_claims(auth);
     }
 
+    /// Whether any rest of credential `id`, the credential's or a model's,
+    /// has a provider reset still ahead at `now`.
+    pub(crate) fn rest_live(&self, id: &str, now: Timestamp) -> bool {
+        self.scopes(id).iter().any(|scope| {
+            self.rests
+                .get(&Self::key(id, scope))
+                .is_some_and(|rest| now < rest.reset_at)
+        })
+    }
+
     /// Whether credential `id` rests on a quota check of any model scope,
     /// under whatever key it was recorded (an alias's included, which a
     /// reconcile leaves behind when it merges the alias's state). A
