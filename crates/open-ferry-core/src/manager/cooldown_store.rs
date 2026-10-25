@@ -80,12 +80,17 @@
 //! - A credential's record carries, under `open_ferry_recovery_refused_until`,
 //!   the bound of the merge mark that refuses its quota recovery (an RFC 3339
 //!   time, or `"unknown"`), see `super::quota_recovery`. It is written while
-//!   the mark stands, in a record of its own with no cooldown when none is
-//!   live, and put back by a restore or a thaw before the bound passes. A
-//!   record with no cooldown is skipped by upstream's restore, and an
-//!   unknown key is ignored by it, so upstream reads such a file as it reads
-//!   one without the field; open-ferry reads a file without the field with
-//!   no mark.
+//!   the mark stands, whatever the credential's state (disabled and cooling
+//!   off included), in a record of its own with no cooldown when none is
+//!   live, and put back by a restore or a thaw before the bound passes onto
+//!   any credential of that id. A record with no cooldown is skipped by
+//!   upstream's restore, and an unknown key is ignored by it, so upstream
+//!   reads such a file as it reads one without the field (and rewrites it
+//!   once without the key if it saves); open-ferry reads a file without the
+//!   field with no mark. A time outside years 0 to 9999 after UTC
+//!   normalising reads as `unknown` and is written as `unknown`, so it
+//!   never makes the record unwritable; the same bounds apply to a quota
+//!   check's times, which read as absent.
 //! - What a file keeps of a credential's free text is scrubbed of that
 //!   credential's secrets: its own keys and tokens, its credential headers
 //!   and each cookie value among them, and its proxy's password, every one
@@ -785,15 +790,29 @@ fn collect_records(
     now: Timestamp,
     out: &mut Vec<Record>,
 ) {
-    if auth.id.is_empty()
-        || auth.disabled
-        || auth.status == Status::Disabled
-        || cooldown_disabled_for_auth(settings, auth)
-    {
+    if auth.id.is_empty() {
         return;
     }
     let provider = auth.provider.trim();
     let auth_file = cooldown_auth_file(auth);
+    // The mark is a refusal of usage recoveries, not a cooldown: it is kept
+    // whatever the credential's cooldown eligibility, on a record that holds
+    // nothing else when the credential is disabled or has cooling off.
+    if auth.disabled
+        || auth.status == Status::Disabled
+        || cooldown_disabled_for_auth(settings, auth)
+    {
+        if mark.is_some() {
+            out.push(Record {
+                provider: provider.to_owned(),
+                auth_id: auth.id.clone(),
+                auth_file,
+                recovery_refused: mark,
+                ..Record::default()
+            });
+        }
+        return;
+    }
     if auth.unavailable && after(auth.next_retry_after, now) {
         out.push(Record {
             provider: provider.to_owned(),
@@ -908,11 +927,9 @@ fn apply_locked(manager: &Manager, state: &mut State, records: &[Record], now: T
         if !record.model.trim().is_empty() {
             continue;
         }
-        if let Some(entry) = state.auths.get(id)
-            && !entry.auth.disabled
-            && entry.auth.status != Status::Disabled
-            && !cooldown_disabled_for_auth(&settings, &entry.auth)
-        {
+        // Whatever the credential's cooldown eligibility (disabled, cooling
+        // off): the mark only refuses usage recoveries.
+        if state.auths.contains_key(id) {
             state.quota_recovery.restore_mark(id, hold);
         }
     }

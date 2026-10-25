@@ -115,13 +115,23 @@
 //! lets the aggregation clear the credential's flags (main had then lifted
 //! the hold for all traffic); a success that leaves the credential blocked
 //! ends nothing, and no failure ever does, since a sibling's failure may have
-//! rewritten the credential's live flags. This is also how the unknown-end
-//! holds recorded after a registration or a restore end in ordinary use. The
-//! resets and removals discard old holds while preserving the fence against
-//! reads already in flight.
+//! rewritten the credential's live flags. A success the application rejected
+//! as stale (`StaleSuccess`) changed nothing, so it ends no hold. This is also
+//! how the unknown-end holds recorded after a registration or a restore end in
+//! ordinary use. A registration, an update, an edit or a refresh keeps the
+//! holds (and the merge mark) and adds unknown-end ones beside them, the later
+//! end winning; only a reset, a removal, a clearing of the cooldowns or a
+//! restore drops them, and all of these fence reads already in flight. The
+//! merge mark is saved whatever the credential's state, and disabling a
+//! credential ends an unknown mark even when there was no cooldown to clear. A
+//! mark restored from a file stays after the cooldowns it guarded were cleared
+//! elsewhere, until its bound passes or a reset (a stale mark).
 //!
-//! A refused read mutates nothing, in the recovery or in the quota checks: a
-//! read that recovers no scope only puts the leases back, and sweeps no rest.
+//! A refused read mutates nothing, in the recovery or in the quota checks: the
+//! recovery runs on copies of the credential and its quota checks, which are
+//! stored only when a scope recovered. A recovery ends only the rests of the
+//! scopes it recovers; it sweeps no other model's rest, because a credential
+//! recovery is refused while any model rests on a check.
 //!
 //! # Fences
 //!
@@ -157,8 +167,8 @@ use sha2::{Digest, Sha256};
 
 use super::classify::should_skip_credential_cooldown;
 use super::cooldown::{
-    CallResult, OwnDeadline, has_model_error, is_credential_quota_active, reset_model_state,
-    unwrap_expired_quota, update_aggregated_availability,
+    CallResult, OwnDeadline, StaleSuccess, has_model_error, is_credential_quota_active,
+    reset_model_state, unwrap_expired_quota, update_aggregated_availability,
 };
 use super::lifecycle::Save;
 use super::quota_signals::apply_cooldown_fields;
@@ -470,6 +480,7 @@ impl Recoveries {
     /// `deadlines` is the deadline of the outcome's scope before and after
     /// it, as the outcome set them: not as the quota check's cap shortened
     /// them to its next check, which is no end of the provider's cooldown.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe(
         &mut self,
         auth: &Auth,
@@ -477,9 +488,16 @@ impl Recoveries {
         model_key: &str,
         own: OwnDeadline,
         deadlines: (Option<Timestamp>, Option<Timestamp>),
+        stale: StaleSuccess,
         now: Timestamp,
     ) {
         let (before, after) = deadlines;
+        // A success application rejected as stale (it predates a cooldown
+        // that stays) changed nothing, so it ends no hold and prunes no claim
+        // or owed window.
+        if result.success && stale != StaleSuccess::default() {
+            return;
+        }
         // A claim whose cooldown layer the outcome ended (a success, an
         // expiry) is not owed any more, and must not be joined by a later one.
         self.claims
@@ -568,31 +586,35 @@ impl Recoveries {
         }
     }
 
-    /// Forgets the claims and holds of credential `id`: its cooldowns were
-    /// replaced (registered again, updated), and a read started before can't
-    /// speak for them. The foreign ones noted no longer taint a claim
-    /// recorded after; the fence against reads in flight stays. A merge's
-    /// mark and its bound stay: they say what the credential held, and nothing
-    /// that replaced the cooldowns says those layers ended.
+    /// Forgets the claims of credential `id`: its cooldowns were replaced
+    /// (registered again, updated), and a read started before can't speak for
+    /// them. The fence against reads in flight stays. The foreign holds stay
+    /// too, as a hold that aggregation hid exists nowhere else: they end only
+    /// at their own deadline, on an accepted success that leaves their scope
+    /// unblocked, or on a reset, removal, clearing or restore. A merge's mark
+    /// and its bound stay as well: they say what the credential held, and
+    /// nothing that replaced the cooldowns says those layers ended.
     pub(crate) fn forget(&mut self, id: &str) {
         self.claims.retain(|(claim_id, _), _| claim_id != id);
         self.owed.retain(|(owed_id, _), _| owed_id != id);
-        self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
     }
 
     /// [`Self::forget`], for a credential that was removed or loaded anew:
-    /// nothing of it is left for the mark to describe.
+    /// nothing of it is left for its holds or its mark to describe.
     pub(crate) fn remove(&mut self, id: &str) {
         self.forget(id);
+        self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.merged_under.remove(id);
     }
 
-    /// [`Self::forget`], for a reset of the credential's cooldowns. A mark
-    /// with a bound stays until the bound passes; one with none would last for
-    /// good (no bound ever passes), so a reset ends it.
+    /// [`Self::forget`], for a reset of the credential's cooldowns: the holds
+    /// go with them. A mark with a bound stays until the bound passes; one
+    /// with none would last for good (no bound ever passes), so a reset ends
+    /// it.
     pub(crate) fn reset(&mut self, id: &str) {
         self.forget(id);
+        self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         if self.merged_under.get(id).is_some_and(Option::is_none) {
             self.merged_under.remove(id);
         }
@@ -725,6 +747,11 @@ impl Recoveries {
         self.foreign.clear();
         self.recovered.clear();
         self.era = self.era.saturating_add(1);
+    }
+
+    /// Whether `id` carries a merge mark.
+    pub(crate) fn marked(&self, id: &str) -> bool {
+        self.merged_under.contains_key(id)
     }
 
     /// The bound of `id`'s merge mark, if it has one (`Some(None)`: unknown).
@@ -1093,9 +1120,15 @@ impl Manager {
             if confirmed.is_empty() {
                 return Ok(none);
             }
-            let auth = Arc::make_mut(&mut entry.auth);
+            // Everything is done on copies: a read that recovers nothing
+            // leaves the credential and its quota checks exactly as they
+            // were (not even `Arc::make_mut`'s copy, `updated_at` or a
+            // lease taken off and put back).
+            let mut working = Auth::clone(&entry.auth);
+            let mut checks = state.quota_checks.clone();
+            let auth = &mut working;
             let mut recovery = QuotaRecovery::default();
-            state.quota_checks.before_result(auth);
+            checks.before_result(auth);
             let mut scopes = Vec::new();
             // The credential first: its models come out from under it with
             // their own limits, which a model's claim may then end.
@@ -1115,10 +1148,7 @@ impl Manager {
                 }
             }
             if scopes.is_empty() {
-                // Nothing matched: put the leases back as they were, and
-                // change nothing else (no rest is swept by a read that
-                // recovered nothing).
-                state.quota_checks.lease_again(auth);
+                // Nothing matched: the copies are dropped.
                 return Ok(none);
             }
             for scope in &scopes {
@@ -1127,10 +1157,12 @@ impl Manager {
                 state.quota_recovery.owed.remove(&key);
                 state.quota_recovery.recovered.insert(key, now);
             }
-            state.quota_checks.recovered(auth, &scopes, now);
+            checks.recovered(auth, &scopes, now);
             let bumps = 2;
             auth.updated_at = Some(now);
             auth.generation = auth.generation.saturating_add(bumps);
+            entry.auth = Arc::new(working);
+            state.quota_checks = checks;
             let committed = (
                 entry.auth.clone(),
                 recovery,
