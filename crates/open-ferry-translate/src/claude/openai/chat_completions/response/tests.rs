@@ -486,6 +486,7 @@ fn non_stream_finish_reasons() {
         ("end_turn", "end_turn", "stop"),
         ("stop_sequence", "stop_sequence", "stop"),
         ("max_tokens", "max_tokens", "length"),
+        ("context_window", "model_context_window_exceeded", "length"),
         ("refusal", "refusal", "content_filter"),
         ("sensitive", "sensitive", "content_filter"),
     ] {
@@ -586,15 +587,18 @@ fn non_stream_native_messages_json() {
 }
 
 #[test]
-fn context_window_stream_and_whole_response_return_error_without_success_usage() {
+fn context_window_stream_and_whole_response_keep_length_content_and_usage() {
     let response =
         json!({"id":"msg_context","type":"message","role":"assistant","model":"claude-test",
         "content":[{"type":"text","text":"Partial"}],"stop_reason":"model_context_window_exceeded",
         "usage":{"input_tokens":7,"output_tokens":4}})
         .to_string();
     let out = convert_claude_response_to_openai_chat_completions_non_stream(response.as_bytes());
-    assert_eq!(out["error"]["code"], "context_length_exceeded");
-    assert!(out.get("usage").is_none());
+    assert!(out.get("error").is_none());
+    assert_eq!(out["choices"][0]["finish_reason"], "length");
+    assert_eq!(out["choices"][0]["message"]["content"], "Partial");
+    assert_eq!(out["usage"]["prompt_tokens"], 7);
+    assert_eq!(out["usage"]["completion_tokens"], 4);
     let Native::Events { sse, .. } = messages_json_to_sse(response.as_bytes()) else {
         panic!("test response")
     };
@@ -603,18 +607,21 @@ fn context_window_stream_and_whole_response_return_error_without_success_usage()
         .lines()
         .filter_map(|line| stream.translate_line(line.as_bytes()))
         .collect();
-    assert_eq!(
+    assert!(events.iter().all(|event| event.get("error").is_none()));
+    let text: String = events
+        .iter()
+        .filter_map(|event| event["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "Partial");
+    assert!(
         events
             .iter()
-            .filter(|event| event.get("error").is_some())
-            .count(),
-        1
+            .any(|event| event["choices"][0]["finish_reason"] == "length")
     );
-    assert_eq!(
-        events.last().unwrap()["error"]["code"],
-        "context_length_exceeded"
-    );
-    assert!(!events.iter().any(|event| event.get("usage").is_some()));
+    let last = events.last().unwrap();
+    assert_eq!(last["choices"], json!([]));
+    assert_eq!(last["usage"]["prompt_tokens"], 7);
+    assert_eq!(last["usage"]["completion_tokens"], 4);
     for (reason, finish) in [
         ("refusal", "content_filter"),
         ("max_tokens", "length"),
@@ -625,5 +632,48 @@ fn context_window_stream_and_whole_response_return_error_without_success_usage()
             convert_claude_response_to_openai_chat_completions_non_stream(response.as_bytes());
         assert_eq!(out["choices"][0]["finish_reason"], finish);
         assert_eq!(out["usage"]["completion_tokens"], 4);
+    }
+}
+
+#[test]
+fn truncated_tool_call_keeps_length_arguments_and_usage() {
+    for reason in ["max_tokens", "model_context_window_exceeded"] {
+        let events = [
+            json!({"type":"message_start","message":{"id":"msg_tc","model":"claude-test","usage":{"input_tokens":5,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -l"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":4}}),
+            json!({"type":"message_stop"}),
+        ];
+        let sse = events.iter().map(data).collect::<Vec<_>>().join("\n");
+        let out = convert_claude_response_to_openai_chat_completions_non_stream(sse.as_bytes());
+        assert_eq!(
+            out["choices"][0]["finish_reason"], "length",
+            "{reason}: {out}"
+        );
+        let call = &out["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "toolu_1");
+        assert_eq!(call["function"]["name"], "bash");
+        assert_eq!(call["function"]["arguments"], "{\"command\":\"ls -l");
+        assert_eq!(out["usage"]["completion_tokens"], 4);
+        let mut stream = ClaudeToOpenAIChatCompletionsStream::new("claude-test");
+        let chunks: Vec<_> = sse
+            .lines()
+            .filter_map(|line| stream.translate_line(line.as_bytes()))
+            .collect();
+        assert!(chunks.iter().all(|chunk| chunk.get("error").is_none()));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk["choices"][0]["finish_reason"] == "length")
+        );
+        let call = chunks
+            .iter()
+            .find_map(|chunk| at(chunk, "choices.0.delta.tool_calls.0"))
+            .unwrap();
+        assert_eq!(call["id"], "toolu_1");
+        assert_eq!(call["function"]["arguments"], "{\"command\":\"ls -l");
+        assert_eq!(chunks.last().unwrap()["usage"]["completion_tokens"], 4);
     }
 }

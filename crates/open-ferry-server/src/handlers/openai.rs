@@ -405,6 +405,32 @@ mod stop_reason_tests {
     use http_body_util::BodyExt;
 
     #[tokio::test]
+    async fn length_finish_preserves_content_tools_and_trailing_usage() {
+        let chunks = [
+            json!({"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"exec","arguments":"{}"}}]},"finish_reason":null}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":4}}),
+            json!({"choices":[],"usage":{"completion_tokens":4}}),
+        ];
+        let body = forward(
+            stream::iter(chunks.map(|chunk| Ok(Bytes::from(chunk.to_string())))).boxed(),
+            ChatWriter::default(),
+            None,
+        )
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Partial"));
+        assert!(body.contains("call_1"));
+        assert!(body.contains("\"finish_reason\":\"length\""));
+        assert!(body.contains("\"completion_tokens\":4"));
+        assert_eq!(body.matches("[DONE]").count(), 1);
+        assert!(!body.contains("\"error\":"));
+    }
+
+    #[tokio::test]
     async fn terminal_error_first_or_after_content_stops_without_duplicate_error_or_done() {
         for content in [false, true] {
             let mut items = Vec::new();
@@ -413,7 +439,7 @@ mod stop_reason_tests {
                     br#"{"choices":[{"delta":{"content":"Partial"},"finish_reason":null}]}"#,
                 )));
             }
-            items.push(Ok(Bytes::from_static(br#"{"error":{"message":"context window filled","type":"invalid_request_error","code":"context_length_exceeded"}}"#)));
+            items.push(Ok(Bytes::from_static(br#"{"error":{"message":"explicit upstream error","type":"invalid_request_error","code":"context_length_exceeded"}}"#)));
             items.push(Err(ErrorMessage::new(
                 502,
                 "upstream stream closed before message_stop",

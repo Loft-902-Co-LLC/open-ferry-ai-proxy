@@ -533,23 +533,6 @@ impl ClaudeExecutor {
         if format == Format::OPENAI_RESPONSE {
             out = ensure_responses_usage_details(out);
         }
-        if format == Format::OPENAI
-            && serde_json::from_slice::<Value>(&out)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .pointer("/error/code")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("context_length_exceeded")
-        {
-            return Err(ExecError::upstream(
-                400,
-                String::from_utf8_lossy(&out).into_owned(),
-            ));
-        }
         Ok(Response {
             payload: Bytes::from(out),
             headers: response_headers,

@@ -2922,7 +2922,7 @@ async fn web_search_results_survive_replay_only_for_the_same_credential() {
 mod capability_tests;
 
 #[tokio::test]
-async fn context_window_chat_is_http_400_and_refusal_remains_successful() {
+async fn context_window_chat_keeps_length_content_usage_and_refusal_remains_successful() {
     for reason in ["model_context_window_exceeded", "refusal"] {
         let reply = SSE.replace("end_turn", reason);
         let mock = Mock::start(Reply::sse(&reply)).await;
@@ -2934,17 +2934,18 @@ async fn context_window_chat_is_http_400_and_refusal_remains_successful() {
                 options(Format::OPENAI),
             )
             .await;
-        if reason == "model_context_window_exceeded" {
-            let error = result.unwrap_err();
-            assert_eq!(error.status, 400);
-            assert!(error.message.contains("context_length_exceeded"));
-            assert!(!error.message.contains(API_KEY));
+        let response = result.unwrap();
+        let body: Value = serde_json::from_slice(&response.payload).unwrap();
+        let finish = if reason == "model_context_window_exceeded" {
+            "length"
         } else {
-            let response = result.unwrap();
-            let body: Value = serde_json::from_slice(&response.payload).unwrap();
-            assert_eq!(body["choices"][0]["finish_reason"], "content_filter");
-            assert!(body.get("usage").is_some());
-        }
+            "content_filter"
+        };
+        assert_eq!(body["choices"][0]["finish_reason"], finish);
+        assert_eq!(body["choices"][0]["message"]["content"], "Hello there");
+        assert_eq!(body["usage"]["prompt_tokens"], 12);
+        assert_eq!(body["usage"]["completion_tokens"], 5);
+        assert!(body.get("error").is_none());
         assert_eq!(mock.requests().len(), 1);
     }
 }
