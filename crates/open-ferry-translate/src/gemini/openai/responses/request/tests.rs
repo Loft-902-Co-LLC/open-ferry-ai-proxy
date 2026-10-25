@@ -20,6 +20,42 @@ use super::super::test_support::{
 use super::*;
 use crate::signature::validate_gemini_function_call_pairing;
 
+#[test]
+fn mixed_web_search_and_functions() {
+    let model = "gemini-3.8-flash-high";
+    let function = json!({"type":"function","name":"get_weather",
+        "parameters":{"type":"object","properties":{"city":{"type":"string"}}}});
+    let search = json!({"type":"web_search"});
+    let out = convert(
+        model,
+        &json!({"input":"weather in Paris",
+        "tools":[search, function], "tool_choice":"auto"}),
+    );
+    assert_eq!(out["toolConfig"]["includeServerSideToolInvocations"], true);
+    assert_eq!(out["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+    assert_eq!(out["tools"][0]["googleSearch"], json!({}));
+    assert_eq!(
+        out["tools"][1]["functionDeclarations"][0]["name"],
+        "get_weather"
+    );
+    for tools in [json!([search]), json!([function])] {
+        let out = convert(model, &json!({"tools":tools}));
+        assert!(path(&out, "toolConfig.includeServerSideToolInvocations").is_none());
+    }
+    for (model, choice) in [
+        (model, json!("none")),
+        ("gpt-oss-120b-medium", json!("auto")),
+        (model, json!({"type":"function","name":"get_weather"})),
+    ] {
+        let out = convert(
+            model,
+            &json!({"tools":[search, function], "tool_choice":choice}),
+        );
+        assert!(path(&out, "toolConfig.includeServerSideToolInvocations").is_none());
+        assert!(path(&out, "tools.0.googleSearch").is_none());
+    }
+}
+
 /// `ConvertOpenAIResponsesRequestToGemini` without streaming.
 fn convert(model: &str, request: &Value) -> Value {
     convert_openai_responses_request_to_gemini(model, request, false)
