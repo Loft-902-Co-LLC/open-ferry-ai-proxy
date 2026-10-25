@@ -51,14 +51,28 @@
 //! quota-check rest (the capped check time is not the reset), and every model
 //! state's own deadline, quota deadline and wrap shadow, with an unknown end
 //! counting as live. A repeated merge keeps the later bound; an unknown bound
-//! lasts until the credential is forgotten or the saved cooldowns replace the
-//! live ones. No single field says it (a Cloudflare failure that names no model
-//! rewrites the credential's quota reason, a cap shortens its deadline), and no
-//! failure of any kind drops it. So it can outlive the wrap it was made under,
-//! for as long as the longest layer lasts: the credential is refused until its
-//! cooldowns end by themselves. Ending the wrap would otherwise have to rebuild
-//! what lay under it, and a rebuilt hold could come out shorter than the real
-//! one.
+//! lasts until the credential is removed or reset by the user, or the saved
+//! cooldowns replace the live ones. No single field says it (a Cloudflare
+//! failure that names no model rewrites the credential's quota reason, a cap
+//! shortens its deadline), and no failure of any kind drops it. While it
+//! stands every recovery on the credential is refused, a model's as well as the
+//! credential's (a model's owed windows can be pruned by a later failure, and
+//! the merged cooldowns can't be given back as they were), and what was owed is
+//! of no use once it is gone: a mark that has passed leaves a credential whose
+//! every layer has ended. The registering, updating and refreshing of a
+//! credential that stores other cooldowns keep it (their cooldowns are held
+//! with an unknown end beside it); the user's reset keeps one with a bound and
+//! ends one with none, which no bound would ever end; removing the credential
+//! ends it. So it can outlive the wrap it was made under, for as long as the
+//! longest layer lasts: the credential is refused until its cooldowns end by
+//! themselves. Ending the wrap would otherwise have to rebuild what lay under
+//! it, and a rebuilt hold could come out shorter than the real one.
+//!
+//! With saving of cooldowns on, a mark whose bound is ahead is written into
+//! the credential's record in a field of open-ferry's own (see
+//! `cooldown_store`), even when no cooldown is live, and put back before the
+//! bound passes by a restore (at start or by a thaw that makes the file the
+//! authority). The record puts no cooldown on the credential.
 //! Merging two models keeps the windows both claims named: they are carried
 //! to the target as debt, and the target's next recognised 429 must have a
 //! reading prove them too.
@@ -91,10 +105,15 @@
 //! model's recovery is refused and changes nothing: the credential's fields
 //! are merged with its models', so taking the model out from under the hold
 //! could not give the hold back as it was, and selection skips the credential
-//! until the hold ends anyway. Once it ends (it expires, a success or a
-//! manual reset clears it), a fresh read recovers the model. Reset, removal,
-//! registration and every clearing of the cooldowns discard old holds while
-//! preserving the fence against reads already in flight.
+//! until the hold ends anyway. A hold ends only at its own recorded deadline
+//! (an unknown one never), on a success on its own scope, or on a reset,
+//! removal, restore or clearing of the cooldowns; it never ends because a
+//! sibling's failure made the aggregation rewrite the credential's live
+//! flags. Those discard old holds while preserving the fence against reads
+//! already in flight.
+//!
+//! A refused read mutates nothing, in the recovery or in the quota checks: a
+//! read that recovers no scope only puts the leases back, and sweeps no rest.
 //!
 //! # Fences
 //!
@@ -459,9 +478,16 @@ impl Recoveries {
             .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
         self.owed
             .retain(|(id, scope), _| id != &auth.id || recorded(auth, scope, scope.is_empty()));
-        // The same for a cooldown nothing could have recovered.
-        self.foreign
-            .retain(|(id, scope), _| id != &auth.id || blocked(auth, scope));
+        // A cooldown nothing could have recovered ends at its own deadline
+        // (an unknown one never does), or when a success leaves its scope
+        // unblocked. No failure ends it: another outcome's aggregation may
+        // have rewritten the live fields it showed in (a sibling's failure
+        // clears the credential's flags while a healthy model is left).
+        self.foreign.retain(|(id, scope), hold| {
+            id != &auth.id
+                || !(hold.is_some_and(|until| until <= now)
+                    || (result.success && !blocked(auth, scope)))
+        });
         if result.success {
             return;
         }
@@ -534,16 +560,58 @@ impl Recoveries {
         }
     }
 
-    /// Forgets everything of credential `id`: it was replaced, removed or
-    /// reset, and a read started before can't speak for it. The cooldowns it
-    /// had went with it, so the foreign ones noted no longer taint a claim
-    /// recorded after; the fence against reads in flight stays.
+    /// Forgets the claims and holds of credential `id`: its cooldowns were
+    /// replaced (registered again, updated), and a read started before can't
+    /// speak for them. The foreign ones noted no longer taint a claim
+    /// recorded after; the fence against reads in flight stays. A merge's
+    /// mark and its bound stay: they say what the credential held, and nothing
+    /// that replaced the cooldowns says those layers ended.
     pub(crate) fn forget(&mut self, id: &str) {
         self.claims.retain(|(claim_id, _), _| claim_id != id);
         self.owed.retain(|(owed_id, _), _| owed_id != id);
-        self.merged_under.remove(id);
         self.foreign.retain(|(foreign_id, _), _| foreign_id != id);
         self.touch_all(id);
+    }
+
+    /// [`Self::forget`], for a credential that was removed or loaded anew:
+    /// nothing of it is left for the mark to describe.
+    pub(crate) fn remove(&mut self, id: &str) {
+        self.forget(id);
+        self.merged_under.remove(id);
+    }
+
+    /// [`Self::forget`], for a reset of the credential's cooldowns. A mark
+    /// with a bound stays until the bound passes; one with none would last for
+    /// good (no bound ever passes), so a reset ends it.
+    pub(crate) fn reset(&mut self, id: &str) {
+        self.forget(id);
+        if self.merged_under.get(id).is_some_and(Option::is_none) {
+            self.merged_under.remove(id);
+        }
+    }
+
+    /// The credentials a merge's refusal stands on at `now`, with its bound
+    /// (`None`: unknown). One whose bound has passed is no longer saved.
+    pub(crate) fn marks(&self, now: Timestamp) -> BTreeMap<String, Hold> {
+        self.merged_under
+            .iter()
+            .filter(|(_, bound)| bound.is_none_or(|bound| bound > now))
+            .map(|(id, bound)| (id.clone(), *bound))
+            .collect()
+    }
+
+    /// Puts a saved mark back on `id`: the later bound stays, unknown wins.
+    pub(crate) fn restore_mark(&mut self, id: &str, bound: Hold) {
+        self.keep_mark(id, bound);
+    }
+
+    /// Sets `id`'s mark to `bound`, or to the later of it and the bound it has.
+    fn keep_mark(&mut self, id: &str, bound: Hold) {
+        let kept = match self.merged_under.get(id) {
+            None => bound,
+            Some(earlier) => (*earlier).zip(bound).map(|(earlier, new)| earlier.max(new)),
+        };
+        self.merged_under.insert(id.to_owned(), kept);
     }
 
     /// Notes that a cooldown of the model `alias` of `id` was merged into (or
@@ -580,11 +648,7 @@ impl Recoveries {
                 .insert((id.to_owned(), target.to_owned()), carried);
         }
         self.claims.remove(&(id.to_owned(), String::new()));
-        let kept = match self.merged_under.get(id) {
-            None => bound,
-            Some(earlier) => (*earlier).zip(bound).map(|(earlier, new)| earlier.max(new)),
-        };
-        self.merged_under.insert(id.to_owned(), kept);
+        self.keep_mark(id, bound);
         self.touch_wrapped(id);
         if !alias.is_empty()
             && !target.is_empty()
@@ -653,6 +717,12 @@ impl Recoveries {
         self.foreign.clear();
         self.recovered.clear();
         self.era = self.era.saturating_add(1);
+    }
+
+    /// The bound of `id`'s merge mark, if it has one (`Some(None)`: unknown).
+    #[cfg(test)]
+    pub(crate) fn mark(&self, id: &str) -> Option<Hold> {
+        self.merged_under.get(id).copied()
     }
 
     /// Whether a saved aggregate of `id`'s models' cooldowns (the credential's
@@ -989,12 +1059,16 @@ impl Manager {
                         // A model stays in cooldown while the credential has
                         // a hold of its own (live, or of unknown end).
                         && !state.quota_recovery.foreign_live(id, "", now)
+                        // While a merge's mark stands nothing of the
+                        // credential is recovered, a model's included: the
+                        // merge may have kept the wrong layer of two, and no
+                        // field or claim says which end is the provider's.
+                        && !state.quota_recovery.merged_under.contains_key(id)
                         // The wrap is not lifted from over a model that rests
                         // on a quota check or holds a cooldown of its own:
                         // their ends could not be told apart from the wrap's.
                         && (!scope.is_empty()
-                            || (!state.quota_recovery.merged_under.contains_key(id)
-                                && !state.quota_checks.rests_on_a_model(id)
+                            || (!state.quota_checks.rests_on_a_model(id)
                                 && !state.quota_recovery.model_hold_live(id, now)))
                         && claim.seq <= token.seq
                         && state.quota_recovery.untouched_since(id, scope, claim)
@@ -1033,8 +1107,10 @@ impl Manager {
                 }
             }
             if scopes.is_empty() {
-                // Nothing matched: put the leases back as they were.
-                state.quota_checks.recovered(auth, &[], now);
+                // Nothing matched: put the leases back as they were, and
+                // change nothing else (no rest is swept by a read that
+                // recovered nothing).
+                state.quota_checks.lease_again(auth);
                 return Ok(none);
             }
             for scope in &scopes {

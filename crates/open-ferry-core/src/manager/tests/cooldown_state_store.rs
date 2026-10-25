@@ -283,6 +283,7 @@ fn file_cooldown_state_store_save_load_and_clean_stale() {
         independent_state: None,
         credential_quota_propagated: false,
         quota_check: None,
+        recovery_refused: None,
     };
 
     store

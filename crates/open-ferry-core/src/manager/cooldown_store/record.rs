@@ -34,7 +34,12 @@
 //! ```
 //!
 //! the rest's wait, in whole seconds, its next check and the provider's
-//! reset (see `quota_check`).
+//! reset (see `quota_check`). A credential's own record may also end with
+//! `open_ferry_recovery_refused_until`, the time (or the string `"unknown"`)
+//! until which a merge of two models' cooldowns keeps a usage read from ending
+//! any of them (see `quota_recovery`). While the refusal stands and the
+//! credential has no cooldown of its own, it is written alone on a record with
+//! the zero `next_retry_after`, which upstream's restore skips.
 //! Reading takes the fields as Go's decoder does: a key matches its field
 //! whatever its case, unknown keys are ignored, `null` leaves a field as it
 //! is, and a value of the wrong type fails the whole file.
@@ -52,6 +57,9 @@
 //!   cap is on; upstream's decoder ignores the unknown key. Reading, one
 //!   that isn't an object with a positive `wait_seconds` and both times is
 //!   ignored rather than failing the file.
+//! - `open_ferry_recovery_refused_until` is open-ferry's own too, written only
+//!   while a merge's refusal stands; upstream's decoder ignores the unknown
+//!   key. Reading, a value that is neither `unknown` nor a time is ignored.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -91,6 +99,21 @@ pub(crate) struct Record {
     /// open-ferry's capped quota rest under this cooldown, if any
     /// (`open_ferry_quota_check`; see `quota_check`).
     pub(crate) quota_check: Option<QuotaCheckRecord>,
+    /// Until when a merge of two models' cooldowns keeps a usage read from
+    /// ending any of the credential's (`open_ferry_recovery_refused_until`;
+    /// see `quota_recovery`). Only a credential's own record (no model)
+    /// carries it, and a record that holds nothing else has no
+    /// `next_retry_after`, so upstream's restore skips it whole.
+    pub(crate) recovery_refused: Option<Refusal>,
+}
+
+/// How long a merge's refusal of usage recoveries lasts, as a record keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// Until the time.
+    Until(Timestamp),
+    /// For a layer that blocked with no end of its own.
+    Unknown,
 }
 
 /// A capped quota rest, as a record keeps it (open-ferry's own; see
@@ -122,6 +145,10 @@ pub(crate) fn writable(record: &Record) -> bool {
         own.and_then(|state| state.quota.next_recover_at),
         record.quota_check.map(|check| check.check_at),
         record.quota_check.map(|check| check.reset_at),
+        match record.recovery_refused {
+            Some(Refusal::Until(time)) => Some(time),
+            _ => None,
+        },
     ]
     .into_iter()
     .flatten()
@@ -196,7 +223,21 @@ fn record_node(record: &Record) -> Node {
     if let Some(check) = &record.quota_check {
         fields.push(("open_ferry_quota_check", quota_check_node(check)));
     }
+    if let Some(refusal) = record.recovery_refused {
+        let node = match refusal {
+            Refusal::Until(time) => time_node(time),
+            Refusal::Unknown => string(UNKNOWN),
+        };
+        fields.push(("open_ferry_recovery_refused_until", node));
+    }
     Node::Object(fields)
+}
+
+/// What `open_ferry_recovery_refused_until` holds when the refusal has no end.
+const UNKNOWN: &str = "unknown";
+
+fn time_node(at: Timestamp) -> Node {
+    time(Some(at))
 }
 
 /// A model's own cooldown (upstream's `ModelState` as `json.Marshal` writes
@@ -378,6 +419,7 @@ fn decode_record(value: &Value) -> Result<Record, String> {
         "independent_state",
         "credential_quota_propagated",
         "open_ferry_quota_check",
+        "open_ferry_recovery_refused_until",
     ];
     let mut record = Record::default();
     let map = match value {
@@ -421,6 +463,9 @@ fn decode_record(value: &Value) -> Result<Record, String> {
                 set_bool(&mut record.credential_quota_propagated, value, key)?;
             }
             Some("open_ferry_quota_check") => record.quota_check = decode_quota_check(value),
+            Some("open_ferry_recovery_refused_until") => {
+                record.recovery_refused = decode_refusal(value);
+            }
             _ => {}
         }
     }
@@ -503,6 +548,18 @@ fn decode_quota_check(value: &Value) -> Option<QuotaCheckRecord> {
         check_at: check_at?,
         reset_at: reset_at?,
     })
+}
+
+/// open-ferry's refusal of usage recoveries: the string `unknown`, or an RFC
+/// 3339 time. Anything else is ignored, not an error (see `quota_recovery`).
+fn decode_refusal(value: &Value) -> Option<Refusal> {
+    let Value::String(text) = value else {
+        return None;
+    };
+    if text.trim().eq_ignore_ascii_case(UNKNOWN) {
+        return Some(Refusal::Unknown);
+    }
+    parse_go_rfc3339(text.trim()).map(Refusal::Until)
 }
 
 fn decode_quota(quota: &mut QuotaState, map: &Map<String, Value>) -> Result<(), String> {
