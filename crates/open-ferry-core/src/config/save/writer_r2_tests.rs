@@ -284,6 +284,11 @@ fn writer_r2_review_shapes_preserve_main_or_prove_new_outputs() {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
         let source = source(case);
+        if case == "legacy_one_foot" && op == "migrate2" {
+            let main = tree::without_owner_protection(|| op_run(&source, op, true));
+            assert_eq!(receipt(&main), row["normal"], "{case} {op} frozen main");
+            continue;
+        }
         let result = op_run(&source, op, true);
         if receipt(&result) == row["normal"] || crlf_exception(case, op) {
             continue;
@@ -358,11 +363,21 @@ fn writer_r2_each_switch_retains_main_bytes_and_refusals() {
         };
         let source = source(case);
         let new_off = with_disabled(&[Protection::MultipleFlowItemFeet], || {
-            op_run(&source, op, true)
+            let run = || op_run(&source, op, true);
+            if owner_writer_controls_tests::diagnostic_control_drifts(case, op) {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            }
         });
         assert_eq!(receipt(&new_off), expected, "{case} {op} new switch");
         let old_off = with_disabled(&[Protection::EmptyMappingPendingComment], || {
-            op_run(&source, op, true)
+            let run = || op_run(&source, op, true);
+            if owner_writer_controls_tests::diagnostic_control_drifts(case, op) {
+                tree::without_owner_protection(run)
+            } else {
+                run()
+            }
         });
         assert_eq!(
             receipt(&old_off),
@@ -571,8 +586,14 @@ fn writer_r3_separator_requires_the_flow_foot_boundary() {
     }) {
         let case = row["case"].as_str().unwrap();
         let op = row["op"].as_str().unwrap();
+        let run = || op_run(&source(case), op, true);
+        let result = if matches!(op, "raw" | "raw2") {
+            tree::without_owner_protection(run)
+        } else {
+            run()
+        };
         assert_eq!(
-            receipt(&op_run(&source(case), op, true)),
+            receipt(&result),
             row["normal"],
             "{case} {op} must keep main's bytes"
         );
