@@ -493,11 +493,12 @@ impl ClaudeExecutor {
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
         let tap = BodyTap::of(&response);
+        let body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
             wrap_fast(
                 fast,
                 status,
-                crate::transport::classify(&error, plain_error(error.to_string())),
+                body.classify(&error, plain_error(error.to_string())),
             )
         })?;
         let data = redact_answer(&secrets, data);
@@ -727,9 +728,10 @@ impl ClaudeExecutor {
             .await?;
         let response = self.check(response, false, &secrets).await?;
         let response_headers = response.headers().clone();
+        let body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE)
             .await
-            .map_err(|error| crate::transport::classify(&error, plain_error(error.to_string())))?;
+            .map_err(|error| body.classify(&error, plain_error(error.to_string())))?;
         let data = redact_answer(&secrets, data);
         let count = serde_json::from_slice::<Value>(&data)
             .map_or(0, |value| json::int_at(&value, "input_tokens"));

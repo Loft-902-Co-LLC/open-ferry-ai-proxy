@@ -298,12 +298,13 @@ async fn read_answer(
     secrets: &Secrets,
 ) -> Result<(HeaderMap, Vec<u8>), ExecError> {
     let headers = response.headers().clone();
+    let body = crate::transport::ResponseBody::new(&response);
     let data = read_body(response, MAX_LINE).await.map_err(|error| {
         let failure = ExecError::new(
             ErrorKind::Upstream,
             secrets.text(error.to_string(), Policy::Client),
         );
-        crate::transport::classify(&error, failure)
+        body.classify(&error, failure)
     })?;
     Ok((headers, redact_answer(secrets, data)))
 }

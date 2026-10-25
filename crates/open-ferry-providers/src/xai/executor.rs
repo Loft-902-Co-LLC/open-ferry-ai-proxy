@@ -279,8 +279,9 @@ impl XaiExecutor {
             return Err(errors::status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
+        let response_body = crate::transport::ResponseBody::new(&response);
         let data = read_body(response, MAX_LINE).await.map_err(|error| {
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(ErrorKind::Upstream, error.to_string()),
             )
@@ -398,6 +399,7 @@ impl XaiExecutor {
         }
         let response_headers = response.headers().clone();
 
+        let response_body = crate::transport::ResponseBody::new(&response);
         let mut reader = LineReader::new(response);
         let mut items = OutputItems::default();
         let mut filter = XSearchFilter::new(
@@ -411,7 +413,7 @@ impl XaiExecutor {
                 Err(error) => {
                     tracing::debug!("xai: response read failed: {error}");
                     reader.report(&error);
-                    return Err(crate::transport::classify(
+                    return Err(response_body.classify(
                         &error,
                         ExecError::new(
                             ErrorKind::Upstream,
@@ -517,10 +519,11 @@ impl XaiExecutor {
             .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
+            let response_body = crate::transport::ResponseBody::new(&response);
             let tap = BodyTap::of(&response);
             let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
             if let Some(error) = error {
-                let error = crate::transport::classify(
+                let error = response_body.classify(
                     &error,
                     ExecError::new(ErrorKind::Upstream, error_chain(&error)),
                 );

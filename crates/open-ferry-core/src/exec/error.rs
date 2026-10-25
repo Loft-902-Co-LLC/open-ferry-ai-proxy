@@ -72,8 +72,9 @@ pub enum WsClose {
     MessageTooBig(String),
 }
 
-/// A connection failure the provider never answered, for executors that can
-/// tell; upstream recognizes these by their error text.
+/// A typed connection failure, supplementing the error-text checks.
+/// [`TransportFault::ResponseBody`] separates cooldown exemption from retry
+/// eligibility after a successful HTTP status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportFault {
     /// A network error that may clear on its own, such as a refused or reset
@@ -82,6 +83,12 @@ pub enum TransportFault {
     /// The connection or call ended early, such as an unexpected EOF or a
     /// WebSocket closing.
     Lifecycle,
+    /// The provider answered with a success status and the body then failed
+    /// on a closed or reset connection. The provider may already have done
+    /// the work, so by its type alone this failure never starts another
+    /// request round (only error text main already matched can, as before),
+    /// and it keeps the credential out of cooldown.
+    ResponseBody,
 }
 
 /// A failed call.

@@ -150,6 +150,39 @@ async fn tls_http2(
     }
 }
 
+/// Serve one TLS HTTP/2 request whose upload never finishes: HEADERS (:status
+/// 200) then DATA "x" with END_STREAM and no RST_STREAM. The response is
+/// complete but the client's stream is only half-closed (remote), so the
+/// connection can still fail it. Wait until the client has seen the end of the
+/// body, then close the socket with no TLS close_notify.
+async fn tls_http2_complete_response(
+    tcp: TcpStream,
+    config: Arc<rustls::ServerConfig>,
+    ended: oneshot::Receiver<()>,
+    done: oneshot::Receiver<()>,
+) {
+    let mut tls = tokio_rustls::TlsAcceptor::from(config)
+        .accept(tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+    let id = request(&mut tls).await;
+    frame(&mut tls, 1, 4, id, &[0x88]).await;
+    frame(&mut tls, 0, 1, id, b"x").await;
+    tls.flush().await.unwrap();
+    ended
+        .await
+        .expect("client must read to the end of the body");
+    // FIN with no close_notify; write side only, as in `tls_http2`.
+    let (mut tcp, _) = tls.into_inner();
+    tcp.shutdown().await.unwrap();
+    let mut drain = Vec::new();
+    tokio::select! {
+        _ = done => {}
+        _ = tcp.read_to_end(&mut drain) => {}
+    }
+}
+
 /// Walk the source chain looking for an h2::Error whose get_io() is the
 /// UnexpectedEof from the TLS read.
 fn h2_unexpected_eof(error: &(dyn Error + 'static)) -> bool {
@@ -180,6 +213,18 @@ fn io_unexpected_eof(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
+/// Walk the source chain looking for any h2::Error.
+fn h2_in_chain(error: &(dyn Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(current) = next {
+        if current.downcast_ref::<h2::Error>().is_some() {
+            return true;
+        }
+        next = current.source();
+    }
+    false
+}
+
 async fn http2(socket: &mut TcpStream, case: Case) {
     let id = request(socket).await;
     match case {
@@ -197,7 +242,9 @@ async fn http2(socket: &mut TcpStream, case: Case) {
     }
 }
 
-async fn capture(case: Case) -> reqwest::Error {
+/// The transport error plus the context captured where the response arrived
+/// (`None` when no response did, so the failure is a before-response one).
+async fn capture(case: Case) -> (reqwest::Error, Option<ResponseBody>) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -260,8 +307,10 @@ async fn capture(case: Case) -> reqwest::Error {
     } else {
         client.get(format!("http://{addr}"))
     };
-    let error = match request.send().await {
+    let (error, body) = match request.send().await {
         Ok(mut response) => {
+            // Captured where the response arrives, before its body is read.
+            let body = ResponseBody::new(&response);
             if case.tls() {
                 assert_eq!(response.version(), reqwest::Version::HTTP_2);
                 // Prove a real response and DATA arrived before the failure.
@@ -269,9 +318,9 @@ async fn capture(case: Case) -> reqwest::Error {
                 assert_eq!(chunk.as_deref(), Some(&b"x"[..]));
                 let _ = ready.take().unwrap().send(());
             }
-            response.bytes().await.unwrap_err()
+            (response.bytes().await.unwrap_err(), Some(body))
         }
-        Err(error) => error,
+        Err(error) => (error, None),
     };
     // Release the fixture even if the client failed before reading DATA.
     drop(ready);
@@ -294,16 +343,22 @@ async fn capture(case: Case) -> reqwest::Error {
             "expected io UnexpectedEof in chain: {error:?}"
         );
     }
-    error
+    (error, body)
 }
 
 /// Run a real socket error through the shared mapper, then through the
 /// manager's normal result recording. HTTP/2 uses h2c for response-future
-/// failures and TLS with ALPN for response-body failures.
-pub(crate) async fn check(case: Case, map: impl FnOnce(reqwest::Error) -> ExecError) {
+/// failures and TLS with ALPN for response-body failures. The mapper also gets
+/// the context captured when the response arrived: `Some` for a body failure
+/// (use `ResponseBody::classify`), `None` for a before-response one (use the
+/// plain `classify`).
+pub(crate) async fn check(
+    case: Case,
+    map: impl FnOnce(reqwest::Error, Option<ResponseBody>) -> ExecError,
+) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let error = capture(case).await;
-        let mapped = map(error);
+        let (error, body) = capture(case).await;
+        let mapped = map(error, body);
         let want = match case {
             Case::BeforeResponse | Case::MidBody => "connection_lifecycle",
             Case::Sending | Case::GoAway | Case::GoAwayError => "transient_transport",
@@ -325,41 +380,7 @@ pub(crate) async fn check(case: Case, map: impl FnOnce(reqwest::Error) -> ExecEr
                 "{mapped:?}"
             );
         }
-        let registry = Arc::new(ModelRegistry::new());
-        registry.register_client(
-            "closed-connection",
-            "local-transport",
-            &[ModelInfo {
-                id: "local-model".into(),
-                ..ModelInfo::default()
-            }],
-        );
-        let manager = Manager::new(Settings::default(), registry, None);
-        let events = Arc::new(Failures::default());
-        manager.set_error_events(events.clone());
-        manager.register_executor(Arc::new(Failed(mapped)));
-        manager
-            .register(Auth {
-                id: "closed-connection".into(),
-                provider: "local-transport".into(),
-                status: Status::Active,
-                ..Auth::default()
-            })
-            .unwrap();
-        let _ = manager
-            .execute(
-                &["local-transport".into()],
-                Request {
-                    model: "local-model".into(),
-                    payload: Bytes::from_static(b"{}"),
-                },
-                Options::new("openai".into()),
-            )
-            .await;
-        // Lifecycle/transient failures deliberately leave no credential error.
-        // Observe the classified result through the manager's public event hook.
-        let recorded = events.0.lock().unwrap();
-        let result = recorded.last().expect("manager must publish the failure");
+        let result = recorded(mapped).await;
         let error = result
             .error
             .as_ref()
@@ -368,6 +389,49 @@ pub(crate) async fn check(case: Case, map: impl FnOnce(reqwest::Error) -> ExecEr
     })
     .await
     .expect("local transport fixture timed out");
+}
+
+/// Hand `failure` to the manager as an executor error and return the result
+/// the manager published for it. Lifecycle/transient failures deliberately
+/// leave no credential error, so the classified result is observed through the
+/// manager's public event hook.
+async fn recorded(failure: ExecError) -> CallResult {
+    let registry = Arc::new(ModelRegistry::new());
+    registry.register_client(
+        "closed-connection",
+        "local-transport",
+        &[ModelInfo {
+            id: "local-model".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    let manager = Manager::new(Settings::default(), registry, None);
+    let events = Arc::new(Failures::default());
+    manager.set_error_events(events.clone());
+    manager.register_executor(Arc::new(Failed(failure)));
+    manager
+        .register(Auth {
+            id: "closed-connection".into(),
+            provider: "local-transport".into(),
+            status: Status::Active,
+            ..Auth::default()
+        })
+        .unwrap();
+    let _ = manager
+        .execute(
+            &["local-transport".into()],
+            Request {
+                model: "local-model".into(),
+                payload: Bytes::from_static(b"{}"),
+            },
+            Options::new("openai".into()),
+        )
+        .await;
+    let published = events.0.lock().unwrap();
+    published
+        .last()
+        .expect("manager must publish the failure")
+        .clone()
 }
 
 #[derive(Default)]
@@ -464,12 +528,13 @@ macro_rules! http_error_tests {
 }
 pub(crate) use http_error_tests;
 
-crate::transport::tests::http_error_tests!(|error: reqwest::Error| {
+crate::transport::tests::http_error_tests!(|error: reqwest::Error, body: Option<ResponseBody>| {
     let error = error.without_url();
-    classify(
-        &error,
-        ExecError::upstream(0, crate::codex::client::error_chain(&error)),
-    )
+    let failure = ExecError::upstream(0, crate::codex::client::error_chain(&error));
+    match body {
+        Some(body) => body.classify(&error, failure),
+        None => classify(&error, failure),
+    }
 });
 
 #[test]
@@ -531,5 +596,137 @@ async fn closed_dispatcher_is_typed_not_a_text_match() {
     assert_eq!(
         classify(&text, ExecError::upstream(0, text.to_string())).transport,
         None
+    );
+}
+
+// Everything below is the trailer-phase regression. Its tests are all named
+// `trailer_regression*` so one `--skip trailer_regression` leaves out exactly
+// these and keeps the original suite's counts.
+
+/// Try to reproduce the wrapper-less HTTP/2 error end to end: a complete
+/// response while the upload is still open, an unclean TLS close, then another
+/// poll of the already-finished body. In that state only a connection I/O
+/// error reaches the stream, and hyper reports it on the trailer path through
+/// `new_h2`, which drops the `h2::Error` wrapper for I/O errors. Returns the
+/// error and the context captured when the response arrived.
+///
+/// This depends on stream-state timing inside h2/hyper/reqwest. The caller
+/// asserts that the error really has the intended shape, so a fixture that
+/// cannot reach the path fails loudly instead of passing for nothing.
+async fn capture_trailer() -> (reqwest::Error, ResponseBody) {
+    use futures_util::StreamExt;
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (identity, config) = tls_identity();
+    let (ended, ended_wait) = oneshot::channel();
+    let (done, done_wait) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        tls_http2_complete_response(socket, config, ended_wait, done_wait).await;
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .tls_certs_only([reqwest::Certificate::from_der(&identity).unwrap()])
+        .resolve("localhost", addr)
+        .build()
+        .unwrap();
+    // One chunk, then never any more and never an end: the request stays open
+    // after the response completes, which leaves the stream half-closed.
+    let first: Result<Bytes, std::io::Error> = Ok(Bytes::from_static(b"x"));
+    let upload = futures_util::stream::iter([first]).chain(futures_util::stream::pending());
+    let mut response = client
+        .post(format!("https://localhost:{}", addr.port()))
+        .body(reqwest::Body::wrap_stream(upload))
+        .send()
+        .await
+        .unwrap();
+    let body = ResponseBody::new(&response);
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let chunk = response.chunk().await.unwrap();
+    assert_eq!(chunk.as_deref(), Some(&b"x"[..]));
+    // END_STREAM: the body ends cleanly while the connection is still up.
+    assert_eq!(response.chunk().await.unwrap(), None);
+    let _ = ended.send(());
+    // Poll the finished body again until the lost connection shows up.
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match response.chunk().await {
+                Err(error) => break error,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(5)).await,
+                Ok(Some(chunk)) => panic!("data after the end of the body: {chunk:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the finished body never reported the lost connection (fixture not reproducible)");
+    let _ = done.send(());
+    server.await.unwrap();
+    assert!(!error.is_timeout(), "fixture timed out: {error:?}");
+    (error, body)
+}
+
+/// An HTTP/2 response that ended cleanly and then lost its connection reaches
+/// the caller as a bare io `UnexpectedEof` with no `h2::Error` in the chain,
+/// exactly what an HTTP/1 body cut short looks like. The captured HTTP version
+/// is the only thing that tells them apart, so this must not be promoted.
+#[tokio::test]
+async fn trailer_regression() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (error, body) = capture_trailer().await;
+        // The test only means something if the fixture produced that shape.
+        assert!(
+            io_unexpected_eof(&error) && !h2_in_chain(&error),
+            "fixture did not produce a bare io UnexpectedEof: {error:?}"
+        );
+        let error = error.without_url();
+        let failure = ExecError::upstream(0, crate::codex::client::error_chain(&error));
+        let mapped = body.classify(&error, failure);
+        assert_eq!(mapped.transport, None, "{mapped:?}");
+        let result = recorded(mapped).await;
+        let error = result
+            .error
+            .as_ref()
+            .expect("failed result must have an error");
+        assert_eq!(error.code, "", "{error:?}");
+    })
+    .await
+    .expect("local trailer fixture timed out");
+}
+
+/// The same wrapper-less error with only the response version changed: a
+/// positively HTTP/1 response is promoted, HTTP/2 and HTTP/3 are not. The
+/// responses are real `reqwest::Response` values, so `ResponseBody::new` is
+/// what reads the version. This holds even where the fixture above cannot
+/// reach the race.
+#[test]
+fn trailer_regression_version_rule() {
+    let response = |version: reqwest::Version| {
+        reqwest::Response::from(
+            hyper::Response::builder()
+                .version(version)
+                .status(200)
+                .body("")
+                .unwrap(),
+        )
+    };
+    let error = std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "peer closed connection without sending TLS close_notify",
+    );
+    let transport = |version: reqwest::Version| {
+        ResponseBody::new(&response(version))
+            .classify(&error, ExecError::upstream(0, error.to_string()))
+            .transport
+    };
+    assert_eq!(transport(reqwest::Version::HTTP_2), None);
+    assert_eq!(transport(reqwest::Version::HTTP_3), None);
+    assert_eq!(
+        transport(reqwest::Version::HTTP_11),
+        Some(TransportFault::ResponseBody)
     );
 }

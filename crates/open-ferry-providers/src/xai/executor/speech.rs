@@ -200,8 +200,9 @@ impl XaiExecutor {
             return Err(error.into());
         }
         let response_headers = response.headers().clone();
+        let response_body = crate::transport::ResponseBody::new(&response);
         let audio = read_body(response, MAX_AUDIO).await.map_err(|error| {
-            crate::transport::classify(
+            response_body.classify(
                 &error,
                 ExecError::new(
                     ErrorKind::Upstream,

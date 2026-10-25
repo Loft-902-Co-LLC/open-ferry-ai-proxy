@@ -80,6 +80,7 @@ pub(crate) struct StreamSetup {
 
 /// The state of one translated stream.
 struct State {
+    response_body: crate::transport::ResponseBody,
     reader: LineReader,
     translator: ResponseStream,
     prepared: Prepared,
@@ -112,6 +113,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
     );
     let restorer = NamespaceRestorer::new(std::mem::take(&mut prepared.namespace_tools));
     let state = State {
+        response_body: crate::transport::ResponseBody::new(&response),
         reader: LineReader::new(response),
         translator,
         prepared,
@@ -161,7 +163,7 @@ impl State {
                 tracing::debug!("xai: stream read failed: {error}");
                 self.reader.report(&error);
                 self.finish().await?;
-                return Err(crate::transport::classify(
+                return Err(self.response_body.classify(
                     &error,
                     ExecError::new(
                         ErrorKind::Upstream,

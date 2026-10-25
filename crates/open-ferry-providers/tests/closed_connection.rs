@@ -172,7 +172,11 @@ async fn exercise(family: Family, case: Case) {
             // intentionally not replaced by generic transport classification.
             assert!(error.status == 408 || error.kind == open_ferry_core::exec::ErrorKind::EmptyStream, "{error:?}");
         } else {
-            let want = if sending { TransportFault::Transient } else { TransportFault::Lifecycle };
+            let want = match case {
+                Case::BeforeResponse => TransportFault::Lifecycle,
+                Case::Sending => TransportFault::Transient,
+                Case::MidBody | Case::StreamBody => TransportFault::ResponseBody,
+            };
             assert_eq!(error.transport, Some(want), "{family:?} {case:?}: {error:?}");
         }
     }).await.expect("local executor fixture timed out");

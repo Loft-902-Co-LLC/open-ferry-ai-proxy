@@ -8,19 +8,45 @@ use open_ferry_core::exec::{ExecError, TransportFault};
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// Keep unambiguous EOF and socket failures independent of hyper's or Windows'
-/// wording. The manager still applies its existing text checks.
-///
-/// h2 loses a preceding GOAWAY when it reports an I/O error on an active stream.
-/// Go remembers it and doesn't classify that EOF as a lifecycle drop. Therefore
-/// only response-body decode errors without an h2 cause get the new EOF marker;
-/// response-future EOFs and HTTP/2 body EOFs keep their existing classification.
-pub(crate) fn classify(error: &(dyn Error + 'static), mut failure: ExecError) -> ExecError {
-    if failure.status != 0 {
+/// The response facts that survive consuming its body, including in a stream.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ResponseBody {
+    version: reqwest::Version,
+    success: bool,
+}
+
+impl ResponseBody {
+    pub(crate) fn new(response: &reqwest::Response) -> Self {
+        Self {
+            version: response.version(),
+            success: response.status().is_success(),
+        }
+    }
+
+    /// A newly recognized failure after acceptance must not replay the request.
+    /// The manager retains any retry that the original error text already allowed.
+    pub(crate) fn classify(self, error: &(dyn Error + 'static), failure: ExecError) -> ExecError {
+        classify_inner(error, failure, Some(self))
+    }
+}
+
+/// Preserve closed-channel and socket types before a response has arrived.
+pub(crate) fn classify(error: &(dyn Error + 'static), failure: ExecError) -> ExecError {
+    classify_inner(error, failure, None)
+}
+
+/// h2 may discard both a preceding GOAWAY and its error wrapper on the trailer
+/// path. Only a positively identified HTTP/1 response gets a new EOF marker.
+fn classify_inner(
+    error: &(dyn Error + 'static),
+    mut failure: ExecError,
+    body: Option<ResponseBody>,
+) -> ExecError {
+    if failure.status != 0 || body.is_some_and(|body| !body.success) {
         return failure;
     }
     let mut current = Some(error);
-    let mut response_body = false;
+    let mut closed = false;
     let mut http2 = false;
     let mut eof = false;
     let mut transient = false;
@@ -29,10 +55,8 @@ pub(crate) fn classify(error: &(dyn Error + 'static), mut failure: ExecError) ->
             .downcast_ref::<hyper::Error>()
             .is_some_and(|error| error.is_closed() || error.is_incomplete_message())
         {
-            return failure.with_transport(TransportFault::Lifecycle);
-        }
-        if let Some(error) = error.downcast_ref::<reqwest::Error>() {
-            response_body |= error.is_decode();
+            closed = true;
+            break;
         }
         // h2 body errors expose their I/O cause through get_io(), not source().
         let h2 = error.downcast_ref::<h2::Error>();
@@ -51,10 +75,93 @@ pub(crate) fn classify(error: &(dyn Error + 'static), mut failure: ExecError) ->
         }
         current = error.source();
     }
-    if eof && response_body && !http2 {
-        failure.transport = Some(TransportFault::Lifecycle);
+    let http1_body = body.is_some_and(|body| {
+        matches!(
+            body.version,
+            reqwest::Version::HTTP_09 | reqwest::Version::HTTP_10 | reqwest::Version::HTTP_11
+        )
+    });
+    let fault = if closed || (eof && http1_body && !http2) {
+        Some(TransportFault::Lifecycle)
     } else if transient {
-        failure.transport = Some(TransportFault::Transient);
+        Some(TransportFault::Transient)
+    } else {
+        None
+    };
+    if let Some(fault) = fault {
+        failure.transport = Some(if body.is_some() {
+            TransportFault::ResponseBody
+        } else {
+            fault
+        });
     }
     failure
+}
+
+#[cfg(test)]
+mod accepted_body_tests {
+    use super::*;
+
+    fn context(version: reqwest::Version) -> ResponseBody {
+        ResponseBody {
+            version,
+            success: true,
+        }
+    }
+
+    #[test]
+    fn every_promoted_body_kind_has_the_non_replaying_marker() {
+        for kind in [
+            ErrorKind::UnexpectedEof,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+        ] {
+            let error = std::io::Error::new(kind, "local body failure");
+            let failure = context(reqwest::Version::HTTP_11)
+                .classify(&error, ExecError::upstream(0, error.to_string()));
+            assert_eq!(failure.transport, Some(TransportFault::ResponseBody));
+            let before = classify(&error, ExecError::upstream(0, error.to_string()));
+            let want = (kind != ErrorKind::UnexpectedEof).then_some(TransportFault::Transient);
+            assert_eq!(before.transport, want);
+        }
+    }
+
+    #[test]
+    fn bare_eof_requires_a_positive_http1_response_version() {
+        let error = std::io::Error::new(ErrorKind::UnexpectedEof, "local TLS body EOF");
+        // This also covers hyper's HTTP/2 trailer path, which drops h2::Error.
+        for version in [reqwest::Version::HTTP_2, reqwest::Version::HTTP_3] {
+            assert_eq!(
+                context(version)
+                    .classify(&error, ExecError::upstream(0, error.to_string()))
+                    .transport,
+                None
+            );
+        }
+        assert_eq!(
+            context(reqwest::Version::HTTP_11)
+                .classify(&error, ExecError::upstream(0, error.to_string()))
+                .transport,
+            Some(TransportFault::ResponseBody)
+        );
+    }
+
+    #[test]
+    fn non_success_responses_and_status_errors_keep_their_classification() {
+        let error = std::io::Error::new(ErrorKind::ConnectionReset, "local body failure");
+        let mut body = context(reqwest::Version::HTTP_11);
+        body.success = false;
+        assert_eq!(
+            body.classify(&error, ExecError::upstream(0, error.to_string()))
+                .transport,
+            None
+        );
+        body.success = true;
+        assert_eq!(
+            body.classify(&error, ExecError::upstream(429, error.to_string()))
+                .transport,
+            None
+        );
+    }
 }

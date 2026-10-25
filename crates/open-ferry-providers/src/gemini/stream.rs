@@ -76,6 +76,7 @@ pub(crate) struct StreamSetup {
 
 /// The state of one translated stream.
 struct State {
+    body: crate::transport::ResponseBody,
     reader: LineReader,
     setup: StreamSetup,
     claude: claude_tokens::State,
@@ -93,6 +94,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         &setup.response_format,
     );
     let state = State {
+        body: crate::transport::ResponseBody::new(&response),
         reader: LineReader::new(response),
         setup,
         claude,
@@ -227,7 +229,7 @@ impl State {
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
             self.reader.report(&error);
-            self.pending.push_back(Err(crate::transport::classify(
+            self.pending.push_back(Err(self.body.classify(
                 &error,
                 ExecError::new(ErrorKind::Upstream, error.to_string()).with_usage_kept(),
             )));

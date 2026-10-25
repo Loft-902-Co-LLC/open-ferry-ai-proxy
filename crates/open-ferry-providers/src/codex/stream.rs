@@ -121,6 +121,7 @@ enum ReaderState {
 /// comes first, then the error.
 pub(crate) struct LineReader {
     response: reqwest::Response,
+    pub(crate) body_context: crate::transport::ResponseBody,
     /// What sees the body as it is read, when the call's taps do.
     tap: Option<BodyTap>,
     buffer: Vec<u8>,
@@ -134,8 +135,10 @@ pub(crate) struct LineReader {
 impl LineReader {
     pub(crate) fn new(response: reqwest::Response) -> Self {
         let tap = BodyTap::of(&response);
+        let body_context = crate::transport::ResponseBody::new(&response);
         Self {
             response,
+            body_context,
             tap,
             buffer: Vec::new(),
             start: 0,
@@ -318,6 +321,7 @@ const CLOSED_BEFORE_FIRST_PAYLOAD: &str = "upstream stream closed before first p
 /// The state of one translated stream.
 struct State {
     reader: SseReader,
+    body_context: crate::transport::ResponseBody,
     setup: StreamSetup,
     claude: claude_tokens::State,
     items: OutputItems,
@@ -362,8 +366,10 @@ impl State {
     fn new(response: reqwest::Response, setup: StreamSetup) -> Self {
         let claude =
             claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
+        let body_context = crate::transport::ResponseBody::new(&response);
         Self {
             reader: SseReader::new(response),
+            body_context,
             setup,
             claude,
             items: OutputItems::default(),
@@ -456,7 +462,7 @@ impl State {
             let line = line.map_err(|error| {
                 tracing::debug!("codex: stream read failed: {error}");
                 self.reader.report(&error);
-                crate::transport::classify(
+                self.body_context.classify(
                     &error,
                     ExecError::new(ErrorKind::Upstream, error.to_string()),
                 )

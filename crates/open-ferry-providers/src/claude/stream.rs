@@ -192,6 +192,7 @@ fn event_payload(raw: &mut [u8]) -> (&[u8], bool) {
 
 /// The state of one stream.
 struct State {
+    body: crate::transport::ResponseBody,
     reader: LineReader,
     setup: StreamSetup,
     /// The event read so far, for a Claude client.
@@ -207,6 +208,7 @@ struct State {
 /// Passes Claude's stream in `response` on to the client.
 pub(crate) fn forward(response: reqwest::Response, setup: StreamSetup) -> ChunkStream {
     let state = State {
+        body: crate::transport::ResponseBody::new(&response),
         reader: LineReader::new(response),
         setup,
         event: Vec::new(),
@@ -375,7 +377,7 @@ impl State {
             return;
         }
         let error = match error {
-            Some(error) => crate::transport::classify(&error, plain_error(error.to_string())),
+            Some(error) => self.body.classify(&error, plain_error(error.to_string())),
             None => ExecError::upstream(
                 502,
                 self.stream_error
@@ -397,6 +399,7 @@ mod tests {
     fn observation_releases_large_event_capacity() {
         let response = reqwest::Response::from(http::Response::new(Vec::<u8>::new()));
         let mut state = State {
+            body: crate::transport::ResponseBody::new(&response),
             reader: LineReader::new(response),
             setup: StreamSetup {
                 translator: None,
