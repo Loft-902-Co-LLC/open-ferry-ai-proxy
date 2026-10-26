@@ -10,6 +10,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestExpandedInventoryKeepsAliasLocalCommentsAndCountsCopies(t *testing.T) {
+	const source = "auth-dir: &a fixture # inherited\nproxy-url: *a # local\nnext: *a\n"
+	value := ParityExpandedInventory(source)
+	if value["unavailable"] != nil {
+		t.Fatal("expanded inventory unavailable")
+	}
+	counts := map[string]int{}
+	for _, raw := range value["comments"].([]any) {
+		counts[raw.(map[string]any)["text"].(string)]++
+	}
+	if counts["# inherited"] != 3 || counts["# local"] != 1 {
+		t.Fatal("source alias budgets changed")
+	}
+}
+
+func TestFootSeparatorCounterexampleRemovesOneExactPhysicalLine(t *testing.T) {
+	const source = "a: one\n# foot\n\nb: two\n"
+	candidates := ParityFootSeparators(source)
+	if len(candidates) != 1 {
+		t.Fatal("missing separator counterexample")
+	}
+	row := candidates[0].(map[string]any)
+	without := "a: one\n# foot\nb: two\n"
+	if row["line"] != 2 || row["without"] != without {
+		t.Fatal("counterexample changed other bytes")
+	}
+	before := ParityDocumentInventory(source)["comments"].([]any)
+	after := row["inventory"].(map[string]any)["comments"].([]any)
+	if len(before) != 1 || len(after) != 1 || reflect.DeepEqual(before, after) {
+		t.Fatal("pinned parser did not move the foot owner")
+	}
+}
+
 func TestParitySourceIdentityBindsPhysicalOwnersAndChangesOnlyTheirComments(t *testing.T) {
 	const source = "# head\nauth-dir: fixture # c1\n# c10\nnext: fixture\n"
 	op := map[string]any{"op": "nested", "keys": []any{"auth-dir"}, "value": "fixture"}

@@ -1175,13 +1175,12 @@ fn source_owner_inventory(text: &str) -> Option<Vec<Occurrence>> {
 /// Cheap eligibility only; this never grants a proof or selects a donor.
 pub fn source_owner_candidate(source: &str, protected: &str) -> bool {
     let (Some(source), Some(protected)) = (
-        source_owner_inventory(source),
-        source_owner_inventory(protected),
+        source_owner_expanded_inventory(source),
+        inventory(protected, false),
     ) else {
         return false;
     };
-    let (s, r) = (counts(&source), counts(&protected));
-    !s.is_empty() && s.iter().all(|(text, n)| *n == 1 && r.get(text) == Some(&1))
+    !source.is_empty() && !protected.is_empty()
 }
 
 fn source_owner_values(a: &str, b: &str) -> bool {
@@ -1579,6 +1578,28 @@ pub fn retained_source_owner(
     operation: &Value,
     evidence: &Value,
 ) -> SourceOwnerProof {
+    let original = retained_unique_source_owner(source, protected, operation, evidence);
+    if original.accepted() {
+        return original;
+    }
+    let repaired = retained_expanded_source_owner(source, protected, operation, evidence);
+    if repaired.accepted()
+        || evidence["retained_source_owner"]
+            .get("expanded_source_inventory")
+            .is_some()
+    {
+        repaired
+    } else {
+        original
+    }
+}
+
+fn retained_unique_source_owner(
+    source: &str,
+    protected: &str,
+    operation: &Value,
+    evidence: &Value,
+) -> SourceOwnerProof {
     let refused = || SourceOwnerProof {
         conditions: [false; 5],
     };
@@ -1829,6 +1850,276 @@ pub fn retained_source_owner(
     }
 }
 
+/// A new separator is licensed only by an exact single-line removal which
+/// makes pinned yaml.v3 move a source-owned foot. Remove all such licensed
+/// lines before applying the unchanged physical-layout guard.
+fn source_owner_repair_layout(
+    source: &str,
+    go: &str,
+    protected: &str,
+    expected: &[Occurrence],
+    native: &[Occurrence],
+    frame: &Value,
+) -> bool {
+    if source_owner_layout(source, go, protected) {
+        return true;
+    }
+    let Some(counterexamples) = frame["foot_separators"].as_array() else {
+        return false;
+    };
+    let lines: Vec<_> = protected.split_inclusive('\n').collect();
+    let mut removed = BTreeSet::new();
+    for example in counterexamples {
+        let Some(line) = example["line"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return false;
+        };
+        if line == 0
+            || lines.get(line) != Some(&"\n")
+            || !lines[line - 1].trim_start().starts_with('#')
+        {
+            return false;
+        }
+        let without: String = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| (i != line).then_some(*s))
+            .collect();
+        if example["without"] != without {
+            return false;
+        }
+        let Some(reduced) = source_owner_native_inventory(&example["inventory"], &without) else {
+            continue;
+        };
+        let before = groups(native);
+        let after = groups(&reduced);
+        let necessary = counts(native) == counts(&reduced)
+            && example["inventory"]["values"] == frame["protected_inventory"]["values"]
+            && expected.iter().any(|item| {
+                item.owner.slot == Slot::Foot
+                    && before
+                        .get(&item.owner)
+                        .is_some_and(|at| at.contains(&item.text))
+                    && after
+                        .get(&item.owner)
+                        .map_or(0, |at| at.iter().filter(|t| **t == item.text).count())
+                        < before
+                            .get(&item.owner)
+                            .map_or(0, |at| at.iter().filter(|t| **t == item.text).count())
+            });
+        if necessary {
+            removed.insert(line);
+        }
+    }
+    let reduced: String = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| (!removed.contains(&i)).then_some(*s))
+        .collect();
+    !removed.is_empty() && source_owner_layout(source, go, &reduced)
+}
+
+/// Extend the same source-owner proof to repeated text and alias-expanded
+/// copies. The source position and ordinal bind each copy independently;
+/// text never chooses a donor. Only the original side/slot is restored.
+fn retained_expanded_source_owner(
+    source: &str,
+    protected: &str,
+    operation: &Value,
+    evidence: &Value,
+) -> SourceOwnerProof {
+    let refused = || SourceOwnerProof {
+        conditions: [false; 5],
+    };
+    let frame = &evidence["retained_source_owner"];
+    if evidence["source"] != source
+        || evidence["operation"] != *operation
+        || evidence.get("unavailable").is_some()
+        || frame["protected"] != protected
+        || (operation["op"] == "write" && operation["body"] != source)
+    {
+        return refused();
+    }
+    let Some(files) = frame["exact_go"]["files"].as_array() else {
+        return refused();
+    };
+    if frame["exact_go"].as_object().is_none_or(|o| o.len() != 1) || files.len() != 1 {
+        return refused();
+    }
+    let Some(go) = files[0].as_str() else {
+        return refused();
+    };
+    let (Some(s), Some(r), Some(native_s), Some(native_r), Some(g), Some(moves)) = (
+        source_owner_expanded_inventory(source),
+        inventory(protected, false),
+        source_owner_native_inventory(&frame["expanded_source_inventory"], source),
+        source_owner_native_inventory(&frame["protected_inventory"], protected),
+        source_owner_native_inventory(&frame["exact_go_inventory"], go),
+        evidence["moves"].as_array(),
+    ) else {
+        return refused();
+    };
+    // Source agreement is required too: alias expansion must not invent owners
+    // or occurrence budgets relative to the independent pinned parser.
+    if groups(&s) != groups(&native_s) || s.is_empty() {
+        return refused();
+    }
+    let (Ok(sd), Ok(gd)) = (unmarshal(source.as_bytes()), unmarshal(go.as_bytes())) else {
+        return refused();
+    };
+    let mut projected = Vec::new();
+    let mut ordinals = BTreeMap::<Owner, usize>::new();
+    for item in &s {
+        let ordinal = ordinals.entry(item.owner.clone()).or_default();
+        let matching: Vec<_> = moves
+            .iter()
+            .filter(|m| {
+                m["source"] == item.owner.json() && m["ordinal"].as_u64() == Some(*ordinal as u64)
+            })
+            .collect();
+        *ordinal += 1;
+        if matching.iter().any(|m| {
+            m["text"] != item.text || !matches!(m["via"].as_str(), Some("observed" | "fallback"))
+        }) {
+            return refused();
+        }
+        let paths: Option<BTreeSet<_>> = matching
+            .iter()
+            .map(|m| Some(parse_owner(&m["destination"])?.path))
+            .collect();
+        let Some(paths) = paths else { return refused() };
+        if paths.len() > 1 {
+            return refused();
+        }
+        let mut own = item.clone();
+        if let Some(path) = paths.into_iter().next() {
+            own.owner.path = path;
+        }
+        if (own.owner.path != item.owner.path
+            && !source_owner_destination_matches(&sd, &gd, &item.owner, &own.owner))
+            || (item.owner.path.iter().any(|p| matches!(p, Part::Index(_))) && matching.is_empty())
+        {
+            return refused();
+        }
+        projected.push(own);
+    }
+    let Some(archives) = archive_inventory(source, evidence) else {
+        return refused();
+    };
+    projected.extend(archives);
+    let expected = groups(&projected);
+    let actual = groups(&r);
+    let go_groups = groups(&g);
+    let by_text = |items: &[Occurrence], text: &str| {
+        groups(
+            &items
+                .iter()
+                .filter(|c| c.text == text)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let texts: BTreeSet<_> = r.iter().chain(&g).map(|c| c.text.as_str()).collect();
+    let repaired: BTreeSet<_> = texts
+        .iter()
+        .copied()
+        .filter(|text| by_text(&r, text) != by_text(&g, text))
+        .collect();
+    let source_owners = groups(&native_r) == actual
+        && repaired.iter().all(|text| {
+            !by_text(&r, text).is_empty() && by_text(&r, text) == by_text(&projected, text)
+        })
+        && actual.iter().all(|(owner, at)| {
+            let wanted = expected.get(owner).cloned().unwrap_or_default();
+            let source_order: Vec<_> = at
+                .iter()
+                .filter(|text| wanted.contains(text))
+                .cloned()
+                .collect();
+            let has_repair = at.iter().any(|text| repaired.contains(text.as_str()));
+            let untouched: Vec<_> = at
+                .iter()
+                .filter(|text| !repaired.contains(text.as_str()))
+                .cloned()
+                .collect();
+            let go_untouched: Vec<_> = go_groups
+                .get(owner)
+                .into_iter()
+                .flatten()
+                .filter(|text| !repaired.contains(text.as_str()))
+                .cloned()
+                .collect();
+            (!has_repair || subsequence(&source_order, &wanted)) && untouched == go_untouched
+        })
+        && source_owner_repair_layout(source, go, protected, &projected, &native_r, frame);
+    // A Go-kept source occurrence is mandatory at that same owner. A Go-only
+    // occurrence is excused only by its complete source-owner counterpart.
+    let go_owners = go_groups.iter().all(|(owner, kept)| {
+        let wanted = expected.get(owner).cloned().unwrap_or_default();
+        let mut used = BTreeMap::new();
+        let shared: Vec<_> = kept
+            .iter()
+            .filter(|text| {
+                let n = used.entry(*text).or_insert(0usize);
+                *n += 1;
+                *n <= wanted.iter().filter(|t| *t == *text).count()
+            })
+            .cloned()
+            .collect();
+        actual.get(owner).is_some_and(|at| subsequence(&shared, at)) || shared.is_empty()
+    }) && !repaired.is_empty();
+    let values = source_owner_values(go, protected)
+        && frame["exact_go_inventory"]["values"] == frame["protected_inventory"]["values"]
+        && super::faithful_without_comments(go)
+            .zip(super::faithful_without_comments(protected))
+            .is_some_and(|(g, r)| g == r);
+    let stable = crate::config::Config::load_bytes(protected.as_bytes()).is_ok()
+        && frame["repeat_input"] == protected
+        && frame["repeat_operation"] == *operation
+        && frame["repeat_ok"] == true
+        && frame["repeated"] == protected
+        && (operation["op"] != "write" || frame["normalized"] == protected);
+    let source_counts = counts(&projected);
+    let budgets = counts(&r)
+        .iter()
+        .all(|(text, n)| *n <= source_counts.get(text).copied().unwrap_or_default())
+        && r.iter().all(|c| {
+            projected
+                .iter()
+                .chain(&g)
+                .any(|allowed| allowed.text == c.text && allowed.owner == c.owner)
+        });
+    SourceOwnerProof {
+        conditions: [source_owners, go_owners, values, stable, budgets],
+    }
+}
+
+// Expansion copies an anchor's comments but can erase an alias node's own
+// physical comments. Those still have source owners and budgets. Take the
+// maximum multiplicity at each (owner,text), never add two equal inventories.
+fn source_owner_expanded_inventory(source: &str) -> Option<Vec<Occurrence>> {
+    let mut expanded = inventory(source, true)?;
+    let physical = inventory(source, false)?;
+    let mut have = BTreeMap::new();
+    for item in &expanded {
+        *have
+            .entry((item.owner.clone(), item.text.clone()))
+            .or_insert(0usize) += 1;
+    }
+    let mut seen = BTreeMap::new();
+    for item in physical {
+        let key = (item.owner.clone(), item.text.clone());
+        let n = seen.entry(key.clone()).or_insert(0usize);
+        *n += 1;
+        if *n > have.get(&key).copied().unwrap_or_default() {
+            expanded.push(item);
+        }
+    }
+    Some(expanded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2040,6 +2331,127 @@ mod tests {
         frame["repeat_operation"] = operation.clone();
         frame["normalized"] = output.into();
         refresh_source_owner_test_inventories(evidence);
+    }
+
+    fn expanded_owner_fixture() -> (String, String, Value, Value) {
+        let (source, go, op, mut evidence) = source_owner_fixture();
+        let frame = &mut evidence["retained_source_owner"];
+        frame["exact_go"] = json!({"files":[go]});
+        frame["exact_go_inventory"] = source_owner_test_snapshot(&go);
+        frame["expanded_source_inventory"] = source_owner_test_snapshot(&source);
+        frame["foot_separators"] = json!([]);
+        (source, go, op, evidence)
+    }
+
+    #[test]
+    fn expanded_owner_repair_requires_every_independent_condition() {
+        let (source, go, op, evidence) = expanded_owner_fixture();
+        assert_eq!(
+            retained_expanded_source_owner(&source, &source, &op, &evidence).conditions,
+            [true; 5]
+        );
+        for (mutation, index) in [
+            ("agreement", 0),
+            ("go-kept", 1),
+            ("third-owner", 4),
+            ("duplicate", 4),
+            ("value", 2),
+            ("style", 2),
+            ("tag", 2),
+            ("blank", 0),
+            ("unstable", 3),
+        ] {
+            let mut changed = evidence.clone();
+            let mut output = source.clone();
+            match mutation {
+                "agreement" => {
+                    changed["retained_source_owner"]["protected_inventory"]["comments"][0]["source"]
+                        ["slot"] = "head".into();
+                }
+                "go-kept" => {
+                    changed["retained_source_owner"]["exact_go"] = json!({"files":[source]});
+                    changed["retained_source_owner"]["exact_go_inventory"] =
+                        source_owner_test_snapshot(&source);
+                }
+                "third-owner" => {
+                    output = source
+                        .replace(" # retained", "")
+                        .replace("next: fixture", "next: fixture # retained");
+                }
+                "duplicate" => {
+                    output = source.replace("next:", "# retained\nnext:");
+                }
+                "value" => {
+                    output = source.replacen("fixture", "changed", 1);
+                }
+                "style" => {
+                    output = source.replacen("fixture", "'fixture'", 1);
+                }
+                "tag" => {
+                    output = source.replacen("fixture", "!custom fixture", 1);
+                }
+                "blank" => {
+                    output = source.replace("next:", "\nnext:");
+                }
+                "unstable" => {
+                    changed["retained_source_owner"]["repeated"] = go.clone().into();
+                }
+                _ => unreachable!(),
+            }
+            if output != source {
+                replace_source_owner_output(&mut changed, &op, &output);
+            }
+            let proof = retained_expanded_source_owner(&source, &output, &op, &changed);
+            assert!(!proof.accepted(), "{mutation}");
+            assert!(
+                !proof.conditions[index],
+                "{mutation}: {:?}",
+                proof.conditions
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_inventory_keeps_alias_local_comments_and_counts_copies() {
+        let source = "auth-dir: &a fixture # inherited\nproxy-url: *a # local\nnext: *a\n";
+        let items = source_owner_expanded_inventory(source).unwrap();
+        let count = counts(&items);
+        assert_eq!(count["# inherited"], 3);
+        assert_eq!(count["# local"], 1);
+    }
+
+    #[test]
+    fn expanded_owner_native_repairs_and_foot_counterexamples() {
+        let fixtures: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/parity/src/config_save/testdata/owners-repairs.json"
+        )))
+        .unwrap();
+        for fixture in fixtures.as_array().unwrap() {
+            let source = fixture["source"].as_str().unwrap();
+            let output = fixture["protected"].as_str().unwrap();
+            let op = &fixture["operation"];
+            let witness = &fixture["evidence"];
+            let proof = retained_expanded_source_owner(source, output, op, witness);
+            assert_eq!(proof.conditions, [true; 5], "{}", fixture["name"]);
+            if fixture["name"] == "plugins-foot-comment" {
+                let go = witness["retained_source_owner"]["exact_go"]["files"][0]
+                    .as_str()
+                    .unwrap();
+                assert!(!source_owner_layout(source, go, output));
+                let mut changed = witness.clone();
+                let frame = &mut changed["retained_source_owner"];
+                let inventory = frame["protected_inventory"].clone();
+                for example in frame["foot_separators"].as_array_mut().unwrap() {
+                    let without = example["without"].clone();
+                    example["inventory"] = inventory.clone();
+                    example["inventory"]["source"] = without;
+                }
+                let proof = retained_expanded_source_owner(source, output, op, &changed);
+                assert!(!proof.accepted());
+                assert!(!proof.conditions[0]);
+            }
+        }
     }
     #[test]
     fn source_owner_proof_accepts_a_uniquely_bound_moved_or_dropped_comment() {

@@ -116,6 +116,47 @@ type parityOrigin struct {
 // ParityDocumentInventory is the certifier's pinned-parser cross-check, not a
 // writer receipt. Decode validates aliases before the independent tag walk.
 func ParityDocumentInventory(source string) map[string]any {
+	return parityDocumentInventory(source, false)
+}
+
+// ParityExpandedInventory counts each alias/merge copy at its logical owner.
+func ParityExpandedInventory(source string) map[string]any {
+	expanded := parityDocumentInventory(source, true)
+	physical := parityDocumentInventory(source, false)
+	if expanded["unavailable"] != nil || physical["unavailable"] != nil {
+		return expanded
+	}
+	comments := expanded["comments"].([]any)
+	counts := map[string]int{}
+	key := func(raw any) string {
+		row := raw.(map[string]any)
+		data, _ := json.Marshal([]any{row["source"], row["text"]})
+		return string(data)
+	}
+	for _, row := range comments {
+		counts[key(row)]++
+	}
+	seen := map[string]int{}
+	for _, row := range physical["comments"].([]any) {
+		k := key(row)
+		seen[k]++
+		if seen[k] > counts[k] {
+			comments = append(comments, row)
+		}
+	}
+	ordinals := map[string]int{}
+	for _, raw := range comments {
+		row := raw.(map[string]any)
+		owner, _ := json.Marshal(row["source"])
+		k := string(owner)
+		row["ordinal"] = ordinals[k]
+		ordinals[k]++
+	}
+	expanded["comments"] = comments
+	return expanded
+}
+
+func parityDocumentInventory(source string, expanded bool) map[string]any {
 	result := map[string]any{"source": source}
 	fail := func() map[string]any { result["unavailable"] = true; return result }
 	var doc yaml.Node
@@ -125,6 +166,9 @@ func ParityDocumentInventory(source string) map[string]any {
 	var decoded any
 	if doc.Decode(&decoded) != nil {
 		return fail()
+	}
+	if expanded {
+		doc.Content[0] = expandConfigAliases(doc.Content[0])
 	}
 	comments := []any{}
 	visit := func(n *yaml.Node, path []any, side string, _ *yaml.Node) {
@@ -154,6 +198,21 @@ func ParityDocumentInventory(source string) map[string]any {
 	sort.Strings(tags)
 	result["comments"] = comments
 	result["values"] = map[string]any{"decoded": fmt.Sprintf("%#v", decoded), "tags": tags}
+	return result
+}
+
+// ParityFootSeparators supplies counterexamples, never a layout verdict. Each
+// candidate removes exactly one empty physical line after a comment line.
+func ParityFootSeparators(source string) []any {
+	result := []any{}
+	lines := strings.SplitAfter(source, "\n")
+	for i := 1; i < len(lines); i++ {
+		if lines[i] != "\n" || !strings.HasPrefix(strings.TrimSpace(lines[i-1]), "#") {
+			continue
+		}
+		without := strings.Join(lines[:i], "") + strings.Join(lines[i+1:], "")
+		result = append(result, map[string]any{"line": i, "without": without, "inventory": ParityDocumentInventory(without)})
+	}
 	return result
 }
 

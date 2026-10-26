@@ -244,6 +244,7 @@ impl Upstream {
         cases: &[Case],
         work_dir: &Path,
     ) -> Result<Vec<GoResult>, Box<dyn Error>> {
+        let _timing = crate::config_save::metrics::Timer::start(1);
         let input_path = work_dir.join("input.jsonl");
         let mut input = BufWriter::new(File::create(&input_path)?);
         for case in cases {

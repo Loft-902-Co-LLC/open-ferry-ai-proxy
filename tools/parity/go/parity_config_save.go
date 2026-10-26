@@ -66,10 +66,11 @@ type configSaveOptions struct {
 	Trace     bool             `json:"_ablation_trace"`
 	Steps     []configSaveStep `json:"steps"`
 	Ownership *struct {
-		Source      string         `json:"source"`
-		Operation   map[string]any `json:"operation"`
-		SourceOwner bool           `json:"source_owner"`
-		Protected   *string        `json:"protected"`
+		Source         string         `json:"source"`
+		Operation      map[string]any `json:"operation"`
+		SourceOwner    bool           `json:"source_owner"`
+		FootSeparators bool           `json:"foot_separators"`
+		Protected      *string        `json:"protected"`
 	} `json:"_ownership_request"`
 }
 
@@ -94,6 +95,26 @@ func configSaveSteps(in input) []byte {
 			identity := config.ParitySourceIdentity(options.Ownership.Source, options.Ownership.Operation)
 			frame := map[string]any{"identity": identity}
 			proof["retained_source_owner"] = frame
+			frame["expanded_source_inventory"] = config.ParityExpandedInventory(options.Ownership.Source)
+			next := in
+			next.Options = configSaveJSON(map[string]any{"file": options.Ownership.Source, "steps": []any{options.Ownership.Operation}})
+			var exact any
+			if json.Unmarshal(configSaveSteps(next), &exact) == nil {
+				frame["exact_go"] = exact
+				if reply, ok := exact.(map[string]any); ok {
+					if files, ok := reply["files"].([]any); ok && len(files) == 1 {
+						if text, ok := files[0].(string); ok {
+							frame["exact_go_inventory"] = config.ParityDocumentInventory(text)
+						}
+					}
+				}
+			}
+			if options.Ownership.Protected != nil {
+				frame["protected_inventory"] = config.ParityDocumentInventory(*options.Ownership.Protected)
+				if options.Ownership.FootSeparators {
+					frame["foot_separators"] = config.ParityFootSeparators(*options.Ownership.Protected)
+				}
+			}
 			if identity["unavailable"] == nil {
 				run := func(source string, marked bool) any {
 					op := map[string]any{}
@@ -111,9 +132,10 @@ func configSaveSteps(in input) []byte {
 					}
 					return reply
 				}
-				frame["go"] = run(options.Ownership.Source, false)
+				frame["go"] = frame["exact_go"]
+				frame["go_inventory"] = frame["exact_go_inventory"]
 				frame["marked_go"] = run(identity["masked_source"].(string), true)
-				for _, name := range []string{"go", "marked_go"} {
+				for _, name := range []string{"marked_go"} {
 					if reply, ok := frame[name].(map[string]any); ok {
 						if files, ok := reply["files"].([]any); ok && len(files) == 1 {
 							if text, ok := files[0].(string); ok {
@@ -121,9 +143,6 @@ func configSaveSteps(in input) []byte {
 							}
 						}
 					}
-				}
-				if options.Ownership.Protected != nil {
-					frame["protected_inventory"] = config.ParityDocumentInventory(*options.Ownership.Protected)
 				}
 			}
 		}

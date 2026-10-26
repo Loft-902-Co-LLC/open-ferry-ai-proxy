@@ -5,6 +5,7 @@
 pub mod ablation;
 pub mod counterfactual;
 pub mod folded;
+pub(crate) mod metrics;
 pub mod version;
 
 #[cfg(test)]
@@ -429,6 +430,7 @@ fn plugin_comment(sources: &[(&str, Vec<Range<usize>>)], comment: &str) -> bool 
 
 /// Runs one step on the file at `path`, and returns why it failed.
 fn run_step(path: &Path, step: &Value) -> Result<Option<String>, String> {
+    let _timing = metrics::Timer::start(0);
     let text = |name: &str| step[name].as_str().unwrap_or_default();
     let result = match text("op") {
         "save" => {
@@ -528,15 +530,30 @@ mod tests {
         ))
         .unwrap();
         let case = Case::new("alias-loss", "", "").with_options(f["options"].clone());
+        let actual = crate::translator::Translator::ConfigSave
+            .run_rust(&case)
+            .unwrap();
+        let candidate = super::counterfactual::rewritten(&case).unwrap();
+        if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_EXPORT_ALIAS_FIXTURE") {
+            std::fs::write(path,serde_json::to_vec(&json!({"case":"alias-loss","options":case.options,"rewritten_options":candidate.options,"rust":actual,"compiled_expected":f["owner_repaired_output"]})).unwrap()).unwrap();
+        }
         let mut go = f["upstream_output"].clone();
         super::drop_repeated_plugin_comments(&case, &mut go);
         let rust = &f["open_ferry_output"];
+        assert!(actual == f["owner_repaired_output"],"writer snapshot differs from frozen owner repair");
         assert_eq!(
             crate::translator::Translator::ConfigSave
-                .run_rust(&case)
+                .run_rust(&candidate)
                 .unwrap(),
-            *rust
+            actual
         );
+        let proof = super::ablation::certify_recorded_owners(
+            &candidate,
+            &f["owner_counterfactual_go"],
+            &actual,
+            &f["owner_counterfactual_proof"],
+        );
+        assert!(proof.deviations.is_some());
         assert_eq!(
             super::version::repair(&case, &mut go, rust),
             Some(Deviation::UpstreamVersionCommentLoss)

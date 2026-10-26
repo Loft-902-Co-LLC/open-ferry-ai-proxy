@@ -42,7 +42,7 @@ pub fn proves(
     rust_original: &Value,
     rust_rewritten: &Value,
 ) -> bool {
-    reason(case, original_go, rust_original).is_some()
+    reason_with_counterfactual(case, original_go, counterfactual_go, rust_original).is_some()
         && rewritten(case).is_some_and(|expected| expected.options == candidate.options)
         && counterfactual_go
             .as_object()
@@ -54,6 +54,21 @@ pub fn proves(
         })
         && go_matches
         && rust_original == rust_rewritten
+}
+
+/// Compose the existing exact plugin-loss proof with a successful source-only
+/// rewrite. The rewritten Go output must be precisely that scalar repair.
+pub fn reason_with_counterfactual(
+    case: &Case,
+    go: &Value,
+    rewritten_go: &Value,
+    rust: &Value,
+) -> Option<Deviation> {
+    reason(case, go, rust).or_else(|| {
+        let mut repaired = go.clone();
+        let deviation = super::repair_lossy_plugin_reencode(case, &mut repaired, rewritten_go)?;
+        (repaired == *rewritten_go).then_some(deviation)
+    })
 }
 
 /// Keep successful-but-lossy archives separate from failed YAML writes.
@@ -210,19 +225,25 @@ pub fn stepwise(
                 (go.clone(), evidence(&single, &single, &go, &go, rust, rust))
             }
             Outcome::Different(_) => {
-                let Some(reason) = reason(&single, &go, rust) else {
-                    return Ok(None);
-                };
                 let Some(candidate) = rewritten(&single) else {
                     return Ok(None);
                 };
-                let cf = evaluate(Translator::ConfigSave, &candidate, &run_go(&candidate)?);
+                let mut cf = evaluate(Translator::ConfigSave, &candidate, &run_go(&candidate)?);
                 let Ok(cf_go) = serde_json::from_str::<Value>(&cf.go_output) else {
                     return Ok(None);
                 };
                 let Ok(cf_rust) = &cf.rust_output else {
                     return Ok(None);
                 };
+                let Some(reason) = reason_with_counterfactual(&single, &go, &cf_go, rust) else {
+                    return Ok(None);
+                };
+                if matches!(cf.outcome, Outcome::Different(_)) {
+                    let proof = super::ablation::certify(&candidate, &cf_go, cf_rust, &mut run_go)?;
+                    if let Some(found) = proof.deviations {
+                        cf.outcome = Outcome::Equivalent(found);
+                    }
+                }
                 if !proves(
                     &single,
                     &candidate,
@@ -399,10 +420,27 @@ mod tests {
                 &candidate,
                 &GoResult::Output(fixture["counterfactual_go"].to_string().into_bytes()),
             );
-            let matching = matches!(
+            let mut matching = matches!(
                 evaluated.outcome,
                 crate::Outcome::Identical | crate::Outcome::Equivalent(_)
             );
+            if !matching && let Some(receipts) = fixture.get("counterfactual_owner_proof") {
+                let proof = super::super::ablation::certify_recorded_owners(
+                    &candidate,
+                    &fixture["counterfactual_go"],
+                    &rust_rewritten,
+                    receipts,
+                );
+                matching = proof.deviations.is_some();
+                assert!(matching);
+                assert!(
+                    proof.evidence["retained_source_owner"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|step| step["checks"] == json!([true, true, true, true, true]))
+                );
+            }
             assert!(proves(
                 &case,
                 &candidate,

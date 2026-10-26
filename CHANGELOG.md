@@ -19,6 +19,10 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   in the source or Go output; byte-identical Go output passes directly.
   Comment-only neighbours are keyed by their trimmed text; each blank run
   draws its allowance from one input run.
+  The proof also checks alias-expanded copies and comments written on aliases
+  against pinned yaml.v3. A new foot separator needs a removal counterexample
+  that changes its parsed owner. Complete owner certificates can bypass the
+  protection-subset search; an internal switch keeps the exhaustive path.
 - **Offline differential parity in CI** runs handwritten cases and a fixed-seed random set against the pinned CLIProxyAPI source in required checks, with larger daily and manually seeded runs and retained synthetic failure artifacts ([parity in CI](tools/parity/README.md#in-ci)).
 - **Repeatable parity suite filters** select named suites with `open-ferry-parity --suite`; unknown names are rejected before running Go.
 - **Claude tool-closure and embedded JSON comparisons** recognize independent closures within each provider event and compact object-valued text only at documented translator paths with raw-request provenance.

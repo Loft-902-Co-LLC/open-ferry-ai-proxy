@@ -872,12 +872,16 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     if let Some(budget) = &budget {
         budget.validate(&baseline::pinned_fingerprint()?)?;
     }
-    let work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("tools/parity is two levels below the workspace root")
-        .join("target")
-        .join("parity");
+    let work_dir = std::env::var_os("OPEN_FERRY_PARITY_WORK_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("tools/parity is two levels below the workspace root")
+                .join("target")
+                .join("parity")
+        });
     fs::create_dir_all(&work_dir)?;
     // Even a failed upstream setup must not retain proofs from an older run.
     fresh_dir(&work_dir.join("counterfactual"))?;
@@ -919,6 +923,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             started.elapsed()
         );
         tally.print(args.show, &dir);
+        config_save::metrics::flush()?;
         let mut matched = tally.different == 0;
         if translator == Translator::ConfigSave {
             (matched, ratchet_summary) = config_save_result(
@@ -1037,6 +1042,17 @@ fn check(
         .enumerate()
         .try_for_each(|(index, (case, go))| {
             let evaluated = evaluate_with_counterfactual(translator, case, go, upstream, work_dir)?;
+            if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_DECISIONS") {
+                use std::io::Write as _;
+                let (decision, deviations) = match &evaluated.outcome {
+                    Outcome::Identical => ("identical", Vec::new()),
+                    Outcome::Equivalent(found) => ("equivalent", found.iter().map(|d| d.describe()).collect()),
+                    Outcome::Different(_) => ("different", Vec::new()),
+                };
+                let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
+                serde_json::to_writer(&mut file, &json!({"suite":translator.slug(),"case":case.name,"decision":decision,"deviations":deviations,"kinds":evaluated.certification_failure}))?;
+                file.write_all(b"\n")?;
+            }
             let proof = proofs.next_if(|((candidate, _), _)| *candidate == index);
             let mut checked = case.clone();
             if checked.known_difference.is_none()
@@ -1380,16 +1396,38 @@ fn evaluate_with_whole_counterfactual(
             Outcome::Equivalent(BTreeSet::from([Deviation::UpstreamFoldedScalarReencode]));
         return Ok(evaluated);
     }
-    let Some(reason) = config_save::counterfactual::reason(case, &original_go, rust) else {
-        return Ok(evaluated);
-    };
     let Some(candidate) = config_save::counterfactual::rewritten(case) else {
         return Ok(evaluated);
     };
     let results = upstream.run(translator.key(), std::slice::from_ref(&candidate), work_dir)?;
-    let counterfactual = evaluate(translator, &candidate, &results[0]);
+    let mut owner_proof = None;
+    let mut counterfactual = evaluate(translator, &candidate, &results[0]);
+    if matches!(counterfactual.outcome, Outcome::Different(_))
+        && let (Ok(cf_go), Ok(cf_rust)) = (
+            serde_json::from_str::<Value>(&counterfactual.go_output),
+            &counterfactual.rust_output,
+        )
+    {
+        let proof = config_save::ablation::certify(&candidate, &cf_go, cf_rust, |request| {
+            Ok(upstream
+                .run(translator.key(), std::slice::from_ref(request), work_dir)?
+                .remove(0))
+        })?;
+        if let Some(deviations) = proof.deviations {
+            owner_proof = Some(proof.evidence);
+            counterfactual.outcome = Outcome::Equivalent(deviations);
+        }
+    }
     let Some(counterfactual_go) = serde_json::from_str::<Value>(&counterfactual.go_output).ok()
     else {
+        return Ok(evaluated);
+    };
+    let Some(reason) = config_save::counterfactual::reason_with_counterfactual(
+        case,
+        &original_go,
+        &counterfactual_go,
+        rust,
+    ) else {
         return Ok(evaluated);
     };
     if let (Ok(rust_original), Ok(rust_rewritten)) =
@@ -1415,6 +1453,9 @@ fn evaluate_with_whole_counterfactual(
             rust_original,
             rust_rewritten,
         );
+        if let Some(owner) = owner_proof {
+            proof["counterfactual_owner_proof"] = owner;
+        }
         if let Outcome::Equivalent(found) = &counterfactual.outcome {
             proof["counterfactual_deviations"] =
                 json!(found.iter().map(|d| d.describe()).collect::<Vec<_>>());
