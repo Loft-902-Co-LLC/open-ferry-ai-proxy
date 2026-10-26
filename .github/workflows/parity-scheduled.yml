@@ -37,7 +37,9 @@ jobs:
   parity:
     name: parity (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The config-save suite runs on one thread, so a slow runner can need
+    # about 40 minutes for the full random set.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
