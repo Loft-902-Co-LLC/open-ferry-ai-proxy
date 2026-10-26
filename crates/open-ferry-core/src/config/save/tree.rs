@@ -790,7 +790,7 @@ fn source_flow_item_heads_with_receipts(
             out.extend_from_slice(line);
         }
         while let Some(c) = receipts.comments.get_mut(receipt) {
-            if c.offset >= old_at + line.len() + 1 {
+            if c.offset > old_at + line.len() {
                 break;
             }
             c.offset = new_at + added + c.offset.saturating_sub(old_at + removed);

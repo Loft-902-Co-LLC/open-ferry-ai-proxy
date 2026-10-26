@@ -295,6 +295,30 @@ pub(crate) fn normalize_config_layout(
     Ok((bytes, changed))
 }
 
+/// The established layout writer, used when raw owner repair is out of budget.
+pub(super) fn normalize_config_layout_writer(
+    data: &[u8],
+    migrate: bool,
+) -> Result<(Vec<u8>, bool), SaveError> {
+    let (doc, changed) = normalize_layout_tree(super::unmarshal(data)?, data, migrate)?;
+    if !changed {
+        return Ok((data.to_vec(), false));
+    }
+    let emitted = marshal(&doc)?;
+    let text = String::from_utf8_lossy(data);
+    let bytes = if text.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        || data
+            .iter()
+            .enumerate()
+            .any(|(i, b)| *b == b'\r' && data.get(i + 1) != Some(&b'\n'))
+    {
+        emitted
+    } else {
+        super::tree::source_flow_item_heads(&doc, emitted)
+    };
+    Ok((bytes, true))
+}
+
 fn layout_candidate(
     data: &[u8],
     migrate: bool,

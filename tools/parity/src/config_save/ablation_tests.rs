@@ -58,7 +58,7 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
         protected["files"][0]
             .as_str()
             .unwrap()
-            .contains("        - \"<tag>\" #   c50 with words\n#c51\n")
+            .contains("      match: ! #   c50 with words\n        - \"<tag>\" #c51\n")
     );
     for file in protected["files"].as_array().unwrap() {
         Config::load_bytes(file.as_str().unwrap().as_bytes()).unwrap();
@@ -66,11 +66,20 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
     let subsets = subsets();
     assert_eq!(subsets.len(), (1_usize << ALL.len()) - 1);
     let mut attempts = Vec::new();
+    let owner_off = with_disabled(&[Protection::DeferredCommentOwners], || {
+        Translator::ConfigSave.run_rust(&case)
+    })
+    .unwrap();
     for disabled in subsets {
         let ablated = with_disabled(&disabled, || Translator::ConfigSave.run_rust(&case)).unwrap();
-        // No subset even reproduces the FIRST snapshot. The scalar-value
-        // protection is outside the five permitted comment switches.
-        assert_eq!(ablated["files"][0], protected["files"][0], "{disabled:?}");
+        // Scalar-value protection is outside these six comment switches.
+        // Owner-off subsets retain their separate strict writer expectation.
+        let expected = if disabled.contains(&Protection::DeferredCommentOwners) {
+            &owner_off
+        } else {
+            &protected
+        };
+        assert_eq!(ablated["files"][0], expected["files"][0], "{disabled:?}");
         assert_ne!(ablated["files"][0], raw_go["files"][0], "{disabled:?}");
         assert_ne!(ablated, raw_go, "{disabled:?}");
         attempts.push(serde_json::json!({
@@ -95,7 +104,7 @@ fn all_comment_ablations_leave_the_independent_block_scalar_protection_enabled()
                 "protected_rust": protected,
                 "attempts": attempts,
                 "check_1": false,
-                "checks_2_3_4": "not evaluated: check 1 fails for all 31 subsets",
+                "checks_2_3_4": format!("not evaluated: check 1 fails for all {} subsets", (1_usize << ALL.len()) - 1),
                 "outcome": "Different",
             }))
             .unwrap(),

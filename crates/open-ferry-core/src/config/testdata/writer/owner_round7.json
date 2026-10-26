@@ -1,0 +1,7 @@
+[
+{"case":"p1","source":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n    # c1\n    excluded-models: [a]\n","main_raw":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n# c1\n    excluded-models: [a]\n"},
+{"case":"p2","source":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n    # c1\n    excluded-models:\n      - a\n","main_raw":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n# c1\n    excluded-models:\n      - a\n"},
+{"case":"p3","source":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n    # c1\n    disable-cooling: true\n","main_raw":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n# c1\n    disable-cooling: true\n"},
+{"case":"p4","source":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n    # c1\n    prefix: p\n","main_raw":"auth-dir: /initial\ngemini-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n# c1\n    prefix: p\n"},
+{"case":"p5","source":"auth-dir: /initial\nclaude-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n    # c1\n    excluded-models: [a]\n","main_raw":"auth-dir: /initial\nclaude-api-key:\n  - api-key: k1\n    headers:\n      x-team: t\n# c1\n    excluded-models: [a]\n"}
+]

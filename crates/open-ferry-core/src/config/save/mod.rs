@@ -476,75 +476,171 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 }
 
 /// The bytes [`write_file`] writes for `data`.
+/// Raw owner repair is bounded independently of ordinary saves and edits.
+const RAW_COMMENT_OWNER_BUDGET: usize = 64 * 1024;
+
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
+    if data.len() > RAW_COMMENT_OWNER_BUDGET || !tree::owner_protection_enabled() {
+        return render_write_file_at_writer_placement(data);
+    }
     let intended = IntendedValues::bytes(data)?;
-    let (candidate, source) = candidate_write_file(data)?;
+    let (candidate, source, legacy_layout) = candidate_write_file_with_layout(data)?;
     let writer = candidate.bytes.clone();
     check_values(&writer, &intended)?;
     let protects_key_feet = source.key_feet_need_restoring(&candidate);
+    let mut cached_previews = None;
     let proposal = tree::finish_comment_owners(&source, candidate, |data| {
-        if protects_key_feet && !raw_feet_survive_following_saves(data) {
-            return None;
+        if protects_key_feet {
+            cached_previews = Some(raw_feet_survive_following_saves(data)?);
         }
         let (candidate, source) = candidate_write_file(data).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
     });
-    // A correct raw owner can be a node the next save deletes or rewrites.
-    // Keep the writer placement if repairing it would lose text it retains.
-    if proposal != writer && !raw_comments_survive_following_saves(data, &writer, &proposal) {
+    if proposal != writer
+        && !raw_comments_survive_following_saves(
+            data,
+            &writer,
+            &proposal,
+            legacy_layout,
+            cached_previews,
+        )
+    {
         return Ok(writer);
     }
     Ok(proposal)
 }
 
-fn raw_comments_survive_following_saves(source: &[u8], writer: &[u8], proposal: &[u8]) -> bool {
+/// Main's writer path, without constructing owner receipts or preview saves.
+fn render_write_file_at_writer_placement(data: &[u8]) -> Result<Vec<u8>, SaveError> {
+    let intended = IntendedValues::bytes(data)?;
+    let doc = unmarshal(data)?;
+    let mut out = std::borrow::Cow::Borrowed(data);
+    if let Some(root) = doc.content.first()
+        && is_v8_config_layout(root)?
+    {
+        out = std::borrow::Cow::Owned(v8::normalize_config_layout_writer(data, true)?.0);
+    }
+    let out = tree::normalize_comment_indentation(&out);
+    check_values(&out, &intended)?;
+    Ok(out)
+}
+
+struct RawSavePreviews {
+    config: Config,
+    outputs: [Vec<u8>; 2],
+}
+
+fn raw_preview_keeps_comment_counts(
+    source_counts: &std::collections::HashMap<&[u8], usize>,
+    proposal_preview: &[u8],
+    writer_preview: impl FnOnce() -> Result<Vec<u8>, SaveError>,
+) -> bool {
+    let Some(proposal_counts) = tree::physical_comment_counts(proposal_preview) else {
+        return false;
+    };
+    // A complete source count already meets any source-capped writer count.
+    if source_counts
+        .iter()
+        .all(|(text, count)| proposal_counts.get(*text).copied().unwrap_or(0) >= *count)
+    {
+        return true;
+    }
+    let Ok(writer_preview) = writer_preview() else {
+        return false;
+    };
+    let Some(writer_counts) = tree::physical_comment_counts(&writer_preview) else {
+        return false;
+    };
+    source_counts.iter().all(|(text, count)| {
+        proposal_counts.get(*text).copied().unwrap_or(0)
+            >= writer_counts.get(*text).copied().unwrap_or(0).min(*count)
+    })
+}
+
+fn raw_comments_survive_following_saves(
+    source: &[u8],
+    writer: &[u8],
+    proposal: &[u8],
+    legacy_layout: bool,
+    cached_previews: Option<RawSavePreviews>,
+) -> bool {
     let Some(source_counts) = tree::physical_comment_counts(source) else {
         return false;
     };
-    // The complete owner gate already proved identical values, styles and
-    // tags. Both byte forms therefore have the same no-change config.
-    let Ok(config) = Config::parse(writer) else {
-        return false;
+    // The whole-file gate proved identical values, scalar styles and tags.
+    let previews = match cached_previews {
+        Some(previews) => previews,
+        None => {
+            let Ok(config) = Config::parse(proposal) else {
+                return false;
+            };
+            let (Ok(save), Ok(migrate)) = (
+                render_preserving_comments(proposal, &config, false),
+                render_preserving_comments(proposal, &config, true),
+            ) else {
+                return false;
+            };
+            RawSavePreviews {
+                config,
+                outputs: [save, migrate],
+            }
+        }
     };
-    [false, true].into_iter().all(|migrate| {
-        let (Ok(writer_save), Ok(proposal_save)) = (
-            render_preserving_comments(writer, &config, migrate),
-            render_preserving_comments(proposal, &config, migrate),
-        ) else {
+    // Every v8 edit first migrates the stored bytes themselves. A save's
+    // migration instead sees its own generated output, so it is a separate
+    // preview. Already-v8 raw results repeat this step in the owner gate.
+    let layout_preview = if legacy_layout {
+        let Ok((bytes, _)) = normalize_config_layout(proposal, true) else {
             return false;
         };
-        let (Some(writer_counts), Some(proposal_counts)) = (
-            tree::physical_comment_counts(&writer_save),
-            tree::physical_comment_counts(&proposal_save),
-        ) else {
+        Some(bytes)
+    } else {
+        None
+    };
+    for (index, output) in previews.outputs.iter().enumerate() {
+        if !raw_preview_keeps_comment_counts(&source_counts, output, || {
+            render_preserving_comments(writer, &previews.config, index == 1)
+        }) {
             return false;
-        };
-        source_counts.iter().all(|(text, count)| {
-            proposal_counts.get(*text).copied().unwrap_or(0)
-                >= writer_counts.get(*text).copied().unwrap_or(0).min(*count)
+        }
+    }
+    layout_preview.is_none_or(|output| {
+        raw_preview_keeps_comment_counts(&source_counts, &output, || {
+            normalize_config_layout(writer, true).map(|(bytes, _)| bytes)
         })
     })
 }
 
-fn raw_feet_survive_following_saves(data: &[u8]) -> bool {
-    let Ok(config) = Config::parse(data) else {
-        return false;
-    };
-    [false, true].into_iter().all(|migrate| {
-        let Ok((candidate, source)) = candidate_preserving_comments(data, &config, migrate) else {
-            return false;
-        };
-        let Ok(output) = render_preserving_comments(data, &config, migrate) else {
-            return false;
-        };
-        tree::output_holds_source(&source, candidate, &output)
-    })
+fn raw_feet_survive_following_saves(data: &[u8]) -> Option<RawSavePreviews> {
+    let config = Config::parse(data).ok()?;
+    let mut outputs = [Vec::new(), Vec::new()];
+    for (index, output) in outputs.iter_mut().enumerate() {
+        let migrate = index == 1;
+        let (candidate, source) = candidate_preserving_comments(data, &config, migrate).ok()?;
+        let bytes = render_preserving_comments(data, &config, migrate).ok()?;
+        if !tree::output_holds_source(&source, candidate, &bytes) {
+            return None;
+        }
+        *output = bytes;
+    }
+    Some(RawSavePreviews { config, outputs })
 }
 
 fn candidate_write_file(
     data: &[u8],
 ) -> Result<(tree::ReceiptedYaml, tree::CommentSource), SaveError> {
+    candidate_write_file_with_layout(data).map(|(candidate, source, _)| (candidate, source))
+}
+
+fn candidate_write_file_with_layout(
+    data: &[u8],
+) -> Result<(tree::ReceiptedYaml, tree::CommentSource, bool), SaveError> {
     let (doc, source) = tree::read_comment_source(data)?;
+    let legacy_layout = doc
+        .content
+        .first()
+        .and_then(|root| yaml_path(root, "config-version"))
+        .is_none_or(|version| version.tag != super::yaml3::INT_TAG || version.value != "8");
     let (out, source) = if let Some(root) = doc.content.first()
         && is_v8_config_layout(root)?
     {
@@ -555,7 +651,7 @@ fn candidate_write_file(
     } else {
         (tree::source_yaml(data, &doc), source)
     };
-    Ok((tree::normalize_receipted(out), source))
+    Ok((tree::normalize_receipted(out), source, legacy_layout))
 }
 
 /// The edit path also crosses this final write stage. Keep the original

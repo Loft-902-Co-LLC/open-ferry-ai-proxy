@@ -4,6 +4,8 @@ use super::*;
 mod round5;
 #[path = "owner_r6_tests.rs"]
 mod round6;
+#[path = "owner_r7_tests.rs"]
+mod round7;
 
 fn probes() -> Vec<serde_json::Value> {
     serde_json::from_str(include_str!("../testdata/writer/owner_probes.json")).unwrap()

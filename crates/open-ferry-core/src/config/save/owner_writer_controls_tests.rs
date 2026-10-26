@@ -195,6 +195,9 @@ pub(super) fn diagnostic_control_drifts(case: &str, op: &str) -> bool {
         "two_no_blank" => matches!(op, "patch" | "patch2" | "put" | "put2"),
         "random-30-1826" => matches!(op, "nested"),
         "random-30-4096" => matches!(op, "raw"),
+        "two_nel_scalar" | "f1" | "f1b" | "o1" | "o1_v8" | "o1_first_seq" => {
+            matches!(op, "nested" | "nested2")
+        }
         "legacy_one_foot" => matches!(
             op,
             "save" | "save2" | "migrate2" | "nested" | "nested2" | "raw" | "raw2"
@@ -228,7 +231,87 @@ fn owner_writer_diagnostic_controls_keep_each_source_owner_under_both_switches()
             checked += 1;
         }
     }
-    assert_eq!(checked, 310);
+    assert_eq!(checked, 334);
+}
+
+#[cfg(feature = "parity")]
+pub(super) fn r4_diagnostic_control_drifts(
+    case: &str,
+    op: &str,
+    protection: parity::ablation::Protection,
+) -> bool {
+    use parity::ablation::Protection;
+    let disabled = match protection {
+        Protection::EmptyMappingPendingComment => "empty",
+        Protection::MultipleFlowItemFeet => "feet",
+        _ => return false,
+    };
+    let rows: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/writer/owner_round7_r4_diagnostics.json"
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 32);
+    rows.iter()
+        .any(|row| row[0] == case && row[1] == op && row[2] == disabled)
+}
+
+#[cfg(feature = "parity")]
+#[test]
+fn owner_round7_r4_diagnostic_controls_keep_main_bytes_and_source_owners() {
+    let rows: Vec<Value> = serde_json::from_str(include_str!(
+        "../testdata/writer/owner_round7_r4_diagnostics.json"
+    ))
+    .unwrap();
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/writer_r4_cases.json")).unwrap();
+    assert_eq!(rows.len(), 32);
+    for control in rows {
+        let case = control[0].as_str().unwrap();
+        let op = control[1].as_str().unwrap();
+        let disabled = control[2].as_str().unwrap();
+        let source = cases.iter().find(|row| row["case"] == case).unwrap()["source"]
+            .as_str()
+            .unwrap();
+        let row = json!({"source":source,"op":op,"disable_empty":disabled=="empty",
+            "disable_flow_feet":disabled=="feet","params":{"nested_keys":["auth-dir"],
+            "nested_values":["/x","/y"]}});
+        owner_legacy_ops::old_scope(&row, || {
+            let off = tree::without_owner_protection(|| owner_legacy_ops::history(&row));
+            assert_eq!(
+                owner_matrix_tests::receipt(&off),
+                control[3],
+                "{case} {op} {disabled} main"
+            );
+            let on = owner_legacy_ops::history(&row);
+            assert_eq!(
+                owner_matrix_tests::receipt(&on),
+                control[4],
+                "{case} {op} {disabled} repaired"
+            );
+            let mut input = source.as_bytes().to_vec();
+            for (pass, file) in on["files"].as_array().unwrap().iter().enumerate() {
+                let actual = file.as_str().unwrap().as_bytes();
+                let operation = owner_legacy_ops::operation(&input, &row, pass).unwrap();
+                let main = tree::without_owner_protection(|| operation.run(&input)).unwrap();
+                let source_owners = owner_legacy_tests::independent_canonical_owners(&input);
+                assert_ne!(
+                    source_owners,
+                    owner_legacy_tests::independent_canonical_owners(&main)
+                );
+                assert_eq!(
+                    source_owners,
+                    owner_legacy_tests::independent_canonical_owners(actual)
+                );
+                assert_eq!(
+                    values(&unmarshal(&main).unwrap()),
+                    values(&unmarshal(actual).unwrap())
+                );
+                Config::load_bytes(actual).unwrap();
+                assert_eq!(operation.run(actual).unwrap(), actual);
+                input = actual.to_vec();
+            }
+        });
+    }
 }
 
 #[cfg(feature = "parity")]

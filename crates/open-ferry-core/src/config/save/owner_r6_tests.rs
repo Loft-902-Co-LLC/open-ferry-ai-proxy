@@ -122,7 +122,14 @@ fn source_count_cap(name: &str) {
         let writer = tree::without_owner_protection(|| render_write_file(data)).unwrap();
         let output = render_write_file(data).unwrap();
         assert!(output != writer, "source cap rejected a safe raw repair");
-        assert!(raw_comments_survive_following_saves(data, &writer, &output));
+        let (_, _, legacy_layout) = candidate_write_file_with_layout(data).unwrap();
+        assert!(raw_comments_survive_following_saves(
+            data,
+            &writer,
+            &output,
+            legacy_layout,
+            None
+        ));
         assert!(render_write_file(&output).unwrap() == output);
     }
 }
