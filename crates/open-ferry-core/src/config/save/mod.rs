@@ -323,7 +323,9 @@ pub(crate) struct PreparedWrite {
 }
 
 pub(crate) fn render_prepared_file(prepared: PreparedWrite) -> Result<Vec<u8>, SaveError> {
+    let intended = IntendedValues::bytes(&prepared.candidate.bytes)?;
     let candidate = candidate_write_file_receipted(prepared.candidate)?;
+    check_values(&candidate.bytes, &intended)?;
     Ok(tree::finish_comment_owners(
         &prepared.source,
         candidate,
@@ -477,16 +479,50 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     let intended = IntendedValues::bytes(data)?;
     let (candidate, source) = candidate_write_file(data)?;
+    let writer = candidate.bytes.clone();
+    check_values(&writer, &intended)?;
     let protects_key_feet = source.key_feet_need_restoring(&candidate);
-    let output = tree::finish_comment_owners(&source, candidate, |data| {
+    let proposal = tree::finish_comment_owners(&source, candidate, |data| {
         if protects_key_feet && !raw_feet_survive_following_saves(data) {
             return None;
         }
         let (candidate, source) = candidate_write_file(data).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
     });
-    check_values(&output, &intended)?;
-    Ok(output)
+    // A correct raw owner can be a node the next save deletes or rewrites.
+    // Keep the writer placement if repairing it would lose text it retains.
+    if proposal != writer && !raw_comments_survive_following_saves(data, &writer, &proposal) {
+        return Ok(writer);
+    }
+    Ok(proposal)
+}
+
+fn raw_comments_survive_following_saves(source: &[u8], writer: &[u8], proposal: &[u8]) -> bool {
+    let Some(source_counts) = tree::physical_comment_counts(source) else {
+        return false;
+    };
+    let (Ok(writer_config), Ok(proposal_config)) = (Config::parse(writer), Config::parse(proposal))
+    else {
+        return false;
+    };
+    [false, true].into_iter().all(|migrate| {
+        let (Ok(writer_save), Ok(proposal_save)) = (
+            render_preserving_comments(writer, &writer_config, migrate),
+            render_preserving_comments(proposal, &proposal_config, migrate),
+        ) else {
+            return false;
+        };
+        let (Some(writer_counts), Some(proposal_counts)) = (
+            tree::physical_comment_counts(&writer_save),
+            tree::physical_comment_counts(&proposal_save),
+        ) else {
+            return false;
+        };
+        source_counts.iter().all(|(text, count)| {
+            proposal_counts.get(*text).copied().unwrap_or(0)
+                >= writer_counts.get(*text).copied().unwrap_or(0).min(*count)
+        })
+    })
 }
 
 fn raw_feet_survive_following_saves(data: &[u8]) -> bool {

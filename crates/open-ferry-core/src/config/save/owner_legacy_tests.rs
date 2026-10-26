@@ -638,7 +638,7 @@ fn owner_legacy_repairs_have_frozen_main_bytes_and_complete_source_owners() {
         verify_repaired_row(&row);
         count += 1;
     }
-    assert_eq!(count, if cfg!(feature = "parity") { 35 } else { 31 });
+    assert_eq!(count, if cfg!(feature = "parity") { 37 } else { 35 });
 }
 #[cfg(feature = "parity")]
 fn sweep_operation(data: &[u8], step: &Value) -> Result<Operation, String> {
