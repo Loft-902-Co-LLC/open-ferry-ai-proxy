@@ -2066,9 +2066,15 @@ fn repair_key_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) {
         if indent > 256 {
             continue;
         }
-        let explicit = &prefix[indent..] == b"? ";
-        let item = &prefix[indent..] == b"- ";
-        if !explicit && !item && indent != prefix.len() {
+        let mut markers = &prefix[indent..];
+        let mut items = 0;
+        while let Some(rest) = markers.strip_prefix(b"- ") {
+            items += 1;
+            markers = rest;
+        }
+        let explicit = markers == b"? ";
+        let item = items > 0 && markers.is_empty();
+        if !explicit && !markers.is_empty() {
             continue;
         }
         let mut header = Vec::new();
@@ -2110,13 +2116,11 @@ fn repair_key_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) {
             bytes: header,
             added: vec![(comment_offset, receipt.clone(), comment.bytes.len())],
         });
-        let mut comment_start = write.offset;
-        while comment_start > 0 && matches!(candidate.bytes[comment_start - 1], b' ' | b'\t') {
-            comment_start -= 1;
-        }
+        let (comment_start, comment_end) =
+            comment_removal_span(&candidate.bytes, write.offset, write.length);
         edits.push(ReceiptEdit {
             start: comment_start,
-            end: write.offset + write.length,
+            end: comment_end,
             bytes: Vec::new(),
             added: Vec::new(),
         });
@@ -2141,6 +2145,30 @@ fn repair_key_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) {
     if same_node_values(&parsed, &reparsed) && required.holds(&reparsed) {
         *candidate = proposal;
     }
+}
+
+fn comment_removal_span(bytes: &[u8], offset: usize, length: usize) -> (usize, usize) {
+    let mut start = offset;
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+    let mut end = offset + length;
+    if start == 0 || bytes[start - 1] == b'\n' {
+        if bytes.get(end..end + 2) == Some(b"\r\n") {
+            end += 2;
+        } else if bytes.get(end) == Some(&b'\n') {
+            end += 1;
+        }
+    }
+    (start, end)
+}
+
+pub(crate) fn physical_comment_counts(bytes: &[u8]) -> Option<HashMap<&[u8], usize>> {
+    let mut counts = HashMap::new();
+    for (offset, length) in super::super::yaml3::parser::physical_comment_lines(bytes)? {
+        *counts.entry(&bytes[offset..offset + length]).or_insert(0) += 1;
+    }
+    Some(counts)
 }
 
 fn same_node_values(a: &Node, b: &Node) -> bool {
@@ -2928,14 +2956,12 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         let Some(header) = collection_header_edit(candidate, key, end, comment) else {
             continue;
         };
-        let mut start = write.offset;
-        while start > 0 && candidate.bytes[start - 1] == b' ' {
-            start -= 1;
-        }
+        let (start, comment_end) =
+            comment_removal_span(&candidate.bytes, write.offset, write.length);
         edits.push(header);
         edits.push(ReceiptEdit {
             start,
-            end: write.offset + write.length,
+            end: comment_end,
             bytes: Vec::new(),
             added: Vec::new(),
         });
@@ -2987,6 +3013,48 @@ pub(crate) fn finish_comment_owners_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_round6_removed_collection_comment_line_leaves_no_empty_line() {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["case"] == "blank-explicit")
+            .unwrap();
+        let data = row["source"].as_str().unwrap().as_bytes();
+        let (mut candidate, source) = super::super::candidate_nested_scalar(
+            data,
+            &["observability", "pprof", "addr"],
+            "localhost:7070",
+        )
+        .unwrap();
+        let original = candidate.bytes.clone();
+        // Exercise the collection-header alternative before the preferred
+        // separate key line consumes this deferred comment.
+        repair_deferred_lines(&source, &mut candidate);
+        assert!(candidate.bytes != original);
+        assert!(source.holds(&read_receipted(&candidate).unwrap()));
+        assert!(same_node_values(
+            &super::super::unmarshal(&original).unwrap(),
+            &super::super::unmarshal(&candidate.bytes).unwrap()
+        ));
+        assert!(
+            super::super::owner_legacy_tests::independent_canonical_owners(data)
+                == super::super::owner_legacy_tests::independent_canonical_owners(&candidate.bytes)
+        );
+        assert!(super::super::Config::load_bytes(&candidate.bytes).is_ok());
+        assert!(
+            !std::str::from_utf8(&candidate.bytes)
+                .unwrap()
+                .lines()
+                .any(|line| line.trim().is_empty()),
+            "empty collection comment line remains"
+        );
+        let before = candidate.bytes.clone();
+        repair_deferred_lines(&source, &mut candidate);
+        assert!(candidate.bytes == before);
+    }
 
     fn map(pairs: &[(&str, Node)]) -> Node {
         let mut node = Node::mapping();

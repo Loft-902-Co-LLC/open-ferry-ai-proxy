@@ -59,14 +59,17 @@ fn check_control(source: &str, case: &str, op: &str, disable: &str, repaired: Op
             let operation = owner_legacy_ops::operation(&input, &row, pass).unwrap();
             let main = tree::without_owner_protection(|| operation.run(&input)).unwrap();
             if actual == main {
-                // Unsupported histories keep the exact frozen writer outcome.
-                // The raw exception also checks both following save modes below.
+                // These fixed controls also include raw proposals rejected to
+                // keep the next save from losing text the writer retains.
+                let raw_fallbacks: Vec<Value> = serde_json::from_str(include_str!(
+                    "../testdata/writer/owner_raw_save_fallbacks.json"
+                ))
+                .unwrap();
                 assert!(
-                    pass == 0
-                        && (case == "legacy_one_foot" && op == "migrate2"
-                            || case == "random-30-4096"
-                                && op == "raw"
-                                && matches!(disable, "empty" | "feet")),
+                    case == "legacy_one_foot" && op == "migrate2" && pass == 0
+                        || raw_fallbacks.iter().any(|row| {
+                            row[0] == case && row[1] == op && row[2] == disable && row[3] == pass
+                        }),
                     "{case} {op} {disable} pass {pass}: unexpected writer fallback"
                 );
                 assert!(file == &off["files"][pass]);

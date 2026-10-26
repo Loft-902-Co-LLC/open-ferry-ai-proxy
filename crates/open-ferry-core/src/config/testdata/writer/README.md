@@ -22,3 +22,5 @@ After the loader update, all 1,355 R2/R4 main receipt rows were checked against 
 
 `owner_round5_source_boundaries.json` adds two source-multiset controls for comments in later YAML documents.
 `owner_round5_incoming_source.json` pairs an incoming YAML body with an unparsed comment and a fully covered body that still permits a repair.
+
+`owner_round6.json` covers raw-write text retention on the following save, source-count caps, tag-free nested and explicit item keys, removed comment lines, and blank lines required by key-foot owners. `owner_raw_save_fallbacks.json` lists fixed diagnostic controls that retain the frozen raw writer bytes; it does not inspect the repair gate.
