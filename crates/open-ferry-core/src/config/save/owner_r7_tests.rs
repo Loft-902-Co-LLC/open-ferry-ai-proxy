@@ -85,6 +85,30 @@ fn owner_round7_raw_over_budget_keeps_writer_bytes() {
 }
 
 #[test]
+fn owner_round7_raw_output_crossing_budget_keeps_writer_bytes() {
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
+    let mut source = rows.iter().find(|row| row["case"] == "fff").unwrap()["source"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    source.push_str("plugins:\n  configs:\n    padding:\n      values: [");
+    source.push_str(&"x,".repeat(32_000));
+    source.push_str("x]\n");
+    assert!(source.len() < RAW_COMMENT_OWNER_BUDGET);
+    let writer = tree::without_owner_protection(|| render_write_file(source.as_bytes())).unwrap();
+    assert!(writer.len() > RAW_COMMENT_OWNER_BUDGET);
+    let actual = render_write_file(source.as_bytes()).unwrap();
+    assert!(actual == writer, "raw repair would cross the repeat budget");
+    let main_repeat = tree::without_owner_protection(|| render_write_file(&writer)).unwrap();
+    let repeated = render_write_file(&actual).unwrap();
+    assert!(
+        repeated == main_repeat,
+        "over-budget repeat changed the writer's bytes"
+    );
+}
+
+#[test]
 fn owner_round7_preview_only_needs_writer_for_a_source_deficit() {
     use std::cell::Cell;
     let source = b"auth-dir: /x # same\n";
