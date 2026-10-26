@@ -913,6 +913,9 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         let generated = random.len();
         cases.extend(random);
         let started = Instant::now();
+        if translator == Translator::ConfigSave {
+            config_save::metrics::reset();
+        }
         let dir = failures_dir.join(translator.slug());
         let tally = check(translator, &cases, &upstream, &work_dir, &dir)?;
         println!();
@@ -923,7 +926,9 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             started.elapsed()
         );
         tally.print(args.show, &dir);
-        config_save::metrics::flush()?;
+        if translator == Translator::ConfigSave {
+            config_save::metrics::flush()?;
+        }
         let mut matched = tally.different == 0;
         if translator == Translator::ConfigSave {
             (matched, ratchet_summary) = config_save_result(
@@ -1049,8 +1054,18 @@ fn check(
                     Outcome::Equivalent(found) => ("equivalent", found.iter().map(|d| d.describe()).collect()),
                     Outcome::Different(_) => ("different", Vec::new()),
                 };
+                let certificate = if translator==Translator::ConfigSave && safe_case_name(&case.name) {
+                    fs::read(work_dir.join("counterfactual").join(format!("{}.json",case.name))).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                } else { None };
+                let certificate_kind=certificate.as_ref().and_then(|c|c.get("kind"));
+                let reasons=certificate.as_ref().map(|c| {
+                    let mut reasons=Vec::new();
+                    if let Some(reason)=c["reason"].as_str() { reasons.push(reason); }
+                    if let Some(failures)=c["failures"].as_array() { reasons.extend(failures.iter().filter_map(|f|f["reason"].as_str())); }
+                    reasons
+                });
                 let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
-                serde_json::to_writer(&mut file, &json!({"suite":translator.slug(),"case":case.name,"decision":decision,"deviations":deviations,"kinds":evaluated.certification_failure}))?;
+                serde_json::to_writer(&mut file, &json!({"suite":translator.slug(),"case":case.name,"decision":decision,"deviations":deviations,"kinds":evaluated.certification_failure,"certificate_kind":certificate_kind,"reasons":reasons}))?;
                 file.write_all(b"\n")?;
             }
             let proof = proofs.next_if(|((candidate, _), _)| *candidate == index);

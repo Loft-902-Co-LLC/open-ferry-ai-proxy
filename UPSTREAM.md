@@ -647,6 +647,9 @@ separator needs an exact one-line removal which makes pinned yaml.v3 move its
 source-owned foot. Removing every licensed separator must leave layout that
 passes the existing guard. A later byte-identical Go replay can carry a proved
 prefix repair forward; a raw write starts a new source.
+Each step first reruns the unchanged comparison rules on that exact source.
+Steps those rules already prove need no new owner exception; every other
+restored owner needs the complete source-owner and repeat proof.
 
 Complete owner certificates bypass the subset search. The internal environment
 variable `OPEN_FERRY_PARITY_FULL_SEARCH` also executes the original exhaustive

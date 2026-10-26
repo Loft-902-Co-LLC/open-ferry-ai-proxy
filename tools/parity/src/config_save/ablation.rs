@@ -421,20 +421,26 @@ fn certify_mode(
     let mut cache = std::collections::BTreeMap::<String, GoResult>::new();
     let mut cached_go = |request: &Case| {
         let key = serde_json::to_string(&request.options)?;
-        if !cache.contains_key(&key) {
-            cache.insert(key.clone(), run_go(request)?);
-        }
-        Ok(match &cache[&key] {
+        let result = match cache.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(run_go(request)?),
+        };
+        Ok(match result {
             GoResult::Output(bytes) => GoResult::Output(bytes.clone()),
             GoResult::Panic(message) => GoResult::Panic(message.clone()),
         })
     };
     let owner = ownership::certify_repair(case, go, protected, &mut cached_go)?;
-    if !full && owner.is_some() {
-        return Ok(owner.unwrap());
+    if !full && let Some(owner) = owner {
+        return Ok(owner);
     }
     let searched = certify_full(case, go, protected, &mut cached_go)?;
-    Ok(owner.unwrap_or(searched))
+    if let Some(mut owner) = owner {
+        owner.evidence["full_search"] = searched.evidence;
+        Ok(owner)
+    } else {
+        Ok(searched)
+    }
 }
 
 /// An otherwise Different case receives named deviations only after all checks.
@@ -626,27 +632,33 @@ pub(super) fn certify_recorded_owners(
     protected: &Value,
     receipts: &Value,
 ) -> Attempt {
-    certify_mode(
-        case,
-        go,
-        protected,
-        |request| {
-            let requested = &request.options["_ownership_request"];
-            let witness = receipts["source_identities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|w| {
-                    w["source"] == requested["source"]
-                        && w["operation"] == requested["operation"]
-                        && w["retained_source_owner"]["protected"] == requested["protected"]
-                })
-                .ok_or("unrecorded oracle request")?;
-            Ok(GoResult::Output(serde_json::to_vec(witness)?))
-        },
-        false,
-    )
-    .unwrap()
+    assert!(
+        receipts["source_identities"].is_array(),
+        "missing native source-owner receipts"
+    );
+    let mut oracle = |request: &Case| {
+        let requested = &request.options["_ownership_request"];
+        let witness = receipts["source_identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| {
+                w["source"] == requested["source"]
+                    && w["operation"] == requested["operation"]
+                    && w["retained_source_owner"]["protected_inventory"]["source"]
+                        == requested["protected"]
+            })
+            .ok_or("unrecorded oracle request")?;
+        Ok(GoResult::Output(serde_json::to_vec(witness)?))
+    };
+    let result = ownership::certify_repair(case, go, protected, &mut oracle).unwrap();
+    result.unwrap_or_else(|| {
+        let bound = ownership::bind(case, protected, &mut oracle).unwrap();
+        panic!(
+            "native owner proof refused: {:?}",
+            ownership::source_owner_evidence(&bound, protected)
+        );
+    })
 }
 
 #[cfg(test)]

@@ -320,8 +320,8 @@ fn retained_source_owner_accepts_native_replay_and_an_observed_writer_repeat() {
 
 #[test]
 fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
-    // These measured losses already fail eligibility. An indexed source owner
-    // also lacks a surviving Go node, so the proof stops before its conditions.
+    // Eligibility now includes partial and repeated inventories. These measured
+    // losses must still fail the complete proof and final ownership decision.
     let fixtures: Value =
         serde_json::from_str(include_str!("../testdata/source-owner-gaps.json")).unwrap();
     let fixtures = fixtures.as_array().unwrap();
@@ -333,8 +333,8 @@ fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
         let operation = &fixture["operation"];
         let evidence = &fixture["evidence"];
         assert!(
-            !core::source_owner_candidate(source, protected),
-            "{name}: measured missing occurrences passed eligibility"
+            core::source_owner_candidate(source, protected),
+            "{name}: the broad eligibility hint excluded a proof candidate"
         );
         assert!(evidence["retained_source_owner"]["identity"]["occurrences"].is_array());
         assert!(evidence["retained_source_owner"]["go_inventory"]["comments"].is_array());
@@ -374,7 +374,7 @@ fn retained_source_owner_measured_tracked_gap_reaches_loss_conditions() {
             "the measured gap has an untracked source owner"
         );
     }
-    assert!(!core::source_owner_candidate(source, protected));
+    assert!(core::source_owner_candidate(source, protected));
     let proof = core::retained_source_owner(source, protected, operation, evidence);
     assert!(
         proof.conditions == [false, true, true, true, false],

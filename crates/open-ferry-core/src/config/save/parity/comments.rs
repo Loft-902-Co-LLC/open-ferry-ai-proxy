@@ -1583,11 +1583,7 @@ pub fn retained_source_owner(
         return original;
     }
     let repaired = retained_expanded_source_owner(source, protected, operation, evidence);
-    if repaired.accepted()
-        || evidence["retained_source_owner"]
-            .get("expanded_source_inventory")
-            .is_some()
-    {
+    if repaired.accepted() {
         repaired
     } else {
         original
@@ -1895,10 +1891,18 @@ fn source_owner_repair_layout(
         };
         let before = groups(native);
         let after = groups(&reduced);
-        let necessary = counts(native) == counts(&reduced)
+        let preceding = lines[line - 1].trim();
+        let foot_owners: BTreeSet<_> = expected
+            .iter()
+            .filter(|item| item.owner.slot == Slot::Foot && item.text.trim_end() == preceding)
+            .map(|item| &item.owner)
+            .collect();
+        let necessary = foot_owners.len() == 1
+            && counts(native) == counts(&reduced)
             && example["inventory"]["values"] == frame["protected_inventory"]["values"]
             && expected.iter().any(|item| {
                 item.owner.slot == Slot::Foot
+                    && item.text.trim_end() == preceding
                     && before
                         .get(&item.owner)
                         .is_some_and(|at| at.contains(&item.text))
@@ -1951,8 +1955,8 @@ fn retained_expanded_source_owner(
     let Some(go) = files[0].as_str() else {
         return refused();
     };
-    let (Some(s), Some(r), Some(native_s), Some(native_r), Some(g), Some(moves)) = (
-        source_owner_expanded_inventory(source),
+    let (Some((s, ambiguous)), Some(r), Some(native_s), Some(native_r), Some(g), Some(moves)) = (
+        source_owner_expanded_basis(source),
         inventory(protected, false),
         source_owner_native_inventory(&frame["expanded_source_inventory"], source),
         source_owner_native_inventory(&frame["protected_inventory"], protected),
@@ -1966,52 +1970,6 @@ fn retained_expanded_source_owner(
     if groups(&s) != groups(&native_s) || s.is_empty() {
         return refused();
     }
-    let (Ok(sd), Ok(gd)) = (unmarshal(source.as_bytes()), unmarshal(go.as_bytes())) else {
-        return refused();
-    };
-    let mut projected = Vec::new();
-    let mut ordinals = BTreeMap::<Owner, usize>::new();
-    for item in &s {
-        let ordinal = ordinals.entry(item.owner.clone()).or_default();
-        let matching: Vec<_> = moves
-            .iter()
-            .filter(|m| {
-                m["source"] == item.owner.json() && m["ordinal"].as_u64() == Some(*ordinal as u64)
-            })
-            .collect();
-        *ordinal += 1;
-        if matching.iter().any(|m| {
-            m["text"] != item.text || !matches!(m["via"].as_str(), Some("observed" | "fallback"))
-        }) {
-            return refused();
-        }
-        let paths: Option<BTreeSet<_>> = matching
-            .iter()
-            .map(|m| Some(parse_owner(&m["destination"])?.path))
-            .collect();
-        let Some(paths) = paths else { return refused() };
-        if paths.len() > 1 {
-            return refused();
-        }
-        let mut own = item.clone();
-        if let Some(path) = paths.into_iter().next() {
-            own.owner.path = path;
-        }
-        if (own.owner.path != item.owner.path
-            && !source_owner_destination_matches(&sd, &gd, &item.owner, &own.owner))
-            || (item.owner.path.iter().any(|p| matches!(p, Part::Index(_))) && matching.is_empty())
-        {
-            return refused();
-        }
-        projected.push(own);
-    }
-    let Some(archives) = archive_inventory(source, evidence) else {
-        return refused();
-    };
-    projected.extend(archives);
-    let expected = groups(&projected);
-    let actual = groups(&r);
-    let go_groups = groups(&g);
     let by_text = |items: &[Occurrence], text: &str| {
         groups(
             &items
@@ -2027,7 +1985,64 @@ fn retained_expanded_source_owner(
         .copied()
         .filter(|text| by_text(&r, text) != by_text(&g, text))
         .collect();
+    let (Ok(sd), Ok(gd)) = (unmarshal(source.as_bytes()), unmarshal(go.as_bytes())) else {
+        return refused();
+    };
+    let mut projected = Vec::new();
+    let mut ordinals = BTreeMap::<Owner, usize>::new();
+    for item in &s {
+        let ordinal = ordinals.entry(item.owner.clone()).or_default();
+        let matching: Vec<_> = moves
+            .iter()
+            .filter(|m| {
+                m["source"] == item.owner.json() && m["ordinal"].as_u64() == Some(*ordinal as u64)
+            })
+            .collect();
+        *ordinal += 1;
+        if repaired.contains(item.text.as_str())
+            && matching.iter().any(|m| {
+                m["text"] != item.text
+                    || !matches!(m["via"].as_str(), Some("observed" | "fallback"))
+            })
+        {
+            return refused();
+        }
+        let paths: Option<BTreeSet<_>> = matching
+            .iter()
+            .map(|m| Some(parse_owner(&m["destination"])?.path))
+            .collect();
+        if paths.is_none() && repaired.contains(item.text.as_str()) {
+            return refused();
+        }
+        let paths = paths.unwrap_or_default();
+        if paths.len() > 1 && repaired.contains(item.text.as_str()) {
+            return refused();
+        }
+        let mut own = item.clone();
+        if paths.len() == 1
+            && let Some(path) = paths.into_iter().next()
+        {
+            own.owner.path = path;
+        }
+        if repaired.contains(item.text.as_str())
+            && ((own.owner.path != item.owner.path
+                && !source_owner_destination_matches(&sd, &gd, &item.owner, &own.owner))
+                || (item.owner.path.iter().any(|p| matches!(p, Part::Index(_)))
+                    && matching.is_empty()))
+        {
+            return refused();
+        }
+        projected.push(own);
+    }
+    let Some(archives) = archive_inventory(source, evidence) else {
+        return refused();
+    };
+    projected.extend(archives);
+    let expected = groups(&projected);
+    let actual = groups(&r);
+    let go_groups = groups(&g);
     let source_owners = groups(&native_r) == actual
+        && repaired.iter().all(|text| !ambiguous.contains(*text))
         && repaired.iter().all(|text| {
             !by_text(&r, text).is_empty() && by_text(&r, text) == by_text(&projected, text)
         })
@@ -2100,8 +2115,47 @@ fn retained_expanded_source_owner(
 // physical comments. Those still have source owners and budgets. Take the
 // maximum multiplicity at each (owner,text), never add two equal inventories.
 fn source_owner_expanded_inventory(source: &str) -> Option<Vec<Occurrence>> {
+    Some(source_owner_expanded_basis(source)?.0)
+}
+
+fn source_owner_expanded_basis(source: &str) -> Option<(Vec<Occurrence>, BTreeSet<String>)> {
     let mut expanded = inventory(source, true)?;
     let physical = inventory(source, false)?;
+    fn aliases(
+        node: &Node,
+        path: &mut Vec<Part>,
+        side: Side,
+        out: &mut BTreeSet<(Vec<Part>, Side)>,
+    ) {
+        if node.kind == super::super::Kind::Alias {
+            out.insert((path.clone(), side));
+        }
+        match node.kind {
+            super::super::Kind::Mapping => {
+                for (key, value) in node.pairs() {
+                    path.push(Part::Key(key.tag.clone(), key.value.clone()));
+                    aliases(value, path, Side::Value, out);
+                    path.pop();
+                }
+            }
+            super::super::Kind::Sequence => {
+                for (i, item) in node.content.iter().enumerate() {
+                    path.push(Part::Index(i));
+                    aliases(item, path, Side::Item, out);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let doc = unmarshal(source.as_bytes()).ok()?;
+    let mut alias_paths = BTreeSet::new();
+    aliases(
+        doc.content.first()?,
+        &mut vec![],
+        Side::Root,
+        &mut alias_paths,
+    );
     let mut have = BTreeMap::new();
     for item in &expanded {
         *have
@@ -2109,15 +2163,23 @@ fn source_owner_expanded_inventory(source: &str) -> Option<Vec<Occurrence>> {
             .or_insert(0usize) += 1;
     }
     let mut seen = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
     for item in physical {
         let key = (item.owner.clone(), item.text.clone());
+        // Two equal lines on the alias and its donor are distinct identities.
+        // A count union cannot tell which survived at that same slot.
+        if alias_paths.contains(&(item.owner.path.clone(), item.owner.side))
+            && have.contains_key(&key)
+        {
+            ambiguous.insert(item.text.clone());
+        }
         let n = seen.entry(key.clone()).or_insert(0usize);
         *n += 1;
         if *n > have.get(&key).copied().unwrap_or_default() {
             expanded.push(item);
         }
     }
-    Some(expanded)
+    Some((expanded, ambiguous))
 }
 
 #[cfg(test)]
@@ -2418,6 +2480,44 @@ mod tests {
         let count = counts(&items);
         assert_eq!(count["# inherited"], 3);
         assert_eq!(count["# local"], 1);
+        assert!(
+            source_owner_expanded_basis("auth-dir: &a fixture # same\nproxy-url: *a # same\n")
+                .unwrap()
+                .1
+                .contains("# same")
+        );
+    }
+
+    #[test]
+    fn expanded_owner_refuses_a_dropped_go_kept_line_and_ambiguous_alias_identity() {
+        let (old_source, old_go, _, mut witness) = expanded_owner_fixture();
+        let source = old_source.replace("next: fixture", "next: fixture # kept");
+        let go = old_go.replace("next: fixture", "next: fixture # kept");
+        let op = json!({"op":"write","body":source});
+        witness["source"] = source.clone().into();
+        witness["operation"] = op.clone();
+        let frame = &mut witness["retained_source_owner"];
+        frame["expanded_source_inventory"] = source_owner_test_snapshot(&source);
+        frame["exact_go"] = json!({"files":[go]});
+        frame["exact_go_inventory"] = source_owner_test_snapshot(&go);
+        replace_source_owner_output(&mut witness, &op, &source);
+        assert!(retained_expanded_source_owner(&source, &source, &op, &witness).accepted());
+        let dropped = source.replace(" # kept", "");
+        replace_source_owner_output(&mut witness, &op, &dropped);
+        let proof = retained_expanded_source_owner(&source, &dropped, &op, &witness);
+        assert!(!proof.accepted());
+        assert!(!proof.conditions[1]);
+
+        let source = "auth-dir: &a fixture # same\nextra: *a # same\n";
+        let go = "auth-dir: &a fixture\nextra: *a # same\n# same\n";
+        let op = json!({"op":"write","body":source});
+        let mut witness = json!({"source":source,"operation":op,"moves":[],"archives":[],"retained_source_owner":{
+            "expanded_source_inventory":source_owner_test_snapshot(source),"go":{"files":[go]},"marked_go":{"files":[go]},"exact_go":{"files":[go]},"exact_go_inventory":source_owner_test_snapshot(go),"foot_separators":[],"repeat_ok":true
+        }});
+        replace_source_owner_output(&mut witness, &op, source);
+        let proof = retained_expanded_source_owner(source, source, &op, &witness);
+        assert!(!proof.accepted());
+        assert!(!proof.conditions[0]);
     }
 
     #[test]
@@ -2617,7 +2717,9 @@ mod tests {
     fn source_owner_proof_refuses_equal_text_and_preserves_go_kept_owners() {
         let (source, _, operation, evidence) = source_owner_fixture();
         let ambiguous = format!("{source}other: fixture # retained\n");
-        assert!(!source_owner_candidate(&ambiguous, &ambiguous));
+        // Eligibility now includes repeated text. The complete independently
+        // bound proof, rather than this cheap hint, must still refuse.
+        assert!(source_owner_candidate(&ambiguous, &ambiguous));
         assert!(!retained_source_owner(&ambiguous, &ambiguous, &operation, &evidence).accepted());
 
         let source = format!("{source}kept: fixture # still here\n");

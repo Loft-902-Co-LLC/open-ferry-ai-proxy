@@ -24,8 +24,15 @@ fn fast_owner_certificate_requires_the_full_proof_and_matches_exhaustive_mode() 
         );
         if !corrupt {
             let fast = certify_mode(&case, go, &protected, &mut oracle, false).unwrap();
-            let full = certify_mode(&case, go, &protected, &mut oracle, true).unwrap();
+            let mut full = certify_mode(&case, go, &protected, &mut oracle, true).unwrap();
             assert_eq!(fast.deviations, full.deviations);
+            assert!(
+                full.evidence
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("full_search")
+                    .is_some()
+            );
             assert_eq!(fast.evidence, full.evidence);
         }
     }

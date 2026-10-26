@@ -534,13 +534,13 @@ mod tests {
             .run_rust(&case)
             .unwrap();
         let candidate = super::counterfactual::rewritten(&case).unwrap();
-        if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_EXPORT_ALIAS_FIXTURE") {
-            std::fs::write(path,serde_json::to_vec(&json!({"case":"alias-loss","options":case.options,"rewritten_options":candidate.options,"rust":actual,"compiled_expected":f["owner_repaired_output"]})).unwrap()).unwrap();
-        }
         let mut go = f["upstream_output"].clone();
         super::drop_repeated_plugin_comments(&case, &mut go);
         let rust = &f["open_ferry_output"];
-        assert!(actual == f["owner_repaired_output"],"writer snapshot differs from frozen owner repair");
+        assert!(
+            actual == f["owner_repaired_output"],
+            "writer snapshot differs from frozen owner repair"
+        );
         assert_eq!(
             crate::translator::Translator::ConfigSave
                 .run_rust(&candidate)
@@ -554,6 +554,16 @@ mod tests {
             &f["owner_counterfactual_proof"],
         );
         assert!(proof.deviations.is_some());
+        assert!(
+            super::counterfactual::reason_with_counterfactual(
+                &case,
+                &f["upstream_output"],
+                &f["owner_counterfactual_go"],
+                &actual
+            )
+            .is_some(),
+            "scalar loss and owner repairs did not compose"
+        );
         assert_eq!(
             super::version::repair(&case, &mut go, rust),
             Some(Deviation::UpstreamVersionCommentLoss)

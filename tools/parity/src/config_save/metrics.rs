@@ -58,3 +58,9 @@ pub(crate) fn flush() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+pub(crate) fn reset() {
+    for total in &TOTALS {
+        total.store(0, Ordering::Relaxed);
+    }
+}
