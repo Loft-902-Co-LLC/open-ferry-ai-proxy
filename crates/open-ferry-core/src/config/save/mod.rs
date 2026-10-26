@@ -501,14 +501,15 @@ fn raw_comments_survive_following_saves(source: &[u8], writer: &[u8], proposal: 
     let Some(source_counts) = tree::physical_comment_counts(source) else {
         return false;
     };
-    let (Ok(writer_config), Ok(proposal_config)) = (Config::parse(writer), Config::parse(proposal))
-    else {
+    // The complete owner gate already proved identical values, styles and
+    // tags. Both byte forms therefore have the same no-change config.
+    let Ok(config) = Config::parse(writer) else {
         return false;
     };
     [false, true].into_iter().all(|migrate| {
         let (Ok(writer_save), Ok(proposal_save)) = (
-            render_preserving_comments(writer, &writer_config, migrate),
-            render_preserving_comments(proposal, &proposal_config, migrate),
+            render_preserving_comments(writer, &config, migrate),
+            render_preserving_comments(proposal, &config, migrate),
         ) else {
             return false;
         };
