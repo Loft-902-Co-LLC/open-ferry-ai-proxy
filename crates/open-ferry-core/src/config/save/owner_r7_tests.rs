@@ -109,6 +109,28 @@ fn owner_round7_raw_output_crossing_budget_keeps_writer_bytes() {
 }
 
 #[test]
+fn owner_round7_loaded_replay_matches_the_uncached_gate() {
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
+    let mut checked = 0;
+    for row in rows {
+        let data = row["source"].as_str().unwrap().as_bytes();
+        let Ok((candidate, source)) = candidate_write_file(data) else {
+            continue;
+        };
+        tree::finish_comment_owners_proven(&source, candidate, |loaded| {
+            let (candidate, source) = candidate_write_file(loaded.bytes()).unwrap();
+            let uncached = tree::finish_comment_owners_replay(&source, candidate.clone());
+            let cached = tree::finish_comment_owners_replay_loaded(&source, candidate, loaded);
+            assert!(cached == uncached, "loaded replay changed bytes");
+            checked += 1;
+            Some(cached)
+        });
+    }
+    assert!(checked > 0);
+}
+
+#[test]
 fn owner_round7_preview_reuse_keeps_legacy_saves_distinct() {
     let source = b"auth-dir: /x # setting\n";
     let previews = raw_feet_survive_following_saves(source, true).unwrap();

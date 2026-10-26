@@ -2469,6 +2469,36 @@ pub(crate) fn finish_comment_owners(
     candidate: ReceiptedYaml,
     repeat: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
 ) -> Vec<u8> {
+    finish_comment_owners_proven(source, candidate, |loaded| repeat(loaded.bytes))
+}
+
+/// A proposal that passed the outer owner, value and loadability checks.
+#[derive(Clone, Copy)]
+pub(crate) struct LoadedProposal<'a> {
+    bytes: &'a [u8],
+    loader: &'a Option<super::loader_yaml::Node>,
+}
+
+impl<'a> LoadedProposal<'a> {
+    pub(crate) fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+}
+
+pub(crate) fn finish_comment_owners_proven(
+    source: &CommentSource,
+    candidate: ReceiptedYaml,
+    repeat: impl FnOnce(LoadedProposal<'_>) -> Option<Vec<u8>>,
+) -> Vec<u8> {
+    finish_comment_owners_loaded(source, candidate, repeat, None)
+}
+
+fn finish_comment_owners_loaded(
+    source: &CommentSource,
+    candidate: ReceiptedYaml,
+    repeat: impl FnOnce(LoadedProposal<'_>) -> Option<Vec<u8>>,
+    loaded: Option<LoadedProposal<'_>>,
+) -> Vec<u8> {
     if !owner_protection_enabled() || !source.complete || source.comments.is_empty() {
         return candidate.bytes;
     }
@@ -2523,6 +2553,7 @@ pub(crate) fn finish_comment_owners(
         return original_bytes;
     };
     let emissions = first_emissions(&proposed);
+    let cached = loaded.filter(|loaded| loaded.bytes == proposed.bytes);
     if !source.holds(&parsed)
         || !comment_multiset_matches(source, &proposed.bytes)
         || proposed.bytes.split(|b| *b == b'\n').any(|line| {
@@ -2541,18 +2572,38 @@ pub(crate) fn finish_comment_owners(
                 })
         })
         || !same_node_values(&original, &parsed)
-        || super::super::Config::load_bytes(&proposed.bytes).is_err()
-        || !same_loader_values(&original_bytes, &proposed.bytes)
+        || (cached.is_none() && super::super::Config::load_bytes(&proposed.bytes).is_err())
     {
         return original_bytes;
     }
-    if repeat(&proposed.bytes).as_ref() != Some(&proposed.bytes) {
+    let Ok(original_loader) = super::loader_root(&original_bytes) else {
+        return original_bytes;
+    };
+    let owned_loader = if cached.is_none() {
+        super::loader_root(&proposed.bytes).ok()
+    } else {
+        None
+    };
+    let Some(loader) = cached.map(|loaded| loaded.loader).or(owned_loader.as_ref()) else {
+        return original_bytes;
+    };
+    if !same_loader_nodes(&original_loader, loader)
+        || repeat(LoadedProposal {
+            bytes: &proposed.bytes,
+            loader,
+        })
+        .as_ref()
+            != Some(&proposed.bytes)
+    {
         return original_bytes;
     }
     proposed.bytes
 }
 
-fn same_loader_values(a: &[u8], b: &[u8]) -> bool {
+fn same_loader_nodes(
+    a: &Option<super::loader_yaml::Node>,
+    b: &Option<super::loader_yaml::Node>,
+) -> bool {
     fn same(a: &super::loader_yaml::Node, b: &super::loader_yaml::Node) -> bool {
         a.kind == b.kind
             && a.tag == b.tag
@@ -2560,9 +2611,9 @@ fn same_loader_values(a: &[u8], b: &[u8]) -> bool {
             && a.content.len() == b.content.len()
             && a.content.iter().zip(&b.content).all(|(a, b)| same(a, b))
     }
-    match (super::loader_root(a), super::loader_root(b)) {
-        (Ok(Some(a)), Ok(Some(b))) => same(&a, &b),
-        (Ok(None), Ok(None)) => true,
+    match (a, b) {
+        (Some(a), Some(b)) => same(a, b),
+        (None, None) => true,
         _ => false,
     }
 }
@@ -3008,6 +3059,21 @@ pub(crate) fn finish_comment_owners_replay(
     candidate: ReceiptedYaml,
 ) -> Vec<u8> {
     finish_comment_owners(source, candidate, |bytes| Some(bytes.to_vec()))
+}
+
+/// Reuse the outer gate's exact validated bytes and parsed loader tree.
+/// A different proposal still loads and parses independently.
+pub(crate) fn finish_comment_owners_replay_loaded(
+    source: &CommentSource,
+    candidate: ReceiptedYaml,
+    loaded: LoadedProposal<'_>,
+) -> Vec<u8> {
+    finish_comment_owners_loaded(
+        source,
+        candidate,
+        |loaded| Some(loaded.bytes.to_vec()),
+        Some(loaded),
+    )
 }
 
 #[cfg(test)]
