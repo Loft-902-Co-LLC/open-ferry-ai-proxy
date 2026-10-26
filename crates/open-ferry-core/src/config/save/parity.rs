@@ -10,6 +10,15 @@ use super::{Node, STR_TAG, SaveError, marshal_config, unmarshal};
 #[cfg(feature = "parity")]
 pub mod ablation;
 
+/// Capture the caller's thread-local diagnostic scope before a parity replay
+/// moves to a worker thread. Workers explicitly inherit these disabled bits.
+#[cfg(feature = "parity")]
+pub fn disabled_protections(protections: &[ablation::Protection]) -> u8 {
+    protections.iter().enumerate().fold(0, |mask, (i, p)| {
+        mask | (u8::from(!ablation::enabled(*p)) << i)
+    })
+}
+
 mod clean;
 pub use clean::{
     comment_free_source, faithful_without_comments, has_binary_values, same_values, single_document,

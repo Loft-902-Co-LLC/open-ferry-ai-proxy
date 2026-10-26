@@ -327,6 +327,15 @@ mod tests {
                 rust["files"][0] = "changed".into();
             }
             let result = stepwise(&case, &original, &rust, |single| {
+                if single.options.get("_ownership_request").is_some()
+                    || single.options.get("_ablation_trace").is_some()
+                {
+                    // Negative counterfactuals may now try the supplementary
+                    // owner proof. This fixture supplies no such receipt, so
+                    // that path must fail closed; the original replay inputs
+                    // and every acceptance/refusal assertion stay exact.
+                    return Ok(GoResult::Panic("unavailable supplementary oracle".into()));
+                }
                 let row = fixture["steps"]
                     .as_array()
                     .unwrap()

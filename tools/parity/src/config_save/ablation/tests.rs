@@ -374,7 +374,9 @@ fn retained_source_owner_measured_tracked_gap_reaches_loss_conditions() {
             "the measured gap has an untracked source owner"
         );
     }
-    assert!(core::source_owner_candidate(source, protected));
+    // This candidate has no surviving protected comments, so even the broad
+    // hint can refuse it. The proof assertions below still isolate the loss.
+    assert!(!core::source_owner_candidate(source, protected));
     let proof = core::retained_source_owner(source, protected, operation, evidence);
     assert!(
         proof.conditions == [false, true, true, true, false],

@@ -9,7 +9,7 @@ use std::{
 };
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
-static TOTALS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static TOTALS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 thread_local! { static STACK: RefCell<Vec<(usize,Instant,Duration)>> = const { RefCell::new(Vec::new()) }; }
 pub(crate) struct Timer(bool);
 impl Timer {
@@ -44,16 +44,25 @@ impl Drop for Timer {
 }
 pub(crate) fn flush() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_METRICS") {
-        let values: serde_json::Map<_, _> = ["writer", "go", "counterfactual_search", "bind"]
-            .into_iter()
-            .enumerate()
-            .map(|(i, name)| {
-                (
-                    name.into(),
-                    serde_json::json!(TOTALS[i].load(Ordering::Relaxed) as f64 / 1e9),
-                )
-            })
-            .collect();
+        // Parallel wait is wall time; worker writer time is aggregate worker
+        // duration. Report both separately, so they are never added together.
+        let values: serde_json::Map<_, _> = [
+            "writer",
+            "go",
+            "counterfactual_search",
+            "bind",
+            "source_owner_proof",
+            "parallel_replay_wall",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
+            (
+                name.into(),
+                serde_json::json!(TOTALS[i].load(Ordering::Relaxed) as f64 / 1e9),
+            )
+        })
+        .collect();
         std::fs::write(path, serde_json::to_vec_pretty(&values)?)?;
     }
     Ok(())

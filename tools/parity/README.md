@@ -343,6 +343,14 @@ Full mode retains its subset-search diagnostics under `full_search`. Every
 step also reruns the unchanged comparison rules on its exact preceding source.
 Only steps those rules cannot prove need a new owner certificate and its repeat
 check. The decision file includes certificate kinds and refusal reasons.
+The optimized search evaluates at most four isolated Rust replays concurrently
+and consumes them in the original mask order. Workers inherit the caller's
+disabled protections explicitly. Full mode runs the sequential search, bypasses
+the exact-input proof cache, and retains marked Go replays even when exact Go
+bytes already rule out an owner repair. A pure scalar-loss refusal guard runs
+before supplementary owner work. `OPEN_FERRY_PARITY_METRICS` names a JSON timing
+file. Worker writer time is aggregate duration; `parallel_replay_wall` is the
+corresponding wait time and must not be added to that worker duration.
 
 Every line of a moved comment block must be kept at its final place, in source
 order. Keeping part of a moved block stays Different. Complete blocks can

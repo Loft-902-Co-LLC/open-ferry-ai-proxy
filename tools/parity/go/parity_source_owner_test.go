@@ -44,3 +44,27 @@ func TestSourceOwnerBundleReplaysTheRealOperationWithOpaqueCommentIdentities(t *
 		t.Fatal("pinned-parser values or source-owner inventory did not match the control")
 	}
 }
+
+func TestEqualGoBytesSkipOnlyUnusableOwnerWitnesses(t *testing.T) {
+	const source = "auth-dir: /a # own\n"
+	op := map[string]any{"op": "nested", "keys": []any{"auth-dir"}, "value": "/x"}
+	var exact map[string]any
+	if json.Unmarshal(configSaveSteps(input{Options: configSaveJSON(map[string]any{"file": source, "steps": []any{op}})}), &exact) != nil {
+		t.Fatal("exact Go replay is not JSON")
+	}
+	protected := exact["files"].([]any)[0].(string)
+	for _, full := range []bool{false, true} {
+		var proof map[string]any
+		request := input{Options: configSaveJSON(map[string]any{"_ownership_request": map[string]any{"source": source, "operation": op, "source_owner": true, "protected": protected, "full": full}})}
+		if json.Unmarshal(configSaveSteps(request), &proof) != nil {
+			t.Fatal("ownership reply is not JSON")
+		}
+		frame := proof["retained_source_owner"].(map[string]any)
+		if !reflect.DeepEqual(frame["exact_go"], exact) {
+			t.Fatal("optimization changed the exact Go replay")
+		}
+		if (frame["marked_go"] != nil) != full {
+			t.Fatal("full mode must retain the marked replay")
+		}
+	}
+}
