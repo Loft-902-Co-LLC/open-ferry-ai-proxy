@@ -90,8 +90,6 @@ fn owner_round8_raw_at_budget_still_repairs() {
 
 #[test]
 fn owner_round7_raw_over_budget_keeps_writer_bytes() {
-    use sha2::{Digest, Sha256};
-
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
     let mut source = rows.iter().find(|row| row["case"] == "fff").unwrap()["source"]
@@ -106,7 +104,7 @@ fn owner_round7_raw_over_budget_keeps_writer_bytes() {
     let actual = render_write_file(source.as_bytes()).unwrap();
     // Independently captured with write_file on main dee3186c.
     assert_eq!(
-        format!("{:x}", Sha256::digest(&actual)),
+        write::sha256_hex(&actual),
         "61861fefdd2d462d66ed57e27238d87d1c73ea066a9a805adb352cda3a728ed3"
     );
 }
