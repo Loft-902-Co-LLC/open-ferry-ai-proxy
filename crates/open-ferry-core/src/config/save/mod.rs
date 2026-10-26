@@ -494,7 +494,7 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
             return render_write_file_at_writer_placement(data).ok();
         }
         if protects_key_feet {
-            cached_previews = Some(raw_feet_survive_following_saves(data)?);
+            cached_previews = Some(raw_feet_survive_following_saves(data, legacy_layout)?);
         }
         let (candidate, source) = candidate_write_file(data).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
@@ -577,16 +577,23 @@ fn raw_comments_survive_following_saves(
             let Ok(config) = Config::parse(proposal) else {
                 return false;
             };
-            let (Ok(save), Ok(migrate)) = (
-                render_preserving_comments(proposal, &config, false),
-                render_preserving_comments(proposal, &config, true),
-            ) else {
-                return false;
+            let outputs = if legacy_layout {
+                let (Ok(save), Ok(migrate)) = (
+                    render_preserving_comments(proposal, &config, false),
+                    render_preserving_comments(proposal, &config, true),
+                ) else {
+                    return false;
+                };
+                [save, migrate]
+            } else {
+                // An explicit v8 marker makes both saves take the same
+                // migration branch, including their repeat checks.
+                let Ok(save) = render_preserving_comments(proposal, &config, true) else {
+                    return false;
+                };
+                [save.clone(), save]
             };
-            RawSavePreviews {
-                config,
-                outputs: [save, migrate],
-            }
+            RawSavePreviews { config, outputs }
         }
     };
     // Every v8 edit first migrates the stored bytes themselves. A save's
@@ -614,17 +621,25 @@ fn raw_comments_survive_following_saves(
     })
 }
 
-fn raw_feet_survive_following_saves(data: &[u8]) -> Option<RawSavePreviews> {
+fn raw_feet_survive_following_saves(data: &[u8], legacy_layout: bool) -> Option<RawSavePreviews> {
     let config = Config::parse(data).ok()?;
     let mut outputs = [Vec::new(), Vec::new()];
-    for (index, output) in outputs.iter_mut().enumerate() {
-        let migrate = index == 1;
+    let count = if legacy_layout { 2 } else { 1 };
+    for (index, output) in outputs.iter_mut().take(count).enumerate() {
+        let migrate = index == 1 || !legacy_layout;
         let (candidate, source) = candidate_preserving_comments(data, &config, migrate).ok()?;
-        let bytes = render_preserving_comments(data, &config, migrate).ok()?;
+        // Keep this candidate for the source check instead of rendering it again.
+        let bytes = tree::finish_comment_owners(&source, candidate.clone(), |data| {
+            let (candidate, source) = candidate_preserving_comments(data, &config, migrate).ok()?;
+            Some(tree::finish_comment_owners_replay(&source, candidate))
+        });
         if !tree::output_holds_source(&source, candidate, &bytes) {
             return None;
         }
         *output = bytes;
+    }
+    if !legacy_layout {
+        outputs[1] = outputs[0].clone();
     }
     Some(RawSavePreviews { config, outputs })
 }

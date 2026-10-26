@@ -109,6 +109,25 @@ fn owner_round7_raw_output_crossing_budget_keeps_writer_bytes() {
 }
 
 #[test]
+fn owner_round7_preview_reuse_keeps_legacy_saves_distinct() {
+    let source = b"auth-dir: /x # setting\n";
+    let previews = raw_feet_survive_following_saves(source, true).unwrap();
+    assert!(previews.outputs[0] != previews.outputs[1]);
+    for (index, output) in previews.outputs.iter().enumerate() {
+        assert!(
+            *output == render_preserving_comments(source, &previews.config, index == 1).unwrap()
+        );
+    }
+    let source = b"config-version: 8\noauth:\n  auth-dir: /x # setting\n";
+    let previews = raw_feet_survive_following_saves(source, false).unwrap();
+    for (index, output) in previews.outputs.iter().enumerate() {
+        assert!(
+            *output == render_preserving_comments(source, &previews.config, index == 1).unwrap()
+        );
+    }
+}
+
+#[test]
 fn owner_round7_preview_only_needs_writer_for_a_source_deficit() {
     use std::cell::Cell;
     let source = b"auth-dir: /x # same\n";
