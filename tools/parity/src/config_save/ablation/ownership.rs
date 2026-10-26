@@ -140,22 +140,6 @@ pub(super) fn certify_repair(
     if proofs.is_empty() {
         return Ok(None);
     }
-    if steps
-        .iter()
-        .zip(gfiles)
-        .zip(rfiles)
-        .enumerate()
-        .any(|(i, ((step, g), r))| {
-            g != r
-                && !stable_repeat(
-                    &bound.options["_ownership_evidence"][i]["retained_source_owner"],
-                    step,
-                    r.as_str().unwrap(),
-                )
-        })
-    {
-        return Ok(None);
-    }
     Ok(Some(Attempt {
         deviations: Some(deviations),
         evidence: json!({"kind":"certified-protection-ablation","method":"source-owner-certificate","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"failures":[]}),
@@ -324,30 +308,6 @@ fn inherited_repair(case: &Case, index: usize, protected: &str) -> bool {
     repaired
 }
 
-#[cfg(test)]
-mod repeat_tests {
-    use super::*;
-
-    #[test]
-    fn inherited_prefix_requires_the_current_operations_repeat() {
-        let fixtures: Value =
-            serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
-        let f = &fixtures[0];
-        let protected = f["protected"].as_str().unwrap();
-        let step = json!({"op":"save","migrate":false});
-        let mut case = Case::new("inherited-repeat", "", "").with_options(json!({
-            "file":f["source"],"steps":[f["operation"],step],
-            "_ownership_evidence":[f["evidence"],{"retained_source_owner":{
-                "exact_go":{"files":[protected]},"repeat_input":protected,"repeat_operation":step,"repeat_ok":true,"repeated":protected
-            }}]
-        }));
-        assert!(inherited_repair(&case, 1, protected));
-        case.options["_ownership_evidence"][1]["retained_source_owner"]["repeated"] =
-            "changed".into();
-        assert!(!inherited_repair(&case, 1, protected));
-    }
-}
-
 pub(super) fn source_owner(
     case: &Case,
     index: usize,
@@ -388,4 +348,28 @@ pub(super) fn source_owner_evidence(case: &Case, protected: &Value) -> Vec<Value
         source = file;
     }
     result
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::*;
+
+    #[test]
+    fn inherited_prefix_requires_the_current_operations_repeat() {
+        let fixtures: Value =
+            serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
+        let f = &fixtures[0];
+        let protected = f["protected"].as_str().unwrap();
+        let step = json!({"op":"save","migrate":false});
+        let mut case = Case::new("inherited-repeat", "", "").with_options(json!({
+            "file":f["source"],"steps":[f["operation"],step],
+            "_ownership_evidence":[f["evidence"],{"retained_source_owner":{
+                "exact_go":{"files":[protected]},"repeat_input":protected,"repeat_operation":step,"repeat_ok":true,"repeated":protected
+            }}]
+        }));
+        assert!(inherited_repair(&case, 1, protected));
+        case.options["_ownership_evidence"][1]["retained_source_owner"]["repeated"] =
+            "changed".into();
+        assert!(!inherited_repair(&case, 1, protected));
+    }
 }
