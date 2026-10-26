@@ -1,11 +1,87 @@
 //! Per-step source identities from the independent pinned Go tree oracle.
 use super::*;
 
+/// A complete source-owner certificate needs no ablation witness: exact Go
+/// replays, both parsers, physical layout, data and Rust repeats independently
+/// account for every differing snapshot. A failed candidate changes nothing.
+pub(super) fn certify_repair(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
+    run_go: &mut impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+) -> Result<Option<Attempt>, Box<dyn Error>> {
+    let (Some(steps), Some(gfiles), Some(rfiles)) = (
+        case.options["steps"].as_array(),
+        go["files"].as_array(),
+        protected["files"].as_array(),
+    ) else {
+        return Ok(None);
+    };
+    if go.as_object().is_none_or(|o| o.len() != 1)
+        || protected.as_object().is_none_or(|o| o.len() != 1)
+        || steps.len() != gfiles.len()
+        || steps.len() != rfiles.len()
+        || go == protected
+        || !gfiles.iter().zip(rfiles).all(|(g, r)| {
+            g.as_str().zip(r.as_str()).is_some_and(|(g, r)| {
+                core::single_document(g)
+                    && core::single_document(r)
+                    && Config::load_bytes(g.as_bytes()).is_ok()
+                    && Config::load_bytes(r.as_bytes()).is_ok()
+                    && core::faithful_without_comments(g)
+                        .zip(core::faithful_without_comments(r))
+                        .is_some_and(|(g, r)| g == r)
+            })
+        })
+    {
+        return Ok(None);
+    }
+    // Serialized evidence is never an oracle receipt.
+    let mut unbound = case.clone();
+    if let Some(options) = unbound.options.as_object_mut() {
+        options.remove("_ownership_evidence");
+    }
+    if replay(&unbound, 0).is_none_or(|r| r.output != *protected) {
+        return Ok(None);
+    }
+    let bound = bind(&unbound, protected, run_go)?;
+    let Some(mut source) = bound.options["file"].as_str() else {
+        return Ok(None);
+    };
+    let mut proofs = Vec::new();
+    for (index, ((step, g), r)) in steps.iter().zip(gfiles).zip(rfiles).enumerate() {
+        if step["op"] == "write" {
+            let Some(body) = step["body"].as_str() else {
+                return Ok(None);
+            };
+            source = body;
+        }
+        let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
+            return Ok(None);
+        };
+        if g != r && !inherited_repair(&bound, index, r) {
+            let Some(proof) = source_owner(&bound, index, source, r) else {
+                return Ok(None);
+            };
+            if !proof.accepted() {
+                return Ok(None);
+            }
+            proofs.push(json!({"step":index,"checks":proof.conditions,"accepted":true}));
+        }
+        source = r;
+    }
+    Ok(Some(Attempt {
+        deviations: Some(BTreeSet::from([Deviation::RetainedDeferredCommentOwners])),
+        evidence: json!({"kind":"certified-protection-ablation","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"source_identities":bound.options["_ownership_evidence"],"checks":[true,true,true,true,true],"failures":[]}),
+    }))
+}
+
 pub(super) fn bind(
     case: &Case,
     protected: &Value,
     run_go: &mut impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
 ) -> Result<Case, Box<dyn Error>> {
+    let _timing = super::super::metrics::Timer::start(3);
     let mut bound = case.clone();
     let mut evidence = Vec::new();
     let Some(mut source) = case.options["file"].as_str() else {
@@ -22,7 +98,7 @@ pub(super) fn bind(
             source = step["body"].as_str().unwrap_or_default();
         }
         let mut request = case.clone();
-        request.options = json!({"_ownership_request":{"source":source,"operation":step,"source_owner":file.as_str().is_some_and(|r|core::source_owner_candidate(source,r)),"protected":file}});
+        request.options = json!({"_ownership_request":{"source":source,"operation":step,"source_owner":file.as_str().is_some_and(|r|core::source_owner_candidate(source,r)),"foot_separators":file.as_str().is_some_and(|r| !core::source_owner_layout(source,source,r)),"protected":file}});
         let mut witness = output(run_go(&request)?).unwrap_or(Value::Null);
         if let Some(frame) = witness.get_mut("retained_source_owner")
             && let Some(protected) = file.as_str()
@@ -89,6 +165,12 @@ pub(super) fn analyze(
     if strict.accepted() {
         return strict;
     }
+    if inherited_repair(case, index, protected) {
+        return core::CommentOwnership {
+            failure: None,
+            rules: vec!["retained-source-owner"],
+        };
+    }
     if source_owner(case, index, source, protected).is_some_and(|proof| proof.accepted()) {
         let mut rules = vec!["retained-source-owner"];
         if case.options["_ownership_evidence"][index]["archives"]
@@ -104,6 +186,46 @@ pub(super) fn analyze(
     } else {
         strict
     }
+}
+
+/// Once a prefix's owner repair is proved, a subsequent byte-identical Go
+/// replay from that repaired prefix needs no new owner exception. A raw write
+/// starts a new source and cannot inherit a certificate from the old file.
+fn inherited_repair(case: &Case, index: usize, protected: &str) -> bool {
+    let Some(evidence) = case.options["_ownership_evidence"].as_array() else {
+        return false;
+    };
+    let Some(steps) = case.options["steps"].as_array() else {
+        return false;
+    };
+    if index == 0 || steps[index]["op"] == "write" {
+        return false;
+    }
+    let frame = &evidence[index]["retained_source_owner"];
+    if frame["exact_go"] != json!({"files":[protected]}) {
+        return false;
+    }
+    let mut repaired = false;
+    for (i, step) in steps.iter().enumerate().take(index) {
+        if step["op"] == "write" {
+            repaired = false;
+        }
+        let witness = &evidence[i];
+        let Some(source) = witness["source"].as_str() else {
+            return false;
+        };
+        let Some(output) = witness["retained_source_owner"]["protected"].as_str() else {
+            return false;
+        };
+        if core::retained_source_owner(source, output, step, witness).accepted() {
+            repaired = true;
+        } else if !repaired
+            || witness["retained_source_owner"]["exact_go"] != json!({"files":[output]})
+        {
+            return false;
+        }
+    }
+    repaired
 }
 
 pub(super) fn source_owner(

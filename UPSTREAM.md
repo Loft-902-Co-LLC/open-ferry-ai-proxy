@@ -637,6 +637,22 @@ yaml.v3 needs it to retain a comment on a key. Extra comments need the
 existing Go archive or migration proof. The evidence lists the protections the
 proof needed.
 
+The source-owner proof also counts alias-expanded copies and physical comments
+on alias nodes. Pinned yaml.v3 and Rust must agree on the source inventories
+and output owners. Each repaired text must retain every source copy at its
+bound source owner; other comments keep Go's owners and order. Counts cannot
+exceed the source and independently computed archives. Values, tags, faithful
+comment-free bytes, loading and operation repeats remain required. A new foot
+separator needs an exact one-line removal which makes pinned yaml.v3 move its
+source-owned foot. Removing every licensed separator must leave layout that
+passes the existing guard. A later byte-identical Go replay can carry a proved
+prefix repair forward; a raw write starts a new source.
+
+Complete owner certificates bypass the subset search. The internal environment
+variable `OPEN_FERRY_PARITY_FULL_SEARCH` also executes the original exhaustive
+search, using the same certificate and refusal decisions. Go replies are cached
+only within one record, keyed by their complete request options.
+
 For archives of unknown keys, a separate replay computes the exact comment
 lines and their places from each original entry and the requested write.
 Each generated line must appear once there, in addition to any equal comments

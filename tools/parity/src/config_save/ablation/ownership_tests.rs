@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn fast_owner_certificate_requires_the_full_proof_and_matches_exhaustive_mode() {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
+    let fixture = &fixtures[0];
+    let case = Case::new("native-foot-repair", "", "")
+        .with_options(json!({"file":fixture["source"],"steps":[fixture["operation"]]}));
+    let go = &fixture["evidence"]["retained_source_owner"]["exact_go"];
+    let protected = json!({"files":[fixture["protected"]]});
+    for corrupt in [false, true] {
+        let mut witness = fixture["evidence"].clone();
+        if corrupt {
+            witness["retained_source_owner"]["protected_inventory"]["comments"][0]["source"]["slot"] =
+                "invalid".into();
+        }
+        let mut oracle = |_: &Case| Ok(GoResult::Output(serde_json::to_vec(&witness).unwrap()));
+        let proof = ownership::certify_repair(&case, go, &protected, &mut oracle).unwrap();
+        assert_eq!(
+            proof.is_some(),
+            !corrupt,
+            "fast path skipped a proof condition"
+        );
+        if !corrupt {
+            let fast = certify_mode(&case, go, &protected, &mut oracle, false).unwrap();
+            let full = certify_mode(&case, go, &protected, &mut oracle, true).unwrap();
+            assert_eq!(fast.deviations, full.deviations);
+            assert_eq!(fast.evidence, full.evidence);
+        }
+    }
+}
+
+#[test]
 fn oracle_requests_bind_each_protected_source_and_complete_operation() {
     let case = Case::new("binding", "", "").with_options(json!({"file":"a: 1\n","steps":[{"op":"nested","keys":["a"],"value":"2"},{"op":"save","migrate":true},{"op":"write","body":"b: 3\n"}]}));
     let protected = json!({"files":["a: '2'\n","config-version: 8\n","b: 3\n"]});

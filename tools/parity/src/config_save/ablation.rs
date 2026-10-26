@@ -392,8 +392,53 @@ pub struct Attempt {
     pub evidence: Value,
 }
 
-/// An otherwise Different case receives named deviations only after all checks.
+/// The optimized and exhaustive modes share the same proof and refusal path.
+/// Exhaustive mode additionally executes the original subset search, retaining
+/// its diagnostic if the supplementary source-owner certificate is refused.
 pub fn certify(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
+    run_go: impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+) -> Result<Attempt, Box<dyn Error>> {
+    certify_mode(
+        case,
+        go,
+        protected,
+        run_go,
+        std::env::var_os("OPEN_FERRY_PARITY_FULL_SEARCH").is_some(),
+    )
+}
+
+fn certify_mode(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
+    mut run_go: impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+    full: bool,
+) -> Result<Attempt, Box<dyn Error>> {
+    let _timing = super::metrics::Timer::start(2);
+    let mut cache = std::collections::BTreeMap::<String, GoResult>::new();
+    let mut cached_go = |request: &Case| {
+        let key = serde_json::to_string(&request.options)?;
+        if !cache.contains_key(&key) {
+            cache.insert(key.clone(), run_go(request)?);
+        }
+        Ok(match &cache[&key] {
+            GoResult::Output(bytes) => GoResult::Output(bytes.clone()),
+            GoResult::Panic(message) => GoResult::Panic(message.clone()),
+        })
+    };
+    let owner = ownership::certify_repair(case, go, protected, &mut cached_go)?;
+    if !full && owner.is_some() {
+        return Ok(owner.unwrap());
+    }
+    let searched = certify_full(case, go, protected, &mut cached_go)?;
+    Ok(owner.unwrap_or(searched))
+}
+
+/// An otherwise Different case receives named deviations only after all checks.
+fn certify_full(
     case: &Case,
     go: &Value,
     protected: &Value,
@@ -573,6 +618,36 @@ pub fn certify(
 
 mod diagnostics;
 mod ownership;
+
+#[cfg(test)]
+pub(super) fn certify_recorded_owners(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
+    receipts: &Value,
+) -> Attempt {
+    certify_mode(
+        case,
+        go,
+        protected,
+        |request| {
+            let requested = &request.options["_ownership_request"];
+            let witness = receipts["source_identities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| {
+                    w["source"] == requested["source"]
+                        && w["operation"] == requested["operation"]
+                        && w["retained_source_owner"]["protected"] == requested["protected"]
+                })
+                .ok_or("unrecorded oracle request")?;
+            Ok(GoResult::Output(serde_json::to_vec(witness)?))
+        },
+        false,
+    )
+    .unwrap()
+}
 
 #[cfg(test)]
 mod tests;

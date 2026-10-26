@@ -324,6 +324,22 @@ yaml.v3 needs it to retain a comment on a key. Extra comments need the
 existing Go archive or migration proof. The evidence lists the protections the
 proof needed.
 
+The extended proof checks alias-expanded source copies and physical comments
+on aliases against a separate pinned-yaml.v3 inventory. Restored text must keep
+every source copy at its bound owner. Unchanged comments retain Go's owners
+and order. Source counts and independently computed archives bound all output
+occurrences. The value, tag, faithful-byte, load and repeat checks still apply.
+A new foot separator is accepted only when an exact single-line removal makes
+pinned yaml.v3 move that source-owned foot. After removing all such separators,
+the existing layout guard must pass.
+
+A complete owner certificate can skip subset enumeration. Set the internal
+environment variable `OPEN_FERRY_PARITY_FULL_SEARCH=1` to execute that search
+too and compare decisions. `OPEN_FERRY_PARITY_DECISIONS` names a JSONL output
+file containing case names, decisions, deviations and refusal kinds, without
+config values. `OPEN_FERRY_PARITY_WORK_DIR` redirects scratch artifacts for
+isolated comparisons. These switches belong to the offline tool only.
+
 Every line of a moved comment block must be kept at its final place, in source
 order. Keeping part of a moved block stays Different. Complete blocks can
 still pass: `random-32-223` keeps all 23 moved source lines, including two-line
