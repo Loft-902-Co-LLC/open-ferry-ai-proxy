@@ -418,6 +418,7 @@ fn certify_mode(
     full: bool,
 ) -> Result<Attempt, Box<dyn Error>> {
     let _timing = super::metrics::Timer::start(2);
+    ownership::reset_proofs();
     let mut cache = std::collections::BTreeMap::<String, GoResult>::new();
     let mut cached_go = |request: &Case| {
         let key = serde_json::to_string(&request.options)?;
@@ -434,7 +435,7 @@ fn certify_mode(
     if !full && let Some(owner) = owner {
         return Ok(owner);
     }
-    let searched = certify_full(case, go, protected, &mut cached_go)?;
+    let searched = certify_full(case, go, protected, &mut cached_go, !full)?;
     if let Some(mut owner) = owner {
         owner.evidence["full_search"] = searched.evidence;
         Ok(owner)
@@ -449,6 +450,7 @@ fn certify_full(
     go: &Value,
     protected: &Value,
     mut run_go: impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+    parallel: bool,
 ) -> Result<Attempt, Box<dyn Error>> {
     // Serialized replay inputs cannot supply their own oracle receipts.
     let mut unbound = case.clone();
@@ -495,14 +497,44 @@ fn certify_full(
     let mut oracle = None;
     let mut last = None;
     let mut bound_case = None;
-    for mask in masks {
+    let inherited = core::disabled_protections(&ALL);
+    let mut pending = std::collections::BTreeMap::new();
+    for (index, &mask) in masks.iter().enumerate() {
         // A proper reproducing subset makes this superset non-minimal,
         // regardless of its bytes. Record that exclusion explicitly.
         if !minimal(mask, &matches) {
+            pending.remove(&mask);
             dominated.push(mask);
             continue;
         }
-        let Some(ablated) = replay(case, mask) else {
+        let ablated = if parallel {
+            if pending.is_empty() {
+                // Only execution is concurrent. Consume results in the original
+                // cardinality/mask order, with the same minimality checks and
+                // first accepted/refused proof. Each call owns its file and
+                // explicitly inherits the caller's disabled protection scope.
+                let batch: Vec<_> = masks[index..]
+                    .iter()
+                    .copied()
+                    .filter(|m| minimal(*m, &matches))
+                    .take(4)
+                    .collect();
+                let _waiting = super::metrics::Timer::start(5);
+                pending = std::thread::scope(|scope| {
+                    batch
+                        .into_iter()
+                        .map(|m| (m, scope.spawn(move || replay(case, m | inherited))))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|(m, task)| (m, task.join().expect("ablation replay worker panicked")))
+                        .collect()
+                });
+            }
+            pending.remove(&mask).unwrap()
+        } else {
+            replay(case, mask)
+        };
+        let Some(ablated) = ablated else {
             matches.push((mask, false));
             trials.push(json!({"mask":mask,"failures":[{"check":1,"step":0,"file":0,"reason":"replay_unavailable"}]}));
             continue;

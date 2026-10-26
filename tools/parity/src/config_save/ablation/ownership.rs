@@ -1,6 +1,36 @@
 //! Per-step source identities from the independent pinned Go tree oracle.
 use super::*;
 
+thread_local! {
+    static PROOFS: std::cell::RefCell<std::collections::BTreeMap<String, [bool; 5]>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+pub(super) fn reset_proofs() {
+    PROOFS.with_borrow_mut(|cache| cache.clear());
+}
+
+fn prove(source: &str, protected: &str, step: &Value, witness: &Value) -> core::SourceOwnerProof {
+    let _timing = super::super::metrics::Timer::start(4);
+    if std::env::var_os("OPEN_FERRY_PARITY_FULL_SEARCH").is_some() {
+        return core::retained_source_owner(source, protected, step, witness);
+    }
+    // A pure proof over exact source/output/operation/native receipts. Its key
+    // includes every input, including negative receipts. Bound memory and reset
+    // it at each record; no serialized writer verdict enters this cache.
+    let key = serde_json::to_string(&(source, protected, step, witness)).unwrap();
+    if let Some(conditions) = PROOFS.with_borrow(|cache| cache.get(&key).copied()) {
+        return core::SourceOwnerProof { conditions };
+    }
+    let proof = core::retained_source_owner(source, protected, step, witness);
+    PROOFS.with_borrow_mut(|cache| {
+        if cache.len() == 32 {
+            cache.clear();
+        }
+        cache.insert(key, proof.conditions);
+    });
+    proof
+}
+
 /// A complete source-owner certificate needs no ablation witness: exact Go
 /// replays, both parsers, physical layout, data and Rust repeats independently
 /// account for every differing snapshot. A failed candidate changes nothing.
@@ -104,7 +134,7 @@ pub(super) fn certify_repair(
     }
     Ok(Some(Attempt {
         deviations: Some(deviations),
-        evidence: json!({"kind":"certified-protection-ablation","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"checks":[true,true,true,true,true],"failures":[]}),
+        evidence: json!({"kind":"certified-protection-ablation","method":"source-owner-certificate","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"failures":[]}),
     }))
 }
 
@@ -130,12 +160,20 @@ pub(super) fn bind(
             source = step["body"].as_str().unwrap_or_default();
         }
         let mut request = case.clone();
-        request.options = json!({"_ownership_request":{"source":source,"operation":step,"source_owner":file.as_str().is_some_and(|r|core::source_owner_candidate(source,r)),"foot_separators":file.as_str().is_some_and(|r| !core::source_owner_layout(source,source,r)),"protected":file}});
+        request.options = json!({"_ownership_request":{"source":source,"operation":step,"source_owner":file.as_str().is_some_and(|r|core::source_owner_candidate(source,r)),"foot_separators":file.as_str().is_some_and(|r| !core::source_owner_layout(source,source,r)),"protected":file,"full":std::env::var_os("OPEN_FERRY_PARITY_FULL_SEARCH").is_some()}});
         let mut witness = output(run_go(&request)?).unwrap_or(Value::Null);
         if let Some(frame) = witness.get_mut("retained_source_owner")
             && let Some(protected) = file.as_str()
         {
             frame["protected"] = protected.into();
+            if std::env::var_os("OPEN_FERRY_PARITY_FULL_SEARCH").is_none()
+                && (frame["exact_go"] == json!({"files":[protected]})
+                    || frame["exact_go"].as_object().is_some_and(|r| r.len() != 1))
+            {
+                evidence.push(witness);
+                source = protected;
+                continue;
+            }
             frame["repeat_input"] = protected.into();
             frame["repeat_operation"] = step.clone();
             let repeat = |operation: &Value| {
@@ -249,7 +287,7 @@ fn inherited_repair(case: &Case, index: usize, protected: &str) -> bool {
         let Some(output) = witness["retained_source_owner"]["protected"].as_str() else {
             return false;
         };
-        if core::retained_source_owner(source, output, step, witness).accepted() {
+        if prove(source, output, step, witness).accepted() {
             repaired = true;
         } else if !repaired
             || witness["retained_source_owner"]["exact_go"] != json!({"files":[output]})
@@ -267,7 +305,7 @@ pub(super) fn source_owner(
     protected: &str,
 ) -> Option<core::SourceOwnerProof> {
     let evidence = case.options["_ownership_evidence"].get(index)?;
-    Some(core::retained_source_owner(
+    Some(prove(
         source,
         protected,
         &case.options["steps"][index],

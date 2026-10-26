@@ -71,6 +71,7 @@ type configSaveOptions struct {
 		SourceOwner    bool           `json:"source_owner"`
 		FootSeparators bool           `json:"foot_separators"`
 		Protected      *string        `json:"protected"`
+		Full           bool           `json:"full"`
 	} `json:"_ownership_request"`
 }
 
@@ -92,15 +93,30 @@ func configSaveSteps(in input) []byte {
 	if options.Ownership != nil {
 		proof := config.ParityOwnership(options.Ownership.Source, options.Ownership.Operation)
 		if options.Ownership.SourceOwner {
-			identity := config.ParitySourceIdentity(options.Ownership.Source, options.Ownership.Operation)
-			frame := map[string]any{"identity": identity}
+			frame := map[string]any{}
 			proof["retained_source_owner"] = frame
-			frame["expanded_source_inventory"] = config.ParityExpandedInventory(options.Ownership.Source)
 			next := in
 			next.Options = configSaveJSON(map[string]any{"file": options.Ownership.Source, "steps": []any{options.Ownership.Operation}})
 			var exact any
 			if json.Unmarshal(configSaveSteps(next), &exact) == nil {
 				frame["exact_go"] = exact
+				// A failed Go operation cannot bind a successful owner repair.
+				// Identical bytes cannot both move a comment in Go and retain it
+				// at its source owner in Rust. Keep the exact replay for prefix
+				// inheritance, but avoid unusable inventories and marked runs.
+				if !options.Ownership.Full {
+					reply, ok := exact.(map[string]any)
+					if !ok || len(reply) != 1 {
+						return configSaveJSON(proof)
+					}
+					files, ok := reply["files"].([]any)
+					if !ok || len(files) != 1 {
+						return configSaveJSON(proof)
+					}
+					if options.Ownership.Protected != nil && files[0] == *options.Ownership.Protected {
+						return configSaveJSON(proof)
+					}
+				}
 				if reply, ok := exact.(map[string]any); ok {
 					if files, ok := reply["files"].([]any); ok && len(files) == 1 {
 						if text, ok := files[0].(string); ok {
@@ -109,6 +125,9 @@ func configSaveSteps(in input) []byte {
 					}
 				}
 			}
+			identity := config.ParitySourceIdentity(options.Ownership.Source, options.Ownership.Operation)
+			frame["identity"] = identity
+			frame["expanded_source_inventory"] = config.ParityExpandedInventory(options.Ownership.Source)
 			if options.Ownership.Protected != nil {
 				frame["protected_inventory"] = config.ParityDocumentInventory(*options.Ownership.Protected)
 				if options.Ownership.FootSeparators {

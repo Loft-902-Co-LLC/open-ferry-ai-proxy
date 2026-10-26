@@ -1417,6 +1417,18 @@ fn evaluate_with_whole_counterfactual(
     let results = upstream.run(translator.key(), std::slice::from_ref(&candidate), work_dir)?;
     let mut owner_proof = None;
     let mut counterfactual = evaluate(translator, &candidate, &results[0]);
+    let Some(counterfactual_go) = serde_json::from_str::<Value>(&counterfactual.go_output).ok()
+    else {
+        return Ok(evaluated);
+    };
+    let Some(reason) = config_save::counterfactual::reason_with_counterfactual(
+        case,
+        &original_go,
+        &counterfactual_go,
+        rust,
+    ) else {
+        return Ok(evaluated);
+    };
     if matches!(counterfactual.outcome, Outcome::Different(_))
         && let (Ok(cf_go), Ok(cf_rust)) = (
             serde_json::from_str::<Value>(&counterfactual.go_output),
@@ -1433,18 +1445,6 @@ fn evaluate_with_whole_counterfactual(
             counterfactual.outcome = Outcome::Equivalent(deviations);
         }
     }
-    let Some(counterfactual_go) = serde_json::from_str::<Value>(&counterfactual.go_output).ok()
-    else {
-        return Ok(evaluated);
-    };
-    let Some(reason) = config_save::counterfactual::reason_with_counterfactual(
-        case,
-        &original_go,
-        &counterfactual_go,
-        rust,
-    ) else {
-        return Ok(evaluated);
-    };
     if let (Ok(rust_original), Ok(rust_rewritten)) =
         (&evaluated.rust_output, &counterfactual.rust_output)
         && config_save::counterfactual::proves(

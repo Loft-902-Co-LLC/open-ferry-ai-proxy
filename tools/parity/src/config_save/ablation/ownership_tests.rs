@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn ordered_parallel_search_matches_sequential_search_and_inherits_scope() {
+    let case = Case::new("ordered-replays", "", "").with_options(json!({
+        "file":"# source\nauth-dir: /old\n",
+        "steps":[{"op":"nested","keys":["auth-dir"],"value":"/new"}]
+    }));
+    with_disabled(&[Protection::DroppedSingleKeyComment], || {
+        let protected = replay(&case, 0).unwrap().output;
+        for go in [
+            protected.clone(),
+            json!({"files":["auth-dir: /different\n"]}),
+        ] {
+            let mut oracle = |_: &Case| Ok(GoResult::Output(serde_json::to_vec(&go).unwrap()));
+            let fast = certify_full(&case, &go, &protected, &mut oracle, true).unwrap();
+            let full = certify_full(&case, &go, &protected, &mut oracle, false).unwrap();
+            assert_eq!(fast.deviations, full.deviations);
+            assert_eq!(fast.evidence, full.evidence);
+        }
+    });
+}
+
+#[test]
+fn cached_owner_proof_key_includes_all_native_receipts() {
+    let fixtures: Value =
+        serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
+    let f = &fixtures[0];
+    let mut case = Case::new("receipt-cache", "", "").with_options(json!({
+        "file":f["source"],"steps":[f["operation"]],"_ownership_evidence":[f["evidence"]]
+    }));
+    ownership::reset_proofs();
+    assert!(
+        ownership::source_owner(
+            &case,
+            0,
+            f["source"].as_str().unwrap(),
+            f["protected"].as_str().unwrap()
+        )
+        .unwrap()
+        .accepted()
+    );
+    case.options["_ownership_evidence"][0]["retained_source_owner"]["protected_inventory"]["comments"]
+        [0]["source"]["slot"] = "invalid".into();
+    assert!(
+        !ownership::source_owner(
+            &case,
+            0,
+            f["source"].as_str().unwrap(),
+            f["protected"].as_str().unwrap()
+        )
+        .unwrap()
+        .accepted()
+    );
+}
+
+#[test]
 fn fast_owner_certificate_requires_the_full_proof_and_matches_exhaustive_mode() {
     let fixtures: Value =
         serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
