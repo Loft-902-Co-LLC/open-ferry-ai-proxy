@@ -507,7 +507,9 @@ fn certify_full(
             dominated.push(mask);
             continue;
         }
-        let ablated = if parallel {
+        // Cheap, early reproductions should not pay for speculative writers.
+        // The exponential no-subset tail is where concurrency saves time.
+        let ablated = if parallel && index >= ALL.len() {
             if pending.is_empty() {
                 // Only execution is concurrent. Consume results in the original
                 // cardinality/mask order, with the same minimality checks and
