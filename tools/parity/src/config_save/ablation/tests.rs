@@ -116,6 +116,12 @@ fn assert_source_owner_layout_gap(fixture: &Value) {
         matches: &[(1, true)],
     });
     assert_eq!(result, [true, true, false, true, true]);
+    let failure = diagnostics::comments(&case, &protected, &replay).unwrap_err();
+    assert_eq!(failure["reason"], "physical_layout");
+    assert_eq!(
+        failure["source_owner_checks"],
+        json!([false, true, true, true, true])
+    );
 }
 
 #[test]

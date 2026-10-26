@@ -201,7 +201,19 @@ pub(super) fn comments(
         } else {
             return Err(at(3, i, json!({"reason":"missing_comment_trace"})));
         };
-        if let Some(failure) = analysis.failure {
+        if let Some(mut failure) = analysis.failure {
+            // This branch already refuses the step. Name a confirmed layout
+            // failure without changing the ownership decision or Go context.
+            if let Some(exact_go) = case.options["_ownership_evidence"][i]["retained_source_owner"]
+                ["go"]["files"][0]
+                .as_str()
+                && !core::source_owner_layout(source, exact_go, r)
+                && let Some(proof) = ownership::source_owner(case, i, source, r)
+                && proof.conditions == [false, true, true, true, true]
+            {
+                failure["reason"] = "physical_layout".into();
+                failure["source_owner_checks"] = json!(proof.conditions);
+            }
             return Err(at(3, i, failure));
         }
         // Every accepted ownership rule needs a layout check. Source-owner

@@ -17,6 +17,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   operation repeats. Comment-free re-encodes must match. All ownership rules
   also check trailing whitespace and blank runs against neighbouring positions
   in the source or Go output; byte-identical Go output passes directly.
+  Comment-only neighbours are keyed by their trimmed text; each blank run
+  draws its allowance from one input run.
 - **Offline differential parity in CI** runs handwritten cases and a fixed-seed random set against the pinned CLIProxyAPI source in required checks, with larger daily and manually seeded runs and retained synthetic failure artifacts ([parity in CI](tools/parity/README.md#in-ci)).
 - **Repeatable parity suite filters** select named suites with `open-ferry-parity --suite`; unknown names are rejected before running Go.
 - **Claude tool-closure and embedded JSON comparisons** recognize independent closures within each provider event and compact object-valued text only at documented translator paths with raw-request provenance.

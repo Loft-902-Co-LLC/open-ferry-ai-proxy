@@ -579,15 +579,18 @@ this layout check directly. Otherwise, regions are bounded by top-level keys
 and code lines shared with equal counts by the source, Go and our output. A
 blank run needs a source or Go run with the same previous or next position
 key. Each key includes its region, code without leading indentation or an
-explicit-key `? ` marker, and its in-region occurrence. Our run must be a
-subsequence of that one input run; allowances are never combined. Trailing
-whitespace needs the same code line, occurrence and suffix. A layout defect
-with no shared boundary fails closed. Comment-only lines count as positions
-for blank keys, while their text is ignored. A blank moved across a comment
-therefore needs a counterpart beside the same neighbouring position. The
-layout check leaves out wider space before a comment, double spaces inside a
-line, indentation and the final newline. Explicit-key syntax remains allowed
-because yaml.v3 needs it to retain a comment on a key. Extra comments need the
+explicit-key `? ` marker, and its in-region occurrence. Each run must be a
+subsequence of one input run; its allowance comes from that run alone.
+Separate runs may use different inputs. Trailing whitespace needs the same
+code line, occurrence and suffix. A layout defect with no shared boundary
+fails closed. Comment-only positions are keyed by their trimmed text. A blank
+run needs a counterpart beside the same normalized code or trimmed comment,
+counted by occurrence. An equal line inserted or removed earlier in the region
+can shift that count, and comments with equal text share this limit. Only one
+neighbour must match; a changed other neighbour remains allowed. The layout
+check leaves out wider space before a comment, double spaces inside a line,
+indentation and the final newline. Explicit-key syntax remains allowed because
+yaml.v3 needs it to retain a comment on a key. Extra comments need the
 existing Go archive or migration proof. The evidence lists the protections the
 proof needed.
 
