@@ -1120,3 +1120,36 @@ fn retained_source_owner_refuses_a_blank_moved_across_a_comment() {
         "x4-blank-before-kept-comment-same-region",
     ));
 }
+
+#[test]
+fn retained_source_owner_keeps_its_exact_input_go_layout_context() {
+    let f: Value = serde_json::from_str(include_str!(
+        "../testdata/source-owner-exact-input-context.json"
+    ))
+    .unwrap();
+    let mut options = f["options"].clone();
+    options["_ownership_evidence"] = f["source_identities"].clone();
+    let case = Case::new("exact-input-context", "", "").with_options(options);
+    let go = &f["original_go"];
+    let native_go =
+        &case.options["_ownership_evidence"][1]["retained_source_owner"]["go"]["files"][0];
+    assert!(
+        native_go != &go["files"][1],
+        "the two Go contexts must differ"
+    );
+    let replay = Replay {
+        output: f["ablated_rust"].clone(),
+        traces: vec![],
+    };
+    let result = checks(Proof {
+        case: &case,
+        go,
+        protected: &f["protected_rust"],
+        ablated: &replay,
+        go_trace: None,
+        expectation: &f["comment_free_go"],
+        mask: 1,
+        matches: &[(1, true)],
+    });
+    assert_eq!(result, [true; 5]);
+}
