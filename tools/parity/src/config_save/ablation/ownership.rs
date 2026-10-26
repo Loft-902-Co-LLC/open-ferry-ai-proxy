@@ -49,6 +49,8 @@ pub(super) fn certify_repair(
         return Ok(None);
     };
     let mut proofs = Vec::new();
+    let mut existing = Vec::new();
+    let mut deviations = BTreeSet::from([Deviation::RetainedDeferredCommentOwners]);
     for (index, ((step, g), r)) in steps.iter().zip(gfiles).zip(rfiles).enumerate() {
         if step["op"] == "write" {
             let Some(body) = step["body"].as_str() else {
@@ -59,6 +61,33 @@ pub(super) fn certify_repair(
         let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
             return Ok(None);
         };
+        let exact =
+            &bound.options["_ownership_evidence"][index]["retained_source_owner"]["exact_go"];
+        let mut single = unbound.clone();
+        single.options = json!({"file":source,"steps":[step]});
+        let compared = crate::evaluate(
+            crate::Translator::ConfigSave,
+            &single,
+            &GoResult::Output(serde_json::to_vec(exact)?),
+        );
+        if compared
+            .rust_output
+            .as_ref()
+            .is_ok_and(|output| *output == json!({"files":[r]}))
+            && matches!(
+                compared.outcome,
+                crate::Outcome::Identical | crate::Outcome::Equivalent(_)
+            )
+        {
+            let mut rules = Vec::new();
+            if let crate::Outcome::Equivalent(found) = compared.outcome {
+                rules = found.iter().map(|d| d.describe()).collect();
+                deviations.extend(found);
+            }
+            existing.push(json!({"step":index,"kind":"existing-comparison","rules":rules}));
+            source = r;
+            continue;
+        }
         if g != r && !inherited_repair(&bound, index, r) {
             let Some(proof) = source_owner(&bound, index, source, r) else {
                 return Ok(None);
@@ -70,9 +99,12 @@ pub(super) fn certify_repair(
         }
         source = r;
     }
+    if proofs.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(Attempt {
-        deviations: Some(BTreeSet::from([Deviation::RetainedDeferredCommentOwners])),
-        evidence: json!({"kind":"certified-protection-ablation","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"source_identities":bound.options["_ownership_evidence"],"checks":[true,true,true,true,true],"failures":[]}),
+        deviations: Some(deviations),
+        evidence: json!({"kind":"certified-protection-ablation","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"checks":[true,true,true,true,true],"failures":[]}),
     }))
 }
 

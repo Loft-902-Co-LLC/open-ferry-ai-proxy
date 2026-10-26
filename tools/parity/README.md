@@ -339,6 +339,10 @@ too and compare decisions. `OPEN_FERRY_PARITY_DECISIONS` names a JSONL output
 file containing case names, decisions, deviations and refusal kinds, without
 config values. `OPEN_FERRY_PARITY_WORK_DIR` redirects scratch artifacts for
 isolated comparisons. These switches belong to the offline tool only.
+Full mode retains its subset-search diagnostics under `full_search`. Every
+step also reruns the unchanged comparison rules on its exact preceding source.
+Only steps those rules cannot prove need a new owner certificate and its repeat
+check. The decision file includes certificate kinds and refusal reasons.
 
 Every line of a moved comment block must be kept at its final place, in source
 order. Keeping part of a moved block stays Different. Complete blocks can

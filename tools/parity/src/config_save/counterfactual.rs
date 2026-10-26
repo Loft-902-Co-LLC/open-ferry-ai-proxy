@@ -238,9 +238,11 @@ pub fn stepwise(
                 let Some(reason) = reason_with_counterfactual(&single, &go, &cf_go, rust) else {
                     return Ok(None);
                 };
+                let mut owner_evidence = None;
                 if matches!(cf.outcome, Outcome::Different(_)) {
                     let proof = super::ablation::certify(&candidate, &cf_go, cf_rust, &mut run_go)?;
                     if let Some(found) = proof.deviations {
+                        owner_evidence = Some(proof.evidence);
                         cf.outcome = Outcome::Equivalent(found);
                     }
                 }
@@ -258,6 +260,9 @@ pub fn stepwise(
                 protected = true;
                 deviations.extend(crate::proof_deviations(reason, &cf.outcome));
                 let mut proof = evidence(&single, &candidate, &go, &cf_go, rust, cf_rust);
+                if let Some(owner) = owner_evidence {
+                    proof["counterfactual_owner_proof"] = owner;
+                }
                 if let Outcome::Equivalent(found) = &cf.outcome {
                     proof["counterfactual_deviations"] =
                         json!(found.iter().map(|d| d.describe()).collect::<Vec<_>>());
