@@ -489,7 +489,8 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     check_values(&writer, &intended)?;
     let protects_key_feet = source.key_feet_need_restoring(&candidate);
     let mut cached_previews = None;
-    let proposal = tree::finish_comment_owners(&source, candidate, |data| {
+    let proposal = tree::finish_comment_owners_proven(&source, candidate, |loaded| {
+        let data = loaded.bytes();
         if data.len() > RAW_COMMENT_OWNER_BUDGET {
             return render_write_file_at_writer_placement(data).ok();
         }
@@ -497,7 +498,9 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
             cached_previews = Some(raw_feet_survive_following_saves(data, legacy_layout)?);
         }
         let (candidate, source) = candidate_write_file(data).ok()?;
-        Some(tree::finish_comment_owners_replay(&source, candidate))
+        Some(tree::finish_comment_owners_replay_loaded(
+            &source, candidate, loaded,
+        ))
     });
     if proposal != writer
         && !raw_comments_survive_following_saves(
