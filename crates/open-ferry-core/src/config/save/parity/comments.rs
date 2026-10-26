@@ -1375,11 +1375,11 @@ fn physical_layout(text: &str) -> Option<PhysicalLayout> {
         let code = code.trim_end_matches([' ', '\t']);
         if code.is_empty() {
             // A comment-only line is a position for neighbouring blanks, not
-            // a shared boundary or a layout defect. Its text is ignored.
+            // a shared boundary or a layout defect. Trim its text for identity.
             if comment.is_none() {
                 gaps.last_mut()?.push(line.to_owned());
             } else {
-                codes.push("\0comment".into());
+                codes.push(format!("\0comment\0{}", line.trim()));
                 trailing.push(None);
                 gaps.push(vec![]);
             }
@@ -1493,8 +1493,10 @@ fn layout_regions(physical: PhysicalLayout, anchors: &BTreeSet<String>) -> Sourc
 /// shared code lines and top-level keys. Blank runs need a source or Go run
 /// with the same previous or next normalized position and occurrence, including
 /// comment-only positions. Trailing suffixes also need equal raw code text.
-/// Allowances from different runs or inputs are never combined. The source-owner
-/// proof and the common ownership check both require this guard.
+/// Each run uses one input run; different runs may use different inputs.
+/// Adding or removing an equal line earlier can shift a blank's occurrence;
+/// equal-text comments share that limit. The source-owner proof and the common
+/// ownership check both require this guard.
 pub fn source_owner_layout(source: &str, go: &str, protected: &str) -> bool {
     if protected == go {
         return true;
@@ -1521,7 +1523,7 @@ fn physical_layout_matches(
     let counts = |physical: &PhysicalLayout| {
         let mut counts = BTreeMap::<String, usize>::new();
         for code in &physical.codes {
-            if code != "\0comment" {
+            if !code.starts_with("\0comment") {
                 *counts.entry(code.clone()).or_default() += 1;
             }
         }
@@ -1877,6 +1879,38 @@ mod tests {
         let kept = "top: 1\nm:\n    b: x\n\n    c: y\nend: 2\n";
         assert!(!source_owner_layout(source, go, moved));
         assert!(source_owner_layout(source, go, kept));
+    }
+
+    #[test]
+    fn source_owner_layout_a2_refuses_blank_after_a_different_moved_comment() {
+        let source = "top: 1\nm:\n  a: 1\n  # c1\n  b: 2\n  # c2\n\n  c: 3\nend: 2\n";
+        let go = "# c1\ntop: 1\nm:\n    a: 1\n    b: 2\n    # c2\n\n    c: 3\nend: 2\n";
+        let protected = "top: 1\nm:\n  a: 1\n  # c1\n\n  b: 2\n  # c2\n  c: 3\nend: 2\n";
+        assert!(!source_owner_layout(source, go, protected));
+    }
+
+    #[test]
+    fn source_owner_layout_a3_refuses_blank_after_a_different_remaining_comment() {
+        let source = "top: 1\nm:\n  # c1\n\n  a: 1\n  # c2\n  b: 2\nend: 2\n";
+        let go = "top: 1\nm:\n    a: 1\n    # c2\n    b: 2\nend: 2\n";
+        let protected = "top: 1\nm:\n  a: 1\n  # c2\n\n  b: 2\nend: 2\n";
+        assert!(!source_owner_layout(source, go, protected));
+    }
+
+    #[test]
+    fn source_owner_layout_w1_keeps_blank_after_its_comment_when_another_moves() {
+        let source = "top: 1\nm:\n  # c0\n  a: 1\n  # c1\n\n  b: 2\nend: 2\n";
+        let go = "# c0\ntop: 1\nm:\n    a: 1\n    # c1\n    b: 3\nend: 2\n";
+        let protected = "# c0\ntop: 1\nm:\n  a: 1\n  # c1\n\n  b: 3\nend: 2\n";
+        assert!(source_owner_layout(source, go, protected));
+    }
+
+    #[test]
+    fn source_owner_layout_w2_keeps_blank_before_its_comment_when_another_is_inline() {
+        let source = "top: 1\nm:\n  a: 1\n  # c1\n\n  # c2\n  b: 2\nend: 2\n";
+        let go = "top: 1\nm:\n    a: 1 # c1\n    b: 3\nend: 2\n";
+        let protected = "top: 1\nm:\n  a: 1 # c1\n\n  # c2\n  b: 3\nend: 2\n";
+        assert!(source_owner_layout(source, go, protected));
     }
 
     #[test]
