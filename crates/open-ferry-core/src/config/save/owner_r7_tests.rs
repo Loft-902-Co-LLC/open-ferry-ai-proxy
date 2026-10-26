@@ -67,7 +67,31 @@ fn owner_round7_raw_then_edit_claude_key() {
 }
 
 #[test]
+fn owner_round8_raw_at_budget_still_repairs() {
+    let rows: Vec<Value> =
+        serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
+    let mut source = rows.iter().find(|row| row["case"] == "fff").unwrap()["source"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    source.extend(std::iter::repeat_n(
+        '\n',
+        RAW_COMMENT_OWNER_BUDGET - source.len(),
+    ));
+    assert_eq!(source.len(), RAW_COMMENT_OWNER_BUDGET);
+    let writer = tree::without_owner_protection(|| render_write_file(source.as_bytes())).unwrap();
+    let actual = render_write_file(source.as_bytes()).unwrap();
+    assert!(
+        actual != writer,
+        "the inclusive budget lost its owner repair"
+    );
+    assert_eq!(render_write_file(&actual).unwrap(), actual);
+}
+
+#[test]
 fn owner_round7_raw_over_budget_keeps_writer_bytes() {
+    use sha2::{Digest, Sha256};
+
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../testdata/writer/owner_round6.json")).unwrap();
     let mut source = rows.iter().find(|row| row["case"] == "fff").unwrap()["source"]
@@ -79,9 +103,12 @@ fn owner_round7_raw_over_budget_keeps_writer_bytes() {
         RAW_COMMENT_OWNER_BUDGET + 1 - source.len(),
     ));
     assert_eq!(source.len(), RAW_COMMENT_OWNER_BUDGET + 1);
-    let writer = tree::without_owner_protection(|| render_write_file(source.as_bytes())).unwrap();
     let actual = render_write_file(source.as_bytes()).unwrap();
-    assert_eq!(actual, writer);
+    // Independently captured with write_file on main dee3186c.
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&actual)),
+        "61861fefdd2d462d66ed57e27238d87d1c73ea066a9a805adb352cda3a728ed3"
+    );
 }
 
 #[test]

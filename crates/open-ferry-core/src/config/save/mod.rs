@@ -91,12 +91,14 @@ use super::yaml3::{Kind, MAP_TAG, NULL_TAG, STR_TAG};
 
 // The tree operations the v8 config edits ([`super::v8_edit`]) build on.
 pub(crate) use super::yaml3::Node;
+#[cfg(any(test, feature = "parity"))]
+pub(crate) use tree::marshal_config;
 #[cfg(test)]
 pub(crate) use tree::normalize_comment_indentation;
 pub(crate) use tree::{
     copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index,
-    get_or_create_map_value, legacy_path, marshal, marshal_config, remove_map_key,
-    set_yaml_path_with_comments, yaml_path, yaml_path_mut,
+    get_or_create_map_value, legacy_path, marshal, remove_map_key, set_yaml_path_with_comments,
+    yaml_path, yaml_path_mut,
 };
 pub(crate) use v8::{
     flatten_v8, is_v8_config_layout, normalize_config_layout, normalize_config_layout_doc,
@@ -492,6 +494,9 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     let proposal = tree::finish_comment_owners_proven(&source, candidate, |loaded| {
         let data = loaded.bytes();
         if data.len() > RAW_COMMENT_OWNER_BUDGET {
+            if protects_key_feet {
+                return None;
+            }
             return render_write_file_at_writer_placement(data).ok();
         }
         if protects_key_feet {
