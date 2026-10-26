@@ -1268,11 +1268,13 @@ fn source_owner_archives(source: &str, evidence: &Value) -> Option<Vec<Occurrenc
 type LayoutAnchor = (String, usize);
 type LayoutLine = (Option<LayoutAnchor>, Option<LayoutAnchor>, String, usize);
 type LayoutGap = (Option<LayoutAnchor>, Option<LayoutAnchor>);
+type LayoutBlankRun = (Option<LayoutLine>, Option<LayoutLine>, Vec<String>);
 
 #[derive(Default)]
 struct SourceLayout {
     trailing: BTreeMap<LayoutLine, String>,
     blanks: BTreeMap<LayoutGap, Vec<String>>,
+    blank_runs: Vec<LayoutBlankRun>,
 }
 
 struct PhysicalLayout {
@@ -1372,10 +1374,14 @@ fn physical_layout(text: &str) -> Option<PhysicalLayout> {
         let code = comment.map_or(line, |i| &text[byte_first..chars[i].0]);
         let code = code.trim_end_matches([' ', '\t']);
         if code.is_empty() {
-            // Comment-only lines are not blank layout, even if their comment
-            // text ends in whitespace. Their text cannot change a region.
+            // A comment-only line is a position for neighbouring blanks, not
+            // a shared boundary or a layout defect. Its text is ignored.
             if comment.is_none() {
                 gaps.last_mut()?.push(line.to_owned());
+            } else {
+                codes.push("\0comment".into());
+                trailing.push(None);
+                gaps.push(vec![]);
             }
         } else {
             if let Some(Some(marker)) = top_keys.get(&line_number) {
@@ -1431,13 +1437,15 @@ fn layout_regions(physical: PhysicalLayout, anchors: &BTreeSet<String>) -> Sourc
     let mut previous = None;
     let mut layout = SourceLayout::default();
     let mut ordinals = BTreeMap::new();
-    for (i, blanks) in gaps.into_iter().enumerate() {
+    let mut blank_ordinals = BTreeMap::new();
+    let mut blank_keys = Vec::new();
+    for (i, blanks) in gaps.iter().enumerate() {
         if !blanks.is_empty() {
             layout
                 .blanks
                 .entry((previous.clone(), next[i].clone()))
                 .or_default()
-                .extend(blanks);
+                .extend(blanks.iter().cloned());
         }
         let Some(code) = codes.get(i) else { break };
         let region = if ids[i].is_some() {
@@ -1445,6 +1453,14 @@ fn layout_regions(physical: PhysicalLayout, anchors: &BTreeSet<String>) -> Sourc
         } else {
             (previous.clone(), next[i].clone())
         };
+        // Indentation and explicit-key spelling may change while a source
+        // blank remains between the same neighbouring code positions.
+        let normalized = code.trim_start_matches([' ', '\t']);
+        let normalized = normalized.strip_prefix("? ").unwrap_or(normalized);
+        let blank_site = (region.0.clone(), region.1.clone(), normalized.to_owned());
+        let blank_ordinal = blank_ordinals.entry(blank_site.clone()).or_insert(0);
+        blank_keys.push((blank_site.0, blank_site.1, blank_site.2, *blank_ordinal));
+        *blank_ordinal += 1;
         let site = (region.0, region.1, code.clone());
         let ordinal = ordinals.entry(site.clone()).or_insert(0);
         if let Some(suffix) = &trailing[i] {
@@ -1459,28 +1475,55 @@ fn layout_regions(physical: PhysicalLayout, anchors: &BTreeSet<String>) -> Sourc
             previous = ids[i].clone();
         }
     }
+    layout.blank_runs = gaps
+        .into_iter()
+        .enumerate()
+        .filter(|(_, blanks)| !blanks.is_empty())
+        .map(|(i, blanks)| {
+            let before = i.checked_sub(1).map(|j| blank_keys[j].clone());
+            let after = blank_keys.get(i).cloned();
+            (before, after, blanks)
+        })
+        .collect();
     layout
 }
 
 /// Check physical blank lines and trailing whitespace without re-encoding.
-/// Regions lie between code lines shared with equal counts by all three
-/// documents. Every occurrence is numbered, including defect-free ones.
-/// Blank runs need a counterpart in the source or Go in that region; a trailing
-/// suffix also needs the same code line and occurrence. The inputs' blank
-/// budgets are never added together. Explicit-key syntax is not itself a
-/// layout defect. Other ownership rules do not call this guard.
+/// Byte-identical Go output passes directly. Otherwise regions lie between
+/// shared code lines and top-level keys. Blank runs need a source or Go run
+/// with the same previous or next normalized position and occurrence, including
+/// comment-only positions. Trailing suffixes also need equal raw code text.
+/// Allowances from different runs or inputs are never combined. The source-owner
+/// proof and the common ownership check both require this guard.
 pub fn source_owner_layout(source: &str, go: &str, protected: &str) -> bool {
-    let (Some(source), Some(go), Some(protected)) = (
-        physical_layout(source),
-        physical_layout(go),
-        physical_layout(protected),
-    ) else {
+    if protected == go {
+        return true;
+    }
+    let Some(protected) = physical_layout(protected) else {
         return false;
     };
+    // There is no added blank or trailing suffix to account for. In particular,
+    // an unloadable Go attempt need not parse when our output has neither.
+    if !protected.trailing.iter().any(Option::is_some) && protected.gaps.iter().all(Vec::is_empty) {
+        return true;
+    }
+    let (Some(source), Some(go)) = (physical_layout(source), physical_layout(go)) else {
+        return false;
+    };
+    physical_layout_matches(source, go, protected)
+}
+
+fn physical_layout_matches(
+    source: PhysicalLayout,
+    go: PhysicalLayout,
+    protected: PhysicalLayout,
+) -> bool {
     let counts = |physical: &PhysicalLayout| {
         let mut counts = BTreeMap::<String, usize>::new();
         for code in &physical.codes {
-            *counts.entry(code.clone()).or_default() += 1;
+            if code != "\0comment" {
+                *counts.entry(code.clone()).or_default() += 1;
+            }
         }
         counts
     };
@@ -1514,6 +1557,13 @@ pub fn source_owner_layout(source: &str, go: &str, protected: &str) -> bool {
             wanted.next().is_none()
         };
         within(&source) || within(&go)
+    }) && protected.blank_runs.iter().all(|(before, after, blanks)| {
+        [&source, &go].iter().any(|other| {
+            other
+                .blank_runs
+                .iter()
+                .any(|(b, a, have)| (b == before || a == after) && subsequence(blanks, have))
+        })
     })
 }
 
@@ -1817,6 +1867,52 @@ mod tests {
             "a: one\n \nb: two\n",
             "a: one\n\n \nb: two\n"
         ));
+    }
+
+    #[test]
+    fn source_owner_layout_keys_blanks_by_unshared_neighbours() {
+        let source = "top: 1\nm:\n  b: x\n\n  c: y\nend: 2\n";
+        let go = "top: 1\nm:\n    b: x\n    c: y\nend: 2\n";
+        let moved = "top: 1\nm:\n\n    b: x\n    c: y\nend: 2\n";
+        let kept = "top: 1\nm:\n    b: x\n\n    c: y\nend: 2\n";
+        assert!(!source_owner_layout(source, go, moved));
+        assert!(source_owner_layout(source, go, kept));
+    }
+
+    #[test]
+    fn source_owner_layout_counts_comment_only_positions_for_blanks() {
+        let source = "top: 1\nm:\n  b: x\n  # note\n\n  c: y\nend: 2\n";
+        let go = "top: 1\nm:\n    b: x\n    # note\n    c: y\nend: 2\n";
+        let moved = "top: 1\nm:\n    b: x\n\n    # note\n    c: y\nend: 2\n";
+        let kept = "top: 1\nm:\n    b: x\n    # different text\n\n    c: y\nend: 2\n";
+        assert!(!source_owner_layout(source, go, moved));
+        assert!(source_owner_layout(source, go, kept));
+    }
+
+    #[test]
+    fn source_owner_layout_counts_unshared_repeated_line_ordinals() {
+        let source = "top: 1\nm:\n  - x \n  - x\nend: 2\n";
+        let go = "top: 1\nm:\n    - x\n    - x\nend: 2\n";
+        let moved = "top: 1\nm:\n  - x\n  - x \nend: 2\n";
+        assert!(!source_owner_layout(source, go, moved));
+    }
+
+    #[test]
+    fn source_owner_layout_counts_unshared_blank_neighbour_ordinals() {
+        let source = "top: 1\nm:\n  - x\n\n  - x\nend: 2\n";
+        let go = "top: 1\nm:\n    - x\n    - x\nend: 2\n";
+        let moved = "top: 1\nm:\n  - x\n  - x\n\nend: 2\n";
+        assert!(!source_owner_layout(source, go, moved));
+    }
+
+    #[test]
+    fn source_owner_layout_refuses_defects_without_shared_lines() {
+        assert!(!source_owner_layout("- x \n", "- y\n", "- x \n"));
+    }
+
+    #[test]
+    fn source_owner_layout_accepts_exact_go_without_shared_source_lines() {
+        assert!(source_owner_layout("- x\n", "- y \n\n", "- y \n\n"));
     }
 
     #[test]

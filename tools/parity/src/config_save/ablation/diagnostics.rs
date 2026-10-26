@@ -204,6 +204,20 @@ pub(super) fn comments(
         if let Some(failure) = analysis.failure {
             return Err(at(3, i, failure));
         }
+        // Every accepted ownership rule must also account for added layout.
+        // Prefer real Go bytes, including a bound unloadable attempt. Without
+        // an observed Go snapshot, only the source can supply a counterpart.
+        let layout_go = g.or_else(|| {
+            replay
+                .traces
+                .get(i)?
+                .rejected
+                .last()
+                .and_then(|attempt| std::str::from_utf8(&attempt.bytes).ok())
+        });
+        if !core::source_owner_layout(source, layout_go.unwrap_or(source), r) {
+            return Err(at(3, i, json!({"reason":"physical_layout"})));
+        }
         rules.extend(analysis.rules);
         source = r;
     }

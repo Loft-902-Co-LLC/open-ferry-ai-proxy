@@ -69,6 +69,11 @@ fn source_owner_layout_gap(name: &str) {
         .iter()
         .find(|f| f["name"] == name)
         .unwrap();
+    assert_source_owner_layout_gap(fixture);
+}
+
+fn assert_source_owner_layout_gap(fixture: &Value) {
+    let name = fixture["name"].as_str().unwrap();
     let source = fixture["source"].as_str().unwrap();
     let protected = fixture["protected"].as_str().unwrap();
     let operation = &fixture["operation"];
@@ -1024,4 +1029,94 @@ fn proof_comment_failure_names_the_text_node_and_slot() {
     assert_eq!(failure["owner"]["node"], "value");
     assert_eq!(failure["owner"]["slot"], "line");
     assert_eq!(failure["owner"]["path"][0]["key"], "a");
+}
+
+fn neighbour_fixture(name: &str) -> Value {
+    let fixtures: Value = serde_json::from_str(include_str!(
+        "../testdata/source-owner-blank-neighbours.json"
+    ))
+    .unwrap();
+    fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == name)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn retained_source_owner_refuses_a_blank_moved_within_a_region() {
+    assert_source_owner_layout_gap(&neighbour_fixture("p2-blank-after-shared-line"));
+}
+
+#[test]
+fn retained_source_owner_refuses_a_second_blank_paid_for_elsewhere() {
+    assert_source_owner_layout_gap(&neighbour_fixture(
+        "p4b-source-blank-moved-before-last-item",
+    ));
+}
+
+#[test]
+fn retained_source_owner_refuses_measured_blank_moved_within_a_region() {
+    assert_source_owner_layout_gap(&neighbour_fixture("measured-moved-blank"));
+}
+
+fn other_rule_layout_checks(name: &str) -> [bool; 5] {
+    let f = neighbour_fixture(name);
+    let source = f["source"].as_str().unwrap();
+    let protected = f["protected"].as_str().unwrap();
+    let go = f["go"].as_str().unwrap();
+    let mut options = json!({"file":source,"steps":[f["operation"]]});
+    if !f["evidence"].is_null() {
+        options["_ownership_evidence"] = json!([f["evidence"]]);
+    }
+    let case = Case::new(name, "", "").with_options(options);
+    let strict = ownership::analyze(&case, 0, source, Some(go), protected, &[], true);
+    assert!(
+        strict.accepted(),
+        "fixture needs an accepted other-rule proof"
+    );
+    assert!(!strict.rules.contains(&"retained-source-owner"));
+    let go = json!({"files":[go]});
+    let protected = json!({"files":[protected]});
+    let replay = Replay {
+        output: go.clone(),
+        traces: vec![],
+    };
+    checks(Proof {
+        case: &case,
+        go: &go,
+        protected: &protected,
+        ablated: &replay,
+        go_trace: None,
+        expectation: &go,
+        mask: 1,
+        matches: &[(1, true)],
+    })
+}
+
+#[test]
+fn other_ownership_rules_refuse_a_measured_added_blank() {
+    assert_eq!(
+        other_rule_layout_checks("other-rule-added-blank"),
+        [true, true, false, true, true]
+    );
+}
+
+#[test]
+fn other_ownership_rules_keep_an_identical_go_v8_migration() {
+    let f = neighbour_fixture("identical-go-v8-migration");
+    assert_eq!(f["go"], f["protected"]);
+    assert_eq!(
+        other_rule_layout_checks("identical-go-v8-migration"),
+        [true; 5]
+    );
+}
+
+#[test]
+fn retained_source_owner_refuses_a_blank_moved_across_a_comment() {
+    assert_source_owner_layout_gap(&neighbour_fixture(
+        "x4-blank-before-kept-comment-same-region",
+    ));
 }
