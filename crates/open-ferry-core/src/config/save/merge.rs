@@ -266,10 +266,20 @@ fn reorder_sequence_for_merge(
         return original.into_iter().map(Some).collect();
     }
     let mut original: Vec<Option<Node>> = original.into_iter().map(Some).collect();
+    let mut first_unused = 0;
     src.content
         .iter()
         .map(|target| {
-            match_sequence_element(&original, target, path)
+            // Earlier empty slots cannot match. Advancing once past them
+            // preserves the first-unused rule without rescanning that prefix
+            // for every item in an otherwise unchanged sequence.
+            while original.get(first_unused).is_some_and(Option::is_none) {
+                #[cfg(test)]
+                super::tree::comment_work(1);
+                first_unused += 1;
+            }
+            match_sequence_element(&original[first_unused..], target, path)
+                .map(|index| first_unused + index)
                 .and_then(|index| original.get_mut(index))
                 .and_then(Option::take)
         })
@@ -285,10 +295,11 @@ fn match_sequence_element(
     path: &mut Vec<String>,
 ) -> Option<usize> {
     let unused = || {
-        original
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| Some((index, item.as_ref()?)))
+        original.iter().enumerate().filter_map(|(index, item)| {
+            #[cfg(test)]
+            super::tree::comment_work(1);
+            Some((index, item.as_ref()?))
+        })
     };
     match target.kind {
         Kind::Mapping => {

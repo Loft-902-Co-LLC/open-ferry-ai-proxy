@@ -18,6 +18,42 @@ fn values_styles_tags(node: &Node) -> Value {
     ])
 }
 
+#[test]
+fn owner_round6_unchanged_sequence_matching_skips_consumed_prefixes() {
+    fn work(n: usize) -> usize {
+        let mut original = Node {
+            kind: Kind::Sequence,
+            tag: "!!seq".into(),
+            ..Node::default()
+        };
+        for i in 0..n {
+            let mut item = Node::scalar(STR_TAG, "same");
+            item.line_comment = format!("# original {i}");
+            original.content.push(item);
+        }
+        let generated = Node {
+            kind: Kind::Sequence,
+            tag: "!!seq".into(),
+            content: (0..n).map(|_| Node::scalar(STR_TAG, "same")).collect(),
+            ..Node::default()
+        };
+        let (_, work) = tree::count_comment_work(|| {
+            merge::merge_node_preserve(&mut original, &generated, &mut Vec::new());
+        });
+        for (i, item) in original.content.iter().enumerate() {
+            assert!(item.line_comment == format!("# original {i}"));
+        }
+        work
+    }
+    let small = work(1_000);
+    let large = work(4_000);
+    assert!(
+        large <= 8_000,
+        "sequence matching rescanned consumed items: {large}"
+    );
+    assert!(large <= small * 5);
+}
+
 fn raw_history(name: &str) {
     let row = rows().into_iter().find(|row| row["case"] == name).unwrap();
     let data = row["source"].as_str().unwrap().as_bytes();
