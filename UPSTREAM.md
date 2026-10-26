@@ -573,17 +573,23 @@ and equal values cannot be told apart. Ambiguous identities and missing,
 duplicate or misplaced comments stay Different. All decoded values and tags
 must match Go. The output must load and stay unchanged when our writer repeats
 the operation. Check 4 compares faithful comment-free re-encodes; it does not
-cover raw whitespace or key style. For this rule, an additional guard checks
-physical layout within top-level keys and between code lines shared with equal
-counts by the source, Go and our output. Every occurrence is numbered,
-including lines with no whitespace defect. Blank lines need counterparts in
-the same region in the source or Go output; trailing whitespace also needs the
-same code line and occurrence. The two inputs' blank-line allowances are not
-added together. Removing whitespace elsewhere cannot pay for an addition. A
-layout defect with no shared boundary fails closed. Comment text does not
-count as layout. Explicit-key syntax is allowed because yaml.v3 needs it to
-retain a comment on a key. Extra comments need the existing Go archive or
-migration proof. The evidence lists the protections the proof needed.
+cover raw whitespace or key style. Every ownership rule also checks physical
+blank lines and trailing whitespace. Output identical to Go's bytes passes
+this layout check directly. Otherwise, regions are bounded by top-level keys
+and code lines shared with equal counts by the source, Go and our output. A
+blank run needs a source or Go run with the same previous or next position
+key. Each key includes its region, code without leading indentation or an
+explicit-key `? ` marker, and its in-region occurrence. Our run must be a
+subsequence of that one input run; allowances are never combined. Trailing
+whitespace needs the same code line, occurrence and suffix. A layout defect
+with no shared boundary fails closed. Comment-only lines count as positions
+for blank keys, while their text is ignored. A blank moved across a comment
+therefore needs a counterpart beside the same neighbouring position. The
+layout check leaves out wider space before a comment, double spaces inside a
+line, indentation and the final newline. Explicit-key syntax remains allowed
+because yaml.v3 needs it to retain a comment on a key. Extra comments need the
+existing Go archive or migration proof. The evidence lists the protections the
+proof needed.
 
 For archives of unknown keys, a separate replay computes the exact comment
 lines and their places from each original entry and the requested write.
