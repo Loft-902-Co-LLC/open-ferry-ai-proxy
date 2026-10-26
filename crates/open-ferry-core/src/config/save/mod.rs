@@ -490,6 +490,9 @@ pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
     let protects_key_feet = source.key_feet_need_restoring(&candidate);
     let mut cached_previews = None;
     let proposal = tree::finish_comment_owners(&source, candidate, |data| {
+        if data.len() > RAW_COMMENT_OWNER_BUDGET {
+            return render_write_file_at_writer_placement(data).ok();
+        }
         if protects_key_feet {
             cached_previews = Some(raw_feet_survive_following_saves(data)?);
         }
