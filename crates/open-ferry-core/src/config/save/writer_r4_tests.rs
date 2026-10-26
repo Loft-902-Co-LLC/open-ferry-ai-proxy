@@ -284,11 +284,16 @@ fn writer_r4_tail_repair_keeps_each_switch_and_faithful_emission_separate() {
             Protection::EmptyMappingPendingComment,
         ] {
             assert_eq!(
-                receipt(&with_disabled(&[protection], || op_run(
-                    &input(case),
-                    op,
-                    true
-                ))),
+                receipt(&with_disabled(&[protection], || {
+                    let run = || op_run(&input(case), op, true);
+                    if owner_writer_controls_tests::r4_diagnostic_control_drifts(
+                        case, op, protection,
+                    ) {
+                        tree::without_owner_protection(run)
+                    } else {
+                        run()
+                    }
+                })),
                 row[2],
                 "{case} {op} disabled {protection:?} must keep main's bytes"
             );

@@ -91,7 +91,7 @@
 {"recipe":{"id":"matrix/V12/put2","op":"put2","params":{"path":["oauth","auth-dir"],"body":"\"/x\""},"source_ref":"matrix/C8/put"},"main":"85aae95e9f72c2db"},
 {"recipe":{"id":"matrix/V12/patch","op":"patch","params":{"path":["oauth"],"body":"{\"auth-dir\":\"/x\"}"},"source_ref":"matrix/C8/put"},"main":"84a36c36bcc297b7"},
 {"recipe":{"id":"matrix/V12/patch2","op":"patch2","params":{"path":["oauth"],"body":"{\"auth-dir\":\"/x\"}"},"source_ref":"matrix/C8/put"},"main":"85aae95e9f72c2db"},
-{"recipe":{"id":"matrix/C8_bom/put","source":"﻿models: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n","op":"put","params":{"path":["oauth","auth-dir"],"body":"\"/x\""}},"main":"84a36c36bcc297b7"},
+{"recipe":{"id":"matrix/C8_bom/put","source":"\ufeffmodels: {}\n\n# k1\n\n# k2\nconfig-version: 8\nplugins: {}\n","op":"put","params":{"path":["oauth","auth-dir"],"body":"\"/x\""}},"main":"84a36c36bcc297b7"},
 {"recipe":{"id":"matrix/C8_bom/put2","op":"put2","params":{"path":["oauth","auth-dir"],"body":"\"/x\""},"source_ref":"matrix/C8_bom/put"},"main":"85aae95e9f72c2db"},
 {"recipe":{"id":"matrix/C8_bom/patch","op":"patch","params":{"path":["oauth"],"body":"{\"auth-dir\":\"/x\"}"},"source_ref":"matrix/C8_bom/put"},"main":"84a36c36bcc297b7"},
 {"recipe":{"id":"matrix/C8_bom/patch2","op":"patch2","params":{"path":["oauth"],"body":"{\"auth-dir\":\"/x\"}"},"source_ref":"matrix/C8_bom/put"},"main":"85aae95e9f72c2db"},
@@ -114,5 +114,5 @@
 {"recipe":{"id":"error/read-only-version","op":"put","params":{"path":["config-version"],"body":"9"},"source_ref":"error/body-json"},"main":"865ce4dc0500d534"},
 {"recipe":{"id":"error/delete-root","op":"delete","params":{"path":[]},"source_ref":"error/body-json"},"main":"2fe73db739a5193a"},
 {"recipe":{"id":"error/delete-absent","op":"delete","params":{"path":["oauth","no-such-setting"]},"source_ref":"error/body-json"},"main":"8b708e658fe90330"},
-{"recipe":{"id":"error/unicode-disagreement","source":"config-version: 8\nx: 'a  b'\n","op":"put","params":{"path":["oauth","auth-dir"],"body":"\"/x\""}},"main":"f3e4d55c354bba97"}
+{"recipe":{"id":"error/unicode-disagreement","source":"config-version: 8\nx: 'a\u0085  b'\n","op":"put","params":{"path":["oauth","auth-dir"],"body":"\"/x\""}},"main":"ac94cf77142687a6"}
 ]
