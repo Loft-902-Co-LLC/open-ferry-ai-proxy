@@ -50,11 +50,21 @@ fn retained_through_history(name: &str) {
     let counts = tree::physical_comment_counts(source).unwrap();
     for snapshot in history(&row) {
         let actual = tree::physical_comment_counts(&snapshot).unwrap();
-        // The reduced sources contain only surviving owners. Include every
-        // source text, rather than recognizing the named regression comment.
+        // The second source retains the context that prunes an empty alias
+        // item. Its head belongs to deleted data; every other source text,
+        // including the explicit key's line, must survive.
         assert!(
             counts
                 .iter()
+                .filter(
+                    |(text, _)| !row["deleted_owner_comments"]
+                        .as_array()
+                        .is_some_and(|deleted| deleted.iter().any(|v| v
+                            .as_str()
+                            .unwrap()
+                            .as_bytes()
+                            == **text))
+                )
                 .all(|(text, count)| actual.get(text).unwrap_or(&0) >= count),
             "{name}: a surviving owner's comment was lost"
         );
