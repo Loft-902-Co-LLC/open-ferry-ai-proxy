@@ -885,17 +885,14 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     if let Some(budget) = &budget {
         budget.validate(&baseline::pinned_fingerprint()?)?;
     }
-    let work_dir = std::env::var_os("OPEN_FERRY_PARITY_WORK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .ancestors()
-                .nth(2)
-                .expect("tools/parity is two levels below the workspace root")
-                .join("target")
-                .join("parity")
-        });
-    prepare_work_dir(&work_dir)?;
+    let default_work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("tools/parity is two levels below the workspace root")
+        .join("target")
+        .join("parity");
+    let custom_work_dir = std::env::var_os("OPEN_FERRY_PARITY_WORK_DIR").map(PathBuf::from);
+    let work_dir = prepare_work_dir(&default_work_dir, custom_work_dir.as_deref())?;
     // Even a failed upstream setup must not retain proofs from an older run.
     fresh_dir(&work_dir.join("counterfactual"))?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
@@ -1377,16 +1374,24 @@ fn config_save_result(
 const WORK_DIR_MARKER: &str = ".open-ferry-parity-work-dir";
 const WORK_DIR_ID: &[u8] = b"open-ferry-parity work directory v1\n";
 
-/// Claim empty scratch space, or reuse scratch space previously claimed here.
-/// Validate before any setup file is overwritten or any run subfolder is reset.
-fn prepare_work_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
+/// The default is tool-owned, including restored caches and older run output.
+/// Validate custom scratch space before setup writes or run subfolder resets.
+fn prepare_work_dir(
+    default_dir: &Path,
+    custom_dir: Option<&Path>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let dir = custom_dir.unwrap_or(default_dir);
     fs::create_dir_all(dir)?;
     let marker = dir.join(WORK_DIR_MARKER);
+    if custom_dir.is_none() {
+        fs::write(marker, WORK_DIR_ID)?;
+        return Ok(dir.to_owned());
+    }
     if fs::read_dir(dir)?.next().transpose()?.is_some() {
         if fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
             && fs::read(&marker).is_ok_and(|bytes| bytes == WORK_DIR_ID)
         {
-            return Ok(());
+            return Ok(dir.to_owned());
         }
         return Err(format!(
             "refusing parity work directory {}: it is nonempty and has no valid {WORK_DIR_MARKER} marker; choose a new or empty directory with OPEN_FERRY_PARITY_WORK_DIR",
@@ -1400,7 +1405,7 @@ fn prepare_work_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
         .create_new(true)
         .open(marker)?
         .write_all(WORK_DIR_ID)?;
-    Ok(())
+    Ok(dir.to_owned())
 }
 
 /// Empties `dir`, creating it if needed.
@@ -1945,18 +1950,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_work_directory_accepts_an_unmarked_restored_go_cache() {
+        let dir = std::env::temp_dir().join(format!("parity-work-default-{}", std::process::id()));
+        fresh_dir(&dir).unwrap();
+        fs::create_dir(dir.join("go-build")).unwrap();
+        let cached = dir.join("go-build/cached-object");
+        fs::write(&cached, b"restored Go cache").unwrap();
+        assert!(!dir.join(WORK_DIR_MARKER).exists());
+        assert_eq!(prepare_work_dir(&dir, None).unwrap(), dir);
+        assert_eq!(fs::read(&cached).unwrap(), b"restored Go cache");
+        assert_eq!(fs::read(dir.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
+        fs::write(dir.join(WORK_DIR_MARKER), b"older marker").unwrap();
+        prepare_work_dir(&dir, None).unwrap();
+        assert_eq!(fs::read(dir.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
+        assert_eq!(fs::read(&cached).unwrap(), b"restored Go cache");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn work_directory_accepts_new_empty_and_previously_owned_scratch() {
         let dir = std::env::temp_dir().join(format!("parity-work-owned-{}", std::process::id()));
         fresh_dir(&dir).unwrap();
         let new = dir.join("new");
-        prepare_work_dir(&new).unwrap();
+        assert_eq!(prepare_work_dir(&dir, Some(&new)).unwrap(), new);
         assert_eq!(fs::read(new.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
         fs::write(new.join("previous-run"), b"old evidence").unwrap();
-        prepare_work_dir(&new).unwrap();
+        prepare_work_dir(&dir, Some(&new)).unwrap();
         assert_eq!(fs::read(new.join("previous-run")).unwrap(), b"old evidence");
         let empty = dir.join("empty");
         fs::create_dir(&empty).unwrap();
-        prepare_work_dir(&empty).unwrap();
+        prepare_work_dir(&dir, Some(&empty)).unwrap();
         assert_eq!(fs::read(empty.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1973,7 +1996,7 @@ mod tests {
             if let Some(bytes) = marker {
                 fs::write(dir.join(WORK_DIR_MARKER), bytes).unwrap();
             }
-            let error = prepare_work_dir(&dir).unwrap_err().to_string();
+            let error = prepare_work_dir(&dir, Some(&dir)).unwrap_err().to_string();
             assert!(error.contains("refusing parity work directory"));
             assert!(error.contains("OPEN_FERRY_PARITY_WORK_DIR"));
             for sub in ["counterfactual", "failures", "live"] {
