@@ -448,7 +448,7 @@ with fewer PR case IDs) prints “Baseline can be lowered” and the refresh com
 
 The measured budget has **13 kinds** and a shared bound of **75 Different
 per 1,000** config-save cases; the exact PR Different set is empty. The ten
-nightly-sized calibration seeds have 249 to 307 Different out of 5,109 cases
+random-5000 calibration seeds have 249 to 307 Different out of 5,109 cases
 each. Seed 30 has 267 and seed 38 has 249. The selected historical sets have
 168/170 and 161/164 Different; they contribute kinds, not rates.
 Every recorded calibration count comes from a measured observation. Keeping
