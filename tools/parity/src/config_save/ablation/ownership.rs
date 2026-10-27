@@ -48,6 +48,23 @@ pub(super) fn certify_repair(
     protected: &Value,
     run_go: &mut impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
 ) -> Result<Option<Attempt>, Box<dyn Error>> {
+    certify_repair_with_replay(case, go, protected, run_go, replay, bind)
+}
+
+// Internal replay seam for saved-history tests. The production entry point
+// always reproduces the current writer and binds fresh native/repeat receipts;
+// serialized case options cannot select either callback.
+fn certify_repair_with_replay<Go>(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
+    run_go: &mut Go,
+    run_replay: impl Fn(&Case, u8) -> Option<Replay>,
+    bind: impl FnOnce(&Case, &Value, &mut Go) -> Result<Case, Box<dyn Error>>,
+) -> Result<Option<Attempt>, Box<dyn Error>>
+where
+    Go: FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+{
     let (Some(steps), Some(gfiles), Some(rfiles)) = (
         case.options["steps"].as_array(),
         go["files"].as_array(),
@@ -79,7 +96,7 @@ pub(super) fn certify_repair(
     if let Some(options) = unbound.options.as_object_mut() {
         options.remove("_ownership_evidence");
     }
-    if replay(&unbound, 0).is_none_or(|r| r.output != *protected) {
+    if run_replay(&unbound, 0).is_none_or(|r| r.output != *protected) {
         return Ok(None);
     }
     let bound = bind(&unbound, protected, run_go)?;
@@ -90,7 +107,7 @@ pub(super) fn certify_repair(
         matches!(
             p,
             Protection::CanonicalVersionComment | Protection::DroppedSingleKeyComment
-        ) && replay(&unbound, 1 << i).is_some_and(|r| r.output == *go)
+        ) && run_replay(&unbound, 1 << i).is_some_and(|r| r.output == *go)
     });
     if existing_rule {
         let existing = super::certify_full(&unbound, go, protected, &mut *run_go, false)?;
