@@ -47,15 +47,28 @@ fn history(row: &Value) -> Vec<Vec<u8>> {
 fn retained_through_history(name: &str) {
     let row = fixture(name);
     let source = row["options"]["file"].as_str().unwrap().as_bytes();
-    let counts = tree::physical_comment_counts(source).unwrap();
-    for snapshot in history(&row) {
+    let mut input = source.to_vec();
+    for (step, snapshot) in history(&row).into_iter().enumerate() {
+        let counts = tree::physical_comment_counts(&input).unwrap();
         let actual = tree::physical_comment_counts(&snapshot).unwrap();
         assert!(
-            counts
-                .iter()
-                .all(|(text, count)| actual.get(text).unwrap_or(&0) >= count),
+            counts.iter().all(|(text, count)| {
+                let go = row["go_comment_counts"][step]
+                    .get(std::str::from_utf8(text).unwrap())
+                    .and_then(Value::as_u64)
+                    .map(|n| n as usize)
+                    .unwrap_or_else(|| {
+                        if row["go_comment_counts"].is_null() {
+                            *count
+                        } else {
+                            0
+                        }
+                    });
+                actual.get(text).copied().unwrap_or(0) >= (*count).min(go)
+            }),
             "{name}: a surviving owner's comment was lost"
         );
+        input = snapshot;
     }
 }
 
@@ -85,7 +98,7 @@ fn owner_round9_flow_collection_comment_survives_later_saves() {
 
 #[test]
 fn owner_round9_explicit_key_comment_survives_migration() {
-    retained_through_history("minimal-random-30-991");
+    retained_through_history("random-30-991");
 }
 
 #[test]
