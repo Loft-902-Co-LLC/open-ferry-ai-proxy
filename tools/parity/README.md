@@ -331,6 +331,8 @@ on aliases against a separate pinned-yaml.v3 inventory. Restored text must keep
 every source copy at its bound owner. Unchanged comments retain Go's owners
 and order. Source counts and independently computed archives bound all output
 occurrences. The value, tag, faithful-byte, load and repeat checks still apply.
+A step that differs from upstream's own history snapshot must also keep at least
+`min(upstream's copies, the step source's copies)` of each comment text.
 A new foot separator is accepted only when an exact single-line removal makes
 pinned yaml.v3 move that source-owned foot. After removing all such separators,
 the existing layout guard must pass.
@@ -346,8 +348,9 @@ default `target/parity` directory is always accepted and marked, including
 restored Go caches and older unmarked output.
 Nonempty unmarked custom directories are refused before any files are overwritten
 or subfolders cleared; use a new empty custom directory for older unmarked scratch
-output. Runs reset the work directory's `counterfactual`, `failures` and `live`
-subfolders as needed. These switches belong to the offline tool only.
+output. Runs reset the work directory's `case-workers`, `counterfactual`,
+`failures` and `live` subfolders as needed. These switches belong to the offline
+tool only.
 Full mode retains its subset-search diagnostics under `full_search`. Every
 step also reruns the unchanged comparison rules on its exact preceding source.
 Only steps those rules cannot prove need a new owner certificate and its repeat

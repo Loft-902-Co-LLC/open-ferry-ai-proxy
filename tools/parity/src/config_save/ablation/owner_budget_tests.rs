@@ -26,6 +26,38 @@ fn oracle(f: &Value, request: &Case) -> Result<GoResult, Box<dyn Error>> {
     Ok(GoResult::Output(serde_json::to_vec(witness)?))
 }
 
+fn saved_case(f: &Value) -> Case {
+    let mut case = case(f);
+    case.options["_ownership_evidence"] = f["source_identities"].clone();
+    case
+}
+
+fn certify_saved(f: &Value, go: &Value) -> Option<Attempt> {
+    // These native histories predate the current writer. Replay their saved
+    // outputs and repeat receipts, while keeping the real certificate checks.
+    certify_repair_with_replay(
+        &saved_case(f),
+        go,
+        &f["protected_rust"],
+        &mut |r| oracle(f, r),
+        |unbound, mask| {
+            assert!(unbound.options.get("_ownership_evidence").is_none());
+            (mask == 0).then(|| Replay {
+                output: f["protected_rust"].clone(),
+                traces: vec![],
+            })
+        },
+        |unbound, protected, _| {
+            assert!(unbound.options.get("_ownership_evidence").is_none());
+            assert_eq!(*protected, f["protected_rust"]);
+            let mut bound = unbound.clone();
+            bound.options["_ownership_evidence"] = f["source_identities"].clone();
+            Ok(bound)
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn exhaustive_search_also_refuses_the_previously_inherited_3152_history() {
     let all = fixtures();
@@ -68,13 +100,11 @@ fn original_go_budget_refuses_saved_histories_in_both_acceptance_paths() {
         let go = &f["original_go"];
         let protected = &f["protected_rust"];
         assert!(
-            certify_repair(&case, go, protected, &mut |r| oracle(f, r))
-                .unwrap()
-                .is_none(),
+            certify_saved(f, go).is_none(),
             "{}: complete history was certified",
             case.name
         );
-        let bound = bind(&case, protected, &mut |r| oracle(f, r)).unwrap();
+        let bound = saved_case(f);
         let index = f["loss_step"].as_u64().unwrap() as usize;
         let source = bound.options["_ownership_evidence"][index]["source"]
             .as_str()
@@ -101,27 +131,73 @@ fn original_go_budget_refuses_saved_histories_in_both_acceptance_paths() {
 }
 
 #[test]
-fn saved_1428_step_zero_still_has_a_complete_owner_certificate() {
-    let all = fixtures();
-    let f = all
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|f| f["case"] == "random-38-1428")
-        .unwrap();
-    let mut prefix = case(f);
-    prefix.options["steps"].as_array_mut().unwrap().truncate(1);
-    let go = json!({"files":[f["original_go"]["files"][0]]});
-    let protected = json!({"files":[f["protected_rust"]["files"][0]]});
-    let proof = certify_repair(&prefix, &go, &protected, &mut |r| oracle(f, r))
-        .unwrap()
-        .unwrap();
+fn current_writer_still_has_a_complete_owner_certificate() {
+    let all: Value = serde_json::from_str(include_str!("../testdata/owners-repairs.json")).unwrap();
+    let f = &all[0];
+    let case = Case::new("current-owner-certificate", "", "")
+        .with_options(json!({"file":f["source"],"steps":[f["operation"]]}));
+    let go = &f["evidence"]["retained_source_owner"]["exact_go"];
+    let protected = json!({"files":[f["protected"]]});
+    let proof = certify_repair(&case, go, &protected, &mut |_| {
+        Ok(GoResult::Output(serde_json::to_vec(&f["evidence"])?))
+    })
+    .unwrap()
+    .unwrap();
     assert!(
         proof
             .deviations
             .unwrap()
             .contains(&Deviation::RetainedDeferredCommentOwners)
     );
+}
+
+#[test]
+fn complete_history_go_budget_is_required_after_a_valid_owner_prefix() {
+    let all = fixtures();
+    let f = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["case"] == "random-30-3152")
+        .unwrap();
+    let mut within_budget = f["original_go"].clone();
+    within_budget["files"][1] = f["protected_rust"]["files"][1].clone();
+    assert!(
+        certify_saved(f, &within_budget).is_some(),
+        "budget-safe control must certify"
+    );
+    assert!(
+        certify_saved(f, &f["original_go"]).is_none(),
+        "original Go comment budget must refuse the history"
+    );
+}
+
+#[test]
+fn inherited_go_budget_is_required_despite_exact_go_and_stable_repeats() {
+    for f in fixtures().as_array().unwrap().iter().filter(|f| {
+        matches!(
+            f["case"].as_str(),
+            Some("random-30-3152" | "random-38-1428")
+        )
+    }) {
+        let bound = saved_case(f);
+        let index = f["loss_step"].as_u64().unwrap() as usize;
+        let source = bound.options["_ownership_evidence"][index]["source"]
+            .as_str()
+            .unwrap();
+        let protected = f["protected_rust"]["files"][index].as_str().unwrap();
+        let go = f["original_go"]["files"][index].as_str().unwrap();
+        assert!(
+            inherited_repair(&bound, index, source, Some(protected), protected),
+            "{}: budget-safe control must inherit",
+            bound.name
+        );
+        assert!(
+            !inherited_repair(&bound, index, source, Some(go), protected),
+            "{}: original Go comment budget must refuse inheritance",
+            bound.name
+        );
+    }
 }
 
 fn inherited_case() -> (Case, String) {
