@@ -328,11 +328,15 @@ pub(crate) fn render_prepared_file(prepared: PreparedWrite) -> Result<Vec<u8>, S
     let intended = IntendedValues::bytes(&prepared.candidate.bytes)?;
     let candidate = candidate_write_file_receipted(prepared.candidate)?;
     check_values(&candidate.bytes, &intended)?;
-    Ok(tree::finish_comment_owners(
-        &prepared.source,
-        candidate,
-        prepared.repeat,
-    ))
+    if !tree::owner_protection_enabled() {
+        return Ok(candidate.bytes);
+    }
+    let writer = candidate.bytes.clone();
+    let proposal = tree::finish_comment_owners(&prepared.source, candidate, prepared.repeat);
+    if proposal != writer && !repair_survives_following_saves(&writer, &proposal) {
+        return Ok(writer);
+    }
+    Ok(proposal)
 }
 
 /// Commit the complete checked edit once, preserving the existing lock,
@@ -891,8 +895,8 @@ fn finish_preserving_comments(
     })
 }
 
-/// Both no-change saves must retain the proposal's comment copies up to the
-/// number the same save keeps at the writer's placement.
+/// The following saves and legacy-to-v8 layout step must retain the proposal's
+/// comment copies up to the number that step keeps at the writer's placement.
 /// Preview the unmodified writer candidate: an owner repair can only restore
 /// its source copies, so this is a lower bound on the protected next step.
 /// This also avoids depending on a repair the next step might itself reject.
@@ -900,15 +904,50 @@ fn repair_survives_following_saves(writer: &[u8], proposal: &[u8]) -> bool {
     let Some(counts) = tree::physical_comment_counts(proposal) else {
         return false;
     };
+    let Ok(doc) = unmarshal(proposal) else {
+        return false;
+    };
+    let legacy_layout = doc
+        .content
+        .first()
+        .and_then(|root| yaml_path(root, "config-version"))
+        .is_none_or(|version| version.tag != super::yaml3::INT_TAG || version.value != "8");
     let Ok(config) = Config::parse(proposal) else {
         return false;
     };
-    for migrate in [false, true] {
-        let Ok((candidate, _)) = candidate_preserving_comments(proposal, &config, migrate) else {
+    if !following_saves_keep_comments(writer, proposal, &counts, &config, legacy_layout) {
+        return false;
+    }
+    // Layout normalization acts on the stored file itself, before an edit.
+    // Use its bare writer too: calling the protected entry point here would
+    // make a layout repair recursively preview itself.
+    !legacy_layout
+        || v8::normalize_config_layout_writer(proposal, true).is_ok_and(|(output, _)| {
+            raw_preview_keeps_comment_counts(&counts, &output, || {
+                v8::normalize_config_layout_writer(writer, true).map(|(bytes, _)| bytes)
+            })
+        })
+}
+
+fn following_saves_keep_comments(
+    writer: &[u8],
+    proposal: &[u8],
+    counts: &std::collections::HashMap<&[u8], usize>,
+    config: &Config,
+    legacy_layout: bool,
+) -> bool {
+    // With an explicit v8 marker both flags take the same migration branch.
+    let flags: &[bool] = if legacy_layout {
+        &[false, true]
+    } else {
+        &[true]
+    };
+    for &migrate in flags {
+        let Ok((candidate, _)) = candidate_preserving_comments(proposal, config, migrate) else {
             return false;
         };
-        if !raw_preview_keeps_comment_counts(&counts, &candidate.bytes, || {
-            candidate_preserving_comments(writer, &config, migrate)
+        if !raw_preview_keeps_comment_counts(counts, &candidate.bytes, || {
+            candidate_preserving_comments(writer, config, migrate)
                 .map(|(candidate, _)| candidate.bytes)
         }) {
             return false;

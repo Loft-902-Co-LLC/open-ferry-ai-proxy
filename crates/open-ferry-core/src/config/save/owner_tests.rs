@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "owner_r10_tests.rs"]
+pub(super) mod round10;
 #[path = "owner_r5_tests.rs"]
 mod round5;
 #[path = "owner_r6_tests.rs"]

@@ -394,7 +394,7 @@ fn independent_expected_owners(data: &[u8], rendered: &[u8]) -> super::owner_tes
     }
     expected
 }
-fn independent_source_owners_held(data: &[u8], rendered: &[u8]) -> bool {
+pub(super) fn independent_source_owners_held(data: &[u8], rendered: &[u8]) -> bool {
     let actual = independent_canonical_owners(rendered);
     independent_expected_owners(data, rendered)
         .iter()
@@ -548,7 +548,9 @@ fn verify_repaired_row(row: &Value) {
         result["proofs"] == row["proofs"],
         "{id}: occurrence owner map"
     );
-    if super::owner_tests::round9::recorded_refusal("legacy", id, "", "", 0) {
+    if super::owner_tests::round9::recorded_refusal("legacy", id, "", "", 0)
+        || super::owner_tests::round10::recorded_refusal("legacy", id, "", "", 0)
+    {
         assert_eq!(result["on"], result["off"]);
         return;
     }

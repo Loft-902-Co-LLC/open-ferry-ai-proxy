@@ -68,6 +68,7 @@ fn check_control(source: &str, case: &str, op: &str, disable: &str, repaired: Op
                 assert!(
                     case == "legacy_one_foot" && op == "migrate2" && pass == 0
                         || owner_tests::round9::recorded_refusal("r2", case, op, disable, pass)
+                        || owner_tests::round10::recorded_refusal("r2", case, op, disable, pass)
                         || raw_fallbacks.iter().any(|row| {
                             row[0] == case && row[1] == op && row[2] == disable && row[3] == pass
                         }),
