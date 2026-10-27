@@ -340,7 +340,13 @@ environment variable `OPEN_FERRY_PARITY_FULL_SEARCH=1` to execute that search
 too and compare decisions. `OPEN_FERRY_PARITY_DECISIONS` names a JSONL output
 file containing case names, decisions, deviations and refusal kinds, without
 config values. `OPEN_FERRY_PARITY_WORK_DIR` redirects scratch artifacts for
-isolated comparisons. These switches belong to the offline tool only.
+isolated comparisons. Its directory must be new, empty, or carry the valid
+`.open-ferry-parity-work-dir` marker written by a previous run. The same rule
+applies to the default `target/parity` directory. Nonempty unmarked directories
+are refused before any files are overwritten or subfolders cleared; use a new
+empty directory for older unmarked scratch output. A marked directory is owned
+scratch space: subsequent runs reset its `counterfactual`, `failures` and `live`
+subfolders as needed. These switches belong to the offline tool only.
 Full mode retains its subset-search diagnostics under `full_search`. Every
 step also reruns the unchanged comparison rules on its exact preceding source.
 Only steps those rules cannot prove need a new owner certificate and its repeat

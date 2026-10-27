@@ -895,7 +895,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
                 .join("target")
                 .join("parity")
         });
-    fs::create_dir_all(&work_dir)?;
+    prepare_work_dir(&work_dir)?;
     // Even a failed upstream setup must not retain proofs from an older run.
     fresh_dir(&work_dir.join("counterfactual"))?;
     let upstream = Upstream::build(&args.upstream, &args.go, &work_dir)?;
@@ -1372,6 +1372,35 @@ fn config_save_result(
     };
     let assessment = budget.assess(&observation, path)?;
     Ok((assessment.passed, assessment.markdown))
+}
+
+const WORK_DIR_MARKER: &str = ".open-ferry-parity-work-dir";
+const WORK_DIR_ID: &[u8] = b"open-ferry-parity work directory v1\n";
+
+/// Claim empty scratch space, or reuse scratch space previously claimed here.
+/// Validate before any setup file is overwritten or any run subfolder is reset.
+fn prepare_work_dir(dir: &Path) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(dir)?;
+    let marker = dir.join(WORK_DIR_MARKER);
+    if fs::read_dir(dir)?.next().transpose()?.is_some() {
+        if fs::symlink_metadata(&marker).is_ok_and(|m| m.file_type().is_file())
+            && fs::read(&marker).is_ok_and(|bytes| bytes == WORK_DIR_ID)
+        {
+            return Ok(());
+        }
+        return Err(format!(
+            "refusing parity work directory {}: it is nonempty and has no valid {WORK_DIR_MARKER} marker; choose a new or empty directory with OPEN_FERRY_PARITY_WORK_DIR",
+            dir.display()
+        )
+        .into());
+    }
+    use std::io::Write as _;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)?
+        .write_all(WORK_DIR_ID)?;
+    Ok(())
 }
 
 /// Empties `dir`, creating it if needed.
@@ -1914,6 +1943,49 @@ mod parallel_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_directory_accepts_new_empty_and_previously_owned_scratch() {
+        let dir = std::env::temp_dir().join(format!("parity-work-owned-{}", std::process::id()));
+        fresh_dir(&dir).unwrap();
+        let new = dir.join("new");
+        prepare_work_dir(&new).unwrap();
+        assert_eq!(fs::read(new.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
+        fs::write(new.join("previous-run"), b"old evidence").unwrap();
+        prepare_work_dir(&new).unwrap();
+        assert_eq!(fs::read(new.join("previous-run")).unwrap(), b"old evidence");
+        let empty = dir.join("empty");
+        fs::create_dir(&empty).unwrap();
+        prepare_work_dir(&empty).unwrap();
+        assert_eq!(fs::read(empty.join(WORK_DIR_MARKER)).unwrap(), WORK_DIR_ID);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn work_directory_refuses_unowned_files_without_changing_them() {
+        let dir = std::env::temp_dir().join(format!("parity-work-unowned-{}", std::process::id()));
+        fresh_dir(&dir).unwrap();
+        for sub in ["counterfactual", "failures", "live"] {
+            fs::create_dir(dir.join(sub)).unwrap();
+            fs::write(dir.join(sub).join("keep"), sub).unwrap();
+        }
+        for marker in [None, Some(b"unrelated marker".as_slice())] {
+            if let Some(bytes) = marker {
+                fs::write(dir.join(WORK_DIR_MARKER), bytes).unwrap();
+            }
+            let error = prepare_work_dir(&dir).unwrap_err().to_string();
+            assert!(error.contains("refusing parity work directory"));
+            assert!(error.contains("OPEN_FERRY_PARITY_WORK_DIR"));
+            for sub in ["counterfactual", "failures", "live"] {
+                assert_eq!(
+                    fs::read(dir.join(sub).join("keep")).unwrap(),
+                    sub.as_bytes()
+                );
+            }
+            assert_eq!(fs::read(dir.join(WORK_DIR_MARKER)).ok().as_deref(), marker);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn counterfactual_deviations_include_comparison_classes() {
