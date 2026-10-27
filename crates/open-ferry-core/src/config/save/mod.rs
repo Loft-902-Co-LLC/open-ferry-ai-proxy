@@ -893,7 +893,9 @@ fn finish_preserving_comments(
 
 /// Both no-change saves must retain the proposal's comment copies up to the
 /// number the same save keeps at the writer's placement.
-/// Finish each preview directly so this check never calls itself recursively.
+/// Preview the unmodified writer candidate: an owner repair can only restore
+/// its source copies, so this is a lower bound on the protected next step.
+/// This also avoids depending on a repair the next step might itself reject.
 fn repair_survives_following_saves(writer: &[u8], proposal: &[u8]) -> bool {
     let Some(counts) = tree::physical_comment_counts(proposal) else {
         return false;
@@ -902,16 +904,12 @@ fn repair_survives_following_saves(writer: &[u8], proposal: &[u8]) -> bool {
         return false;
     };
     for migrate in [false, true] {
-        let Ok((candidate, source)) = candidate_preserving_comments(proposal, &config, migrate)
-        else {
+        let Ok((candidate, _)) = candidate_preserving_comments(proposal, &config, migrate) else {
             return false;
         };
-        let preview = finish_preserving_comments(candidate, &source, &config, migrate);
-        if !raw_preview_keeps_comment_counts(&counts, &preview, || {
-            let (candidate, source) = candidate_preserving_comments(writer, &config, migrate)?;
-            Ok(finish_preserving_comments(
-                candidate, &source, &config, migrate,
-            ))
+        if !raw_preview_keeps_comment_counts(&counts, &candidate.bytes, || {
+            candidate_preserving_comments(writer, &config, migrate)
+                .map(|(candidate, _)| candidate.bytes)
         }) {
             return false;
         }
