@@ -135,8 +135,8 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   ` ! ` tag, which changes no value. A repaired raw write also checks
   that a following no-change save, migration, and the first layout step of a
   v8 edit keep every comment text that the same step keeps when the raw write
-  uses upstream’s placement, capped at the original number of copies; these
-  steps can still move comments between owners. Raw inputs above 64 KiB use
+  uses upstream’s placement, including expanded alias copies; these steps can
+  still move comments between owners. Raw inputs above 64 KiB use
   the existing writer's output, and repairs repeat under the same budget.
   Measured locally with the CI release profile, raw writes below the budget
   took at most 2.55× main's time, with peak heap at most 1.45× main's across
@@ -146,8 +146,9 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   writer](UPSTREAM.md#the-config-writer). Repairs from saves, nested updates
   and raw writes are checked against a following no-change save and migration,
   so a repaired comment is not lost where the existing writer's placement
-  would keep it. When a later step deletes or rewrites a comment's owner, the
-  comment goes with it.
+  would keep it. Blank separators are added only where reloading needs them
+  to keep a key foot. When a later step deletes or rewrites a comment's owner,
+  the comment goes with it.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Request-log file names can't point outside the log directory.** A `..` in the request path becomes `-`, dots are trimmed from the ends, and a name that isn't a plain file name is refused, following CLIProxyAPI v8.0.42 ahead of the v8.0.38 pin.
