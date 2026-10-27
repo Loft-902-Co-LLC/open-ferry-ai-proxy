@@ -37,8 +37,8 @@ jobs:
   parity:
     name: parity (ubuntu-latest)
     runs-on: ubuntu-latest
-    # Config-save cases run in parallel, but each one is costly. With 2000
-    # random cases a slow runner needs about 45 minutes.
+    # Config-save cases run in parallel, but each one is costly. A run with
+    # 2000 random cases took 22 minutes; slow runners and seeds take longer.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

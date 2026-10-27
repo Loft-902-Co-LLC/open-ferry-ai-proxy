@@ -1607,7 +1607,7 @@ For a reviewed newly seen existing limitation, add `--baseline EXISTING` to
 refresh incrementally without lowering the bound or changing the exact PR set.
 The measured calibration has 13 kinds and a bound of 75 Different per 1,000.
 Seeds 30 and 38 have 267 and 249 Different out of 5,109 cases; the ten
-nightly-sized counts range from 249 to 307. The PR run has zero Different.
+random-5000 counts range from 249 to 307. The PR run has zero Different.
 The selected historical sets have 168/170 and 161/164 Different and count
 toward the kinds, not the rate. Keeping part of a moved block stays Different.
 Complete blocks can still be proved, as in `random-32-223`;
