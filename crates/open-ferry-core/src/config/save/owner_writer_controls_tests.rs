@@ -67,6 +67,7 @@ fn check_control(source: &str, case: &str, op: &str, disable: &str, repaired: Op
                 .unwrap();
                 assert!(
                     case == "legacy_one_foot" && op == "migrate2" && pass == 0
+                        || owner_tests::round9::recorded_refusal("r2", case, op, disable, pass)
                         || raw_fallbacks.iter().any(|row| {
                             row[0] == case && row[1] == op && row[2] == disable && row[3] == pass
                         }),
@@ -293,6 +294,13 @@ fn owner_round7_r4_diagnostic_controls_keep_main_bytes_and_source_owners() {
                 let actual = file.as_str().unwrap().as_bytes();
                 let operation = owner_legacy_ops::operation(&input, &row, pass).unwrap();
                 let main = tree::without_owner_protection(|| operation.run(&input)).unwrap();
+                if owner_tests::round9::recorded_refusal("r4", case, op, disabled, pass) {
+                    assert_eq!(actual, main);
+                    assert_eq!(file, &off["files"][pass]);
+                    Config::load_bytes(actual).unwrap();
+                    input = actual.to_vec();
+                    continue;
+                }
                 let source_owners = owner_legacy_tests::independent_canonical_owners(&input);
                 assert_ne!(
                     source_owners,

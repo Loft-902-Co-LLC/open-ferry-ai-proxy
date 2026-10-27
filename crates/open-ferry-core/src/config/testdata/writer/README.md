@@ -24,3 +24,16 @@ After the loader update, all 1,355 R2/R4 main receipt rows were checked against 
 `owner_round5_incoming_source.json` pairs an incoming YAML body with an unparsed comment and a fully covered body that still permits a repair.
 
 `owner_round6.json` covers raw-write text retention on the following save, source-count caps, tag-free nested and explicit item keys, removed comment lines, and blank lines required by key-foot owners. `owner_raw_save_fallbacks.json` lists fixed diagnostic controls that retain the frozen raw writer bytes; it does not inspect the repair gate.
+
+`owner_round9.json` has a reduced flow-value history, the complete explicit-key
+history with pinned Go comment counts, and an isolated migration for conditional
+foot separators. Each history snapshot checks source copies up to the number
+Go's own snapshot keeps. The migration pins the complete output hash, including
+its two required blank separators.
+
+`owner_round9_refusals.json` freezes 158 existing diagnostic histories whose
+repairs are unsafe on a following save with an older protection disabled.
+The 124 R2, 32 R4 and two legacy rows retain the exact main output. Each row
+pins the prior proposal and its following save and migration outcomes; tests
+independently check source owners, values, styles, tags and the unsafe preview.
+The R2 selector remains 334 rows and the R4 selector remains the same 32 rows.
