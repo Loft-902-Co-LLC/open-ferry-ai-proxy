@@ -83,12 +83,27 @@ pub(super) fn certify_repair(
         return Ok(None);
     }
     let bound = bind(&unbound, protected, run_go)?;
+    // Prefer the existing single-protection certificates for these old rules.
+    // Reproduction is only a hint: the full certificate must still pass every
+    // check. A refused subset never weakens the supplementary owner proof.
+    let existing_rule = ALL.iter().enumerate().any(|(i, p)| {
+        matches!(
+            p,
+            Protection::CanonicalVersionComment | Protection::DroppedSingleKeyComment
+        ) && replay(&unbound, 1 << i).is_some_and(|r| r.output == *go)
+    });
+    if existing_rule {
+        let existing = super::certify_full(&unbound, go, protected, &mut *run_go, false)?;
+        if existing.deviations.is_some() {
+            return Ok(Some(existing));
+        }
+    }
     let Some(mut source) = bound.options["file"].as_str() else {
         return Ok(None);
     };
     let mut proofs = Vec::new();
     let mut existing = Vec::new();
-    let mut deviations = BTreeSet::from([Deviation::RetainedDeferredCommentOwners]);
+    let mut deviations = BTreeSet::new();
     for (index, ((step, g), r)) in steps.iter().zip(gfiles).zip(rfiles).enumerate() {
         if step["op"] == "write" {
             let Some(body) = step["body"].as_str() else {
@@ -99,6 +114,9 @@ pub(super) fn certify_repair(
         let (Some(g), Some(r)) = (g.as_str(), r.as_str()) else {
             return Ok(None);
         };
+        if g != r && !core::CommentOwnership::go_budget(source, g, r).accepted() {
+            return Ok(None);
+        }
         let exact =
             &bound.options["_ownership_evidence"][index]["retained_source_owner"]["exact_go"];
         let mut single = unbound.clone();
@@ -126,7 +144,7 @@ pub(super) fn certify_repair(
             source = r;
             continue;
         }
-        if g != r && !inherited_repair(&bound, index, r) {
+        if g != r && !inherited_repair(&bound, index, source, Some(g), r) {
             let Some(proof) = source_owner(&bound, index, source, r) else {
                 return Ok(None);
             };
@@ -134,15 +152,20 @@ pub(super) fn certify_repair(
                 return Ok(None);
             }
             proofs.push(json!({"step":index,"checks":proof.conditions,"accepted":true}));
+            deviations.insert(Deviation::RetainedDeferredCommentOwners);
         }
         source = r;
     }
     if proofs.is_empty() {
         return Ok(None);
     }
+    let owner_rules: Vec<_> = (!proofs.is_empty())
+        .then_some("retained-source-owner")
+        .into_iter()
+        .collect();
     Ok(Some(Attempt {
         deviations: Some(deviations),
-        evidence: json!({"kind":"certified-protection-ablation","method":"source-owner-certificate","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":["retained-source-owner"],"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"failures":[]}),
+        evidence: json!({"kind":"certified-protection-ablation","method":"source-owner-certificate","case":case.name,"options":unbound.options,"original_go":go,"protected_rust":protected,"owner_rules":owner_rules,"retained_source_owner":proofs,"existing_steps":existing,"source_identities":bound.options["_ownership_evidence"],"failures":[]}),
     }))
 }
 
@@ -224,6 +247,12 @@ pub(super) fn analyze(
     written: &[String],
     observed: bool,
 ) -> core::CommentOwnership {
+    if let Some(go) = go.filter(|g| *g != protected) {
+        let budget = core::CommentOwnership::go_budget(source, go, protected);
+        if !budget.accepted() {
+            return budget;
+        }
+    }
     let strict = if let Some(evidence) = case.options["_ownership_evidence"].get(index) {
         core::comment_ownership_with_provenance(
             source,
@@ -242,7 +271,7 @@ pub(super) fn analyze(
     if strict.accepted() {
         return strict;
     }
-    if inherited_repair(case, index, protected) {
+    if inherited_repair(case, index, source, go, protected) {
         return core::CommentOwnership {
             failure: None,
             rules: vec!["retained-source-owner"],
@@ -268,7 +297,17 @@ pub(super) fn analyze(
 /// Once a prefix's owner repair is proved, a subsequent byte-identical Go
 /// replay from that repaired prefix needs no new owner exception. A raw write
 /// starts a new source and cannot inherit a certificate from the old file.
-fn inherited_repair(case: &Case, index: usize, protected: &str) -> bool {
+fn inherited_repair(
+    case: &Case,
+    index: usize,
+    source: &str,
+    go: Option<&str>,
+    protected: &str,
+) -> bool {
+    let Some(go) = go else { return false };
+    if go != protected && !core::CommentOwnership::go_budget(source, go, protected).accepted() {
+        return false;
+    }
     let Some(evidence) = case.options["_ownership_evidence"].as_array() else {
         return false;
     };
@@ -367,9 +406,25 @@ mod repeat_tests {
                 "exact_go":{"files":[protected]},"repeat_input":protected,"repeat_operation":step,"repeat_ok":true,"repeated":protected
             }}]
         }));
-        assert!(inherited_repair(&case, 1, protected));
+        assert!(inherited_repair(
+            &case,
+            1,
+            protected,
+            Some(protected),
+            protected
+        ));
         case.options["_ownership_evidence"][1]["retained_source_owner"]["repeated"] =
             "changed".into();
-        assert!(!inherited_repair(&case, 1, protected));
+        assert!(!inherited_repair(
+            &case,
+            1,
+            protected,
+            Some(protected),
+            protected
+        ));
     }
 }
+
+#[cfg(test)]
+#[path = "owner_budget_tests.rs"]
+mod owner_budget_tests;

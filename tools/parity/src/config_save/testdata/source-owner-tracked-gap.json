@@ -209,7 +209,94 @@
       },
       "repeat_ok": true,
       "repeated": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
-      "normalized": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n"
+      "normalized": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\nname: m\n",
+      "exact_go": {
+        "files": [
+          "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n"
+        ]
+      },
+      "expanded_source_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "srv",
+                  "tag": "!!str"
+                },
+                {
+                  "key": "host",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "foot"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"n\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      },
+      "exact_go_inventory": {
+        "comments": [
+          {
+            "ordinal": 0,
+            "source": {
+              "path": [
+                {
+                  "key": "name",
+                  "tag": "!!str"
+                }
+              ],
+              "node": "key",
+              "slot": "head"
+            },
+            "text": "# note-a"
+          }
+        ],
+        "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n# note-a\nname: m\n",
+        "values": {
+          "decoded": "map[string]interface {}{\"name\":\"m\", \"srv\":map[string]interface {}{\"host\":\"h\"}, \"x\":1, \"y\":\"two\", \"z\":[]interface {}{1, 2}}",
+          "tags": [
+            "[[],\"root\",\"!!map\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"name\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"},{\"key\":\"host\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"srv\",\"tag\":\"!!str\"}],\"value\",\"!!map\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"x\",\"tag\":\"!!str\"}],\"value\",\"!!int\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"y\",\"tag\":\"!!str\"}],\"value\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":0}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"},{\"index\":1}],\"item\",\"!!int\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"key\",\"!!str\"]",
+            "[[{\"key\":\"z\",\"tag\":\"!!str\"}],\"value\",\"!!seq\"]"
+          ]
+        }
+      }
     },
     "source": "x: 1\ny: two\nz: [1, 2]\nsrv:\n  host: h\n  # note-a\nname: n\n"
   },
