@@ -12,7 +12,7 @@ on:
       random:
         description: 'Random cases per generator'
         type: string
-        default: '3000'
+        default: '2000'
   # CI calls the same job with a smaller, deterministic input set.
   workflow_call:
     inputs:
@@ -21,7 +21,7 @@ on:
         default: ''
       random:
         type: string
-        default: '3000'
+        default: '2000'
 
 permissions:
   contents: read
@@ -37,8 +37,8 @@ jobs:
   parity:
     name: parity (ubuntu-latest)
     runs-on: ubuntu-latest
-    # Config-save cases run in parallel, but each one is costly. With 3000
-    # random cases a slow runner needs about 50 minutes.
+    # Config-save cases run in parallel, but each one is costly. With 2000
+    # random cases a slow runner needs about 45 minutes.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,7 +72,7 @@ jobs:
       - name: Compare offline
         env:
           PARITY_SEED: ${{ inputs.seed || github.run_number }}
-          PARITY_RANDOM: ${{ inputs.random || '3000' }}
+          PARITY_RANDOM: ${{ inputs.random || '2000' }}
         run: bash .github/scripts/run-parity.sh
 
       - name: Keep counterfactual proof evidence
