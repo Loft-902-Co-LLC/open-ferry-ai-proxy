@@ -18,6 +18,23 @@ pub const ALL: [Protection; 8] = [
 ];
 const _: () = assert!(ALL.len() <= 8);
 
+thread_local! {
+    static PARALLEL_REPLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Case workers already consume the CLI's thread budget. Keep their replay
+/// tails inline; the sequential CLI path retains its original four-way tail.
+pub(crate) fn without_parallel_replay<T>(call: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PARALLEL_REPLAY.set(self.0);
+        }
+    }
+    let _restore = Restore(PARALLEL_REPLAY.replace(false));
+    call()
+}
+
 #[derive(Clone, Debug)]
 pub struct Replay {
     pub output: Value,
@@ -509,7 +526,7 @@ fn certify_full(
         }
         // Cheap, early reproductions should not pay for speculative writers.
         // The exponential no-subset tail is where concurrency saves time.
-        let ablated = if parallel && index >= ALL.len() {
+        let ablated = if parallel && PARALLEL_REPLAY.get() && index >= ALL.len() {
             if pending.is_empty() {
                 // Only execution is concurrent. Consume results in the original
                 // cardinality/mask order, with the same minimality checks and

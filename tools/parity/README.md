@@ -2,6 +2,8 @@
 
 Differential tests of open-ferry's translators against upstream [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The tool runs the same input through upstream's Go translators and through our Rust ports, then compares what they produce.
 
+Config-save cases run concurrently on the available logical processors. Use `--jobs N` to limit case workers, or `--jobs 1` for the sequential path. Results, proofs, failure files and decision logs are recorded in the original case order. Other suites remain sequential. Case workers run their protection-ablation replay tails inline, so at most `N` cases and Go helpers execute at once; `--jobs 1` retains the original four-thread replay tail. At most twice the worker count is dispatched before recording, bounding buffered results and staging files.
+
 One hundred and eight suites are covered so far:
 
 | Module | Translator | Input | Output |
