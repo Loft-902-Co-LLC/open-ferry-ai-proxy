@@ -9,17 +9,23 @@ use std::{
 
 /// At most `jobs` evaluations run and at most `2 * jobs` await recording.
 /// Errors belong to the recorder, so an earlier case always wins, including
-/// when a later evaluation finishes (or fails) first. Dropping the task sender
+/// when a later evaluation finishes (or fails) first. Panic handling also runs
+/// only when that case is consumed, on the recorder thread in either mode. Dropping the task sender
 /// on error stops dispatch; scoped workers finish before returning.
 pub(crate) fn for_each<T: Send, E>(
     count: usize,
     jobs: usize,
     evaluate: impl Fn(usize) -> T + Sync,
     mut record: impl FnMut(usize, T) -> Result<(), E>,
+    mut on_panic: impl FnMut(usize, Box<dyn std::any::Any + Send>) -> T,
 ) -> Result<(), E> {
     let jobs = jobs.max(1).min(count);
     if jobs <= 1 {
-        return (0..count).try_for_each(|index| record(index, evaluate(index)));
+        return (0..count).try_for_each(|index| {
+            let result = panic::catch_unwind(AssertUnwindSafe(|| evaluate(index)))
+                .unwrap_or_else(|payload| on_panic(index, payload));
+            record(index, result)
+        });
     }
     let (tasks, work) = mpsc::channel();
     let work = Mutex::new(work);
@@ -55,7 +61,7 @@ pub(crate) fn for_each<T: Send, E>(
             for (index, result) in results {
                 pending.insert(index, result);
                 while let Some(result) = pending.remove(&next) {
-                    let result = result.unwrap_or_else(|payload| panic::resume_unwind(payload));
+                    let result = result.unwrap_or_else(|payload| on_panic(next, payload));
                     record(next, result)?;
                     if let Some(index) = next.checked_add(window).filter(|&i| i < count) {
                         tasks.send(index).unwrap();

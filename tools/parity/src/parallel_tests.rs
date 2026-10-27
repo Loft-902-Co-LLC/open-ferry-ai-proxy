@@ -79,7 +79,7 @@ fn parallel_fixture_records_and_artifacts_match_sequential_in_case_order() {
             };
             records.push(json!({"case":case.name,"outcome":outcome,"kinds":evaluated.certification_failure,"proof":proof,"rust":evaluated.rust_output}));
             tally.record(&case, evaluated, &dir)
-        }).unwrap();
+        }, |_, payload| panic::resume_unwind(payload)).unwrap();
         if jobs > 1 {
             assert_ne!(
                 completed.lock().unwrap()[0],
@@ -140,6 +140,7 @@ fn parallel_errors_stop_recording_at_the_first_case_order_error() {
                 recorded.push(result?);
                 Ok::<_, String>(())
             },
+            |_, payload| panic::resume_unwind(payload),
         );
         assert_eq!(result, Err("case 1".into()));
         assert_eq!(recorded, [0]);
@@ -149,6 +150,7 @@ fn parallel_errors_stop_recording_at_the_first_case_order_error() {
         4,
         |_| unreachable!(),
         |_, _: ()| -> Result<(), ()> { unreachable!() },
+        |_, payload| panic::resume_unwind(payload),
     )
     .unwrap();
 }
@@ -171,6 +173,7 @@ fn workers_restore_protection_scopes_after_each_case_and_panic() {
             assert_eq!(core::disabled_protections(&all), 0);
         },
         |_, ()| Ok::<_, ()>(()),
+        |_, payload| panic::resume_unwind(payload),
     )
     .unwrap();
 }
@@ -196,4 +199,116 @@ fn staged_artifacts_publish_duplicate_names_in_record_order() {
         );
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+pub(super) fn panic_record(case: &Case, evaluated: &Evaluated) -> Value {
+    let differences = match &evaluated.outcome {
+        Outcome::Different(found) => found
+            .iter()
+            .map(|d| (&d.path, &d.go, &d.rust))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    json!({"case":case.name,"go_output":evaluated.go_output,"go_value":evaluated.go_value,
+        "rust":evaluated.rust_output,"differences":differences,"kinds":evaluated.certification_failure})
+}
+
+#[test]
+fn case_worker_panics_match_sequential_per_case_records_and_continue() {
+    let cases: Vec<_> = (0..5)
+        .map(|i| {
+            Case::new(format!("panic-case-{i}"), "", "")
+                .with_options(json!({"file":"debug: false\n","steps":[]}))
+        })
+        .collect();
+    let go = GoResult::Output(br#"{"files":[]}"#.to_vec());
+    let run = |jobs| {
+        let dir =
+            std::env::temp_dir().join(format!("parity-case-panics-{}-{jobs}", std::process::id()));
+        fresh_dir(&dir).unwrap();
+        let mut records = Vec::new();
+        let mut tally = Tally::default();
+        let mut handled = Vec::new();
+        parallel::for_each(
+            cases.len(),
+            jobs,
+            |i| match i {
+                1 => panic::panic_any(String::from("case worker panic")),
+                2 => panic::panic_any(42_u32),
+                3 => panic!("literal worker panic"),
+                _ => evaluate(Translator::ConfigSave, &cases[i], &go),
+            },
+            |i, evaluated| {
+                records.push(panic_record(&cases[i], &evaluated));
+                tally.record(&cases[i], evaluated, &dir)
+            },
+            |i, payload| {
+                handled.push(i);
+                evaluate_panic(Translator::ConfigSave, &cases[i], &go, payload)
+            },
+        )
+        .unwrap();
+        assert_eq!(handled, [1, 2, 3]);
+        assert_eq!((tally.identical, tally.different), (2, 3));
+        assert!(tally.certification_failures.is_empty());
+        let files: BTreeMap<_, _> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        fs::remove_dir_all(dir).unwrap();
+        (records, files)
+    };
+    let sequential = run(1);
+    assert_eq!(sequential, run(4));
+    for (i, message) in [
+        (1, "panic: case worker panic"),
+        (2, "panic: "),
+        (3, "panic: literal worker panic"),
+    ] {
+        let expected =
+            evaluate_rust_output(Translator::ConfigSave, &cases[i], &go, Err(message.into()));
+        assert_eq!(sequential.0[i], panic_record(&cases[i], &expected));
+    }
+}
+
+#[test]
+fn speculative_case_panic_after_an_earlier_error_is_never_reported() {
+    for jobs in [1, 4] {
+        let barrier = Barrier::new(2);
+        let panicked = std::sync::atomic::AtomicBool::new(false);
+        let mut handled = Vec::new();
+        let result = parallel::for_each(
+            4,
+            jobs,
+            |i| -> Result<(), String> {
+                if i == 0 {
+                    if jobs > 1 {
+                        barrier.wait();
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                    return Err("first case error".into());
+                }
+                if i == 1 {
+                    barrier.wait();
+                    panicked.store(true, std::sync::atomic::Ordering::Relaxed);
+                    panic!("unconsumed speculative case");
+                }
+                Ok(())
+            },
+            |_, result| result,
+            |i, payload| {
+                handled.push(i);
+                Err(panic_message(&*payload))
+            },
+        );
+        assert_eq!(result, Err("first case error".into()));
+        assert!(handled.is_empty());
+        assert_eq!(
+            panicked.load(std::sync::atomic::Ordering::Relaxed),
+            jobs > 1
+        );
+    }
 }

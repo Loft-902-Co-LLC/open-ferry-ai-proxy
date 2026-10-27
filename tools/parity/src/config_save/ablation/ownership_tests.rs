@@ -1,6 +1,142 @@
 use super::*;
 
 #[test]
+fn consumed_replay_worker_panic_keeps_the_sequential_payload() {
+    let case = Case::new("consumed-replay-panic", "", "").with_options(json!({
+        "file":"auth-dir: /old # source\n",
+        "steps":[{"op":"nested","keys":["auth-dir"],"value":"/new"}]
+    }));
+    let protected = replay(&case, 0).unwrap().output;
+    let go = json!({"files":["auth-dir: /different\n"]});
+    let run = |parallel| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            certify_full_with_replay(
+                &case,
+                &go,
+                &protected,
+                |_| unreachable!("no reproducing subset"),
+                parallel,
+                |case, mask| {
+                    if mask == 5 {
+                        panic!("consumed replay panic");
+                    }
+                    replay(case, mask)
+                },
+            )
+        }));
+        let Err(payload) = result else {
+            panic!("the consumed replay must panic")
+        };
+        crate::panic_message(&*payload)
+    };
+    assert_eq!(run(false), "panic: consumed replay panic");
+    assert_eq!(run(true), run(false));
+
+    let records = |jobs, parallel_tail| {
+        let original_go = GoResult::Output(serde_json::to_vec(&go).unwrap());
+        let mut records = Vec::new();
+        crate::parallel::for_each(
+            4,
+            jobs,
+            |index| {
+                if index == 1 {
+                    let certify = || {
+                        certify_full_with_replay(
+                            &case,
+                            &go,
+                            &protected,
+                            |_| unreachable!("no reproducing subset"),
+                            parallel_tail,
+                            |case, mask| {
+                                if mask == 5 {
+                                    panic!("consumed replay panic");
+                                }
+                                replay(case, mask)
+                            },
+                        )
+                    };
+                    let result = if jobs > 1 {
+                        without_parallel_replay(certify)
+                    } else {
+                        certify()
+                    };
+                    result.unwrap();
+                }
+                crate::evaluate(crate::Translator::ConfigSave, &case, &original_go)
+            },
+            |index, evaluated| {
+                records.push(json!([
+                    index,
+                    crate::parallel_tests::panic_record(&case, &evaluated)
+                ]));
+                Ok::<_, ()>(())
+            },
+            |_, payload| {
+                crate::evaluate_panic(crate::Translator::ConfigSave, &case, &original_go, payload)
+            },
+        )
+        .unwrap();
+        assert_eq!(records.len(), 4, "record later cases after the panic");
+        assert_eq!(
+            records[1][1]["rust"],
+            json!({"Err":"panic: consumed replay panic"})
+        );
+        assert!(records[1][1]["kinds"].is_null());
+        records
+    };
+    let sequential = records(1, false);
+    assert_eq!(sequential, records(1, true));
+    assert_eq!(sequential, records(4, true));
+}
+
+#[test]
+fn unconsumed_speculative_replay_panic_cannot_change_a_refusal() {
+    let case = Case::new("unconsumed-replay-panic", "", "").with_options(json!({
+        "file":"auth-dir: /old # source\n",
+        "steps":[{"op":"nested","keys":["auth-dir"],"value":"/new"}]
+    }));
+    let protected = replay(&case, 0).unwrap().output;
+    let go = json!({"files":["auth-dir: /different\n"]});
+    let run = |parallel| {
+        let panicked = std::sync::atomic::AtomicBool::new(false);
+        let mut oracle_calls = 0;
+        let attempt = certify_full_with_replay(
+            &case,
+            &go,
+            &protected,
+            |_| {
+                oracle_calls += 1;
+                Ok(GoResult::Panic("independent oracle unavailable".into()))
+            },
+            parallel,
+            |case, mask| {
+                if mask == 5 {
+                    panicked.store(true, std::sync::atomic::Ordering::Relaxed);
+                    panic!("unconsumed replay panic");
+                }
+                let mut replay = replay(case, mask)?;
+                // Force the first tail mask to reach the existing oracle refusal.
+                // The later panic is outside the sequential execution prefix.
+                if mask == 3 {
+                    replay.output = go.clone();
+                }
+                Some(replay)
+            },
+        )
+        .unwrap();
+        assert_eq!(oracle_calls, 1);
+        assert_eq!(
+            panicked.load(std::sync::atomic::Ordering::Relaxed),
+            parallel
+        );
+        assert!(attempt.deviations.is_none());
+        assert_eq!(attempt.evidence["reason"], "check 2: Go oracle panicked");
+        attempt.evidence
+    };
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
 fn ordered_parallel_search_matches_sequential_search_and_inherits_scope() {
     let case = Case::new("ordered-replays", "", "").with_options(json!({
         "file":"# source\nauth-dir: /old\n",
