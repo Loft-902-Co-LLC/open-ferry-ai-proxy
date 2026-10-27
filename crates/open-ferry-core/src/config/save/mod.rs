@@ -575,9 +575,18 @@ fn raw_comments_survive_following_saves(
     legacy_layout: bool,
     cached_previews: Option<RawSavePreviews>,
 ) -> bool {
-    let Some(source_counts) = tree::physical_comment_counts(source) else {
+    let Some(mut source_counts) = tree::physical_comment_counts(source) else {
         return false;
     };
+    let Some(proposal_counts) = tree::physical_comment_counts(proposal) else {
+        return false;
+    };
+    // The following save receives the expanded proposal, including every
+    // physical alias copy. Its source count can exceed the raw input's count.
+    for (text, count) in proposal_counts {
+        let required = source_counts.entry(text).or_insert(0);
+        *required = (*required).max(count);
+    }
     // The whole-file gate proved identical values, scalar styles and tags.
     let previews = match cached_previews {
         Some(previews) => previews,
@@ -862,10 +871,52 @@ pub(crate) fn render_preserving_comments(
     migrate_v8: bool,
 ) -> Result<Vec<u8>, SaveError> {
     let (candidate, source) = candidate_preserving_comments(data, cfg, migrate_v8)?;
-    Ok(tree::finish_comment_owners(&source, candidate, |data| {
+    let writer = candidate.bytes.clone();
+    let proposal = finish_preserving_comments(candidate, &source, cfg, migrate_v8);
+    if proposal != writer && !repair_survives_following_saves(&writer, &proposal) {
+        return Ok(writer);
+    }
+    Ok(proposal)
+}
+
+fn finish_preserving_comments(
+    candidate: tree::ReceiptedYaml,
+    source: &tree::CommentSource,
+    cfg: &Config,
+    migrate_v8: bool,
+) -> Vec<u8> {
+    tree::finish_comment_owners(source, candidate, |data| {
         let (candidate, source) = candidate_preserving_comments(data, cfg, migrate_v8).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
-    }))
+    })
+}
+
+/// Both no-change saves must retain the proposal's comment copies up to the
+/// number the same save keeps at the writer's placement.
+/// Finish each preview directly so this check never calls itself recursively.
+fn repair_survives_following_saves(writer: &[u8], proposal: &[u8]) -> bool {
+    let Some(counts) = tree::physical_comment_counts(proposal) else {
+        return false;
+    };
+    let Ok(config) = Config::parse(proposal) else {
+        return false;
+    };
+    for migrate in [false, true] {
+        let Ok((candidate, source)) = candidate_preserving_comments(proposal, &config, migrate)
+        else {
+            return false;
+        };
+        let preview = finish_preserving_comments(candidate, &source, &config, migrate);
+        if !raw_preview_keeps_comment_counts(&counts, &preview, || {
+            let (candidate, source) = candidate_preserving_comments(writer, &config, migrate)?;
+            Ok(finish_preserving_comments(
+                candidate, &source, &config, migrate,
+            ))
+        }) {
+            return false;
+        }
+    }
+    true
 }
 
 fn candidate_preserving_comments(
@@ -942,10 +993,15 @@ pub(crate) fn render_nested_scalar(
     value: &str,
 ) -> Result<Vec<u8>, SaveError> {
     let (candidate, source) = candidate_nested_scalar(data, keys, value)?;
-    Ok(tree::finish_comment_owners(&source, candidate, |data| {
+    let writer = candidate.bytes.clone();
+    let proposal = tree::finish_comment_owners(&source, candidate, |data| {
         let (candidate, source) = candidate_nested_scalar(data, keys, value).ok()?;
         Some(tree::finish_comment_owners_replay(&source, candidate))
-    }))
+    });
+    if proposal != writer && !repair_survives_following_saves(&writer, &proposal) {
+        return Ok(writer);
+    }
+    Ok(proposal)
 }
 
 fn candidate_nested_scalar(

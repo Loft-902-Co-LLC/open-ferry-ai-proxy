@@ -143,7 +143,11 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
   the measured rows. Above the budget, raw writes run the existing writer
   path, measured within noise of main. Unsupported shapes keep upstream's
   placement, as described in [The config
-  writer](UPSTREAM.md#the-config-writer).
+  writer](UPSTREAM.md#the-config-writer). Repairs from saves, nested updates
+  and raw writes are checked against a following no-change save and migration,
+  so a repaired comment is not lost where the existing writer's placement
+  would keep it. When a later step deletes or rewrites a comment's owner, the
+  comment goes with it.
 - **Don't suggest the refused auth directory as its replacement.** When the machine auth directory fails the trust check and is already the default, the refusal no longer tells you to set `auth-dir` to that same path.
 - **The parity tool accepts a JSON string with its escapes rewritten,** such as `\u00e9` written as `é`, where open-ferry writes embedded JSON compactly on purpose. It accepts it only on the documented paths, and only when upstream's text is the request's own string.
 - **Request-log file names can't point outside the log directory.** A `..` in the request path becomes `-`, dots are trimmed from the ends, and a name that isn't a plain file name is refused, following CLIProxyAPI v8.0.42 ahead of the v8.0.38 pin.
