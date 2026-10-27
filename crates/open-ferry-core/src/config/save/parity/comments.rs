@@ -269,6 +269,37 @@ impl CommentOwnership {
     pub fn accepted(&self) -> bool {
         self.failure.is_none()
     }
+
+    /// Keep the original Go history's comment budget even when an owner repair
+    /// changes the input used by the next exact-input Go replay. Go-generated
+    /// duplicates need only their source multiplicity, as in the owner proof.
+    pub fn go_budget(source: &str, go: &str, protected: &str) -> Self {
+        let failed = |failure| Self {
+            failure: Some(failure),
+            rules: vec![],
+        };
+        let (Some(s), Some(g), Some(r)) = (
+            source_owner_expanded_inventory(source),
+            inventory(go, false),
+            inventory(protected, false),
+        ) else {
+            return failed(json!({"reason":"go_budget","detail":"comments_unparseable"}));
+        };
+        let (sc, gc, rc) = (counts(&s), counts(&g), counts(&r));
+        for (text, n) in gc {
+            let source = sc.get(&text).copied().unwrap_or_default();
+            let actual = rc.get(&text).copied().unwrap_or_default();
+            if actual < n.min(source) {
+                return failed(
+                    json!({"reason":"go_budget","text":text,"owner":g.iter().find(|c|c.text==text).map(|c|c.owner.json()),"go":n,"source":source,"protected":actual}),
+                );
+            }
+        }
+        Self {
+            failure: None,
+            rules: vec![],
+        }
+    }
 }
 
 fn promotion(
@@ -2183,6 +2214,10 @@ fn source_owner_expanded_basis(source: &str) -> Option<(Vec<Occurrence>, BTreeSe
 }
 
 #[cfg(test)]
+#[path = "owner_condition_tests.rs"]
+mod owner_condition_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2343,7 +2378,7 @@ mod tests {
         }
     }
 
-    fn source_owner_test_snapshot(text: &str) -> Value {
+    pub(super) fn source_owner_test_snapshot(text: &str) -> Value {
         let snapshot = (|| {
             let items = source_owner_inventory(text)?;
             let values = source_owner_signature(&unmarshal(text.as_bytes()).ok()?, true)?;
@@ -2385,7 +2420,11 @@ mod tests {
         refresh_source_owner_test_inventories(&mut evidence);
         (source, go, operation, evidence)
     }
-    fn replace_source_owner_output(evidence: &mut Value, operation: &Value, output: &str) {
+    pub(super) fn replace_source_owner_output(
+        evidence: &mut Value,
+        operation: &Value,
+        output: &str,
+    ) {
         let frame = &mut evidence["retained_source_owner"];
         frame["protected"] = output.into();
         frame["repeat_input"] = output.into();
@@ -2395,7 +2434,7 @@ mod tests {
         refresh_source_owner_test_inventories(evidence);
     }
 
-    fn expanded_owner_fixture() -> (String, String, Value, Value) {
+    pub(super) fn expanded_owner_fixture() -> (String, String, Value, Value) {
         let (source, go, op, mut evidence) = source_owner_fixture();
         let frame = &mut evidence["retained_source_owner"];
         frame["exact_go"] = json!({"files":[go]});

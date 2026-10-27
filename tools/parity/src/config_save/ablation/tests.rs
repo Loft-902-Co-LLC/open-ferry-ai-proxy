@@ -338,6 +338,16 @@ fn retained_source_owner_keeps_four_measured_writer_gaps_different() {
         );
         assert!(evidence["retained_source_owner"]["identity"]["occurrences"].is_array());
         assert!(evidence["retained_source_owner"]["go_inventory"]["comments"].is_array());
+        for receipt in [
+            "exact_go",
+            "expanded_source_inventory",
+            "exact_go_inventory",
+        ] {
+            assert!(
+                evidence["retained_source_owner"][receipt].is_object(),
+                "{name}: {receipt}"
+            );
+        }
         assert!(
             !core::retained_source_owner(source, protected, operation, evidence).accepted(),
             "{name}: a measured writer gap passed the new proof"

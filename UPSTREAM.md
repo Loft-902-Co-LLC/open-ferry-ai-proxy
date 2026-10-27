@@ -647,14 +647,23 @@ separator needs an exact one-line removal which makes pinned yaml.v3 move its
 source-owned foot. Removing every licensed separator must leave layout that
 passes the existing guard. A later byte-identical Go replay can carry a proved
 prefix repair forward; a raw write starts a new source.
+Every differing snapshot must also retain at least the smaller of each comment
+text's source count and its count in upstream's own history at that step.
+Exact-input replays cannot waive this budget. Deleting a repaired owner later
+does not license losing text that this budget requires; that history remains
+Different. The refusal retains its `check-3/go_budget/<op>` kind.
 Each step first reruns the unchanged comparison rules on that exact source.
 Steps those rules already prove need no new owner exception; every other
-restored owner needs the complete source-owner and repeat proof.
+restored owner needs the complete source-owner and repeat proof. Only a
+certificate that uses such a proof receives the retained-owner deviation.
 
 Complete owner certificates bypass the subset search. The internal environment
 variable `OPEN_FERRY_PARITY_FULL_SEARCH` also executes the original exhaustive
 search, using the same certificate and refusal decisions. Go replies are cached
 only within one record, keyed by their complete request options.
+Fast/full comparisons check the search path and caches, not whether the
+certificate agrees with the subset search. The certificate accepts records
+the exhaustive subset search refuses by design.
 
 For archives of unknown keys, a separate replay computes the exact comment
 lines and their places from each original entry and the requested write.
