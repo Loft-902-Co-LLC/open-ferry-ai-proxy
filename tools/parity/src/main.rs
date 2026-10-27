@@ -14,6 +14,7 @@ mod generate;
 mod interactions;
 mod live;
 mod multi_agent;
+mod parallel;
 mod payload;
 mod quota_signals;
 mod raw_json;
@@ -49,6 +50,7 @@ usage: open-ferry-parity --upstream <CLIProxyAPI checkout> [options]
 options:
   --random <n>   random cases to generate per translator (default 5000)
   --seed <n>     seed for the random cases (default 1)
+  --jobs <n>     concurrent config-save cases (default: available logical processors; 1: sequential)
   --suite <name> run only this offline suite (directory slug); repeat to select several
                  (default: all suites; unknown names are errors)
   --show <n>     kinds of difference to print (default 10)
@@ -82,6 +84,7 @@ const MAX_CONFIG_FAILURE_FILES: usize = 1000;
 struct Args {
     upstream: PathBuf,
     random: usize,
+    jobs: usize,
     seed: u64,
     show: usize,
     go: PathBuf,
@@ -109,6 +112,7 @@ impl Args {
         let mut parsed = Self {
             upstream: PathBuf::new(),
             random: 5000,
+            jobs: std::thread::available_parallelism().map_or(1, usize::from),
             seed: 1,
             show: 10,
             go: "go".into(),
@@ -129,13 +133,22 @@ impl Args {
             relabel_baseline: None,
         };
         while let Some(flag) = args.next() {
-            if matches!(flag.as_str(), "--seed" | "--random" | "--show" | "--go") {
+            if matches!(
+                flag.as_str(),
+                "--seed" | "--random" | "--show" | "--go" | "--jobs"
+            ) {
                 run_flags.insert(flag.clone());
             }
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
             match flag.as_str() {
                 "--upstream" => upstream = Some(PathBuf::from(value()?)),
                 "--random" => parsed.random = parse_number(&flag, &value()?)?,
+                "--jobs" => {
+                    parsed.jobs = parse_number(&flag, &value()?)?;
+                    if parsed.jobs == 0 {
+                        return Err("--jobs must be at least 1".into());
+                    }
+                }
                 "--seed" => parsed.seed = parse_number(&flag, &value()?)?,
                 "--show" => parsed.show = parse_number(&flag, &value()?)?,
                 "--go" => parsed.go = value()?.into(),
@@ -917,7 +930,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             config_save::metrics::reset();
         }
         let dir = failures_dir.join(translator.slug());
-        let tally = check(translator, &cases, &upstream, &work_dir, &dir)?;
+        let tally = check(translator, &cases, &upstream, &work_dir, &dir, args.jobs)?;
         println!();
         println!("{}", translator.title());
         println!(
@@ -1020,6 +1033,7 @@ fn check(
     upstream: &Upstream,
     work_dir: &Path,
     dir: &Path,
+    jobs: usize,
 ) -> Result<Tally, Box<dyn Error>> {
     let go_results = upstream.run(translator.key(), cases, work_dir)?;
     // The documented SSE exception needs an independent upstream execution
@@ -1038,34 +1052,92 @@ fn check(
         upstream.run(translator.key(), &bare_cases, work_dir)?
     };
     let mut proofs = probes.into_iter().zip(bare_go).peekable();
+    let mut tally = Tally::default();
+    let jobs = if translator == Translator::ConfigSave {
+        jobs
+    } else {
+        1
+    };
+    // Workers start with default thread-local protection/trace scopes. Every
+    // nested diagnostic scope restores itself on return and on unwinding.
+    let staging = work_dir.join("case-workers");
+    if jobs > 1 {
+        fresh_dir(&staging)?;
+    }
     // Rust panics are caught and reported per case, so keep them off stderr.
     panic::set_hook(Box::new(|_| {}));
-    let mut tally = Tally::default();
-    let recorded = cases
-        .iter()
-        .zip(&go_results)
-        .enumerate()
-        .try_for_each(|(index, (case, go))| {
-            let evaluated = evaluate_with_counterfactual(translator, case, go, upstream, work_dir)?;
+    let recorded = parallel::for_each(
+        cases.len().min(go_results.len()),
+        jobs,
+        |index| {
+            let case = &cases[index];
+            let go = &go_results[index];
+            if jobs == 1 {
+                return (
+                    None,
+                    evaluate_with_counterfactual(translator, case, go, upstream, work_dir)
+                        .map_err(|e| e.to_string()),
+                );
+            }
+            let dir = staging.join(index.to_string());
+            let result = (|| {
+                fs::create_dir(&dir)?;
+                config_save::ablation::without_parallel_replay(|| {
+                    evaluate_with_counterfactual(translator, case, go, upstream, &dir)
+                })
+            })()
+            .map_err(|e: Box<dyn Error>| e.to_string());
+            (Some(dir), result)
+        },
+        |index, (staged, evaluated)| {
+            let case = &cases[index];
+            if let Some(staged) = staged {
+                // Publish even partial evidence before returning a case error,
+                // just as sequential evaluation does. Later cases stay private.
+                publish_case(&staged, work_dir, case)?;
+                fs::remove_dir_all(staged)?;
+            }
+            let evaluated = evaluated.map_err(|e| -> Box<dyn Error> { e.into() })?;
             if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_DECISIONS") {
                 use std::io::Write as _;
                 let (decision, deviations) = match &evaluated.outcome {
                     Outcome::Identical => ("identical", Vec::new()),
-                    Outcome::Equivalent(found) => ("equivalent", found.iter().map(|d| d.describe()).collect()),
+                    Outcome::Equivalent(found) => {
+                        ("equivalent", found.iter().map(|d| d.describe()).collect())
+                    }
                     Outcome::Different(_) => ("different", Vec::new()),
                 };
-                let certificate = if translator==Translator::ConfigSave && safe_case_name(&case.name) {
-                    fs::read(work_dir.join("counterfactual").join(format!("{}.json",case.name))).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                } else { None };
-                let certificate_kind=certificate.as_ref().and_then(|c|c.get("kind"));
-                let reasons=certificate.as_ref().map(|c| {
-                    let mut reasons=Vec::new();
-                    if let Some(reason)=c["reason"].as_str() { reasons.push(reason); }
-                    if let Some(failures)=c["failures"].as_array() { reasons.extend(failures.iter().filter_map(|f|f["reason"].as_str())); }
+                let certificate =
+                    if translator == Translator::ConfigSave && safe_case_name(&case.name) {
+                        fs::read(
+                            work_dir
+                                .join("counterfactual")
+                                .join(format!("{}.json", case.name)),
+                        )
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    } else {
+                        None
+                    };
+                let certificate_kind = certificate.as_ref().and_then(|c| c.get("kind"));
+                let reasons = certificate.as_ref().map(|c| {
+                    let mut reasons = Vec::new();
+                    if let Some(reason) = c["reason"].as_str() {
+                        reasons.push(reason);
+                    }
+                    if let Some(failures) = c["failures"].as_array() {
+                        reasons.extend(failures.iter().filter_map(|f| f["reason"].as_str()));
+                    }
                     reasons
                 });
-                let mut file = fs::OpenOptions::new().append(true).create(true).open(path)?;
-                serde_json::to_writer(&mut file, &json!({"suite":translator.slug(),"case":case.name,"decision":decision,"deviations":deviations,"kinds":evaluated.certification_failure,"certificate_kind":certificate_kind,"reasons":reasons}))?;
+                let mut file = fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)?;
+                serde_json::to_writer(
+                    &mut file,
+                    &json!({"suite":translator.slug(),"case":case.name,"decision":decision,"deviations":deviations,"kinds":evaluated.certification_failure,"certificate_kind":certificate_kind,"reasons":reasons}),
+                )?;
                 file.write_all(b"\n")?;
             }
             let proof = proofs.next_if(|((candidate, _), _)| *candidate == index);
@@ -1079,9 +1151,35 @@ fn check(
                 checked.known_difference = Some(stream_framing::REASON);
             }
             tally.record(&checked, evaluated, dir)
-        });
+        },
+    );
     let _ = panic::take_hook();
-    recorded.map(|()| tally)
+    // Speculative work is never published, even after a recorder error.
+    let cleaned = if jobs > 1 {
+        fs::remove_dir_all(staging)
+    } else {
+        Ok(())
+    };
+    recorded?;
+    cleaned?;
+    Ok(tally)
+}
+
+/// Preserve the sequential final request and proof bytes, including repeated
+/// case names. Only this ordered recorder writes shared artifact paths.
+fn publish_case(staged: &Path, work_dir: &Path, case: &Case) -> Result<(), Box<dyn Error>> {
+    if staged.join("input.jsonl").is_file() {
+        fs::copy(staged.join("input.jsonl"), work_dir.join("input.jsonl"))?;
+    }
+    if safe_case_name(&case.name) {
+        let name = format!("{}.json", case.name);
+        let proof = staged.join("counterfactual").join(&name);
+        if proof.is_file() {
+            fs::create_dir_all(work_dir.join("counterfactual"))?;
+            fs::copy(proof, work_dir.join("counterfactual").join(name))?;
+        }
+    }
+    Ok(())
 }
 
 /// Translates the live cases both ways and sends each body through the proxy,
@@ -1217,7 +1315,7 @@ as expected {expected}/{}",
         (Translator::ChatNonStream, &finals),
     ] {
         let dir = live_dir.join(translator.slug());
-        let tally = check(translator, replies, upstream, work_dir, &dir)?;
+        let tally = check(translator, replies, upstream, work_dir, &dir, 1)?;
         println!();
         println!("{}", translator.title());
         println!("cases       the {} replies above", replies.len());
@@ -1769,6 +1867,9 @@ fn clip(text: &str) -> String {
         None => text.to_owned(),
     }
 }
+
+#[cfg(test)]
+mod parallel_tests;
 
 #[cfg(test)]
 mod tests {
