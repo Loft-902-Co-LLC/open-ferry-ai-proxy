@@ -137,6 +137,49 @@ fn unconsumed_speculative_replay_panic_cannot_change_a_refusal() {
 }
 
 #[test]
+fn replay_tail_workers_receive_the_callers_disabled_protections() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let case = Case::new("inherited-replay-scope", "", "").with_options(json!({
+        "file":"auth-dir: /old # source\n",
+        "steps":[{"op":"nested","keys":["auth-dir"],"value":"/new"}]
+    }));
+    let caller = std::thread::current().id();
+    let workers = AtomicUsize::new(0);
+    with_disabled(&[Protection::DeferredCommentOwners], || {
+        let inherited = core::disabled_protections(&ALL);
+        assert_eq!(inherited, 128);
+        let protected = replay(&case, 0).unwrap().output;
+        // No subset reproduces this output, so the threaded tail must run.
+        let go = json!({"files":["auth-dir: /different\n"]});
+        let run = |parallel| {
+            certify_full_with_replay(
+                &case,
+                &go,
+                &protected,
+                |_| unreachable!("no reproducing subset"),
+                parallel,
+                |case, mask| {
+                    if std::thread::current().id() != caller {
+                        workers.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(core::disabled_protections(&ALL), 0);
+                        assert_eq!(mask & inherited, inherited, "worker lost caller scope");
+                    }
+                    replay(case, mask)
+                },
+            )
+            .unwrap()
+        };
+        let parallel = run(true);
+        let sequential = run(false);
+        assert_eq!(parallel.deviations, sequential.deviations);
+        assert_eq!(parallel.evidence, sequential.evidence);
+        assert_eq!(core::disabled_protections(&ALL), inherited);
+    });
+    assert!(workers.load(Ordering::Relaxed) > 0);
+    assert_eq!(core::disabled_protections(&ALL), 0);
+}
+
+#[test]
 fn ordered_parallel_search_matches_sequential_search_and_inherits_scope() {
     let case = Case::new("ordered-replays", "", "").with_options(json!({
         "file":"# source\nauth-dir: /old\n",
