@@ -50,25 +50,32 @@ fn retained_through_history(name: &str) {
     let counts = tree::physical_comment_counts(source).unwrap();
     for snapshot in history(&row) {
         let actual = tree::physical_comment_counts(&snapshot).unwrap();
-        // The second source retains the context that prunes an empty alias
-        // item. Its head belongs to deleted data; every other source text,
-        // including the explicit key's line, must survive.
         assert!(
             counts
                 .iter()
-                .filter(
-                    |(text, _)| !row["deleted_owner_comments"]
-                        .as_array()
-                        .is_some_and(|deleted| deleted.iter().any(|v| v
-                            .as_str()
-                            .unwrap()
-                            .as_bytes()
-                            == **text))
-                )
                 .all(|(text, count)| actual.get(text).unwrap_or(&0) >= count),
             "{name}: a surviving owner's comment was lost"
         );
     }
+}
+
+pub(super) fn unsafe_nested_repair_is_refused(data: &[u8]) {
+    let (candidate, source) = candidate_nested_scalar(data, &["auth-dir"], "/x").unwrap();
+    let writer = candidate.bytes.clone();
+    let proposal = tree::finish_comment_owners(&source, candidate, |data| {
+        let (candidate, source) = candidate_nested_scalar(data, &["auth-dir"], "/x").ok()?;
+        Some(tree::finish_comment_owners_replay(&source, candidate))
+    });
+    assert!(proposal != writer, "fixture did not exercise a repair");
+    assert!(!repair_survives_following_saves(&writer, &proposal));
+    assert_eq!(
+        render_nested_scalar(data, &["auth-dir"], "/x").unwrap(),
+        writer
+    );
+    assert_eq!(
+        writer,
+        tree::without_owner_protection(|| render_nested_scalar(data, &["auth-dir"], "/x")).unwrap()
+    );
 }
 
 #[test]

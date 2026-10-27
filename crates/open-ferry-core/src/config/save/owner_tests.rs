@@ -106,21 +106,13 @@ fn owner_many_comment_parts_keep_their_physical_receipts() {
 }
 
 #[test]
-fn owner_a2_probe_keeps_its_sequence_item_head() {
+fn owner_a2_probe_refuses_a_head_repair_lost_by_a_later_save() {
     let probe = probes()
         .into_iter()
         .find(|p| p["case"] == "A-sequence-head")
         .unwrap();
     let source = probe["options"]["file"].as_str().unwrap().as_bytes();
-    let output = render_nested_scalar(source, &["auth-dir"], "/x").unwrap();
-    let doc = unmarshal(&output).unwrap();
-    let list = yaml_path(&doc.content[0], "oauth-model-alias.qwen").unwrap();
-    assert!(
-        !list.content[1].head_comment.is_empty(),
-        "source head drifted"
-    );
-    let again = render_nested_scalar(&output, &["auth-dir"], "/x").unwrap();
-    assert!(output == again, "second write differs");
+    round9::unsafe_nested_repair_is_refused(source);
 }
 
 #[test]
@@ -373,22 +365,26 @@ fn owner_diagnosed_a2_and_a3_cases_preserve_each_source_node_and_slot() {
             );
             continue;
         }
-        assert!(
-            output != prior.bytes,
-            "{} did not exercise repair",
-            case["case"]
-        );
-        assert!(
-            expected == independent_owners(&output),
-            "{} changed a source node/slot/paragraph",
-            case["case"]
-        );
-        assert!(source.complete);
-        assert!(
-            output == render_nested_scalar(&output, &["auth-dir"], "/x").unwrap(),
-            "{} second write",
-            case["case"]
-        );
+        if case["case"] == "random-30-2345-step-0" {
+            round9::unsafe_nested_repair_is_refused(data);
+        } else {
+            assert!(
+                output != prior.bytes,
+                "{} did not exercise repair",
+                case["case"]
+            );
+            assert!(
+                expected == independent_owners(&output),
+                "{} changed a source node/slot/paragraph",
+                case["case"]
+            );
+            assert!(source.complete);
+            assert!(
+                output == render_nested_scalar(&output, &["auth-dir"], "/x").unwrap(),
+                "{} second write",
+                case["case"]
+            );
+        }
         for root in case["roots"].as_array().unwrap() {
             if root == "A2" {
                 a2.insert(case["original_case"].as_str().unwrap().to_owned());
