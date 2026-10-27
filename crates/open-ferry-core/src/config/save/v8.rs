@@ -286,12 +286,19 @@ pub(crate) fn normalize_config_layout(
     migrate: bool,
 ) -> Result<(Vec<u8>, bool), SaveError> {
     let (candidate, source, changed) = layout_candidate(data, migrate)?;
+    if !super::tree::owner_protection_enabled() {
+        return Ok((candidate.bytes, changed));
+    }
+    let writer = candidate.bytes.clone();
     let bytes = super::tree::finish_comment_owners(&source, candidate, |data| {
         let (candidate, source, _) = layout_candidate(data, migrate).ok()?;
         Some(super::tree::finish_comment_owners_replay(
             &source, candidate,
         ))
     });
+    if bytes != writer && !super::repair_survives_following_saves(&writer, &bytes) {
+        return Ok((writer, changed));
+    }
     Ok((bytes, changed))
 }
 

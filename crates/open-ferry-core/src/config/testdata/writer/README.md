@@ -37,3 +37,17 @@ The 124 R2, 32 R4 and two legacy rows retain the exact main output. Each row
 pins the prior proposal and its following save and migration outcomes; tests
 independently check source owners, values, styles, tags and the unsafe preview.
 The R2 selector remains 334 rows and the R4 selector remains the same 32 rows.
+
+`owner_round10.json` has five reduced following-step controls: nested and save
+repairs before layout normalization, repairs made by layout normalization and
+a prepared v8 edit, and a legacy placement whose no-change save keeps a comment
+but whose migration drops it. Rows freeze writer bytes and prior proposals;
+the migration row also freezes both placements' save and migration previews.
+Original source hashes bind the reductions to their generated cases.
+
+`owner_round10_refusals.json` pins two existing R2 diagnostic controls and one
+legacy alias save whose following layout loses a copy at the repaired
+placement. Their frozen writer output remains covered, and their old proposals
+retain independent source-owner and value/style/tag checks. The raw preview
+unit uses that alias placement pair with real following operations to require
+both expanded copies, rather than just the one copy in the original input.
