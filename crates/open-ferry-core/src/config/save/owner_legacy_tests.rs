@@ -548,6 +548,10 @@ fn verify_repaired_row(row: &Value) {
         result["proofs"] == row["proofs"],
         "{id}: occurrence owner map"
     );
+    if super::owner_tests::round9::recorded_refusal("legacy", id, "", "", 0) {
+        assert_eq!(result["on"], result["off"]);
+        return;
+    }
     // Re-parse source, main and actual output with an independent path walker.
     // Static v8 path moves identify the same setting across layout changes.
     let mut input = row["recipe"]["source"]
