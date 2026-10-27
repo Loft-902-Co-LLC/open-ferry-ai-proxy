@@ -2839,6 +2839,7 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
     let mut edits = Vec::new();
     let mut removed = HashSet::new();
     let mut headers = HashSet::new();
+    let mut separator_groups = Vec::new();
     let mut feet: HashMap<_, Vec<_>> = HashMap::new();
     for comment in &source.comments {
         if comment.receipt.slot == CommentSlot::Foot {
@@ -2942,14 +2943,7 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
                 });
             }
             if deletes.len() == group.len() {
-                let next =
-                    deletes.iter().fold(
-                        insert,
-                        |at, edit| if edit.start == at { edit.end } else { at },
-                    );
-                if candidate.bytes.get(next) != Some(&b'\n') {
-                    block.push(b'\n');
-                }
+                separator_groups.push(group.clone());
                 edits.extend(deletes);
                 edits.push(ReceiptEdit {
                     start: insert,
@@ -3019,7 +3013,71 @@ fn repair_deferred_lines(source: &CommentSource, candidate: &mut ReceiptedYaml) 
         removed.insert(comment.receipt.id.clone());
         headers.insert(end);
     }
-    if let Some(proposal) = apply_receipt_edits(candidate, edits, &removed) {
+    if let Some(mut proposal) = apply_receipt_edits(candidate, edits, &removed) {
+        if !separator_groups.is_empty() {
+            // Test all moved feet together. One parse and one traversal keep
+            // this linear even when a document has many foot paragraphs.
+            fn held_feet(node: &Node, held: &mut HashSet<super::super::yaml3::CommentId>) {
+                comment_work(1);
+                let (mut at, mut part) = (0, 0);
+                for span in &node.comment_receipts.foot {
+                    if span.at < at || span.at > node.foot_comment.len() {
+                        continue;
+                    }
+                    part += node.foot_comment.as_bytes()[at..span.at]
+                        .iter()
+                        .filter(|b| **b == b'\n')
+                        .count();
+                    at = span.at;
+                    if node.comment_receipts.owner.as_ref() == Some(&span.receipt.owner)
+                        && span.receipt.slot == CommentSlot::Foot
+                        && span.receipt.ordinal == part
+                    {
+                        held.insert(span.receipt.id.clone());
+                    }
+                }
+                for child in &node.content {
+                    held_feet(child, held);
+                }
+            }
+            let mut held = HashSet::new();
+            if let Ok(parsed) = read_receipted(&proposal) {
+                held_feet(&parsed, &mut held);
+            }
+            let emissions = first_emissions(&proposal);
+            let mut separators = Vec::new();
+            for group in separator_groups {
+                if group.iter().all(|c| held.contains(&c.receipt.id)) {
+                    continue;
+                }
+                let Some(last) = group
+                    .iter()
+                    .filter_map(|c| emissions.get(&c.receipt.id))
+                    .max_by_key(|e| e.offset)
+                else {
+                    continue;
+                };
+                let end = last.offset + last.length;
+                let insert = if proposal.bytes.get(end..end + 2) == Some(b"\r\n") {
+                    end + 2
+                } else if proposal.bytes.get(end) == Some(&b'\n') {
+                    end + 1
+                } else {
+                    continue;
+                };
+                if proposal.bytes.get(insert) != Some(&b'\n') {
+                    separators.push(ReceiptEdit {
+                        start: insert,
+                        end: insert,
+                        bytes: b"\n".to_vec(),
+                        added: Vec::new(),
+                    });
+                }
+            }
+            if let Some(separated) = apply_receipt_edits(&proposal, separators, &HashSet::new()) {
+                proposal = separated;
+            }
+        }
         *candidate = proposal;
     }
 }
