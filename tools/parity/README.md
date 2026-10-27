@@ -144,7 +144,7 @@ the fixture's existing marker accepts either outcome. A tally regression test
 checks that neither outcome can become an unexpected difference.
 
 [Parity (scheduled)](../../.github/workflows/parity-scheduled.yml) runs daily at
-06:23 UTC with `--random 3000` and the Actions run number as its printed seed.
+06:23 UTC with `--random 2000` and the Actions run number as its printed seed.
 This separate workflow fails visibly on a mismatch and is outside the required
 checks. Its manual dispatch accepts optional `seed` and `random` inputs; an empty
 seed uses the run number. For example:
