@@ -466,8 +466,19 @@ fn certify_full(
     case: &Case,
     go: &Value,
     protected: &Value,
+    run_go: impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
+    parallel: bool,
+) -> Result<Attempt, Box<dyn Error>> {
+    certify_full_with_replay(case, go, protected, run_go, parallel, replay)
+}
+
+fn certify_full_with_replay(
+    case: &Case,
+    go: &Value,
+    protected: &Value,
     mut run_go: impl FnMut(&Case) -> Result<GoResult, Box<dyn Error>>,
     parallel: bool,
+    run_replay: impl Fn(&Case, u8) -> Option<Replay> + Sync,
 ) -> Result<Attempt, Box<dyn Error>> {
     // Serialized replay inputs cannot supply their own oracle receipts.
     let mut unbound = case.clone();
@@ -479,7 +490,8 @@ fn certify_full(
         deviations: None,
         evidence: json!({"kind":"uncertified-protection-ablation","case":case.name,"reason":reason}),
     };
-    let protected_replay = replay(case, 0);
+    let run_replay = &run_replay;
+    let protected_replay = run_replay(case, 0);
     if protected_replay
         .as_ref()
         .is_none_or(|r| r.output != *protected)
@@ -542,16 +554,21 @@ fn certify_full(
                 pending = std::thread::scope(|scope| {
                     batch
                         .into_iter()
-                        .map(|m| (m, scope.spawn(move || replay(case, m | inherited))))
+                        .map(|m| (m, scope.spawn(move || run_replay(case, m | inherited))))
                         .collect::<Vec<_>>()
                         .into_iter()
-                        .map(|(m, task)| (m, task.join().expect("ablation replay worker panicked")))
+                        .map(|(m, task)| (m, task.join()))
                         .collect()
                 });
             }
-            pending.remove(&mask).unwrap()
+            // A speculative panic belongs only to this mask. If a subset
+            // prunes it, or an earlier result returns, drop it unobserved.
+            pending
+                .remove(&mask)
+                .unwrap()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
         } else {
-            replay(case, mask)
+            run_replay(case, mask)
         };
         let Some(ablated) = ablated else {
             matches.push((mask, false));

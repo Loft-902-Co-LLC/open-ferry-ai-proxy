@@ -1095,7 +1095,9 @@ fn check(
                 // Publish even partial evidence before returning a case error,
                 // just as sequential evaluation does. Later cases stay private.
                 publish_case(&staged, work_dir, case)?;
-                fs::remove_dir_all(staged)?;
+                if staged.is_dir() {
+                    fs::remove_dir_all(staged)?;
+                }
             }
             let evaluated = evaluated.map_err(|e| -> Box<dyn Error> { e.into() })?;
             if let Some(path) = std::env::var_os("OPEN_FERRY_PARITY_DECISIONS") {
@@ -1151,6 +1153,23 @@ fn check(
                 checked.known_difference = Some(stream_framing::REASON);
             }
             tally.record(&checked, evaluated, dir)
+        },
+        |index, payload| {
+            if translator != Translator::ConfigSave {
+                panic::resume_unwind(payload);
+            }
+            let staged = (jobs > 1)
+                .then(|| staging.join(index.to_string()))
+                .filter(|p| p.is_dir());
+            (
+                staged,
+                Ok(evaluate_panic(
+                    translator,
+                    &cases[index],
+                    &go_results[index],
+                    payload,
+                )),
+            )
         },
     );
     let _ = panic::take_hook();
@@ -1586,15 +1605,36 @@ fn evaluate_with_whole_counterfactual(
 
 fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
     let rust_output = panic::catch_unwind(AssertUnwindSafe(|| translator.run_rust(case)))
-        .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_default();
-            Err(format!("panic: {message}"))
-        });
+        .unwrap_or_else(|payload| Err(panic_message(&*payload)));
+    evaluate_rust_output(translator, case, go, rust_output)
+}
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    format!("panic: {message}")
+}
+
+/// Use the existing per-case Rust-panic comparison path for the entire case,
+/// including consumed diagnostic replays. No proof can certify a panic.
+fn evaluate_panic(
+    translator: Translator,
+    case: &Case,
+    go: &GoResult,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Evaluated {
+    evaluate_rust_output(translator, case, go, Err(panic_message(&*payload)))
+}
+
+fn evaluate_rust_output(
+    translator: Translator,
+    case: &Case,
+    go: &GoResult,
+    rust_output: Result<Value, String>,
+) -> Evaluated {
     let (go_output, mut go_value) = match go {
         GoResult::Panic(message) => (format!("panic: {message}"), None),
         GoResult::Output(bytes) => (
