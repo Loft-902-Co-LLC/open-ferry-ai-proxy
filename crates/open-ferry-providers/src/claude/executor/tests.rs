@@ -365,10 +365,12 @@ async fn oauth_call_passes_the_client_through() {
         "x-stainless-lang",
         "js",
     );
-    mock.executor()
+    let response = mock
+        .executor()
         .execute(oauth_auth(), request(payload.clone()), options)
         .await
         .unwrap();
+    assert_eq!(response.payload, MESSAGE.as_bytes());
 
     let seen = mock.last();
     assert_eq!(
@@ -387,6 +389,7 @@ async fn oauth_call_passes_the_client_through() {
     let body = seen.json();
     assert_eq!(body["metadata"], json!({"user_id": "client-chosen-id"}));
     assert_eq!(body["system"], payload["system"]);
+    assert_eq!(body["messages"], payload["messages"]);
     assert_eq!(body["tools"], payload["tools"]);
     assert_eq!(body["model"], "claude-sonnet-4-5");
 }

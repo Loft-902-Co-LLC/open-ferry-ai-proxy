@@ -11,7 +11,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Added
 
 - **A README quick start** from installation through an API-key provider and client setup to a verified model reply, using the installer's config and keys, with key recovery and port-conflict guidance. The Status section is shorter; its full feature inventory is in [docs/features.md](docs/features.md).
-- **Generated compatibility evidence matrix** shows tested protocol/provider/credential capabilities first, with compact endpoint tables, exact offline fixture references and a separate translation-parity table derived from the Rust suite registry. Existing CI rejects stale output and missing, ignored or failing evidence; unrelated fixture comments and line shifts do not change the matrix ([matrix](docs/compatibility.md)).
+- **Generated compatibility evidence matrix** separates reviewed Open Ferry fixture assertions, tested refusals, scripted routes and translation parity. CI checks exact test definitions and normalized body digests, requires explicit acceptance after body changes, exports every classified parity suite with explicit exclusions, and reuses workspace test harnesses without extra feature-resolution builds ([matrix](docs/compatibility.md)).
 - **Config-save parity proofs follow comments that upstream moves.** The parity tool replays the pinned Go edits on the exact input to find where each comment ends up, and accepts a moved comment block only if every line is kept there, in order. Partial or misplaced blocks stay Different. The recalibrated baseline records the measured counts.
 - **Config-save parity can prove comments retained at their source owners when
   Go moved or dropped them.** A separate Go run checks each comment against

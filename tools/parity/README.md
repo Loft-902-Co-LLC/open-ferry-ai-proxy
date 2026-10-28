@@ -638,40 +638,57 @@ can be reused in a reviewed refresh.
 
 [`docs/compatibility.md`](../../docs/compatibility.md) is generated with
 `python .github/scripts/compatibility.py`; `--check` rejects stale output.
-The small map in `.github/scripts/compatibility-evidence.json` connects exact
-Rust provider/server fixtures to the client format, credential and capability
-assertions they exercise. Generation and CI compile the libtest harnesses and
-run each named test, requiring one pass and zero ignored tests. Public-route
-fixtures identify whether they use real provider executors or only scripted
-dispatch; scripted dispatch never fills a real provider/credential row.
+The small map in `.github/scripts/compatibility-evidence.json` names exact
+Rust fixture/refusal tests, cells and scopes. The checker resolves each fully
+qualified test from its crate's module declarations to the named file, checks
+its reviewed `body_sha256`, then runs the compiled test by its exact name,
+requiring one pass and zero ignored tests. Both refusal entries are tied to
+existing tests and checked the same way as successful fixtures.
 
-`cargo run --locked -p open-ferry-parity -- --list-suites` exports JSON from
-`main.rs`'s actual suite registry and `translator.rs`'s keys/slugs, including
-Interactions families. Client/upstream formats and direction come from the
-registered key, not a separate list of suites. Counts are hand-written cases
-with seed 1 and zero random cases, including signature-relay cases. The export
-skips configuration/non-translation fixtures and requires no Go, upstream tree,
-credentials or live proxy. The generated translation table uses its own
-`parity-tested` level: passing parity compares identical/equivalent output or
-recorded known differences, and an unaccepted Different result fails. It does
-not establish a provider account, credential type, public route or application
-version. PR parity runs only for the paths selected by ci.yml, using seed 1 and
-25 random cases; the scheduled job runs nightly with 2,000 by default.
+The small Rust lexer in `.github/scripts/compatibility_rust.py` matches braces
+through normal/raw strings, chars, lifetimes and nested comments. Body identity
+uses tokens with comments and whitespace outside literals removed. A semantic
+body edit fails with the evidence ID and `compatibility.py --accept ID` command;
+review its scope/cells first. That command changes only that body's digest,
+without running tests or changing scope/cells/date. Missing definitions and
+extraction errors cannot be accepted. Unrelated file edits and comments or
+formatting within the body do not require acceptance. Fixtures identify reviewed
+Open Ferry bodies and their review date, not an upstream version or workspace
+release. No whole-file hash, line anchor or generation timestamp is used.
 
-Evidence identity is source path, exact test name or suite slug/label, the
-upstream version/commit from UPSTREAM.md, and the stable catalog review date.
-No file digest, line anchor, workspace version or run timestamp affects output.
-An unrelated comment or line shift in a fixture file leaves the doc unchanged.
-Meaningful capability sets are explicit per endpoint. The overview lists tested
-coverage; detail tables omit entirely unknown rows and unrelated capability
-columns while counting unknown meaningful combinations separately.
+Translation metadata comes from the actual parity suite registry and its
+translator keys/slugs. `compatibility::tests::write_catalog_for_generator` writes
+JSON only when `OPEN_FERRY_COMPATIBILITY_CATALOG` names an output file; the
+checker invokes that exact test in the already-built parity harness. This is
+metadata transport, not compatibility evidence. The standalone `--list-suites`
+option remains available for manual inspection. Counts use hand-written cases
+with seed 1 and no random cases, including signature-relay cases. Every registry
+key must classify or appear in an explicit exclusion list with a reason. The
+unit test checks every registration and rejects unknown keys/stale exclusions.
+The tool-input-error suite is a separate response-error helper: it compares
+stream finalization/error presence, not a successful response. There are 88
+exported suites, including that helper, and 20 explicit exclusions.
 
-`python -I .github/scripts/test_compatibility.py` checks exact evidence execution,
-document freshness, unchanged output after unrelated source comments, and drift
-when a suite slug changes. It runs in the existing required CI tests job after
-the workspace tests. Those tests already build the parity test harness; exporting
-JSON adds a small normal-binary compile/link using the same dependencies. No
-new action or required check is added.
-The fixture-harness build includes the parity package, and the export build
-enables `open-ferry-providers/test-support`, matching the workspace tests'
-features so Cargo can reuse their compiled core/provider dependencies.
+The generated `parity-tested` section uses the current pin from UPSTREAM.md
+because real parity CI compares against that pin. A passing translator run allows
+identical/equivalent outputs or recorded known differences; an unaccepted
+Different result fails. Config-save has its separate recorded baseline. PR parity
+is path-gated, using seed 1 and 25 random cases; scheduled parity runs nightly
+with 2,000 by default. An inventory is not a new Go comparison or evidence for
+an account, credential or public route. Export needs no Go or reference tree.
+
+`python -I .github/scripts/test_compatibility.py` runs in the existing CI tests
+job with the workflow's OS-specific PYTHON selection. It reuses
+`cargo test --workspace --locked --no-run --message-format=json`, the same
+workspace feature resolution as the preceding Test step. Harnesses and the
+parity catalog come from those artifacts; no subset build or normal binary is
+needed. The checker reports non-fresh compiler artifacts so rebuild cost is
+visible. Regression tests cover body edits/acceptance, formatting/comments,
+wrong-file definitions, missing/ignored/failing evidence and document drift.
+
+Meaningful capability sets are explicit per endpoint. Dedicated Images paths
+count Codex, xAI and OpenAI-compatible executors; speech/video paths count xAI
+API keys. Other protocols retain broad model/catalog-dependent unknowns rather
+than inventing an endpoint provider allowlist. Scripted public-route fixtures
+have separate counts and never fill a provider/credential row. The overview
+leads with tested coverage; details omit unknown rows and irrelevant columns.

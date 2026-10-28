@@ -205,9 +205,11 @@ async fn an_agent_uses_the_native_interactions_endpoint() {
     let seen = mock.only();
     assert_eq!(seen.path, "/v1beta/interactions");
     assert_eq!(seen.json()["agent"], AGENT, "{:?}", seen.body);
+    assert_eq!(seen.json()["input"], "hi");
     assert_eq!(seen.header("x-goog-api-key"), Some(CREDENTIAL_KEY));
     let answer: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(answer["id"], "interaction_1", "{body}");
+    assert_eq!(answer["steps"][0]["content"][0]["text"], "ok");
 }
 
 // Not upstream's: an agent's stream reaches the client frame for frame, as
