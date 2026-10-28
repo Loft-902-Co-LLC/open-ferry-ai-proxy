@@ -66,6 +66,9 @@ This example uses an API key for an OpenAI-compatible provider. It needs no brow
 
 ## Install
 
+Stable is the default release channel. To opt into preview, pass `--channel preview` to `install.sh` or `-Channel preview` to `install.ps1`; see [release channels](docs/updates.md).
+
+
 Coming from CLIProxyAPI? Install Open Ferry, then run `open-ferry migrate`, which switches your setup over on its config and credentials, and `open-ferry migrate -undo` switches back. The install scripts offer to run it when they find CLIProxyAPI. The [migration guide](docs/migrating-from-cliproxyapi.md) covers what carries over and what doesn't.
 
 ### Install script

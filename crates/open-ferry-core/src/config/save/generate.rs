@@ -464,6 +464,7 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
             "self-update",
             Fields::default()
                 .omit_empty("mode", s(&cfg.self_update.mode))
+                .omit_empty("channel", s(&cfg.self_update.channel))
                 .omit_empty("check-every", s(&cfg.self_update.check_every))
                 .done(),
         )

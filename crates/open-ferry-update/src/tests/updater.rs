@@ -19,6 +19,7 @@ use crate::updater::{Report, UpdateError};
 fn settings(mode: &str) -> Settings {
     Settings::resolve(
         &SelfUpdate {
+            channel: String::new(),
             mode: mode.to_owned(),
             check_every: String::new(),
         },
@@ -711,6 +712,7 @@ async fn the_status_says_what_set_the_mode_and_why_the_install_doesnt_update() {
     let f = Fixture::new().await;
     let settings = Settings::resolve(
         &SelfUpdate {
+            channel: String::new(),
             mode: "auto".into(),
             check_every: "12h".into(),
         },

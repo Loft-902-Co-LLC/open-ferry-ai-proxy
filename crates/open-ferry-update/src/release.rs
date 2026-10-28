@@ -257,7 +257,12 @@ impl Verdict {
 /// How `latest` compares with `running` (a version that doesn't parse
 /// counts as 0.0.0, older than any release).
 pub fn compare(running: &str, latest: &Version) -> Verdict {
-    if !latest.pre.is_empty() {
+    compare_channel(running, latest, false)
+}
+
+/// Compare with prereleases allowed only on preview. Never accepts older versions.
+pub fn compare_channel(running: &str, latest: &Version, preview: bool) -> Verdict {
+    if !preview && !latest.pre.is_empty() {
         return Verdict::Prerelease;
     }
     let running = Version::parse(running).unwrap_or_else(|_| Version::new(0, 0, 0));

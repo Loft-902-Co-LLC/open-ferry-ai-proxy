@@ -487,6 +487,13 @@ pub(crate) fn validate_claude_cli(entries: &[ClaudeCli]) -> Result<(), ConfigErr
 /// and empty or a positive Go duration. A short interval is raised to the
 /// updater's minimum when it runs, not here.
 pub(crate) fn clean_up_self_update(section: &mut SelfUpdate) -> Result<(), ConfigError> {
+    section.channel = to_lower(section.channel.trim());
+    if super::SelfUpdateChannel::parse(&section.channel).is_none() {
+        return Err(ConfigError::new(
+            ConfigErrorKind::Invalid,
+            "self-update.channel: must be stable or preview",
+        ));
+    }
     section.mode = to_lower(section.mode.trim());
     section.check_every = section.check_every.trim().to_owned();
     if SelfUpdateMode::parse(&section.mode).is_none() {

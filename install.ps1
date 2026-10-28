@@ -24,6 +24,7 @@
 #
 # Options:
 #   -System            install for the whole machine; needs an administrator
+#   -Channel CHANNEL   stable (default) or preview; also OPEN_FERRY_INSTALL_CHANNEL
 #   -Version VERSION   install this version (such as 0.1.0) rather than the
 #                      latest release
 #   -InstallDir DIR    install in DIR (default:
@@ -83,6 +84,7 @@
 
 param(
     [string]$Version,
+    [string]$Channel,
     [string]$InstallDir,
     [string]$ConfigPath,
     [switch]$NoAttestation,
@@ -106,6 +108,7 @@ param(
 function Install-OpenFerry {
     param(
         [string]$Version,
+        [string]$Channel,
         [string]$InstallDir,
         [string]$ConfigPath,
         [bool]$NoAttestation,
@@ -373,6 +376,8 @@ function Install-OpenFerry {
 
     # --- Options -------------------------------------------------------------
 
+    if (-not $Channel) { $Channel = $env:OPEN_FERRY_INSTALL_CHANNEL }
+    if ($Channel -and $Channel -cnotin 'stable', 'preview') { throw "Channel must be stable or preview" }
     $selfUpdate = $env:OPEN_FERRY_INSTALL_SELF_UPDATE
     if ($NoAutoUpdate) { $selfUpdate = 'off' }
     if ($selfUpdate -and $selfUpdate -cnotin 'off', 'notify', 'auto') {
@@ -463,10 +468,11 @@ function Install-OpenFerry {
 
     # --- Downloads -----------------------------------------------------------
 
-    function Save-Download([string]$Url, [string]$OutFile) {
+    function Save-Download([string]$Url, [string]$OutFile, [switch]$Optional) {
         try {
             $response = Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -PassThru
         } catch {
+            if ($Optional -and $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return $false }
             throw "Couldn't download ${Url}: $($_.Exception.Message)"
         }
         # Never take a download that a redirect moved off HTTPS.
@@ -484,6 +490,25 @@ function Install-OpenFerry {
                 throw "The download of $Url was redirected off HTTPS, to $final"
             }
         }
+    }
+
+    function Compare-ReleaseVersion([string]$A, [string]$B) {
+        $ac, $ap = $A -split '-', 2; $bc, $bp = $B -split '-', 2
+        $x = $ac.Split('.'); $y = $bc.Split('.')
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($x[$i].Length -ne $y[$i].Length) { return [Math]::Sign($x[$i].Length - $y[$i].Length) }
+            $c = [string]::CompareOrdinal($x[$i], $y[$i]); if ($c) { return [Math]::Sign($c) }
+        }
+        if (-not $ap) { if ($bp) { return 1 }; return 0 }
+        if (-not $bp) { return -1 }
+        $x = $ap.Split('.'); $y = $bp.Split('.')
+        for ($i = 0; $i -lt [Math]::Min($x.Length, $y.Length); $i++) {
+            $xn = $x[$i] -match '^[0-9]+$'; $yn = $y[$i] -match '^[0-9]+$'
+            if ($xn -and $yn -and $x[$i].Length -ne $y[$i].Length) { return [Math]::Sign($x[$i].Length - $y[$i].Length) }
+            if ($xn -ne $yn) { if ($xn) { return -1 }; return 1 }
+            $c = [string]::CompareOrdinal($x[$i], $y[$i]); if ($c) { return [Math]::Sign($c) }
+        }
+        return [Math]::Sign($x.Length - $y.Length)
     }
 
     # One argument for a Windows command line, quoted so it reads back as it
@@ -639,6 +664,23 @@ function Install-OpenFerry {
             }
             if (-not $Version) { throw "The latest release has no archive for $target" }
             if ($Version -notmatch $versionPattern) { throw "The latest release's archive has an unexpected name: open-ferry-$Version$suffix" }
+            if ($Channel -eq 'preview') {
+                $pointerPath = Join-Path $tmp 'VERSION'
+                $pointerResult = Save-Download "$baseUrl/download/channel-preview/VERSION" $pointerPath -Optional
+                if ($pointerResult -ne $false) {
+                    $bytes = [IO.File]::ReadAllBytes($pointerPath)
+                    $preview = [Text.Encoding]::UTF8.GetString($bytes)
+                    if ($bytes.Length -gt 64 -or $preview -cnotmatch ('\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?' + "`n\z")) {
+                        throw 'Malformed preview VERSION: expected one version and a newline, at most 64 bytes'
+                    }
+                    $preview = $preview.Substring(0, $preview.Length - 1)
+                    if ((Compare-ReleaseVersion $preview $Version) -gt 0) {
+                        $Version = $preview
+                        Save-Download "$baseUrl/download/v$Version/SHA256SUMS" $sumsPath
+                        $sums = Read-Sums $sumsPath
+                    }
+                }
+            }
         } else {
             try {
                 Save-Download "$baseUrl/download/v$Version/SHA256SUMS" $sumsPath
@@ -946,6 +988,15 @@ function Install-OpenFerry {
 
     # --- Next steps ----------------------------------------------------------
 
+    if ($Channel) {
+        if ($modeConfig) {
+            if ((Invoke-Native { & $exe update -channel $Channel -config $modeConfig }) -ne 0) {
+                throw "open-ferry update couldn't set self-update.channel to $Channel in $modeConfig"
+            }
+        } else {
+            Write-Host "Once open-ferry runs on a config, run: $command update -channel $Channel -config <config>"
+        }
+    }
     Write-Host "open-ferry $Version is installed."
     if (-not $onPath) {
         $quotedDir = "'" + $trimmed.Replace("'", "''") + "'"
@@ -1032,7 +1083,7 @@ try {
             default { throw "OPEN_FERRY_INSTALL_SYSTEM is yes or no, not $env:OPEN_FERRY_INSTALL_SYSTEM" }
         }
     }
-    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent -TestBaseUrl $TestBaseUrl -TestPrivilege $TestPrivilege -TestElevated $TestElevated.IsPresent -TestProgramFiles $TestProgramFiles -TestProgramData $TestProgramData -TestGh $TestGh
+    Install-OpenFerry -Version $Version -Channel $Channel -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent -System $System.IsPresent -TestBaseUrl $TestBaseUrl -TestPrivilege $TestPrivilege -TestElevated $TestElevated.IsPresent -TestProgramFiles $TestProgramFiles -TestProgramData $TestProgramData -TestGh $TestGh
 } catch {
     # Even a failed privilege probe or rejected test parameter must not
     # autoload error-reporting commands from the caller's module folders.

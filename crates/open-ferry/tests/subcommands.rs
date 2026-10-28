@@ -736,15 +736,19 @@ fn update_shows_its_usage_and_sets_the_mode() {
     for (args, message) in [
         (
             &["update", "-check", "-rollback"][..],
-            "use only one of -cancel, -check, -rollback and -mode",
+            "use only one of -cancel, -check, -rollback, -mode and -channel",
         ),
         (
             &["update", "-cancel", "-check"],
-            "use only one of -cancel, -check, -rollback and -mode",
+            "use only one of -cancel, -check, -rollback, -mode and -channel",
         ),
         (
             &["update", "-mode", "sometimes"],
             "-mode is \"sometimes\"; use off, notify or auto",
+        ),
+        (
+            &["update", "-channel", "beta"],
+            "-channel is \"beta\"; use stable or preview",
         ),
         (&["update", "now"], "unexpected argument: now"),
     ] {
@@ -788,6 +792,24 @@ fn update_shows_its_usage_and_sets_the_mode() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# Mine.\n"), "{text}");
     assert!(text.contains("self-update:\n  mode: off\n"), "{text}");
+    let set = run(
+        dir.path(),
+        &["update", "-channel", "preview", "-config", &shown],
+    );
+    assert_eq!(
+        code(&set),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("channel: preview"), "{text}");
+    assert!(text.contains("mode: off"), "{text}");
+    assert!(
+        String::from_utf8(set.stdout)
+            .unwrap()
+            .contains("self-update.channel is preview")
+    );
 }
 
 #[test]

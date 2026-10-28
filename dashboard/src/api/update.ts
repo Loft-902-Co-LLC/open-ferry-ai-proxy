@@ -92,6 +92,10 @@ export type UpdateResult =
 
 /** An answer of `GET /update`. */
 export interface UpdateStatus {
+  channel: "stable" | "preview";
+  checked_channel: "stable" | "preview" | null;
+  release_source: "latest" | "preview" | null;
+  channel_error: string | null;
   supervisor: SupervisorStatus | null;
   switch_request: SwitchRequest | null;
   mode: UpdateMode;

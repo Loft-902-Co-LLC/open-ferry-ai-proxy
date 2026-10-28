@@ -759,3 +759,12 @@ it.each(["request", "live switch"])("keeps an unanswered alert for an old %s aft
   expect(within(card).getByText("The switch could not be confirmed")).toBeVisible();
   expect(api.callsTo("POST", UPDATE_INSTALL)).toHaveLength(1);
 });
+
+it("shows preview policy, source, and pointer failures", async () => {
+  server(updateStatus({ channel: "preview", checked_channel: "preview", release_source: "latest", channel_error: "preview source: bad signature" }));
+  const { card } = await openUpdates();
+  await within(card).findByText("Running", { selector: "dt" });
+  expect(fact(card, "Channel")).toBe("preview");
+  expect(fact(card, "Release source")).toBe("latest");
+  expect(fact(card, "Source warning")).toContain("bad signature");
+});

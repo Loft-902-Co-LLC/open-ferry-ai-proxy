@@ -435,6 +435,13 @@ export function SettingsForm({ id, settings, facts, onSubmit, onDraft }: Setting
 
       <Card title="Updates" description="Whether open-ferry keeps itself up to date.">
         <SelectField
+          label="Update channel"
+          options={[{ value: "stable", label: "Stable" }, { value: "preview", label: "Preview" }]}
+          hint="Stable follows promoted releases. Preview also considers the preview release. Switching to stable waits for it to catch up; updates never install an older version."
+          error={errors.selfUpdateChannel?.message}
+          {...form.register("selfUpdateChannel")}
+        />
+        <SelectField
           label="open-ferry's own updates"
           options={UPDATE_MODES.map((value) => ({ value, label: UPDATE_MODE_LABELS[value] }))}
           hint={

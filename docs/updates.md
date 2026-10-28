@@ -1,5 +1,14 @@
 # Updates
 
+Stable is the default release channel. Each release is first published for preview; promotion makes that same build and signature stable. Opt in with `open-ferry update -channel preview`, or set `self-update.channel: preview` in the config. Use `-config PATH` to choose the file, just as for `-mode`. The CLI, About page, and update API show the channel and the source of the found release. The Settings tab can change the channel. `init` and migration never opt into preview, and there is no environment variable that enables preview for the updater.
+
+Preview checks both GitHub's latest release and `download/channel-preview/VERSION` under the releases base URL, choosing the newer verified release. The pointer contains one semver version followed by a newline, at most 64 bytes. Its `download/v<version>/SHA256SUMS` and `.minisig` undergo the same signature, trusted-comment, version, and archive checks as latest. A missing pointer (404) means latest only; other pointer failures appear in status and logs while a usable latest release remains eligible. A usable preview release also works when latest fails; if neither source works, the check fails.
+
+Return to stable with `open-ferry update -channel stable`. Updates never install an older version: if preview is ahead of stable, it waits for stable to catch up. Withdrawal is fix-forward and does not trigger an automatic rollback. Services follow the configured channel on reload. Containers report updates but do not replace themselves; choose image tag `:preview` for preview or `:latest` for stable (`:<version>` pins a release).
+
+For installers, pass `--channel preview` to `install.sh`, `-Channel preview` to `install.ps1`, or set `OPEN_FERRY_INSTALL_CHANNEL=preview`. Explicit version options select the installed version even when a channel is supplied; an explicitly supplied channel is saved for future updates. With no channel option or variable, installers preserve the existing channel, and a new config uses stable. If migration leaves no config to edit, the installer prints the command to set it later.
+
+
 open-ferry keeps itself up to date. By default it looks for a newer release every six hours, and when one is out it downloads it, checks its signature, and gets it ready for `open-ferry update` to install. The server never replaces its own binary and never restarts itself. In a supervised service in `auto` mode, the blue-green supervisor starts the staged version, checks it, and switches traffic to it automatically. `notify` only reports new releases. In the plain form, run `open-ferry update` to install one. You can turn this off, for good, in any of the ways below. CLIProxyAPI has nothing like it ([below](#cliproxyapi)).
 
 ## Turning updates off
@@ -71,7 +80,7 @@ Staging a release downloads one more, this system's archive: `https://github.com
 Before anything is installed:
 
 1. **The signature.** `SHA256SUMS.minisig` must be a [minisign](https://jedisct1.github.io/minisign/) signature of `SHA256SUMS` by a key built into the binary. Its trusted comment, which the signature covers, must be `open-ferry <version> SHA256SUMS`, and every archive the list names must be of that version, so an old signed list can't pass for a newer release.
-2. **The version.** It must be newer than the installed one. The same version is up to date, an older one is never installed by an update, and a pre-release is ignored.
+2. **The version.** It must be newer than the installed one. The same version is up to date, an older one is never installed by an update, and a semver pre-release is ignored on stable (allowed on preview).
 3. **The archive.** Its SHA-256 must be the one the signed list gives. Only the binary is taken out of it, and the whole archive is refused when an entry has an absolute path, a `..` part, a backslash or a drive letter, is a link, or is too large.
 4. **The binary.** It is written to `versions/<version>/` in the data directory and run with `--version`, which must print `open-ferry <version>` within 30 seconds. One that fails is deleted, and automatic checks skip that version until a newer release; `open-ferry update` run by hand tries it again.
 

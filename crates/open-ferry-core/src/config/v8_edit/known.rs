@@ -167,6 +167,7 @@ mod tests {
             ("api-keys", KnownKind::Section),
             ("observability.logs.debug", KnownKind::Value),
             ("claude-cli", KnownKind::List),
+            ("self-update.channel", KnownKind::Value),
             ("self-update.mode", KnownKind::Value),
             ("self-update.check-every", KnownKind::Value),
             ("self-update", KnownKind::Section),

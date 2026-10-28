@@ -1010,12 +1010,43 @@ impl ClaudeCli {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename = "config.SelfUpdate", rename_all = "kebab-case")]
 pub struct SelfUpdate {
+    /// Release channel: stable (default) or preview.
+    pub channel: String,
     /// `auto` (the default) gets a newer release ready, `notify` only says
     /// one is out, and `off` makes no request at all.
     pub mode: String,
     /// How often to look, as a Go duration (`6h`); empty means
     /// [`SelfUpdate::DEFAULT_CHECK_EVERY`].
     pub check_every: String,
+}
+
+/// The releases an install follows. Preview must be explicitly selected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SelfUpdateChannel {
+    /// GitHub's latest stable release.
+    #[default]
+    Stable,
+    /// The newer of latest and the verified preview pointer release.
+    Preview,
+}
+
+impl SelfUpdateChannel {
+    /// The channel's config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Preview => "preview",
+        }
+    }
+
+    /// Empty means stable; case and surrounding space are ignored.
+    pub fn parse(text: &str) -> Option<Self> {
+        match to_lower(text.trim()).as_str() {
+            "" | "stable" => Some(Self::Stable),
+            "preview" => Some(Self::Preview),
+            _ => None,
+        }
+    }
 }
 
 /// What `self-update.mode` asks for. The order is how much each does, so
@@ -1055,6 +1086,11 @@ impl SelfUpdateMode {
 }
 
 impl SelfUpdate {
+    /// Unknown values fail closed to stable; config loading rejects them.
+    pub fn channel(&self) -> SelfUpdateChannel {
+        SelfUpdateChannel::parse(&self.channel).unwrap_or_default()
+    }
+
     /// How often to look when `check-every` is empty.
     pub const DEFAULT_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 

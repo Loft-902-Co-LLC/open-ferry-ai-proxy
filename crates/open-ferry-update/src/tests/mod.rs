@@ -13,3 +13,5 @@ mod switch_view;
 mod switching;
 mod units;
 mod updater;
+
+mod channels;

@@ -135,8 +135,8 @@ pub use types::{
     IngressLimits, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
     OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement,
     RequestScopedErrorRule, RoutingConfig, RoutingQuota, RoutingStrategy, SelfUpdate,
-    SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey,
-    VertexCompatModel, XaiConfig,
+    SelfUpdateChannel, SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig,
+    VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, ReadGuard, WatchError, WatchEvent, next_revision};

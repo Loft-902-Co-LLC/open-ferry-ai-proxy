@@ -363,6 +363,10 @@ impl Updates for Fake {
 
     fn status(&self, settings: &Settings) -> Status {
         Status {
+            channel: settings.channel.as_str(),
+            checked_channel: None,
+            release_source: None,
+            channel_error: None,
             mode: settings.mode.as_str(),
             mode_source: settings.source.as_str(),
             updates: settings.describe(),
@@ -472,6 +476,7 @@ impl Ran {
 fn settings(mode: &str, env: Option<&str>) -> Settings {
     Settings::resolve(
         &SelfUpdate {
+            channel: String::new(),
             mode: mode.to_owned(),
             check_every: String::new(),
         },
@@ -526,7 +531,7 @@ async fn check_says_when_it_is_up_to_date() {
     assert_eq!((ran.code, ran.result), (0, "up-to-date"));
     assert_eq!(
         ran.out,
-        "Automatic updates are on (the default).\nopen-ferry 0.1.0 is installed, the latest release.\n"
+        "Automatic updates are on (the default).\nUpdate channel: stable.\nopen-ferry 0.1.0 is installed, the latest release.\n"
     );
     assert_eq!(fake.calls(), ["latest"]);
 }
@@ -686,7 +691,10 @@ async fn a_failed_check_exits_with_1_and_says_why_on_standard_error() {
         "{}",
         ran.err
     );
-    assert_eq!(ran.out, "Automatic updates are on (the default).\n");
+    assert_eq!(
+        ran.out,
+        "Automatic updates are on (the default).\nUpdate channel: stable.\n"
+    );
 
     let ran = go(
         Request::Update,
@@ -1585,4 +1593,81 @@ fn mode_refusals_use_safe_messages_in_text_and_json() {
             assert!(!open_ferry_core::config::save::backup_path(&path).exists());
         }
     }
+}
+
+#[test]
+fn channel_flags_validate_and_conflict_with_other_actions() {
+    use open_ferry_core::config::SelfUpdateChannel;
+    for (name, channel) in [
+        ("stable", SelfUpdateChannel::Stable),
+        ("preview", SelfUpdateChannel::Preview),
+    ] {
+        let (options, _) =
+            flags::parse_with(&DEFINITIONS, ["-channel".to_owned(), name.to_owned()]).unwrap();
+        assert_eq!(request(&options).unwrap(), Request::Channel(channel));
+    }
+    for value in ["", "beta"] {
+        assert!(
+            request(&Options {
+                channel: Some(value.into()),
+                ..Default::default()
+            })
+            .unwrap_err()
+            .contains("stable or preview")
+        );
+    }
+    assert!(
+        request(&Options {
+            channel: Some("preview".into()),
+            check: true,
+            ..Default::default()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn channel_writes_only_the_chosen_policy_and_preserves_other_settings() {
+    use open_ferry_core::config::SelfUpdateChannel;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    std::fs::write(
+        &path,
+        "# policy\nself-update:\n  mode: off\n  check-every: 12h\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut console = Console::new(false, &mut out, &mut err);
+    let probe = scope_probe::Fake::new(crate::os_service::Platform::Windows, false);
+    let outcome = set_channel(
+        &probe,
+        &path,
+        SelfUpdateChannel::Preview,
+        None,
+        &mut console,
+    );
+    assert_eq!(outcome.code, 0);
+    let cfg = Config::load(&path).unwrap();
+    assert_eq!(cfg.self_update.channel(), SelfUpdateChannel::Preview);
+    assert_eq!(cfg.self_update.mode, "off");
+    assert_eq!(cfg.self_update.check_every, "12h");
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("# policy")
+    );
+}
+
+#[tokio::test]
+async fn checks_show_the_selected_channel_in_text_and_json() {
+    let mut selected = settings("off", None);
+    selected.channel = SelfUpdateChannel::Preview;
+    let fake = Fake::finding("0.2.0", "0.1.0");
+    let text = go(Request::Check, &fake, &selected, false, false, None).await;
+    assert!(text.out.contains("Update channel: preview."));
+    let json = go(Request::Check, &fake, &selected, false, true, None).await;
+    let body: Value = serde_json::from_str(&json.out).unwrap();
+    assert_eq!(body["channel"], "preview");
+    assert_eq!(body["status"]["channel"], "preview");
 }

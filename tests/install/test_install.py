@@ -993,6 +993,48 @@ def scratch_inside_target(scratch):
         return False
 
 
+class ChannelVersionTests(unittest.TestCase):
+    def test_shell_channel_semver_precedence(self):
+        if not SH:
+            self.skipTest("sh is not installed")
+        text = read_text(INSTALL_SH)
+        helper = text.split("version_newer() {", 1)[1].split("\nsha256_of()", 1)[0]
+        program = 'run() { "$@"; }\nversion_newer() {' + helper
+        validator = text.split("valid_version() {", 1)[1].split("\nif [ -n ", 1)[0]
+        program += "\nvalid_version() {" + validator
+        cases = (("1.10.0", "1.9.0", True), ("1.2.3-rc.10", "1.2.3-rc.9", True),
+                 ("1.2.3", "1.2.3-rc.1", True), ("1.2.3-rc.1", "1.2.3", False),
+                 ("1.2.3", "1.2.3", False), ("1.2.3-a", "1.2.3-1", True),
+                 ("1.2.3-A", "1.2.3-a", False))
+        for a, b, expected in cases:
+            program += f"\nif version_newer '{a}' '{b}'; then echo yes; else echo no; fi"
+        env = clean_env()
+        env["PATH"] = os.pathsep.join([env.get("PATH", ""), *SH_TOOLS])
+        result = run([SH, "-c", program], env)
+        self.assertEqual(result.code, 0, result.output)
+        self.assertEqual(lines_of(result.output), ["yes" if expected else "no" for _, _, expected in cases])
+        result = run([SH, "-c", program + "\nif valid_version '1.2.3-ä'; then exit 1; fi"], env)
+        self.assertEqual(result.code, 0, result.output)
+
+    def test_powershell_channel_semver_precedence(self):
+        text = read_text(INSTALL_PS1)
+        helper = text.split("    function Compare-ReleaseVersion", 1)[1].split("    # One argument", 1)[0]
+        program = "function Compare-ReleaseVersion" + helper
+        cases = (("1.10.0", "1.9.0", 1), ("1.2.3-rc.10", "1.2.3-rc.9", 1),
+                 ("1.2.3", "1.2.3-rc.1", 1), ("1.2.3-rc.1", "1.2.3", -1),
+                 ("1.2.3", "1.2.3", 0), ("1.2.3-a", "1.2.3-1", 1),
+                 ("1.2.3-A", "1.2.3-a", -1))
+        for a, b, expected in cases:
+            program += f"\nCompare-ReleaseVersion '{a}' '{b}'"
+        shells = [shell for shell in (POWERSHELL, PWSH) if shell]
+        if not shells:
+            self.skipTest("PowerShell is not installed")
+        for shell in shells:
+            result = run([shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program], clean_env())
+            self.assertEqual(result.code, 0, result.output)
+            self.assertEqual(lines_of(result.output), [str(expected) for _, _, expected in cases])
+
+
 class StrictPrivilegeSkipTests(unittest.TestCase):
     def test_strict_mode_turns_privilege_skip_into_failure(self):
         from unittest.mock import patch
@@ -1067,6 +1109,16 @@ def setUpModule():
         build_release(good, TAMPERED, latest_exe, tampered=True)
         build_release(os.path.join(releases, "broken"), TAMPERED, latest_exe, tampered=True)
         latest = {"good": LATEST, "broken": TAMPERED}
+        for label, pointer in (("preview-newer", LATEST + "\n"), ("preview-older", OLDER + "\n"),
+                               ("preview-missing", None), ("preview-bad", "1.2.3\n1.1.0\n"),
+                               ("preview-long", "1" * 65 + "\n"), ("preview-nul", "1.2.3\0\n")):
+            base = os.path.join(releases, label)
+            build_release(base, LATEST, latest_exe)
+            build_release(base, OLDER, older_exe)
+            latest[label] = OLDER if label == "preview-newer" else LATEST
+            if pointer is not None:
+                write_file(os.path.join(base, "download", "channel-preview", "VERSION"), pointer)
+
         if REAL_BINARY:
             # The real binary in the archives, for RealBinaryTests.
             with open(REAL_BINARY, "rb") as f:
@@ -1101,6 +1153,37 @@ class Case(unittest.TestCase):
 
 @unittest.skipIf(SH is None, "no sh")
 class InstallShTests(Case):
+    def test_preview_channel_selects_newer_missing_and_older_and_writes_only_when_asked(self):
+        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST)):
+            with self.subTest(label=label):
+                self.reset()
+                result = self.run_sh("--target", GNU, "--channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
+                self.assertExit(result, 0)
+                name = self.assertInstalled(expected, GNU)
+                self.assertIn([name, "update", "-channel", "preview", "-config", sh_path(self.config)], read_log(self.log))
+
+    def test_preview_malformed_pointer_is_refused_and_explicit_version_wins(self):
+        for label in ("preview-bad", "preview-long", "preview-nul"):
+            self.reset()
+            result = self.run_sh("--target", GNU, "--channel=preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
+            self.assertExit(result, 1)
+            self.assertFalse(os.path.exists(self.binary()))
+        self.reset()
+        result = self.run_sh("--target", GNU, "--channel", "preview", "--version", OLDER, *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-bad"))
+        self.assertExit(result, 0)
+        self.assertInstalled(OLDER, GNU)
+
+    def test_channel_environment_and_explicit_stable(self):
+        result = self.run_sh("--target", GNU, "--channel", "stable", *self.install_args(), OPEN_FERRY_INSTALL_CHANNEL="preview", OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-newer"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(OLDER, GNU)
+        self.assertIn([name, "update", "-channel", "stable", "-config", sh_path(self.config)], read_log(self.log))
+        self.reset()
+        result = self.run_sh("--target", GNU, *self.install_args(), OPEN_FERRY_INSTALL_CHANNEL="preview", OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-newer"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertIn([name, "update", "-channel", "preview", "-config", sh_path(self.config)], read_log(self.log))
+
     def test_privileged_directory_checks_refuse_before_any_download(self):
         tools = os.path.join(self.work, "trust-tools")
         real_ls = sh_path(shutil.which("ls", path=os.pathsep.join(SH_TOOLS + [os.environ.get("PATH", "")])) or "/bin/ls")
@@ -2115,6 +2198,35 @@ class InstallShTests(Case):
 
 
 class InstallPs1Cases:
+    def test_preview_channel_selects_newer_missing_and_older_and_writes_only_when_asked(self):
+        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST)):
+            with self.subTest(label=label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                result = self.run_file("-Channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
+                self.assertExit(result, 0)
+                name = self.assertInstalled(expected)
+                self.assertIn([name, "update", "-channel", "preview", "-config", self.config], read_log(self.log))
+
+    def test_preview_malformed_pointer_is_refused_and_explicit_version_wins(self):
+        for label in ("preview-bad", "preview-long", "preview-nul"):
+            result = self.run_file("-Channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
+            self.assertExit(result, 1)
+            self.assertFalse(os.path.exists(self.exe))
+        result = self.run_file("-Channel", "preview", "-Version", OLDER, *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-bad"))
+        self.assertExit(result, 0)
+        self.assertInstalled(OLDER)
+
+    def test_channel_environment_and_explicit_stable(self):
+        result = self.run_file("-Channel", "stable", *self.install_args(), OPEN_FERRY_INSTALL_CHANNEL="preview", OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-newer"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(OLDER)
+        self.assertIn([name, "update", "-channel", "stable", "-config", self.config], read_log(self.log))
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        result = self.run_file(*self.install_args(), OPEN_FERRY_INSTALL_CHANNEL="preview", OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-newer"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertIn([name, "update", "-channel", "preview", "-config", self.config], read_log(self.log))
+
     """install.ps1's tests, run under each PowerShell (shell)."""
 
     def test_privileged_directory_checks_refuse_foreign_write_aces_before_download(self):

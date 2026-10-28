@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use open_ferry_core::config::{Config, SelfUpdateMode};
+use open_ferry_core::config::{Config, SelfUpdateChannel, SelfUpdateMode};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -391,6 +391,7 @@ impl UpdateService {
         let running = Arc::clone(&self.inner.running)
             .try_lock_owned()
             .map_err(|_| UpdateError::Busy)?;
+        let selected_channel = snapshot.settings.channel;
         let inner = Arc::clone(&self.inner);
         let runtime = tokio::runtime::Handle::current();
         // The task owns the guard even if the caller stops waiting. Blocking
@@ -398,15 +399,23 @@ impl UpdateService {
         let (pin, _request) = tokio::task::spawn_blocking(move || {
             let prepared = runtime.block_on(async move {
                 let _running = running;
-                let updater = &inner.updater;
+                let updater = &Updater {
+                    channel: snapshot.settings.channel,
+                    ..inner.updater.clone()
+                };
                 let _lock = updater.lock()?;
                 let mut state = switching::read_state(updater)?;
                 let staged = state.staged.clone().filter(|version| {
-                    state.latest.as_ref().is_none_or(|latest| latest == version)
+                    state.channel.as_deref().unwrap_or("stable")
+                        == snapshot.settings.channel.as_str()
+                        && state.latest.as_ref().is_none_or(|latest| latest == version)
                         && (auto
                             || version.parse().is_ok_and(|latest| {
-                                crate::release::compare(&updater.running, &latest)
-                                    == crate::release::Verdict::Newer
+                                crate::release::compare_channel(
+                                    &updater.running,
+                                    &latest,
+                                    updater.channel == SelfUpdateChannel::Preview,
+                                ) == crate::release::Verdict::Newer
                             }))
                 });
                 let version = match staged {
@@ -426,8 +435,11 @@ impl UpdateService {
                         let newer = if auto {
                             found.is_newer()
                         } else {
-                            crate::release::compare(&updater.running, &found.release.semver)
-                                == crate::release::Verdict::Newer
+                            crate::release::compare_channel(
+                                &updater.running,
+                                &found.release.semver,
+                                updater.channel == SelfUpdateChannel::Preview,
+                            ) == crate::release::Verdict::Newer
                         };
                         if !newer {
                             return Err(if auto {
@@ -463,7 +475,10 @@ impl UpdateService {
             what: "prepare the update",
             error: error.to_string(),
         })??;
-        if auto && self.settings().mode != SelfUpdateMode::Auto {
+        if auto
+            && (self.settings().mode != SelfUpdateMode::Auto
+                || self.settings().channel != selected_channel)
+        {
             return Err(SwitchError::UpdatesOff);
         }
         let version = pin.version.clone();
@@ -706,8 +721,8 @@ async fn checked(
                 tokio::time::sleep_until(until.min(Instant::now() + Duration::from_millis(250))).await;
             }
         } => Some(outcome),
-        () = turned_off(&mut changes) => {
-            tracing::info!("automatic updates were turned off; the update check in progress stopped");
+        () = turned_off(&mut changes, snapshot.settings.channel) => {
+            tracing::info!("automatic update policy changed; the update check in progress stopped");
             None
         }
     };
@@ -953,6 +968,7 @@ async fn check(inner: &Inner, snapshot: &Snapshot) -> Result<CheckResult, Update
     })?;
     let updater = Updater {
         fetch,
+        channel: snapshot.settings.channel,
         ..inner.updater.clone()
     };
     let supervised = inner
@@ -987,13 +1003,14 @@ async fn check_barrier(inner: &Inner, name: &'static str) -> Result<(), UpdateEr
 }
 
 /// Resolves once the mode is `off`.
-async fn turned_off(changes: &mut watch::Receiver<Snapshot>) {
+async fn turned_off(changes: &mut watch::Receiver<Snapshot>, channel: SelfUpdateChannel) {
     loop {
         if changes.changed().await.is_err() {
             // The service is gone; let the check finish.
             std::future::pending::<()>().await;
         }
-        if changes.borrow_and_update().settings.mode == SelfUpdateMode::Off {
+        let settings = &changes.borrow_and_update().settings;
+        if settings.mode == SelfUpdateMode::Off || settings.channel != channel {
             return;
         }
     }

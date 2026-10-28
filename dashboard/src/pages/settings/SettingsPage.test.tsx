@@ -53,6 +53,7 @@ const V8_PATHS = [
   "routing/quota/reserve-percent",
   "routing/quota/check-after",
   "self-update/mode",
+  "self-update/channel",
 ];
 
 /** The setting each route changes, by its path under the management API. */
@@ -2324,4 +2325,20 @@ it("never re-arms an unversioned deletion after the removed key comes back", asy
   expectNothingUnsaved();
   expect(screen.queryByRole("button", { name: /^Undo deleting/ })).not.toBeInTheDocument();
   expect(state.api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+});
+
+it("saves preview only after the user chooses the update channel", async () => {
+  const state = server({ "self-update": { mode: "off" } });
+  const { user } = await openSettings();
+  const channel = screen.getByRole("combobox", { name: "Update channel" });
+  expect(channel).toHaveValue("stable");
+  await user.selectOptions(channel, "preview");
+  await user.click(screen.getByRole("button", { name: "Review and save" }));
+  const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+  expect(dialog).toHaveTextContent("self-update.channel");
+  await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+  expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+  expect(v8Puts(state.api)).toEqual([["self-update/channel", "preview"]]);
+  expect(state.config["self-update"]).toEqual({ mode: "off", channel: "preview" });
+  expect(state.api.unhandled).toEqual([]);
 });

@@ -4,6 +4,7 @@ Both legacy and v8 YAML layouts are accepted. The v8 management API edits the v8
 
 | v8 path | Legacy path | Default and meaning |
 |---|---|---|
+| `self-update.channel` | Same | String, `stable` (also when empty) or opt-in `preview`. Other values fail validation. Updates never install older versions when returning to stable. |
 | `server.max-request-body-bytes` | `max-request-body-bytes` | Integer, `0`. A positive value is the most bytes a proxy request body may have, before and after decoding, and a larger one receives HTTP 413; it also bounds each Responses WebSocket message. A value <= 0 keeps open-ferry's default of 64 MiB, where upstream has no limit. |
 | `routing.session-affinity-rebind-on` | Same | String, effective default `any`. `quota` preserves the binding across transient failovers. See [routing](routing.md). |
 | `requests.streaming.send-keepalive-before-ft` | `streaming.send-keepalive-before-ft` | Boolean, `false`. Sends SSE heartbeats before the first token only when `keepalive-seconds` is positive. |
@@ -148,3 +149,5 @@ The v8.0.38 contract also carries these settings for compatibility. open-ferry i
 | `upstream.claude.header-defaults.anthropic-beta-append` | `claude-header-defaults.anthropic-beta-append` | String list, empty. Same normalization as strip. Ignored here. |
 | `upstream.claude.header-defaults.inject-diagnostics` | `claude-header-defaults.inject-diagnostics` | Optional boolean, unset means `true` upstream. Explicit false is retained. Ignored here. |
 | `upstream.claude.header-defaults.client-request-id` | `claude-header-defaults.client-request-id` | String, empty means `on` upstream. Trimmed and lowercased; `on`, `off`, `passthrough` accepted, unknown modes reset to empty. Ignored here. |
+
+`self-update.channel` selects `stable` (the default, also for empty) or `preview`; any other value fails validation. Preview considers both latest and the signed preview release and chooses the newer. The updater has no channel environment override. `open-ferry update -channel stable|preview` and the dashboard Settings tab write this setting. Updates never downgrade when leaving preview. See [updates](updates.md).

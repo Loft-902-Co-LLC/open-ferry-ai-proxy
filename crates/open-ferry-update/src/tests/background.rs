@@ -715,3 +715,30 @@ async fn the_settings_follow_the_config() {
     assert_eq!(status.mode, "notify");
     assert_eq!(status.check_every_seconds, 24 * 3600);
 }
+
+#[tokio::test]
+async fn leaving_preview_stops_a_check_in_progress_before_staging() {
+    let f = Fixture::new().await;
+    f.release("0.2.0");
+    f.server.reply(
+        LIST_PATHS[0],
+        Reply::Slow(Duration::from_secs(30), b"slow".to_vec()),
+    );
+    let mut preview = config("auto");
+    preview.self_update.channel = "preview".into();
+    let service = UpdateService::new(f.updater.clone(), http_fetch(), &preview);
+    let running = tokio::spawn({
+        let service = service.clone();
+        async move { service.check_once().await }
+    });
+    until(|| f.server.requests() == 1).await;
+    service.set_config(&config("auto"));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("changing channel stops the check")
+        .unwrap();
+    assert!(outcome.is_none());
+    assert_eq!(service.status().channel, "stable");
+    assert!(!service.status().checking);
+    assert!(f.data.kept_versions().is_empty());
+}
