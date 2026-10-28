@@ -21,6 +21,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 - Manage credentials, settings, usage and logs from the built-in [dashboard](#dashboard).
 
 The full [feature inventory](docs/features.md) lists the ported endpoints, providers and translation behaviour, including the limits of the Claude sign-in.
+The [compatibility matrix](docs/compatibility.md) shows which protocol, provider, credential and capability combinations the tests cover, and which are untested.
 
 ## Quick start
 
@@ -223,6 +224,8 @@ The binaries aren't code-signed. If macOS refuses to open one you downloaded wit
 ### Verify the download
 
 Each release has a `SHA256SUMS` file and a build provenance attestation for each archive and install script, both made by the [release workflow](.github/workflows/release.yml). Check both before you run the binary. The install scripts check both for you, the attestation when `gh` is installed.
+
+Each release also has CycloneDX software bills of materials (SBOMs): one per target for the Rust dependencies, and one for the dashboard's npm dependencies built into every binary. `SHA256SUMS` lists them too, so you check them the same way. See [SECURITY.md](SECURITY.md#signed-releases).
 
 To check the checksum, download `SHA256SUMS` into the same directory as the archive, then run:
 
