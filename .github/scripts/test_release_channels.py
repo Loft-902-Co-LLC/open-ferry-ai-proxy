@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +39,8 @@ class FakeCLIs:
         self.latest = latest
         self.has_pointer = pointer is not None
         self.pointer = None if pointer is None else (pointer + "\n").encode()
+        self.pointer_state = "uploaded"
+        self.fail_move = None
         self.images = {v: digest(v) for r in releases if (v := channels.release_version(r))}
         if latest:
             self.images["latest"] = self.images[latest]
@@ -78,7 +82,7 @@ class FakeCLIs:
                 if not self.has_pointer:
                     raise FileNotFoundError()
                 return {"draft": False, "prerelease": True, "assets": [] if self.pointer is None else
-                        [{"id": 99, "name": "VERSION", "size": len(self.pointer)}]}
+                        [{"id": 99, "name": "VERSION", "size": len(self.pointer), "state": self.pointer_state}]}
             if endpoint == "/assets/99":
                 return self.pointer
             raise AssertionError(args)
@@ -90,6 +94,7 @@ class FakeCLIs:
         elif action == "upload":
             assert tag == "channel-preview" and "--clobber" in args
             self.pointer = Path(args[3]).read_bytes()
+            self.pointer_state = "uploaded"
         elif action == "delete-asset":
             assert tag == "channel-preview" and args[3:] == ["VERSION", "--yes"]
             self.pointer = None
@@ -124,6 +129,8 @@ class FakeCLIs:
             return self.images[tag].encode()
         assert args[2] == "create" and "--prefer-index=false" in args, args
         tag = args[args.index("--tag") + 1].rsplit(":", 1)[1]
+        if self.fail_move == tag:
+            raise RuntimeError("fake Docker image move failed")
         self.images[tag] = args[-1].split("@", 1)[1]
         return b""
 
@@ -142,7 +149,6 @@ class ChannelTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 1, b"", b"manifest unknown")
             return fake.run(args, **kwargs)
         with patch.object(channels.subprocess, "run", side_effect=runner), \
-                patch.object(channels.urllib.request, "urlopen", side_effect=AssertionError("No network")), \
                 patch("sys.stdout", new_callable=io.StringIO) as output:
             channels.apply(operation, version, reason, channels.GitHub("owner/repo"), channels.Images())
         return output.getvalue()
@@ -187,6 +193,29 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(fake.pointer, b"1.2.0\n")
         self.assertFalse(any(c[:3] == ["gh", "release", "create"] for c in fake.calls))
 
+    def test_old_publish_event_reconciles_dropped_newer_publication(self):
+        fake = FakeCLIs([self.c, self.a, self.b, release("1.3.0", draft=True),
+                        release("1.4.0", name="open-ferry 1.4.0 (withdrawn)")],
+                       latest="1.0.0", pointer="1.1.0")
+        self.apply(fake, "publish", "1.0.0")
+        self.assertEqual(fake.pointer, b"1.2.0\n")
+        self.assertEqual(fake.images["preview"], digest("1.2.0"))
+        self.assertEqual(fake.latest, "1.0.0")
+
+    def test_backport_after_pointer_removal_does_not_lower_preview_below_latest(self):
+        fake = FakeCLIs([self.a, release("0.9.0")], latest="1.0.0")
+        fake.images["preview"] = digest("0.8.0")
+        self.apply(fake, "publish", "0.9.0")
+        self.assertFalse(fake.has_pointer)
+        self.assertIsNone(fake.pointer)
+        self.assertEqual(fake.images["preview"], digest("1.0.0"))
+
+    def test_publish_clears_stale_pointer_below_latest(self):
+        fake = FakeCLIs([self.a, release("0.9.0")], latest="1.0.0", pointer="0.9.0")
+        self.apply(fake, "publish", "0.9.0")
+        self.assertIsNone(fake.pointer)
+        self.assertEqual(fake.images["preview"], digest("1.0.0"))
+
     def test_publish_equal_repairs_image_without_changing_build(self):
         fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
         fake.images["preview"] = digest("1.0.0")
@@ -207,7 +236,7 @@ class ChannelTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.apply(fake, "Promote", "1.1.0")
                 self.assertFalse(fake.edits)
-        for older in ("0.9.0", "1.0.0-rc.1"):
+        for older in ("0.9.0",):
             with self.subTest(older=older):
                 fake = FakeCLIs([self.a, release(older)], latest="1.0.0")
                 with self.assertRaisesRegex(ValueError, "newer than latest"):
@@ -231,6 +260,41 @@ class ChannelTests(unittest.TestCase):
         fake = FakeCLIs([self.b], pointer="1.1.0")
         self.apply(fake, "Promote", "1.1.0")
         self.assertEqual(fake.latest, "1.1.0")
+
+    def test_promote_retry_after_image_failure_repairs_only_image(self):
+        fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
+        fake.fail_move = "latest"
+        with self.assertRaisesRegex(RuntimeError, "image move failed"):
+            self.apply(fake, "Promote", "1.1.0")
+        self.assertEqual(fake.latest, "1.1.0")
+        self.assertFalse(fake.find("1.1.0")["prerelease"])
+        self.assertEqual(fake.images["latest"], digest("1.0.0"))
+        edits = copy.deepcopy(fake.edits)
+        fake.fail_move = None
+        self.apply(fake, "Promote", "1.1.0")
+        self.assertEqual(fake.images["latest"], digest("1.1.0"))
+        self.assertEqual(fake.edits, edits)
+        self.assertEqual(fake.pointer, b"1.1.0\n")
+
+    def test_promote_repairs_accidental_stable_publication(self):
+        fake = FakeCLIs([self.a, release("1.1.0", prerelease=False)], latest="1.1.0")
+        fake.images["latest"] = digest("1.0.0")
+        self.apply(fake, "Promote", "1.1.0")
+        self.assertEqual(fake.images["latest"], digest("1.1.0"))
+        self.assertFalse(fake.edits)
+        self.assertFalse(fake.has_pointer)
+
+    def test_promote_refuses_semver_prerelease_even_if_already_latest(self):
+        for latest, prerelease in (("1.0.0", True), ("1.2.0-rc.1", False)):
+            fake = FakeCLIs([self.a, release("1.2.0-rc.1", prerelease=prerelease)], latest=latest)
+            with self.subTest(latest=latest), self.assertRaisesRegex(ValueError, "SemVer prerelease"):
+                self.apply(fake, "Promote", "1.2.0-rc.1")
+            self.assertFalse(fake.edits)
+
+    def test_promote_repair_still_refuses_withdrawn(self):
+        target = release("1.1.0", prerelease=False, name="open-ferry 1.1.0 (withdrawn)")
+        with self.assertRaisesRegex(ValueError, "non-withdrawn"):
+            channels.decide("Promote", "1.1.0", [target], target, None)
 
     def test_withdraw_latest_preserves_newer_preview(self):
         b = release("1.1.0", prerelease=False)
@@ -284,36 +348,69 @@ class ChannelTests(unittest.TestCase):
     def test_withdraw_retry_is_safe_and_title_suffix_is_not_duplicated(self):
         fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
         self.apply(fake, "Withdraw", "1.1.0", "broken")
+        original_notes = fake.find("1.1.0")["body"]
         self.apply(fake, "Withdraw", "1.1.0", "still broken")
         self.assertEqual(fake.find("1.1.0")["name"].count(" (withdrawn)"), 1)
+        self.assertEqual(fake.find("1.1.0")["body"], original_notes)
+        self.assertEqual(len(fake.notes), 1)
         self.assertIsNone(fake.pointer)
         self.assertEqual(fake.latest, "1.0.0")
 
     def test_withdraw_both_with_only_good_prerelease_left(self):
         fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.0.0")
-        with patch.object(channels.Images, "disable") as disable:
-            self.apply(fake, "Withdraw", "1.0.0", "broken")
-        disable.assert_called_once_with("latest")
+        output = self.apply(fake, "Withdraw", "1.0.0", "broken")
+        self.assertIn("::warning::No good fallback for " + channels.IMAGE + ":latest", output)
         self.assertIsNone(fake.latest)
         self.assertEqual(fake.pointer, b"1.1.0\n")
         self.assertEqual(fake.images["preview"], digest("1.1.0"))
 
-    def test_withdraw_no_good_release_disables_aliases_retains_version(self):
+    def test_withdraw_no_good_release_warns_and_retains_aliases_and_version(self):
         fake = FakeCLIs([self.a], latest="1.0.0", pointer="1.0.0")
-        disabled = []
-        with patch.object(channels.Images, "disable", side_effect=disabled.append):
-            self.apply(fake, "Withdraw", "1.0.0", "broken")
+        original_images = fake.images.copy()
+        output = self.apply(fake, "Withdraw", "1.0.0", "broken")
         self.assertIsNone(fake.latest)
         self.assertIsNone(fake.pointer)
-        self.assertEqual(disabled, ["latest", "preview"])
-        self.assertEqual(fake.images["1.0.0"], digest("1.0.0"))
+        for tag in ("latest", "preview"):
+            self.assertIn("::warning::No good fallback for " + channels.IMAGE + ":" + tag, output)
+        self.assertEqual(fake.images, original_images)
 
     def test_withdraw_no_older_stable_keeps_good_preview(self):
         fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
-        with patch.object(channels.Images, "disable") as disable:
-            self.apply(fake, "Withdraw", "1.0.0", "broken")
-        disable.assert_called_once_with("latest")
+        output = self.apply(fake, "Withdraw", "1.0.0", "broken")
+        self.assertIn("::warning::No good fallback for " + channels.IMAGE + ":latest", output)
         self.assertEqual(fake.pointer, b"1.1.0\n")
+
+    def test_withdraw_missing_version_image_repoints_releases_and_pointer(self):
+        fake = FakeCLIs([self.a, release("1.1.0", prerelease=False)], latest="1.1.0", pointer="1.1.0")
+        del fake.images["1.1.0"]
+        self.apply(fake, "Withdraw", "1.1.0", "image was deleted")
+        self.assertEqual(fake.latest, "1.0.0")
+        self.assertIsNone(fake.pointer)
+        self.assertTrue(channels.withdrawn(fake.find("1.1.0")))
+        # Without the missing version digest, existing aliases cannot be
+        # identified as its image; leave their unknown digests alone.
+        self.assertEqual(fake.images["latest"], digest("1.1.0"))
+
+    def test_withdraw_missing_version_and_aliases_populates_fallback_aliases(self):
+        fake = FakeCLIs([self.a, release("1.1.0", prerelease=False)], latest="1.1.0", pointer="1.1.0")
+        for tag in ("1.1.0", "latest", "preview"):
+            del fake.images[tag]
+        self.apply(fake, "Withdraw", "1.1.0", "image job failed")
+        self.assertEqual(fake.latest, "1.0.0")
+        self.assertIsNone(fake.pointer)
+        for tag in ("latest", "preview"):
+            self.assertEqual(fake.images[tag], digest("1.0.0"))
+
+    def test_withdraw_all_images_missing_and_no_good_release_still_withdraws(self):
+        fake = FakeCLIs([self.a], latest="1.0.0", pointer="1.0.0")
+        fake.images.clear()
+        output = self.apply(fake, "Withdraw", "1.0.0", "image job failed")
+        self.assertIsNone(fake.latest)
+        self.assertIsNone(fake.pointer)
+        self.assertTrue(channels.withdrawn(fake.find("1.0.0")))
+        for tag in ("latest", "preview"):
+            self.assertIn("::warning::No good fallback for " + channels.IMAGE + ":" + tag, output)
+        self.assertFalse(fake.images)
 
     def test_withdraw_skips_withdrawn_drafts_and_nonversion_releases(self):
         releases = [self.a, self.b, self.c, release("1.3.0", draft=True),
@@ -395,24 +492,71 @@ class ChannelTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.apply(fake, "publish", "1.1.0")
 
-    def test_empty_index_transport_preserves_versioned_manifests(self):
-        requests = []
-        expected = "sha256:" + hashlib.sha256(
-            b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}').hexdigest()
+    def test_starter_pointer_asset_is_replaced_after_interrupted_upload(self):
+        fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
+        fake.pointer, fake.pointer_state = b"", "starter"
+        self.apply(fake, "publish", "1.0.0")
+        self.assertEqual(fake.pointer, b"1.1.0\n")
+        self.assertEqual(fake.pointer_state, "uploaded")
+        self.assertFalse(any("/assets/99" in c for args in fake.calls for c in args))
 
-        def transport(request, **kwargs):
-            requests.append(request)
-            return io.BytesIO(b'{"token":"fake-token"}' if len(requests) == 1 else b"")
+    def test_deleted_pointer_asset_is_reuploaded_after_interruption(self):
+        fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
+        fake.pointer = None
+        self.apply(fake, "publish", "1.0.0")
+        self.assertEqual(fake.pointer, b"1.1.0\n")
 
-        with patch.dict(os.environ, {"GITHUB_ACTOR": "actor", "GH_TOKEN": "fake-secret"}), \
-                patch.object(channels.urllib.request, "urlopen", side_effect=transport), \
-                patch.object(channels.Images, "digest", return_value=expected), \
-                patch("sys.stdout", new_callable=io.StringIO):
-            channels.Images().disable("latest")
-        self.assertEqual(requests[1].method, "PUT")
-        self.assertTrue(requests[1].full_url.endswith("/manifests/latest"))
-        self.assertEqual(json.loads(requests[1].data)["manifests"], [])
-        self.assertNotIn("fake-secret", requests[1].full_url)
+    def test_pointer_asset_404_between_metadata_and_download_is_recoverable(self):
+        fake = FakeCLIs([self.a, self.b], latest="1.0.0", pointer="1.1.0")
+        real_gh = fake.gh
+
+        def gh(args):
+            if args[:1] == ["api"] and args[1].endswith("/assets/99"):
+                raise FileNotFoundError()
+            return real_gh(args)
+
+        with patch.object(fake, "gh", side_effect=gh):
+            self.apply(fake, "publish", "1.0.0")
+        self.assertEqual(fake.pointer, b"1.1.0\n")
+        self.assertTrue(any(c[:3] == ["gh", "release", "upload"] for c in fake.calls))
+
+    def test_cli_errors_preserve_stderr(self):
+        for cli in ("gh", "docker"):
+            with self.subTest(cli=cli), patch.object(channels.subprocess, "run", return_value=
+                    subprocess.CompletedProcess([], 1, b"", b"registry or release request failed: diagnostic detail")), \
+                    self.assertRaisesRegex(RuntimeError, "diagnostic detail"):
+                if cli == "gh":
+                    channels.command(["gh", "release", "edit", "v1.0.0"])
+                else:
+                    channels.Images().digest("1.0.0")
+
+    def test_release_workflow_version_validation_matches_channels(self):
+        source_root = Path(__file__).resolve().parents[2]
+        workflow = (source_root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        start = workflow.index("          version=$(python3 -I - <<'PY'\n")
+        payload = workflow[start:].split("\n", 1)[1].split("          PY\n", 1)[0]
+        code = "\n".join(line[10:] for line in payload.splitlines())
+        values = ["1.0.0", "1.0.0-rc.1", "1.0.0-0", "1.0.0-01", "1.0.0-a..b",
+                  "1.0.0+meta", "01.0.0", "1.0.0\n", "1.0.0-" + "x" * 57, "1.0.0-" + "x" * 58]
+        with tempfile.TemporaryDirectory(prefix="release-version-test-") as directory:
+            work = Path(directory)
+            script = work / ".github/scripts/release_channels.py"
+            script.parent.mkdir(parents=True)
+            script.write_bytes(Path(channels.__file__).read_bytes())
+            for value in values:
+                with self.subTest(value=value):
+                    (work / "Cargo.toml").write_text("[workspace.package]\nversion = " + json.dumps(value) + "\n",
+                                                     encoding="utf-8")
+                    result = subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=work,
+                                            capture_output=True, check=False, timeout=10)
+                    try:
+                        channels.version_key(value)
+                        valid = True
+                    except ValueError:
+                        valid = False
+                    self.assertEqual(result.returncode == 0, valid)
+                    if valid:
+                        self.assertEqual(result.stdout.decode().strip(), value)
 
 
 if __name__ == "__main__":
