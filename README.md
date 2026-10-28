@@ -148,7 +148,7 @@ For an unprivileged install, to download from a mirror instead of GitHub, set `O
 
 ### Run it in a container
 
-Each release has a container image for linux/amd64 and linux/arm64, `ghcr.io/loft-902-co-llc/open-ferry`, tagged with the version, such as `0.1.0`, and, unless the release is a pre-release, `latest`. It holds the release's static binary on Alpine, at the paths of CLIProxyAPI's image: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. The image has a build provenance attestation too:
+Each release has a container image for linux/amd64 and linux/arm64, `ghcr.io/loft-902-co-llc/open-ferry`, tagged with the version, such as `0.1.0`; publishing reconciles `preview` to the newest preview candidate (or stable when none is newer), and Promote moves `latest` to that same versioned build. It holds the release's static binary on Alpine, at the paths of CLIProxyAPI's image: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. The image has a build provenance attestation too:
 
 ```sh
 gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:<version> --repo Loft-902-Co-LLC/open-ferry-ai-proxy

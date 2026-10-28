@@ -1,20 +1,16 @@
 """Release channel policy and CLI operations. Never builds or signs an image.
 
-Run only from release-channels.yml; tests replace subprocess.run and the
-registry transport with fake CLIs. Inputs arrive as environment variables.
+Run only from release-channels.yml; tests replace subprocess.run with fake
+CLIs. Inputs arrive as environment variables.
 """
 
-import base64
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
-import urllib.parse
-import urllib.request
 
 
 POINTER = "channel-preview"
@@ -75,12 +71,28 @@ def decide(operation, version, releases, latest, pointer):
     if not published(target):
         raise ValueError("Release must be published, not a draft")
     if operation == "publish":
-        if withdrawn(target) or (pointer and version_key(version) < version_key(pointer)):
+        if withdrawn(target):
             return {}
-        # Equality repairs a partial pointer/image update on rerun.
-        return {"pointer": version, "preview_image": version}
+        # Events can be delayed or dropped from GitHub's pending slot. Any
+        # surviving publication reconciles all currently good releases.
+        candidate = newest(r for r in releases if published(r) and not withdrawn(r)
+                           and release_version(r) and (not latest or
+                           version_key(release_version(r)) > version_key(release_version(latest))))
+        preview = release_version(candidate) if candidate else None
+        plan = {"preview_image": preview or (release_version(latest) if latest else None)}
+        if pointer != preview:
+            plan["pointer"] = preview
+        return plan
     if operation == "Promote":
-        if withdrawn(target) or not target["prerelease"]:
+        if "-" in version:
+            raise ValueError("Promote requires a version without a SemVer prerelease part")
+        if withdrawn(target):
+            raise ValueError("Promote requires a non-withdrawn pre-release")
+        if latest and latest["id"] == target["id"] and not target["prerelease"]:
+            # The metadata edit succeeded before a failed image move, or
+            # the owner accidentally published with pre-release unchecked.
+            return {"latest_image": version}
+        if not target["prerelease"]:
             raise ValueError("Promote requires a non-withdrawn pre-release")
         if latest and version_key(version) <= version_key(release_version(latest)):
             raise ValueError("Promote requires a version newer than latest")
@@ -112,7 +124,8 @@ def command(args, *, optional=False):
         # Only an actual 404 means absent, never a permission/network failure.
         if optional and b"(HTTP 404)" in result.stderr:
             return None
-        raise RuntimeError(f"{args[0]} command failed (exit {result.returncode}); no credentials or response echoed")
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"{args[0]} command failed (exit {result.returncode}): {error}")
     return result.stdout
 
 
@@ -143,14 +156,19 @@ class GitHub:
             assets = pointer_release.get("assets", [])
             if len(assets) > 1 or any(a["name"] != "VERSION" for a in assets):
                 raise ValueError("Preview pointer may contain only VERSION")
-            if assets:
+            # Failed GitHub uploads can leave an empty 'starter' asset.
+            # Treat it as missing so the next --clobber can replace it.
+            if assets and assets[0].get("state", "uploaded") != "starter":
                 if assets[0]["size"] > 64:
                     raise ValueError("Preview VERSION exceeds 64 bytes")
-                data = self.api(f"/assets/{assets[0]['id']}", binary=True)
-                if len(data) > 64 or not data.endswith(b"\n"):
-                    raise ValueError("Preview VERSION must end with a newline and fit in 64 bytes")
-                pointer = data[:-1].decode("ascii")
-                version_key(pointer)
+                data = self.api(f"/assets/{assets[0]['id']}", binary=True, optional=True)
+                # A concurrent/interrupted replacement can remove the asset
+                # between metadata and download. Only its 404 is recoverable.
+                if data is not None:
+                    if len(data) > 64 or not data.endswith(b"\n"):
+                        raise ValueError("Preview VERSION must end with a newline and fit in 64 bytes")
+                    pointer = data[:-1].decode("ascii")
+                    version_key(pointer)
         return releases, latest, pointer
 
     def edit(self, release, *flags):
@@ -182,7 +200,8 @@ class Images:
             if optional and not any(s in error for s in (b"unauthorized", b"denied", b"forbidden", b"401", b"403")) \
                     and any(s in error for s in (b"manifest unknown", b"not found")):
                 return None
-            raise RuntimeError("Cannot inspect image; finish the release image job before publishing")
+            detail = result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Cannot inspect image :{tag}: {detail}")
         digest = result.stdout.decode("ascii").strip()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise ValueError("Invalid image digest")
@@ -190,35 +209,13 @@ class Images:
 
     def move(self, tag, digest):
         if digest is None:
-            self.disable(tag)
+            print(f"::warning::No good fallback for {IMAGE}:{tag}; alias left unchanged. "
+                  "Manually repoint it when a good image is available, and stop using this alias until then.")
             return
         command(["docker", "buildx", "imagetools", "create", "--prefer-index=false",
                  "--tag", f"{IMAGE}:{tag}", f"{IMAGE}@{digest}"])
         if self.digest(tag) != digest:
             raise RuntimeError("Retag changed the image digest")
-
-    def disable(self, tag):
-        """No fallback: replace only the alias with a non-runnable empty index.
-
-        GHCR's package deletion would delete every tag on the version,
-        including its immutable version tag. Preserve that version instead.
-        """
-        name = IMAGE.removeprefix("ghcr.io/")
-        scope = urllib.parse.urlencode({"service": "ghcr.io", "scope": f"repository:{name}:pull,push"})
-        credentials = (os.environ["GITHUB_ACTOR"] + ":" + os.environ["GH_TOKEN"]).encode()
-        request = urllib.request.Request("https://ghcr.io/token?" + scope,
-            headers={"Authorization": "Basic " + base64.b64encode(credentials).decode("ascii")})
-        with urllib.request.urlopen(request, timeout=90) as response:
-            token = json.load(response)["token"]
-        body = b'{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}'
-        request = urllib.request.Request(f"https://ghcr.io/v2/{name}/manifests/{tag}", data=body,
-            headers={"Authorization": "Bearer " + token,
-                     "Content-Type": "application/vnd.oci.image.index.v1+json"}, method="PUT")
-        with urllib.request.urlopen(request, timeout=90):
-            pass
-        if self.digest(tag) != "sha256:" + hashlib.sha256(body).hexdigest():
-            raise RuntimeError("Could not disable the image alias")
-        print(f"Disabled :{tag}: no remaining good release; versioned images retained")
 
 
 def reason_text(reason):
@@ -237,23 +234,28 @@ def apply(operation, version, reason, github, images):
     releases, latest, pointer = github.snapshot()
     plan = decide(operation, version, releases, latest, pointer)
     if not plan:
-        print("No channel change: withdrawn release or preview already newer")
+        print("No channel change: publication of a withdrawn release")
         return
     # Resolve every needed version image before modifying releases or aliases.
     versions = {v for k, v in plan.items() if k.endswith("_image") and v}
     digests = {v: images.digest(v) for v in versions}
-    bad_digest = images.digest(version) if operation == "Withdraw" else None
+    bad_digest = images.digest(version, optional=True) if operation == "Withdraw" else None
     moves = {}
     for key, tag in (("latest_image", "latest"), ("preview_image", "preview")):
         if key in plan:
             current = images.digest(tag, optional=True)
-            if operation != "Withdraw" or current == bad_digest:
+            affected = bad_digest is not None and current == bad_digest
+            missing_with_fallback = current is None and plan[key] is not None
+            if operation != "Withdraw" or affected or missing_with_fallback or plan[key] is None:
                 moves[tag] = digests.get(plan[key])
-    if "promote" in plan:
-        target = plan["promote"]
+    if operation == "Promote":
+        target = require_release(releases, version)
         age = datetime.now(timezone.utc) - datetime.fromisoformat(target["published_at"].replace("Z", "+00:00"))
         print(f"v{version} has been published for {age}; no minimum soak time")
-        github.edit(target, "--prerelease=false", "--latest")
+        if "promote" in plan:
+            github.edit(target, "--prerelease=false", "--latest")
+        else:
+            print("Release is already stable/latest; repairing only the :latest image alias")
     if "fallback" in plan:
         github.edit(plan["fallback"], "--latest")
     if "pointer" in plan:
@@ -262,9 +264,13 @@ def apply(operation, version, reason, github, images):
         images.move(tag, digest)
     if "withdraw" in plan:
         target = plan["withdraw"]
+        if withdrawn(target):
+            # A retry must preserve the first withdrawal reason and notes.
+            github.edit(target, "--prerelease", "--latest=false")
+            print("Already withdrawn; original withdrawal notes retained")
+            return
         title = target.get("name") or target["tag_name"]
-        if not withdrawn(target):
-            title += " (withdrawn)"
+        title += " (withdrawn)"
         # A text code block keeps Markdown/HTML in the reason inert. The
         # delimiter is longer than any backtick run in untrusted plain text.
         fence = "`" * max(3, 1 + max((len(s) for s in re.findall(r"`+", reason)), default=0))
@@ -299,6 +305,6 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, RuntimeError, OSError) as error:
-        # Never echo user inputs, notes, HTTP credentials or workflow commands.
+        # Keep CLI stderr for diagnosis; reasons never enter CLI arguments.
         raise SystemExit(f"Release channel operation failed: {type(error).__name__}: "
                          + (str(error) if isinstance(error, (ValueError, RuntimeError)) else "I/O failure")) from None

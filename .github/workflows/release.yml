@@ -82,11 +82,15 @@ jobs:
             echo "::error::crates/open-ferry/Cargo.toml doesn't take its version from the workspace"
             exit 1
           fi
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
-          if ! [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::The workspace version '$version' isn't MAJOR.MINOR.PATCH with an optional pre-release part"
-            exit 1
-          fi
+          version=$(python3 -I - <<'PY'
+          import runpy
+          import tomllib
+
+          version = tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"]
+          runpy.run_path(".github/scripts/release_channels.py")["version_key"](version)
+          print(version)
+          PY
+          )
           if [ "$EVENT" = push ]; then
             if [ "$TAG" != "v$version" ]; then
               echo "::error::The tag $TAG doesn't match the workspace version $version: tag v$version, or bump the version first"
