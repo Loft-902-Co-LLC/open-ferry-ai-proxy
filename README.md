@@ -13,13 +13,58 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 ## Status
 
-**Pre-alpha.** This README describes what we're building, not all of what exists. `open-ferry` reads CLIProxyAPI's `config.yaml` and auth directory, signs in to Codex and Claude with their OAuth logins (`-codex-login`, `-codex-device-login`, `-claude-login`), binds Sign in with ChatGPT to an existing Codex credential with [`-siwc-bind FILE`](docs/cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential) or the authenticated [management bind mode](docs/dashboard-api.md#sign-in-with-chatgpt-binding), and serves Chat Completions, legacy Completions, Claude Messages, and OpenAI Responses over HTTP and WebSocket, with upstream's routing, errors, streaming and keep-alives. The Claude sign-in goes against Anthropic's terms and, in our testing, gets only the Haiku models ([why](docs/claude-subscription.md#the-claude-sign-in)). It serves the Gemini API's `/v1beta/models` routes too (model lists, `generateContent`, `streamGenerateContent` and `countTokens`), and the model list Codex clients fetch, from upstream's Codex client catalog. With `xai-api-key` credentials it serves the video endpoints too, xAI's own `/v1/videos` routes and OpenAI's `/openai/v1/videos`, and streams the finished video without writing it to disk. It serves OpenAI's speech endpoint, `/v1/audio/speech`, and xAI's `/v1/tts`, through xAI's Grok TTS models (`grok-tts`, `grok-voice-tts-1.0`). It serves the images endpoints, `/v1/images/generations` and `/v1/images/edits`, through Codex's image generation tool, xAI's Grok Imagine image models and the image models of `openai-compatibility` providers, and reads an edit's uploaded images in memory, never writing them to disk. Through Codex, the provider picks the image's size: it gets the request's `size` as sent, yet in our testing `1024x1024` came back as 1536x1024 and as 1254x1254. The answer's `size` gives the real one. It also calls the OpenAI-compatible upstreams of the config (`openai-compatibility`), any provider that speaks Chat Completions, with their API keys, headers, proxies and model aliases, and Gemini and Vertex AI, with the config's `gemini-api-key` and `vertex-api-key` entries and Vertex AI service accounts from the auth directory. With the config's `claude-cli` entries, it serves Claude models through your own installed Claude Code, which signs itself in to your subscription and makes the requests to Anthropic ([docs/claude-subscription.md](docs/claude-subscription.md)). Requests to Codex and to the OpenAI-compatible upstreams carry the thinking setting a model suffix such as `gpt-5.5(high)` or the client's request asks for, checked against the model's levels. Behind the server, upstream's credential manager picks an account per request, with its retries, cooldowns and model aliases, refreshes tokens in the background, and follows changes to the config and auth files. With the config's `codex.model-level-cooling`, a Codex usage limit cools only the model, and with `codex.stream-bootstrap-buffering`, a Codex stream that reports an overload before it starts fails over to another account. It also serves the part of CLIProxyAPI's `/v0/management` API that T3 Code's hub uses, with upstream's key checks and bans: `auth-files` (and `auth-files/models`), `api-call` and `reset-quota`, under their `/v8/management` names too, and more: the credential files and state, the OAuth logins, the config reads and writes (a save keeps the file's comments and takes effect before the answer), `logs`, the usage queue and `quota/fetch`. The plugin routes and other providers' ones aren't ported ([UPSTREAM.md](UPSTREAM.md#not-ported)). Behind them, `request-log` and the error logs write each request's log to the log directory, `logging-to-file` writes `main.log`, `usage-statistics-enabled` queues a usage record for each call, the config's `payload` rules and `disable-image-generation` apply, and `save-cooldown-status` keeps cooldowns across restarts, all as upstream does (see [UPSTREAM.md](UPSTREAM.md#observability)). With `-tui` it runs upstream's terminal management UI, as a client of a running server's management API or, with `-standalone`, of a server it runs itself ([UPSTREAM.md](UPSTREAM.md#the-tui)). A web dashboard is built into the binary, at `/dashboard/` ([below](#dashboard)). The translators between Codex and three client formats, Claude Messages, OpenAI Responses and OpenAI Chat Completions, are ported in both directions, as are those between Claude and the two OpenAI formats, along with upstream's checks of every provider's reasoning signatures. So are the translators for upstreams that only speak OpenAI Chat Completions, for Claude Messages and OpenAI Responses clients, the passthrough for Chat Completions clients, the translators from Gemini `generateContent` clients to Codex, Claude and Chat Completions upstreams, and the translators for Gemini, Claude Messages, Chat Completions and OpenAI Responses clients to Gemini upstreams. For Claude clients of Codex, which drop Codex's encrypted reasoning, it keeps each turn's reasoning and tool calls in memory by the session the client names and puts them back in that session's next request, as upstream does. With `client.codex.optimize-multi-agent-v2`, a Codex client's multi-agent v2 requests can go to other upstreams, with the models it may delegate to listed in `spawn_agent`, and with `codex.orphan-delegation-compatibility`, a Codex sub-agent's delegation outputs without their call become user messages; a `codex-api-key` model marked `is-compat` gets requests in Codex's plain Responses dialect. The translators are checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
+**Pre-alpha.** This README describes what we're building, not all of what exists. The first release, 0.1.0, isn't out yet. Candidates 0.0.3 and 0.0.4 are published to test updating from one signed release to the next. They install and update like any release.
+
+- Connect coding agents through Chat Completions, Responses, Claude Messages or the Gemini API.
+- Use Codex, API-key providers or your own installed Claude Code through one local proxy.
+- Route across accounts with retries, cooldowns and model aliases.
+- Manage credentials, settings, usage and logs from the built-in [dashboard](#dashboard).
+
+The full [feature inventory](docs/features.md) lists the ported endpoints, providers and translation behaviour, including the limits of the Claude sign-in.
+
+## Quick start
+
+This example uses an API key for an OpenAI-compatible provider. It needs no browser sign-in. You need that provider's key, Chat Completions base URL and a model it offers.
+
+1. **Install.** On Linux or macOS:
+   ```sh
+   curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh
+   ```
+   On Windows, use PowerShell: `irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 | iex`. Follow the script's PATH instructions if needed. [Other ways to install](#install).
+
+2. **Add a provider and start.** In a new directory, run `open-ferry init -config ./config.yaml`. Keep the client key it prints; the management key is for the dashboard. Save this as `provider.yaml`, replacing all three `YOUR-...` values with your provider's values. Keep both files private.
+   ```yaml
+   - name: example
+     base-url: "https://YOUR-PROVIDER/v1"
+     keys:
+       - api-key: "YOUR-PROVIDER-KEY"
+     models:
+       - name: "YOUR-PROVIDER-MODEL"
+         alias: "quick-start"
+   ```
+   ```sh
+   open-ferry config set api-keys.openai-compatibility --from-file ./provider.yaml --config ./config.yaml
+   open-ferry -config ./config.yaml
+   ```
+   Leave the server running. [Other provider options](docs/agents.md#give-it-credentials) include Codex sign-in and your own Claude Code; the [dashboard](#dashboard) can sign in and upload credentials too.
+
+3. **Connect a tool.** In a second terminal in the same directory, run `open-ferry clients setup claude-code --config ./config.yaml --model quick-start` for an installed Claude Code. Copy its commands, replace the masked key with the client key from `init` (`access.api-keys`) and run them. This uses base URL `http://127.0.0.1:8317` and model `quick-start`. OpenAI-compatible tools use `http://127.0.0.1:8317/v1`. Both need the client key, not the provider or management key. [Codex and SDK examples](docs/agents.md#point-a-client-at-it) are alternatives.
+
+4. **Verify a reply.** Save this as `request.json` in the same directory:
+   ```json
+   {"model":"quick-start","messages":[{"role":"user","content":"Say hello."}]}
+   ```
+   Replace `YOUR-CLIENT-KEY` below with the client key and run this request (on Windows use `curl.exe` and put it on one line):
+   ```sh
+   curl -sS http://127.0.0.1:8317/v1/chat/completions \
+     -H 'Authorization: Bearer YOUR-CLIENT-KEY' -H 'Content-Type: application/json' \
+     --data-binary '@request.json'
+   ```
+   Success is JSON with the model's reply in `choices[0].message.content`. An HTTP 401 with `{"error":"Invalid API key"}` means the client key is wrong. For other errors, read the server terminal and run `open-ferry check -config ./config.yaml`; check the provider's URL, model and key, or the dashboard's Credentials and Logs pages.
 
 ## Install
 
 Coming from CLIProxyAPI? Install Open Ferry, then run `open-ferry migrate`, which switches your setup over on its config and credentials, and `open-ferry migrate -undo` switches back. The install scripts offer to run it when they find CLIProxyAPI. The [migration guide](docs/migrating-from-cliproxyapi.md) covers what carries over and what doesn't.
-
-The first release, 0.1.0, isn't out yet. Candidates 0.0.3 and 0.0.4 are published to test updating from one signed release to the next. They install and update like any release, or you can [build from source](#build-from-source).
 
 ### Install script
 
