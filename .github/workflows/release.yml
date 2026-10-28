@@ -4,7 +4,7 @@ name: Release
 # for the archives, install scripts and SBOMs, signs it with the release key
 # (SHA256SUMS.minisig) once the maintainer approves the release-signing
 # environment, attests their build provenance and creates a draft GitHub
-# release for the maintainer to review and publish. It then builds the
+# pre-release for the maintainer to review and publish to preview. It then builds the
 # container image from the static Linux archives, for linux/amd64 and
 # linux/arm64, pushes it to ghcr.io/loft-902-co-llc/open-ferry and attests
 # it.
@@ -65,7 +65,6 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       commit: ${{ steps.meta.outputs.commit }}
       build-date: ${{ steps.meta.outputs.build-date }}
-      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,14 +99,11 @@ jobs:
           else
             echo "::notice::Dry run: building $version from $GITHUB_REF without publishing"
           fi
-          prerelease=false
-          if [[ $version == *-* ]]; then prerelease=true; fi
           {
             echo "version=$version"
             echo "commit=$(git rev-parse --short HEAD)"
             # One build date for every target.
             echo "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
   dashboard:
@@ -524,7 +520,6 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.meta.outputs.version }}
-      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -597,14 +592,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          flags=()
-          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
           gh release create "$TAG" dist/* \
-            --draft \
+            --draft --prerelease --latest=false \
             --verify-tag \
             --title "open-ferry $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            "${flags[@]}"
+            --notes-file "$RUNNER_TEMP/notes.md"
 
   image:
     name: Build the container image
@@ -627,7 +619,6 @@ jobs:
       attestations: write
     env:
       VERSION: ${{ needs.meta.outputs.version }}
-      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
       PUSH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
       IMAGE: ghcr.io/loft-902-co-llc/open-ferry
       # Read by build-image.sh.
@@ -700,14 +691,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      # The same image, from the cache, pushed as VERSION and, unless it's a
-      # pre-release, latest.
+      # The same image, from the cache, pushed only as VERSION. Publishing
+      # moves :preview; only Promote in release-channels.yml moves :latest.
       - name: Push the image
         id: push
         if: env.PUSH == 'true'
         run: |
           names=("$IMAGE:$VERSION")
-          if [ "$PRERELEASE" != true ]; then names+=("$IMAGE:latest"); fi
           tags=()
           for name in "${names[@]}"; do tags+=(--tag "$name"); done
           sh .github/scripts/build-image.sh image-context linux/amd64,linux/arm64 \
