@@ -8,6 +8,11 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.38.
 
+### Security
+
+- **Release dependency evidence:** target-specific Rust and production dashboard CycloneDX SBOMs covered by the signed checksums and build provenance, RustSec and npm production advisory checks in dependency-changing CI and daily runs, and a documented signing-key recovery drill with throwaway-key rotation coverage.
+- Updated `rustls-webpki` to 0.103.16 and `webpki-roots` / `webpki-root-certs` to 1.0.10 for RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0383 (distrusted certificate authorities).
+
 ### Added
 
 - **A README quick start** from installation through an API-key provider and client setup to a verified model reply, using the installer's config and keys, with key recovery and port-conflict guidance. The Status section is shorter; its full feature inventory is in [docs/features.md](docs/features.md).

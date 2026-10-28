@@ -1,0 +1,5 @@
+# Project-local dependency advisory dispositions; licensing stays in about.toml.
+# Each ignore must have an advisory ID, evidence/reason, and a review date.
+# No current exceptions. See SECURITY.md#dependencies.
+[advisories]
+ignore = []
