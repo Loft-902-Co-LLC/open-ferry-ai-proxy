@@ -42,6 +42,7 @@ jobs:
       rust: ${{ steps.diff.outputs.rust }}
       dashboard-real: ${{ steps.diff.outputs.dashboard-real }}
       parity: ${{ steps.diff.outputs.parity }}
+      supply-chain: ${{ steps.diff.outputs.supply-chain }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,6 +72,7 @@ jobs:
           rust=true
           dashboard_real=true
           parity=true
+          supply_chain=true
           if [[ -n $base && $base != 0000000000000000000000000000000000000000 ]] &&
             git fetch --quiet --no-tags --depth=1 origin "$base" &&
             git diff --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed" &&
@@ -78,7 +80,13 @@ jobs:
             rust=false
             dashboard_real=false
             parity=false
+            supply_chain=false
             while IFS= read -r path; do
+              case "$path" in
+                Cargo.lock|Cargo.toml|*/Cargo.toml|dashboard/package*.json|dashboard/.nvmrc|rust-toolchain.toml|.github/workflows/ci.yml|.github/workflows/release.yml|.github/workflows/supply-chain.yml|.github/scripts/sbom.py|.cargo/audit.toml)
+                  supply_chain=true
+                  ;;
+              esac
               if [[ $path != dashboard/* ]] || git grep --quiet --fixed-strings -e "$path" -- crates; then
                 echo "Rust change: $path"
                 rust=true
@@ -97,6 +105,13 @@ jobs:
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "dashboard-real=$dashboard_real" >> "$GITHUB_OUTPUT"
           echo "parity=$parity" >> "$GITHUB_OUTPUT"
+          echo "supply-chain=$supply_chain" >> "$GITHUB_OUTPUT"
+
+  # Deliberately outside check/blue-green and their merge-queue aggregates.
+  supply-chain:
+    needs: changes
+    if: needs.changes.outputs.supply-chain == 'true'
+    uses: ./.github/workflows/supply-chain.yml
 
   # Cheap enough for PRs too; its result belongs to the existing required
   # Ubuntu aggregate. Dispatch runs it even without a diff to compare.

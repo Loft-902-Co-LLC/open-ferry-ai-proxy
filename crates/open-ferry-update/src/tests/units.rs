@@ -73,6 +73,26 @@ fn no_key_trusts_no_release() {
     );
 }
 
+#[test]
+fn key_rotation_accepts_both_keys_then_refuses_the_retired_key() {
+    let (old, new) = (TestKey::new(), TestKey::new());
+    let sums = b"throwaway SHA256SUMS recovery drill\n";
+    let comment = "open-ferry 0.2.0 SHA256SUMS";
+    let old_signature = old.sign(sums, comment);
+    let new_signature = new.sign(sums, comment);
+
+    let overlap = trusting(&[&old, &new]);
+    assert_eq!(overlap.verify(sums, &old_signature).unwrap(), comment);
+    assert_eq!(overlap.verify(sums, &new_signature).unwrap(), comment);
+
+    let retired = trusting(&[&new]);
+    assert_eq!(retired.verify(sums, &new_signature).unwrap(), comment);
+    assert_eq!(
+        retired.verify(sums, &old_signature).unwrap_err(),
+        VerifyError::UnknownKey
+    );
+}
+
 // SHA256SUMS, read as install.sh reads it.
 
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -85,7 +105,9 @@ fn read(sums: &str, comment: &str, target: &str) -> Result<release::Release, Rel
 fn a_release_is_read_as_install_sh_reads_it() {
     let upper = HASH.to_ascii_uppercase();
     let sums = format!(
-        "{HASH}  open-ferry-0.2.0-aarch64-apple-darwin.tar.gz\n\
+        "{HASH}  open-ferry-sbom-dashboard.cdx.json\n\
+         {HASH}  open-ferry-sbom-rust-x86_64-unknown-linux-gnu.cdx.json\n\
+         {HASH}  open-ferry-0.2.0-aarch64-apple-darwin.tar.gz\n\
          {upper}\t*open-ferry-0.2.0-x86_64-unknown-linux-gnu.tar.gz\n\
          {HASH}  open-ferry-0.2.0-x86_64-unknown-linux-musl.tar.gz\n\
          {HASH}  open-ferry-0.2.0-x86_64-pc-windows-msvc.zip\n"

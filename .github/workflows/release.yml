@@ -1,7 +1,7 @@
 name: Release
 
 # Pushing a tag vX.Y.Z builds open-ferry for each target, writes SHA256SUMS
-# for the archives and the install scripts, signs it with the release key
+# for the archives, install scripts and SBOMs, signs it with the release key
 # (SHA256SUMS.minisig) once the maintainer approves the release-signing
 # environment, attests their build provenance and creates a draft GitHub
 # release for the maintainer to review and publish. It then builds the
@@ -188,6 +188,11 @@ jobs:
           path: rust-licenses
           if-no-files-found: error
 
+  supply-chain:
+    if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_only && !inputs.qualification_preflight_only && inputs.qualification_published == '')
+    name: Dependency advisories and release SBOMs
+    uses: ./.github/workflows/supply-chain.yml
+
   build:
     if: github.event_name != 'workflow_dispatch' || (!inputs.qualification_only && !inputs.qualification_preflight_only && inputs.qualification_published == '')
     name: build (${{ matrix.target }})
@@ -348,7 +353,7 @@ jobs:
 
   checksums:
     name: Write SHA256SUMS
-    needs: build
+    needs: [build, supply-chain]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -377,11 +382,17 @@ jobs:
           cd dist
           shopt -s nullglob
           archives=(open-ferry-*.tar.gz open-ferry-*.zip)
+          sboms=(open-ferry-sbom-*.cdx.json)
           if [ "${#archives[@]}" -eq 0 ]; then
             echo "::error::No archives were downloaded"
             exit 1
           fi
-          sha256sum -- "${archives[@]}" install.sh install.ps1 | sort -k 2 > SHA256SUMS
+          # Seven target-specific Rust SBOMs plus the embedded dashboard.
+          if [ "${#sboms[@]}" -ne 8 ]; then
+            echo "::error::Expected eight release SBOMs, got ${#sboms[@]}"
+            exit 1
+          fi
+          sha256sum -- "${archives[@]}" "${sboms[@]}" install.sh install.ps1 | sort -k 2 > SHA256SUMS
           sha256sum --check --strict SHA256SUMS
           cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
 
@@ -549,6 +560,7 @@ jobs:
             dist/open-ferry-*.zip
             dist/install.sh
             dist/install.ps1
+            dist/open-ferry-sbom-*.cdx.json
 
       - name: Write the release notes from CHANGELOG.md
         run: |

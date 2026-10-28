@@ -1,0 +1,80 @@
+name: Supply chain
+
+on:
+  workflow_call:
+  # New advisories can affect an unchanged lockfile.
+  schedule:
+    - cron: '23 7 * * *'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust-advisories:
+    name: Rust dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install --profile minimal
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      # Project config takes precedence over runner-local ignores. Fetches RustSec's
+      # current database every run; warnings also need a disposition.
+      - name: Check Cargo.lock against RustSec
+        run: cargo audit --file Cargo.lock --deny warnings
+
+  dashboard-advisories:
+    name: Dashboard production dependency advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          package-manager-cache: false
+      # Audits the lockfile without installing or running package scripts.
+      - name: Check dashboard production dependencies (all severities)
+        working-directory: dashboard
+        run: npm audit --omit=dev --audit-level=low
+
+  sbom:
+    name: Release SBOMs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          package-manager-cache: false
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install --profile minimal
+      - name: Install the pinned SBOM tools
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          # Keep tool dependencies separate from the dashboard's lockfile.
+          npm install --prefix "$RUNNER_TEMP/sbom-tools" --ignore-scripts --no-audit --no-fund --save-exact @cyclonedx/cyclonedx-npm@6.0.1
+          echo "$RUNNER_TEMP/sbom-tools/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Fetch the locked crates
+        run: cargo fetch --locked
+      - name: Generate every release target and the production dashboard SBOM
+        run: python3 .github/scripts/sbom.py sboms
+      # Matches the release checksums/publish jobs' existing asset selector.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: open-ferry-sboms
+          path: sboms/*.cdx.json
+          if-no-files-found: error

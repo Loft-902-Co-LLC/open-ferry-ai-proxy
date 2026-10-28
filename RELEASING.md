@@ -3,9 +3,10 @@
 How the maintainer makes a release. Pushing a tag runs [the release workflow](.github/workflows/release.yml), which does the following:
 - builds the web dashboard once, and each binary with it built in, the static (musl) Linux ones in Alpine;
 - lists the licenses of the Rust crates built into each binary;
-- writes `SHA256SUMS`, of the archives and the install scripts, `install.sh` and `install.ps1`;
+- writes target-specific Rust SBOMs and a separate production dashboard SBOM, and checks dependency advisories;
+- writes `SHA256SUMS`, of the archives, the eight SBOMs and the install scripts, `install.sh` and `install.ps1`;
 - once you approve it, signs `SHA256SUMS` with the release key, as `SHA256SUMS.minisig`, and checks the signature against [`release-keys.pub`](release-keys.pub) (see [The release key](#the-release-key));
-- attests the build provenance of each archive and script;
+- attests the build provenance of each archive, script and SBOM;
 - creates a **draft** release;
 - then builds the container image from the static binaries, tests it, pushes it to GHCR and attests it.
 
@@ -53,11 +54,11 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
    When the archives are built, the **Sign SHA256SUMS** job waits for you. Open the run, choose **Review deployments**, tick `release-signing` and approve. Approve only a run of a tag you pushed.
 
 7. **Review the draft.** When the workflow finishes, the draft is on the [Releases](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) page. Check that:
-   - it has seven archives, one for each target in the [runners](#notes) table, `install.sh`, `install.ps1`, `SHA256SUMS`, which lists those nine, and `SHA256SUMS.minisig`;
-   - the signature checks out with the key in `release-keys.pub`, and its trusted comment is `open-ferry X.Y.Z SHA256SUMS`: `minisign -Vm SHA256SUMS -P <key>`;
+   - it has seven archives, one for each target in the [runners](#notes) table, eight `open-ferry-sbom-*.cdx.json` files, `install.sh`, `install.ps1`, `SHA256SUMS`, which lists those seventeen, and `SHA256SUMS.minisig`;
+   - the signature checks out with the key in `release-keys.pub`, and its trusted comment is `open-ferry X.Y.Z SHA256SUMS`: `minisign -V -H -m SHA256SUMS -P <key>`;
    - an archive holds `config.example.yaml`, and its `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
    - the notes are the changelog section;
-   - an archive downloads and checks out as the README's [install section](README.md#download-a-release) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`. So do the two scripts;
+   - an archive downloads and checks out as the README's [install section](README.md#download-a-release) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`. So do the two scripts and eight SBOMs;
    - the binary runs (`open-ferry -h`);
    - the image is on GHCR, tagged `X.Y.Z` and, unless it's a pre-release, `latest`; it runs (`docker run --rm ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z open-ferry -h`), and its attestation checks out: `gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z --repo Loft-902-Co-LLC/open-ferry-ai-proxy`;
    - after the first release only: the package `open-ferry` is public. A new GHCR package may start private; make it public in its settings (**Package settings**, **Change visibility**), or pulls fail for everyone else.
@@ -71,6 +72,7 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
 Run the **Release** workflow from the Actions tab (**Run workflow**), on `main` or any branch. It does the following:
 - builds every target;
 - packages the archives;
+- runs the same dependency advisory checks and eight SBOM generations as a tag release;
 - writes `SHA256SUMS`;
 - builds the container image for linux/amd64 and linux/arm64 and tests the amd64 one, as on a tag;
 - qualifies two throwaway candidate builds on the hosted Linux and macOS user forms; the Windows user lifecycle is blocked by the hosted interactive-logon limitation described below.
@@ -220,6 +222,20 @@ The updater downloads only from this repository's GitHub releases, over HTTPS, s
 2. Make a new key, and put only its public half in `release-keys.pub`. Put the new private key in the secret.
 3. Release a new version, signed with the new key. Never sign anything with the leaked key again, not even to move installs on: anyone could sign the same way.
 4. Publish a security advisory (see [SECURITY.md](SECURITY.md)). Installs that trust only the leaked key can't update to the new release on their own; they say that `SHA256SUMS` is signed with a key they don't trust. Tell users to install the new release by hand, and to check its signature with the new key.
+
+### Recovery drill
+
+If the signing secret is lost without exposure, restore the backed-up private key from the password manager into the signing environment on a trusted machine, then require the sign job's existing public-key and trusted-comment checks to pass. If the backup is also lost, use a new key; old builds that do not already trust it need a manual update, as in the exposed-key procedure. Never paste a private key into a log or a drill report.
+
+Rehearse rotation with throwaway keys only: a build trusting old and new keys must accept `SHA256SUMS` signed by either; a build trusting only the new key must accept its signature and refuse the old key with `UnknownKey`. The unit test [`key_rotation_accepts_both_keys_then_refuses_the_retired_key`](crates/open-ferry-update/src/tests/units.rs) generates both keys in memory and exercises exactly this trust transition. Run `cargo test -p open-ferry-update --locked key_rotation_accepts_both_keys_then_refuses_the_retired_key`. The updater tests [`a_release_signed_with_the_second_key_is_accepted`, `a_release_signed_with_another_key_is_refused`, `a_list_changed_after_signing_is_refused` and `an_archive_that_doesnt_match_its_hash_is_refused`](crates/open-ferry-update/src/tests/updater.rs) cover staging and verification failures. No real signing key or environment change is needed for the rehearsal.
+
+### SBOM generation
+
+[Supply chain](.github/workflows/supply-chain.yml) runs in release builds, full dry runs, dependency-changing CI runs and daily. It installs cargo-cyclonedx 0.5.9 with `--locked` and `@cyclonedx/cyclonedx-npm` 6.0.1 separately from the dashboard, then runs `cargo fetch --locked` and `python3 .github/scripts/sbom.py <dir>`. For a local run, install those exact tools (`npm install --prefix <tool-dir> --ignore-scripts --no-audit --no-fund --save-exact @cyclonedx/cyclonedx-npm@6.0.1`) and add `<tool-dir>/node_modules/.bin` to `PATH` first. No application compilation or dashboard `node_modules` is needed.
+
+The output is CycloneDX 1.5 JSON, one `open-ferry-sbom-rust-<target>.cdx.json` for each of the seven release targets plus `open-ferry-sbom-dashboard.cdx.json`, stored in the `open-ferry-sboms` workflow artifact and published as individual release assets. Rust files describe `open-ferry` with its default release features, normal and build dependencies, omitting dev dependencies; build dependencies have excluded runtime scope. Platform dependencies differ (for example Windows service APIs versus Unix libc and macOS frameworks), so the target files are intentionally separate. The dashboard file includes production dependencies from `package-lock.json`, including transitive dependencies, and is shared by all binaries. It is not merged into each Rust file. These are dependency inventories, not a scan of the container's Alpine base packages.
+
+The generator runs Rust metadata offline in a disposable source snapshot and refuses any lockfile change. It restricts cargo-cyclonedx's workspace metadata to `cargo tree --locked -p open-ferry --target <target> --edges normal,build`, rebuilding dependency edges from that graph: this removes optional and test-only packages introduced by workspace feature unification. It fails if the tool omits any package in the production graph. All eight files enter `SHA256SUMS` before the existing sign job; it still signs only that list. Build provenance now covers the SBOM files as well. We do not add `actions/attest-sbom`: the signed list binds each target-named inventory and dashboard inventory to the same release's archives, and the existing provenance action records their origin. A separate per-archive SBOM attestation would need to combine both inventories; it is optional follow-up work. The full dry run exercises generation, eight-file collection and hash verification without signing, attesting or publishing.
 
 ## When something fails
 

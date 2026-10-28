@@ -75,6 +75,8 @@ Before anything is installed:
 3. **The archive.** Its SHA-256 must be the one the signed list gives. Only the binary is taken out of it, and the whole archive is refused when an entry has an absolute path, a `..` part, a backslash or a drive letter, is a link, or is too large.
 4. **The binary.** It is written to `versions/<version>/` in the data directory and run with `--version`, which must print `open-ferry <version>` within 30 seconds. One that fails is deleted, and automatic checks skip that version until a newer release; `open-ferry update` run by hand tries it again.
 
+The signed list also covers the release's CycloneDX JSON SBOMs: one Rust dependency file per target (`open-ferry-sbom-rust-<target>.cdx.json`) and a separate production dashboard file (`open-ferry-sbom-dashboard.cdx.json`). They are release assets for inspection and scanning; automatic updates need only their target's archive. See [SECURITY.md](../SECURITY.md#signed-releases) for scope and manual verification.
+
 ## Which installs update themselves
 
 Only a binary that `install.sh` or `install.ps1` put in place. Each writes `install-receipt.json` in the [data directory](#files), naming the binary it installed, and open-ferry replaces its binary only when:
@@ -176,7 +178,7 @@ The release workflow signs each release's `SHA256SUMS` with a minisign Ed25519 k
 To check a download by hand, put `SHA256SUMS` and `SHA256SUMS.minisig` beside the archive, and run, with `<key>` the key line of `release-keys.pub` (the one starting `RW`):
 
 ```sh
-minisign -Vm SHA256SUMS -P <key>
+minisign -V -H -m SHA256SUMS -P <key>
 sha256sum --check --ignore-missing SHA256SUMS      # shasum -a 256 on macOS
 ```
 
