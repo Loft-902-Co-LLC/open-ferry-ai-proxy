@@ -7,8 +7,8 @@ How the maintainer makes a release. Pushing a tag runs [the release workflow](.g
 - writes `SHA256SUMS`, of the archives, the eight SBOMs and the install scripts, `install.sh` and `install.ps1`;
 - once you approve it, signs `SHA256SUMS` with the release key, as `SHA256SUMS.minisig`, and checks the signature against [`release-keys.pub`](release-keys.pub) (see [The release key](#the-release-key));
 - attests the build provenance of each archive, script and SBOM;
-- creates a **draft** release;
-- then builds the container image from the static binaries, tests it, pushes it to GHCR and attests it.
+- creates a **draft pre-release**, explicitly not latest;
+- then builds the container image from the static binaries, tests it, pushes only its version tag to GHCR and attests it.
 
 Nothing but the container image is public until the draft is reviewed and published by hand. The image is pushed before the draft is published, and anyone can pull it from then on, once its package is public (see step 7 and the container image under [Notes](#notes)).
 
@@ -18,7 +18,7 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
 
 - The version is `version` under `[workspace.package]` in `Cargo.toml`. Every crate takes it from there, and the binary reports it: in its startup log line, in the management API's `X-CPA-VERSION` header, and in its `open-ferry/<version>` user agent.
 - The tag is `v` and the version, such as `v0.1.0`. The workflow refuses a tag that doesn't match `Cargo.toml`.
-- A version with a pre-release part, such as `0.2.0-rc.1`, is published as a pre-release.
+- Every version, including `0.2.0` with no SemVer pre-release part, starts as a GitHub pre-release. Publishing offers it to preview; only **Promote** makes it stable/latest. Use a version without a SemVer pre-release part for stable: older clients still ignore versions such as `0.2.0-rc.1` even if GitHub marks them stable.
 
 ## Steps
 
@@ -60,12 +60,51 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
    - the notes are the changelog section;
    - an archive downloads and checks out as the README's [install section](README.md#download-a-release) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`. So do the two scripts and eight SBOMs;
    - the binary runs (`open-ferry -h`);
-   - the image is on GHCR, tagged `X.Y.Z` and, unless it's a pre-release, `latest`; it runs (`docker run --rm ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z open-ferry -h`), and its attestation checks out: `gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z --repo Loft-902-Co-LLC/open-ferry-ai-proxy`;
+   - the image is on GHCR, tagged only `X.Y.Z`; it runs (`docker run --rm ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z open-ferry -h`), and its attestation checks out: `gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z --repo Loft-902-Co-LLC/open-ferry-ai-proxy`;
    - after the first release only: the package `open-ferry` is public. A new GHCR package may start private; make it public in its settings (**Package settings**, **Change visibility**), or pulls fail for everyone else.
 
-8. **Publish** the draft. It then becomes the latest release, which the management API's `latest-version` route reports to the running proxies. A pre-release doesn't.
+8. **Publish to preview.** Wait for the entire tag workflow, including the image and its attestation, to finish. Publish the draft with **Set as a pre-release** still checked and without setting it latest. The [Release channels workflow](.github/workflows/release-channels.yml) reacts to publication, advances the preview pointer if this version is newer, and moves the image's `:preview` tag to the same digest as `:X.Y.Z`. Confirm that run succeeds. Existing stable installs stay on the current latest release.
 
-9. **Try the install scripts.** They download from published releases only, so try them now, on Linux or macOS and on Windows, with the one-liners in the README's [install section](README.md#install-script).
+9. **Watch preview.** Try the published release on preview installs on Linux or macOS and Windows, exercise the features it changes, and inspect update/service health. Try the install scripts against this explicit version (`--version X.Y.Z` / `-Version X.Y.Z`). A few days of preview may be useful; the owner decides when it is ready. There is no enforced minimum soak time.
+
+10. **Promote the same build.** In Actions, open **Release channels**, choose **Run workflow** on `main`, select operation **Promote**, and enter `X.Y.Z` without `v`. Leave reason empty. The release must be published, still a pre-release, not withdrawn, and newer by SemVer precedence than the current latest. The run prints its published age, runs `gh release edit vX.Y.Z --prerelease=false --latest`, and moves `:latest` to the versioned image's existing digest. It rebuilds nothing, changes no release assets or signature, and keeps the preview pointer. Verify both the GitHub latest release and image tag, then try the stable install one-liners.
+
+## Channel pointers and image tags
+
+The published GitHub pre-release [`channel-preview`](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/tag/channel-preview), titled **Preview channel**, is never latest. Its only asset is `VERSION`: an ASCII version, with no `v`, followed by one LF, at most 64 bytes in total. Clients fetch it at `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/download/channel-preview/VERSION`. A missing release or asset (404) means no preview candidate. The pointer does not carry a signature; the chosen version's existing `SHA256SUMS` and `SHA256SUMS.minisig` remain the trust boundary.
+
+Preview clients compare the pointer with GitHub latest and take the newer verified release. Stable clients follow GitHub latest only. **Transition:** installs on 0.0.x know only latest; publishing a preview does not update them. They receive the new channel-aware release when it is promoted.
+
+The image is `ghcr.io/loft-902-co-llc/open-ferry`. Tag builds push only `:<version>`, publication moves `:preview` when it advances the pointer, and Promote moves `:latest`. Channel moves use `docker buildx imagetools create --prefer-index=false` from a digest, with a post-copy digest check, preserving the multi-platform manifest and its digest-bound attestation ([Docker documentation](https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/)). Do not rebuild, overwrite the versioned image, or re-sign to promote.
+
+The workflow serializes all channel operations. GitHub concurrency keeps one running and one pending channel job; a new arrival can replace a pending job. Check that each requested operation completes, and rerun a cancelled operation before assuming its channel changed. Only the channel job can write releases (`contents: write`) and move image aliases (`packages: write`); tests have `contents: read`. Dispatches must use `main`, and publication policy is also checked out from `main`. Once this workflow is on `main`, no new signing secret or environment is needed. If repository tag rules block Actions from creating `channel-preview`, the owner must allow that one pointer tag; do not relax protection for version tags. Existing GHCR package access must allow this repository to write the package, as for the release image job.
+
+## Withdraw a release
+
+Withdrawal is **fix-forward**, with no signed withdrawal list and no automatic rollback. It stops channel discovery offering the bad version. Machines that already installed it stay there until a newer fixed version ships, or the operator runs `open-ferry update -rollback`. Downloads and signatures are retained for investigation and rollback; **explicit `--version` / `-Version` installs of a withdrawn release still work**. Containers pinned to a version or digest also stay on it until their operator changes them.
+
+1. In Actions, open **Release channels**, choose **Run workflow** on `main`, select **Withdraw**, enter the version without `v`, and give a nonempty plain-text reason. Reasons are limited to 4000 UTF-8 bytes, allow LF/tab, and refuse other control characters. The reason is passed through an environment variable and a notes file, never shell interpolation; it appears in a literal text block above the original release notes.
+2. The run finds the newest remaining published, non-withdrawn stable release by SemVer. If the bad release was latest, that stable release becomes latest. If the preview pointer named the bad release, it moves to the newest remaining published, non-withdrawn release, including pre-releases, only if that candidate is newer than the remaining latest; otherwise it removes `VERSION` and leaves the pointer release in place.
+3. Image aliases move to the corresponding good release only if their current digest is the withdrawn version's digest. When there is no good preview newer than latest, `:preview` falls back to latest. When there is no good fallback for an affected alias, the workflow replaces that alias with an empty OCI image index: new pulls cannot run an image. This preserves the versioned image; deleting a GHCR package version would remove its other tags too ([GitHub package deletion documentation](https://docs.github.com/en/packages/learn-github-packages/deleting-and-restoring-a-package)).
+4. Finally the run appends ` (withdrawn)` to the title, prepends the reason to its notes, and marks it pre-release and not latest. It retains all versioned release assets. Check the release, the latest endpoint, the pointer's `VERSION` (or its expected 404), and affected image aliases. If no stable release remains, stable download discovery returns 404 until a good release is promoted.
+5. Ship a fixed version newer than the withdrawn one. Publish it to preview, check the fix, and Promote when ready. An already affected install will not automatically downgrade to an older fallback. Tell affected operators about rollback or the fixed version.
+
+Channel changes span GitHub Releases and GHCR and are not atomic. Version images are inspected before any release changes. If a run fails, inspect its completed steps and the three pointers before retrying. A publication retry repairs a pointer/image mismatch at the same version; Withdraw can be retried and preserves unrelated image digests. If Promote has already changed the release but its image move failed, it will refuse a second promotion because the release is now stable: repair only `:latest` to that release's verified version digest with the same `imagetools create` command and confirm equality. Never rebuild or dispatch the tag build as a repair.
+
+### Time to ship a fix
+
+Measured with `gh run list --workflow release.yml --event push` on 2026-10-28, from run creation through completion (including signing approval waits):
+
+| Tag | Run | Elapsed |
+| --- | --- | --- |
+| v0.0.1 | [39499420467](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/39499420467) | 113m 06s |
+| v0.0.2 | [39513762128](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/39513762128) | 29m 18s |
+| v0.0.3 | [40126847402](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/40126847402) | 106m 33s |
+| v0.0.4 | [40138596997](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/actions/runs/40138596997) | 44m 41s |
+
+The observed range is about **30–113 minutes**, not a delivery guarantee. For v0.0.1, checksums finished at 21:41:06 UTC and signing started at 23:11:05 UTC: roughly 90 minutes of that elapsed time was waiting between those jobs. Preparing/testing and merging the fix comes first; the owner then adds signing approval response time, draft review/publication, preview observation and the Promote dispatch. Promotion itself copies the existing image manifest and edits release metadata, with no full build or mandatory soak. Clients still need their next update check and the normal supervised watch, or an operator's check-now.
+
+Published qualification still requires **B to be latest** (see below). Test a preview fixing release on preview installs before promotion; the existing `qualification_published=A,B` gate runs after B is promoted. Supporting preview B there also requires a channel-aware published A and a broader lifecycle-harness change; changing only its metadata precondition would not test the real update path.
 
 ## Dry run
 

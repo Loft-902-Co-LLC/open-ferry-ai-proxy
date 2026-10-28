@@ -98,6 +98,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 
 ### Changed
 
+- New releases go to the preview channel first. The maintainer can promote the same signed build to stable without rebuilding, or withdraw it from channel discovery while keeping its downloads for rollback and investigation.
 - **Quota recovery after an upstream reset**: a fresh, successful Claude usage probe can end a cached quota cooldown before its deadline when it confirms capacity for the limit that caused it. Failed or ambiguous reads, authentication failures, other backoffs and unrelated credentials stay unchanged. The dashboard's per-credential **Clear proxy cooldown** action asks for confirmation and distinguishes a proxy reset from a provider quota reset.
 - **Fewer streaming allocations** per event for Chat Completions and Claude Messages, and no commit-header allocation when pre-first-token keepalive is disabled. Shared-host measurements did not establish an end-to-end speedup.
 - **Config writer refusals** now answer `409 config_unwritable` with a safe reason. The CLI shows that reason, says nothing was changed, and distinguishes the refusal from an I/O failure in JSON output.

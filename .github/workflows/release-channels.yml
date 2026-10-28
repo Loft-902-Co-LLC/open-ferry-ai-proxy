@@ -1,0 +1,92 @@
+name: Release channels
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Channel operation
+        type: choice
+        options: [Promote, Withdraw]
+        required: true
+      version:
+        description: Release version without the v prefix (for example 0.1.0)
+        type: string
+        required: true
+      reason:
+        description: Plain text reason (required for Withdraw)
+        type: string
+        default: ''
+  pull_request:
+    paths:
+      - .github/workflows/release-channels.yml
+      - .github/scripts/release_channels.py
+      - .github/scripts/test_release_channels.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-channels.yml
+      - .github/scripts/release_channels.py
+      - .github/scripts/test_release_channels.py
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test channel decisions without network access
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && 'main' || github.sha }}
+          persist-credentials: false
+      - run: python3 -I -B -m unittest discover -s .github/scripts -p test_release_channels.py -v
+
+  channels:
+    name: Publish, Promote or Withdraw
+    needs: test
+    if: >-
+      (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v'))
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: write
+    # Serialize mutations across versions and operations. GitHub may replace
+    # an older pending job; the runbook requires checking for cancellation.
+    concurrency:
+      group: release-channels
+      cancel-in-progress: false
+    steps:
+      # Release events normally check out the release tag. Channel policy
+      # always comes from main, including for older published builds.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Sign in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Apply channel decision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHANNEL_EVENT: ${{ github.event_name }}
+          CHANNEL_TAG: ${{ github.event.release.tag_name }}
+          CHANNEL_OPERATION: ${{ inputs.operation }}
+          CHANNEL_VERSION: ${{ inputs.version }}
+          CHANNEL_REASON: ${{ inputs.reason }}
+        run: python3 -I .github/scripts/release_channels.py
+      - name: Sign out of GHCR
+        if: always()
+        run: docker logout ghcr.io
