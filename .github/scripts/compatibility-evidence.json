@@ -7,7 +7,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests.rs",
       "test": "codex::executor::tests::execute_fills_empty_output_from_items",
       "scope": "Executor fixture: a Chat Completions request with a Codex API key receives the asserted text 'ok' reconstructed from a fake Responses event stream.",
-      "cells": [["chat", "codex-key", "text"]]
+      "cells": [["chat", "codex-key", "text"]],
+      "body_sha256": "e61c0d176c5774f6576ace5f2ffa27000b655faca55650c80f3f8880e8496479"
     },
     {
       "id": "E02",
@@ -15,7 +16,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests.rs",
       "test": "codex::executor::tests::stream_fills_empty_output_from_items",
       "scope": "Executor fixture: a Responses request with a Codex API key receives streamed events and an asserted completed response containing 'ok'. This does not open a client WebSocket.",
-      "cells": [["responses", "codex-key", "text"], ["responses", "codex-key", "streaming"]]
+      "cells": [["responses", "codex-key", "text"], ["responses", "codex-key", "streaming"]],
+      "body_sha256": "71b8d21ea565e909761a732e5421d4b52fed6b52830131d6262d1d02bbac84fd"
     },
     {
       "id": "E03",
@@ -23,7 +25,8 @@
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::native_call_with_an_api_key",
       "scope": "Executor fixture: native Claude Messages request fields and API-key headers are asserted, and the response equals the fake upstream message bytes.",
-      "cells": [["claude", "claude-key", "text"]]
+      "cells": [["claude", "claude-key", "text"]],
+      "body_sha256": "f91a89eae80502ad157e61b1dd2eeb1358fb2b167877fd4c6411f0c0ba3ca476"
     },
     {
       "id": "E04",
@@ -31,15 +34,17 @@
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::native_stream_forwards_whole_events",
       "scope": "Executor fixture: a Claude API-key Messages stream preserves all eight fake SSE events and their framing.",
-      "cells": [["claude", "claude-key", "streaming"]]
+      "cells": [["claude", "claude-key", "streaming"]],
+      "body_sha256": "1c3e7d0be19d60064fafdf4065d0c24d8c6fe1e53535b087adf0fd02dfbff198"
     },
     {
       "id": "E05",
       "level": "fixture-tested",
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::oauth_call_passes_the_client_through",
-      "scope": "Executor fixture: synthetic Claude OAuth bearer, Messages text request, client headers, and tool declarations pass through. Only the request-side text behavior is mapped; it does not test a returned tool call or real model access. Its synthetic Sonnet model does not override the Haiku-only real testing limits documented above.",
-      "cells": [["claude", "claude-oauth", "text"]]
+      "scope": "Executor fixture: synthetic Claude OAuth Messages forwards the asserted user messages and returns the exact fake upstream message bytes, with asserted OAuth headers, system, tools and metadata. Its synthetic Sonnet model does not establish live model access or override the Haiku-only limits above.",
+      "cells": [["claude", "claude-oauth", "text"]],
+      "body_sha256": "a896cc94b376ceb6c1272e5b1a8f8fbf1d5d39bcab03b500f668536339b14d20"
     },
     {
       "id": "E06",
@@ -47,7 +52,8 @@
       "path": "crates/open-ferry-providers/src/gemini/executor/tests.rs",
       "test": "gemini::executor::tests::streams_the_answer",
       "scope": "Executor fixture: native Gemini text input with an API key receives fake text chunks; the SSE content type and streamGenerateContent URL are asserted.",
-      "cells": [["gemini", "gemini-key", "text"], ["gemini", "gemini-key", "streaming"]]
+      "cells": [["gemini", "gemini-key", "text"], ["gemini", "gemini-key", "streaming"]],
+      "body_sha256": "6cabf3e899ff813bea559ce592cc0cbd06bbab45dc7b3f449baf318bc2ae4ae8"
     },
     {
       "id": "E07",
@@ -55,7 +61,8 @@
       "path": "crates/open-ferry-providers/src/gemini/executor/tests.rs",
       "test": "gemini::executor::tests::count_tokens_prepends_leading_user",
       "scope": "Executor fixture: Gemini API-key token counting normalizes the request and forwards the fake upstream's totalTokens response. This is upstream counting, not a locally measured model tokenizer.",
-      "cells": [["gemini", "gemini-key", "tokens"]]
+      "cells": [["gemini", "gemini-key", "tokens"]],
+      "body_sha256": "5409f9ff6d72ea7a768450ca1a1685d62c5c591b42b96a25223c4b8b3b41a6c5"
     },
     {
       "id": "E08",
@@ -63,7 +70,8 @@
       "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
       "test": "gemini::vertex::tests::service_accounts_call_their_project_with_a_cached_token",
       "scope": "Executor fixture: a fake service-account token endpoint and Vertex API verify text response, streaming chunks, token-count response, project URL, bearer headers, and reuse of the cached token.",
-      "cells": [["gemini", "vertex-sa", "text"], ["gemini", "vertex-sa", "streaming"], ["gemini", "vertex-sa", "tokens"]]
+      "cells": [["gemini", "vertex-sa", "text"], ["gemini", "vertex-sa", "streaming"], ["gemini", "vertex-sa", "tokens"]],
+      "body_sha256": "6798e76deb66efbcd08e1ee3acd28ae7e5b28d2db57afbd5bfceee584c5860be"
     },
     {
       "id": "E09",
@@ -71,7 +79,8 @@
       "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
       "test": "gemini::vertex::tests::streams_lines_as_they_come",
       "scope": "Executor fixture: native Gemini input through a Vertex API key receives fake text chunks; stream URL and alternative response-format query are asserted.",
-      "cells": [["gemini", "vertex-key", "text"], ["gemini", "vertex-key", "streaming"]]
+      "cells": [["gemini", "vertex-key", "text"], ["gemini", "vertex-key", "streaming"]],
+      "body_sha256": "3c8f9130681ebb2b6bce50deea44318daadaae35d6db809a3ed573dc4cc7591a"
     },
     {
       "id": "E10",
@@ -79,7 +88,8 @@
       "path": "crates/open-ferry-providers/src/gemini/interactions/tests.rs",
       "test": "gemini::interactions::tests::native_stream_passes_frames_with_their_usage",
       "scope": "Executor fixture: the Interactions executor with a Gemini API key preserves fake created/completed SSE frames and token usage. It asserts event framing rather than generated text.",
-      "cells": [["interactions", "interactions-key", "streaming"]]
+      "cells": [["interactions", "interactions-key", "streaming"]],
+      "body_sha256": "d0fd6e75e01ff557b4312f7c9e0c62a2e72286071316e72c6dd2a05d61f674a6"
     },
     {
       "id": "E11",
@@ -87,15 +97,17 @@
       "path": "crates/open-ferry-providers/src/gemini/interactions/tests.rs",
       "test": "gemini::interactions::tests::native_preserves_thinking_protocol_fields",
       "scope": "Executor fixture: native Interactions thinking_level and thinking_summaries request fields survive translation with an API key. This is request-side reasoning configuration, not returned reasoning text.",
-      "cells": [["interactions", "interactions-key", "reasoning"]]
+      "cells": [["interactions", "interactions-key", "reasoning"]],
+      "body_sha256": "df7e795fac55b2b0c806f2cefab7e3340237e059a7c92aa80140a9d8e96bac13"
     },
     {
       "id": "E12",
       "level": "fixture-tested",
       "path": "crates/open-ferry-providers/src/meta/tests.rs",
       "test": "meta::tests::apply_patch_goes_to_meta_as_a_function_and_comes_back_custom",
-      "scope": "Executor fixture: Responses custom apply_patch declarations, history, tool choice, returned calls and patch text round trip through a fake Meta upstream with an API key, both streamed and non-streamed.",
-      "cells": [["responses", "meta-key", "tools"], ["responses", "meta-key", "streaming"]]
+      "scope": "Executor fixture: Responses custom apply_patch declarations, history and choice are translated with a Meta API key; the whole-response branch asserts the returned custom tool type and exact patch text. The streaming branch checks event/type presence only and is not mapped to a capability cell.",
+      "cells": [["responses", "meta-key", "tools"]],
+      "body_sha256": "5c6c295bf9bcd72d5fcda204315c579777abf9eab2dcd49a8da6306484394032"
     },
     {
       "id": "E13",
@@ -103,15 +115,8 @@
       "path": "crates/open-ferry-providers/src/xai/executor/tests.rs",
       "test": "xai::executor::tests::translates_for_a_chat_completions_client",
       "scope": "Executor fixture: a Chat Completions client format receives asserted text 'ok' and chat.completion.chunk output from a fake xAI Responses stream with an API key.",
-      "cells": [["chat", "xai-key", "text"], ["chat", "xai-key", "streaming"]]
-    },
-    {
-      "id": "E14",
-      "level": "fixture-tested",
-      "path": "crates/open-ferry-providers/src/xai/executor/tests.rs",
-      "test": "xai::executor::tests::stream_normalizes_reasoning_text_events",
-      "scope": "Executor fixture: fake xAI reasoning_text events become Responses reasoning_summary events, with asserted text, event types, and ordering, for an API key.",
-      "cells": [["responses", "xai-key", "reasoning"], ["responses", "xai-key", "streaming"]]
+      "cells": [["chat", "xai-key", "text"], ["chat", "xai-key", "streaming"]],
+      "body_sha256": "ac5fdeee3fcabc20bca9b56df39021fa36c18f1be84149d36526c03d588efbec"
     },
     {
       "id": "E15",
@@ -119,7 +124,8 @@
       "path": "crates/open-ferry-providers/src/xai/executor/tests/images.rs",
       "test": "xai::executor::tests::images::image_calls_post_to_generations_and_publish_usage",
       "scope": "Executor fixture: the OpenAI Images generation format with an xAI API key posts to the fake images endpoint and returns asserted base64 image data. This covers image output, not editing input.",
-      "cells": [["images", "xai-key", "image-out"]]
+      "cells": [["images", "xai-key", "image-out"]],
+      "body_sha256": "d7d901a43e29ee1784f06ebbd75f9d602f4e16c416095608642c3d7b50b7726d"
     },
     {
       "id": "E16",
@@ -127,7 +133,8 @@
       "path": "crates/open-ferry-providers/src/xai/executor/tests/images.rs",
       "test": "xai::executor::tests::images::image_edits_post_to_edits",
       "scope": "Executor fixture: an OpenAI Images edit request with an input image URL and xAI API key reaches the fake edits endpoint with its image preserved.",
-      "cells": [["images", "xai-key", "image-in"]]
+      "cells": [["images", "xai-key", "image-in"]],
+      "body_sha256": "97da626bfaf284cb46b21fd2f2f1966b62b1e8f6f14fd89b75788dc84d09ac3e"
     },
     {
       "id": "E17",
@@ -135,15 +142,17 @@
       "path": "crates/open-ferry-providers/src/xai/executor/speech/tests.rs",
       "test": "xai::executor::speech::tests::speech_posts_the_body_and_returns_the_audio",
       "scope": "Executor fixture: the OpenAI Speech source format and /v1/audio/speech request-path metadata, with an API key and an already shaped xAI payload, post to fake /v1/tts and return asserted audio bytes with audio/mpeg content type. Audio direction: output. This covers the executor boundary, not the public Speech route's input conversion.",
-      "cells": [["speech", "xai-key", "audio"]]
+      "cells": [["speech", "xai-key", "audio"]],
+      "body_sha256": "406cce096f72671afbe1ed7aed7eebb33ca6682e2cfddd3bba4101d19dc07773"
     },
     {
       "id": "E18",
       "level": "fixture-tested",
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::chat_request_goes_out_as_sent",
-      "scope": "Executor fixture: a Chat Completions request with an OpenAI-compatible API key receives asserted text 'ok'; the request's reasoning_effort is asserted as high. The streaming branch checks request forwarding only, so streaming is not promoted by this entry.",
-      "cells": [["chat", "compat-key", "text"], ["chat", "compat-key", "reasoning"]]
+      "scope": "Executor fixture: a Chat Completions request with an OpenAI-compatible API key receives asserted text ok; a model-name suffix (high) becomes the asserted reasoning_effort. This is suffix-derived reasoning configuration, not a client reasoning-field assertion. Its streaming branch checks request forwarding only.",
+      "cells": [["chat", "compat-key", "text"], ["chat", "compat-key", "reasoning"]],
+      "body_sha256": "3767c1d09da13be7db9caae82f6eab9038a49115ddc72870606e49db24cb11e5"
     },
     {
       "id": "E19",
@@ -151,7 +160,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::claude_client_gets_a_claude_message",
       "scope": "Executor fixture: the Claude Messages input format is translated to fake upstream Chat Completions with an API key and returns an asserted Claude message with text 'ok'.",
-      "cells": [["claude", "compat-key", "text"]]
+      "cells": [["claude", "compat-key", "text"]],
+      "body_sha256": "bc9458768ea3cea346e09a6809f98bafa0563cb280e411c62723a94c3a26cba5"
     },
     {
       "id": "E20",
@@ -159,7 +169,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::claude_client_streams_claude_events",
       "scope": "Executor fixture: fake Chat Completions chunks with an OpenAI-compatible API key become asserted Claude Messages events and text deltas.",
-      "cells": [["claude", "compat-key", "streaming"]]
+      "cells": [["claude", "compat-key", "streaming"]],
+      "body_sha256": "595638a2542322a501febe8bd7ae904fd038b77b355b07fbc8b0d9986a67145c"
     },
     {
       "id": "E21",
@@ -167,7 +178,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::video_input",
       "scope": "Executor fixture: Chat Completions and Responses video input URLs and data URLs with an API key are preserved in fake upstream requests, both streamed and non-streamed; the returned text is asserted. Video direction: input only; this does not establish video generation.",
-      "cells": [["chat", "compat-key", "video"], ["responses", "compat-key", "video"]]
+      "cells": [["chat", "compat-key", "video"], ["responses", "compat-key", "video"]],
+      "body_sha256": "145f51d933d836137aeea557716e21577425cbd04160b94bedefd95be0abc7b0"
     },
     {
       "id": "E22",
@@ -175,7 +187,8 @@
       "path": "crates/open-ferry-server/src/handlers/openai_videos/tests/native.rs",
       "test": "handlers::openai_videos::tests::native::videos_create_binds_retrieve_to_selected_auth",
       "scope": "Server-route fixture: OpenAI video creation and retrieval against a fake xAI upstream stay bound to the selected API-key credential. This covers video job metadata and credential routing, not real generated video quality.",
-      "cells": [["videos", "xai-key", "video"]]
+      "cells": [["videos", "xai-key", "video"]],
+      "body_sha256": "d82145bf7f4d343b4dfda67462cef1032627d8763f1e3dbb125e1b41aa799fc0"
     },
     {
       "id": "E23",
@@ -183,7 +196,8 @@
       "path": "crates/open-ferry-server/src/handlers/openai_videos/tests/native.rs",
       "test": "handlers::openai_videos::tests::native::xai_videos_native_create_binds_retrieve_to_selected_auth",
       "scope": "Server-route fixture: native xAI video creation and retrieval against a fake xAI upstream stay bound to the selected API-key credential. This covers video job metadata and credential routing.",
-      "cells": [["xai-videos", "xai-key", "video"]]
+      "cells": [["xai-videos", "xai-key", "video"]],
+      "body_sha256": "9689735136cabbacd807006458c9ac1776b6f2d1cb9a24462c159e5321734751"
     },
     {
       "id": "E24",
@@ -191,7 +205,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests.rs",
       "test": "codex::executor::tests::drops_invalid_reasoning_encrypted_content",
       "scope": "Executor fixture: Codex API-key Responses requests retain valid encrypted reasoning and remove invalid reasoning IDs/content, on whole, streaming and compaction request paths. This asserts request-side reasoning handling.",
-      "cells": [["responses", "codex-key", "reasoning"]]
+      "cells": [["responses", "codex-key", "reasoning"]],
+      "body_sha256": "96c506fb2392dce7453bb870d4b4906f6f14357ab68f3af222cae454dadc25ee"
     },
     {
       "id": "E25",
@@ -199,7 +214,8 @@
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::openai_call_reads_claudes_stream",
       "scope": "Executor fixture: a Chat Completions request through a Claude API key returns asserted text Hello there and the stop finish reason from fake Claude SSE.",
-      "cells": [["chat", "claude-key", "text"]]
+      "cells": [["chat", "claude-key", "text"]],
+      "body_sha256": "fadb44f0fa89c340fa492162f045a4736543735a86d1df3e63bfdeeacd46f075"
     },
     {
       "id": "E26",
@@ -207,15 +223,17 @@
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::openai_stream_is_translated",
       "scope": "Executor fixture: fake Claude SSE through an API key becomes Chat Completions chunks with asserted concatenated text and finish reason.",
-      "cells": [["chat", "claude-key", "streaming"]]
+      "cells": [["chat", "claude-key", "streaming"]],
+      "body_sha256": "25b686865898939b468703c4c4488d0699b4ce9fee852b9102ccdf21c1027600"
     },
     {
       "id": "E27",
       "level": "fixture-tested",
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::thinking_suffix_is_applied",
-      "scope": "Executor fixture: a Claude API-key Messages request carries the asserted enabled thinking configuration with a 16384-token budget. This covers request-side reasoning settings.",
-      "cells": [["claude", "claude-key", "reasoning"]]
+      "scope": "Executor fixture: a Claude API-key Messages request with model-name suffix (16384) becomes the asserted enabled thinking configuration with a 16384-token budget. This is suffix-derived reasoning configuration, not a client thinking-field assertion.",
+      "cells": [["claude", "claude-key", "reasoning"]],
+      "body_sha256": "00d5bd92f045ba9b6064a821c62cebec2eb44b623f6e9f64215edd6fbe23cebf"
     },
     {
       "id": "E28",
@@ -223,7 +241,8 @@
       "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
       "test": "claude::executor::tests::counts_tokens_with_anthropic",
       "scope": "Executor fixture: synthetic Claude OAuth Messages token counting calls the fake Anthropic count_tokens endpoint and returns its asserted input_tokens value. It does not prove live model access; the OAuth limits above still apply.",
-      "cells": [["claude", "claude-oauth", "tokens"]]
+      "cells": [["claude", "claude-oauth", "tokens"]],
+      "body_sha256": "9e7affc9b8afd657bceaf008c195ce88ae762b393779e5df83f3bf1bfd31cfe3"
     },
     {
       "id": "E29",
@@ -231,7 +250,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::count_tokens",
       "scope": "Executor fixture: an OpenAI-compatible API-key credential gets an asserted local tokenizer estimate for Chat Completions. No upstream tokenizer or credential validity is tested.",
-      "cells": [["chat", "compat-key", "tokens"]]
+      "cells": [["chat", "compat-key", "tokens"]],
+      "body_sha256": "fcbccb72be352e3652785f26c65e18de44435f59b5dacf256d6726838eca9575"
     },
     {
       "id": "E30",
@@ -239,7 +259,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
       "test": "openai_compat::executor::tests::count_tokens_for_a_claude_client",
       "scope": "Executor fixture: a Claude Messages request with an OpenAI-compatible API-key credential gets an asserted local input_tokens estimate, without an upstream count call.",
-      "cells": [["claude", "compat-key", "tokens"]]
+      "cells": [["claude", "compat-key", "tokens"]],
+      "body_sha256": "e4b6b7c22ebff249b6256851310f999bfb8cbb0d6e01512a29c876ba7de721bb"
     },
     {
       "id": "E31",
@@ -247,7 +268,8 @@
       "path": "crates/open-ferry-providers/src/xai/executor/tests.rs",
       "test": "xai::executor::tests::count_tokens_answers_in_the_clients_format_unsent",
       "scope": "Executor fixture: xAI API-key credentials get positive local token estimates in Responses and Claude Messages formats; the fake upstream receives no request.",
-      "cells": [["responses", "xai-key", "tokens"], ["claude", "xai-key", "tokens"]]
+      "cells": [["responses", "xai-key", "tokens"], ["claude", "xai-key", "tokens"]],
+      "body_sha256": "45229768bbbf72fce9bd0d6b09e29c7f4c760e5044964386201b5f023207b9e2"
     },
     {
       "id": "E32",
@@ -255,7 +277,8 @@
       "path": "crates/open-ferry-providers/src/meta/tests.rs",
       "test": "meta::tests::count_tokens_answers_in_the_clients_format",
       "scope": "Executor fixture: Meta API-key credentials get positive local token estimates in Responses and Claude Messages formats; no Meta request is made.",
-      "cells": [["responses", "meta-key", "tokens"], ["claude", "meta-key", "tokens"]]
+      "cells": [["responses", "meta-key", "tokens"], ["claude", "meta-key", "tokens"]],
+      "body_sha256": "2f3a7db4a7b28bca1c0fe41db786205f4fadf3b6bf05900194c4da316ebeac33"
     },
     {
       "id": "E33",
@@ -263,7 +286,8 @@
       "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
       "test": "gemini::vertex::tests::apply_patch_reuses_the_executor",
       "scope": "Executor fixture: Responses apply_patch tool declarations, returned custom-tool patch output, and streamed tool events are asserted through a Vertex API key and fake upstream.",
-      "cells": [["responses", "vertex-key", "tools"], ["responses", "vertex-key", "streaming"]]
+      "cells": [["responses", "vertex-key", "tools"], ["responses", "vertex-key", "streaming"]],
+      "body_sha256": "7325d8a7b28cdbd85208d31716bea128652a7e1594e816caf1af197d2c63daaf"
     },
     {
       "id": "E34",
@@ -271,15 +295,8 @@
       "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
       "test": "gemini::vertex::tests::service_accounts_call_imagen_with_its_own_requests",
       "scope": "Executor fixture: a Vertex service account exchanges a fake token, calls the project Imagen predict endpoint, and returns asserted base64 image bytes in Gemini response shape. Image direction: output.",
-      "cells": [["gemini", "vertex-sa", "image-out"]]
-    },
-    {
-      "id": "E35",
-      "level": "fixture-tested",
-      "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
-      "test": "gemini::vertex::tests::api_keys_call_imagen_with_the_gemini_request",
-      "scope": "Executor fixture: a Vertex API key routes Gemini text input to Imagen predict and returns asserted base64 prediction bytes. Image direction: output.",
-      "cells": [["gemini", "vertex-key", "image-out"]]
+      "cells": [["gemini", "vertex-sa", "image-out"]],
+      "body_sha256": "5016bca8fc73658e17da9197102e4b43b1f714d2b8b71623fc0235a369a85f19"
     },
     {
       "id": "E36",
@@ -287,7 +304,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
       "test": "codex::executor::tests::images::tool_generation",
       "scope": "Executor fixture: a Codex API key turns an Images generation request into an image_generation Responses tool and returns asserted image data URL and metadata. Image direction: output.",
-      "cells": [["images", "codex-key", "image-out"]]
+      "cells": [["images", "codex-key", "image-out"]],
+      "body_sha256": "39907e28994625b971a6db91a6294b13e1120665136c05b93505c99ac7c3d108"
     },
     {
       "id": "E37",
@@ -295,7 +313,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
       "test": "codex::executor::tests::images::tool_json_edit",
       "scope": "Executor fixture: Codex API-key Images edits preserve input image URLs/data URLs and masks in the translated tool request, and return asserted base64 image output. This entry covers the input-image cell.",
-      "cells": [["images", "codex-key", "image-in"]]
+      "cells": [["images", "codex-key", "image-in"]],
+      "body_sha256": "6477ab9567d704188ea21bff35ef9de18e22b2462b1e2130b8f0407dcbfe9306"
     },
     {
       "id": "E38",
@@ -303,7 +322,8 @@
       "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
       "test": "codex::executor::tests::images::tool_stream",
       "scope": "Executor fixture: a Codex API-key Images edit returns asserted partial-image and completed-image SSE events and base64 payloads.",
-      "cells": [["images", "codex-key", "streaming"]]
+      "cells": [["images", "codex-key", "streaming"]],
+      "body_sha256": "4bfa7626413c322ea82601c2d78b7578498dd5a688a025843d324fd56085127d"
     },
     {
       "id": "E39",
@@ -311,7 +331,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
       "test": "openai_compat::executor::tests::images::images_generations_passthrough",
       "scope": "Executor fixture: an OpenAI-compatible API key passes an Images generation request to a fake images endpoint and returns the exact asserted base64 image response. Image direction: output.",
-      "cells": [["images", "compat-key", "image-out"]]
+      "cells": [["images", "compat-key", "image-out"]],
+      "body_sha256": "09a35255e75d9af3b50c88eb0632f925f6ac0b5cbbf6644ecc7dce230ccc9d8f"
     },
     {
       "id": "E40",
@@ -319,7 +340,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
       "test": "openai_compat::executor::tests::images::images_edits_multipart_rewrites_model",
       "scope": "Executor fixture: an OpenAI-compatible API-key Images edit preserves asserted multipart image bytes and MIME type while rewriting the model. Image direction: input.",
-      "cells": [["images", "compat-key", "image-in"]]
+      "cells": [["images", "compat-key", "image-in"]],
+      "body_sha256": "11f83923f7d39915dfc61ce26679be65133e47e1775dad555d5cc2ec4c39d729"
     },
     {
       "id": "E41",
@@ -327,7 +349,8 @@
       "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
       "test": "openai_compat::executor::tests::images::images_generations_streams_upstream",
       "scope": "Executor fixture: an OpenAI-compatible API-key Images generation forwards the fake partial-generation and DONE SSE events with the asserted streaming request headers.",
-      "cells": [["images", "compat-key", "streaming"]]
+      "cells": [["images", "compat-key", "streaming"]],
+      "body_sha256": "d2839cccaf9e74f3e0e11f96b840ef6b9107bc030a9e607b9d23a2f8e8feb897"
     },
     {
       "id": "E42",
@@ -335,15 +358,17 @@
       "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
       "test": "handlers::interactions::tests::native::a_vertex_model_uses_the_native_interactions_endpoint",
       "scope": "Public-route fixture: POST /v1beta/interactions passes through the real credential manager and Vertex executor with an API key; input text, upstream key, native endpoint, and returned vertex-ok text are asserted.",
-      "cells": [["interactions", "vertex-key", "text"]]
+      "cells": [["interactions", "vertex-key", "text"]],
+      "body_sha256": "1210235984fbb0a0435fa5eacab3eabd703b1480857bcc9c42646745c1c31cf9"
     },
     {
       "id": "E43",
       "level": "fixture-tested",
       "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
       "test": "handlers::interactions::tests::native::an_agent_uses_the_native_interactions_endpoint",
-      "scope": "Public-route fixture: POST /v1beta/interactions with agent and text input goes through the real Interactions executor and API-key credential; the selected agent, credential header, endpoint and response ID are asserted. This covers request-side text handling.",
-      "cells": [["interactions", "interactions-key", "text"]]
+      "scope": "Public-route fixture: POST /v1beta/interactions goes through the real Interactions executor and API-key credential. Forwarded input hi, returned text ok, selected agent, credential header, endpoint and response ID are asserted.",
+      "cells": [["interactions", "interactions-key", "text"]],
+      "body_sha256": "5184b78ae0b0b116f85b12eed20c344f129d7970f7e7f737fa0c151469f9f742"
     },
     {
       "id": "E44",
@@ -351,7 +376,8 @@
       "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
       "test": "handlers::interactions::tests::native::an_agent_stream_passes_the_frames_through",
       "scope": "Public-route fixture: an Interactions agent stream goes through the real Interactions executor and API-key credential; the HTTP SSE content type and exact returned frames are asserted.",
-      "cells": [["interactions", "interactions-key", "streaming"]]
+      "cells": [["interactions", "interactions-key", "streaming"]],
+      "body_sha256": "67a5369eda90d33240b3e4fea83a9ff7ce0c0f5820dda3099bde374a3532078f"
     },
     {
       "id": "E45",
@@ -359,7 +385,8 @@
       "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
       "test": "handlers::images::tests::codex_generation_is_sent_on",
       "scope": "Public-route fixture: POST /v1/images/generations selects Codex and returns asserted base64 output through a scripted dispatcher. Provider credentials are not exercised.",
-      "cells": [["images", "route-only", "image-out"]]
+      "cells": [["images", "route-only", "image-out"]],
+      "body_sha256": "794bc2cc4d58813119761783593470e672114fa7d048e8a8bfda54d71790d905"
     },
     {
       "id": "E46",
@@ -367,7 +394,8 @@
       "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
       "test": "handlers::images::tests::xai_streams_are_written_as_completed_events",
       "scope": "Public-route fixture: POST /v1/images/generations with stream=true writes exact completed-image SSE events and asserted base64/URL fields from scripted xAI dispatch. Provider credentials are not exercised.",
-      "cells": [["images", "route-only", "streaming"]]
+      "cells": [["images", "route-only", "streaming"]],
+      "body_sha256": "80bed7433c65bcb719ea954ac85f4dc44ace24f90b797b866f9bfbcea79e5f42"
     },
     {
       "id": "E47",
@@ -375,7 +403,8 @@
       "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
       "test": "handlers::images::tests::codex_form_edits_are_written_again",
       "scope": "Public-route fixture: POST /v1/images/edits preserves asserted multipart PNG bytes, MIME type and fields in the scripted Codex dispatch. Provider credentials are not exercised.",
-      "cells": [["images", "route-only", "image-in"]]
+      "cells": [["images", "route-only", "image-in"]],
+      "body_sha256": "f0a4b2ad69914af73be56a6f46f48e663ade5582acb37d114881e4585c257869"
     },
     {
       "id": "E48",
@@ -383,23 +412,8 @@
       "path": "crates/open-ferry-server/src/handlers/openai_speech/tests.rs",
       "test": "handlers::openai_speech::tests::speech_endpoints_route_speech_models_to_the_executor",
       "scope": "Public-route fixture: POST /v1/audio/speech and POST /v1/tts select xAI and return asserted ID3audio bytes and audio/mpeg content type from a scripted dispatcher. Audio direction: output; provider credentials are not exercised.",
-      "cells": [["speech", "route-only", "audio"], ["xai-tts", "route-only", "audio"]]
-    },
-    {
-      "id": "E49",
-      "level": "fixture-tested",
-      "path": "crates/open-ferry-server/src/handlers/codex_client/tests.rs",
-      "test": "handlers::codex_client::tests::responses_ready_tools_for_http_and_sse",
-      "scope": "Public-route fixture: POST /v1/responses in HTTP and SSE modes prepares asserted collaboration-tool schemas and descriptions for scripted Codex dispatch. This covers request-side tool handling; no real client version or provider credential is exercised.",
-      "cells": [["responses", "route-only", "tools"]]
-    },
-    {
-      "id": "E50",
-      "level": "fixture-tested",
-      "path": "crates/open-ferry-server/src/handlers/codex_client/tests.rs",
-      "test": "handlers::codex_client::tests::websocket_readies_tools",
-      "scope": "Public-route fixture: a real socket at /v1/responses accepts response.create and prepares asserted collaboration-tool schemas for scripted Codex dispatch. This covers request-side tool handling and the client WebSocket, without a provider credential or real client application.",
-      "cells": [["responses-ws", "route-only", "tools"], ["responses-ws", "route-only", "websocket"]]
+      "cells": [["speech", "route-only", "audio"], ["xai-tts", "route-only", "audio"]],
+      "body_sha256": "0d07ba3139117cca0deea39f95701ac7f23e3b5bc73ec6b7451eea137906da5f"
     },
     {
       "id": "E51",
@@ -407,7 +421,8 @@
       "path": "crates/open-ferry-server/src/handlers/responses_ws/tests.rs",
       "test": "handlers::responses_ws::tests::merges_transcript_for_non_passthrough_upstream",
       "scope": "Public-route fixture: a real /v1/responses WebSocket emits asserted completed events over two turns and sends the asserted merged transcript via scripted Codex dispatch. No provider credential or upstream WebSocket is exercised.",
-      "cells": [["responses-ws", "route-only", "streaming"], ["responses-ws", "route-only", "websocket"]]
+      "cells": [["responses-ws", "route-only", "streaming"], ["responses-ws", "route-only", "websocket"]],
+      "body_sha256": "ed1f97521fbf12d3c85418b7bf335cf9dfaf5401d71a93a3e835220d30f4ffe2"
     },
     {
       "id": "E52",
@@ -415,7 +430,8 @@
       "path": "crates/open-ferry-server/src/handlers/models/codex/tests.rs",
       "test": "handlers::models::codex::tests::serves_the_codex_catalog",
       "scope": "Public-route fixture: GET /v1/models?client_version returns asserted Codex catalog entries, capabilities and token limits from a registered model list. Synthetic client-version headers are not a tested application recipe; provider credentials are not exercised.",
-      "cells": [["models", "route-only", "model-list"]]
+      "cells": [["models", "route-only", "model-list"]],
+      "body_sha256": "13cbace85c6635d564769467aac93a120169a0f2556c18aed08f83b8a8e7138a"
     },
     {
       "id": "E53",
@@ -423,7 +439,8 @@
       "path": "crates/open-ferry-server/src/handlers/openai_videos/tests/native.rs",
       "test": "handlers::openai_videos::tests::native::write_video_content_from_url",
       "scope": "Public-route fixture: GET /openai/v1/videos/video_123/content goes through the real xAI executor and API-key credential, returning asserted video bytes, video/mp4 type and attachment disposition from fake upstreams. Video direction: output.",
-      "cells": [["videos", "xai-key", "video"]]
+      "cells": [["videos", "xai-key", "video"]],
+      "body_sha256": "c5b411922417c41e143e1b9126f342efb6479ccd8beb6549774c677505cd95c0"
     },
     {
       "id": "U01",
@@ -431,7 +448,9 @@
       "path": "crates/open-ferry-providers/src/claude_cli/prompt.rs",
       "refusal": "claude-cli: client tools aren't supported by claude-cli yet",
       "scope": "The Claude Messages prompt builder rejects client tools, forcing tool choices, and tool-use/result blocks with a local invalid-request error. See also docs/claude-subscription.md.",
-      "cells": [["claude", "claude-cli", "tools"]]
+      "cells": [["claude", "claude-cli", "tools"]],
+      "test": "claude_cli::prompt::tests::refuses_what_claude_code_cant_do",
+      "body_sha256": "3e1ef111a032dbda00ddb908d7d20617b9905f4396747e8b1695cc19b0fe9e8e"
     },
     {
       "id": "U02",
@@ -439,7 +458,9 @@
       "path": "crates/open-ferry-providers/src/claude_cli/executor.rs",
       "refusal": "claude-cli: counting tokens isn't supported; Claude Code has no token count",
       "scope": "The claude-cli executor's count_tokens method returns 501 for Claude Messages token counting. See also docs/claude-subscription.md.",
-      "cells": [["claude", "claude-cli", "tokens"]]
+      "cells": [["claude", "claude-cli", "tokens"]],
+      "test": "claude_cli::executor::tests::refuses_what_it_cant_do",
+      "body_sha256": "d16cac1cb23f8130b316823c136d93797907942b0bfd04ecfa271647457abc72"
     }
   ]
 }
