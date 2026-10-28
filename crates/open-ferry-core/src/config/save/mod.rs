@@ -486,6 +486,18 @@ pub fn defaults() -> Result<V8Document, SaveError> {
 const RAW_COMMENT_OWNER_BUDGET: usize = 64 * 1024;
 
 pub(crate) fn render_write_file(data: &[u8]) -> Result<Vec<u8>, SaveError> {
+    let (mut doc, source) = tree::read_comment_source(data)?;
+    if let Some(root) = doc.content.first_mut()
+        && omit_stable_update_channel(root)
+    {
+        // Removing a default must not turn duplicate keys into valid input.
+        if let Some(original) = loader_root(data)? {
+            loader_yaml::check_shape(&original)
+                .map_err(|error| SaveError::new(SaveErrorKind::Yaml, error.message()))?;
+        }
+        let canonical = tree::marshal_config_for_source(&doc, &source)?;
+        return render_write_file(&canonical.bytes);
+    }
     if data.len() > RAW_COMMENT_OWNER_BUDGET || !tree::owner_protection_enabled() {
         return render_write_file_at_writer_placement(data);
     }
@@ -1023,6 +1035,18 @@ fn candidate_preserving_comments(
     Ok((out, source))
 }
 
+/// Stable is the default, so older binaries must not encounter this new key.
+pub(crate) fn omit_stable_update_channel(root: &mut Node) -> bool {
+    let stable = yaml_path(root, "self-update.channel").is_some_and(|node| {
+        node.kind == Kind::Scalar
+            && (node.tag == NULL_TAG
+                || (node.tag == STR_TAG
+                    && super::SelfUpdateChannel::parse(&node.value)
+                        == Some(super::SelfUpdateChannel::Stable)))
+    });
+    stable && delete_yaml_path(root, "self-update.channel")
+}
+
 /// The bytes [`update_nested_scalar`] writes for the file `data`.
 pub(crate) fn render_nested_scalar(
     data: &[u8],
@@ -1083,6 +1107,9 @@ fn candidate_nested_scalar(
             MAP_TAG.clone_into(&mut next.tag);
         }
         node = next;
+    }
+    if let Some(root) = doc.content.first_mut() {
+        omit_stable_update_channel(root);
     }
     let intended = IntendedValues::node(&doc, false)?;
     source.include_copies(&doc);

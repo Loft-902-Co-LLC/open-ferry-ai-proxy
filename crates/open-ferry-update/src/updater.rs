@@ -101,6 +101,8 @@ pub enum UpdateError {
     Journal(String),
     /// Neither release source could be used, or a pointer was malformed.
     Discovery(String),
+    /// The configured channel changed during preparation.
+    ChannelChanged,
     /// An immutable version is in use with different bytes.
     VersionInUse(String),
     /// A download failed.
@@ -161,6 +163,7 @@ impl fmt::Display for UpdateError {
             Self::Io { what, error } => write!(f, "{what}: {error}"),
             Self::Busy => f.write_str("another update is running"),
             Self::Journal(error) | Self::Discovery(error) => f.write_str(error),
+            Self::ChannelChanged => f.write_str("the update channel changed while preparing the release; check again before installing"),
             Self::VersionInUse(version) => write!(f, "version {version} is in use and differs"),
             Self::Fetch { what, error } => write!(f, "downloading {what}: {error}"),
             Self::Verify(error) => error.fmt(f),
@@ -1279,8 +1282,9 @@ impl Updater {
         state: &State,
     ) -> Status {
         let installed = self.installed_version(state);
-        let update_available = state.channel.as_deref().unwrap_or("stable")
-            == settings.channel.as_str()
+        let same_channel =
+            state.channel.as_deref().unwrap_or("stable") == settings.channel.as_str();
+        let update_available = same_channel
             && state.latest.as_deref().is_some_and(|latest| {
                 semver::Version::parse(latest).is_ok_and(|latest| {
                     release::compare_channel(
@@ -1292,9 +1296,9 @@ impl Updater {
             });
         Status {
             channel: settings.channel.as_str(),
-            release_source: state.release_source.clone(),
+            release_source: same_channel.then(|| state.release_source.clone()).flatten(),
             checked_channel: state.channel.clone(),
-            channel_error: state.channel_error.clone(),
+            channel_error: same_channel.then(|| state.channel_error.clone()).flatten(),
             mode: settings.mode.as_str(),
             mode_source: settings.source.as_str(),
             updates: settings.describe(),
@@ -1303,9 +1307,9 @@ impl Updater {
             installed_version: installed.clone(),
             restart_needed: installed != self.running,
             target: self.target.clone(),
-            latest_version: state.latest.clone(),
+            latest_version: same_channel.then(|| state.latest.clone()).flatten(),
             update_available,
-            staged_version: state.staged.clone(),
+            staged_version: same_channel.then(|| state.staged.clone()).flatten(),
             previous_version: state.previous.clone(),
             failed_versions: state.failed.clone(),
             rolled_back_version: state.rolled_back.clone(),

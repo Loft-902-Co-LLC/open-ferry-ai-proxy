@@ -153,6 +153,7 @@ function Notices({ status }: { status: UpdateStatus }) {
 function Facts({ status }: { status: UpdateStatus }) {
   const updates = UPDATES[status.updates];
   const runningVersion = status.supervisor?.running_version ?? status.running_version;
+  const checkedOtherChannel = status.checked_channel !== null && status.checked_channel !== status.channel;
   const checkBeforeSwitch = status.last_result === "up-to-date" && status.latest_version !== null && status.latest_version !== runningVersion;
   const rollbackTarget = status.supervisor?.rollback_target ?? status.previous_version;
   const skipped = [
@@ -201,7 +202,7 @@ function Facts({ status }: { status: UpdateStatus }) {
         {status.last_check === null
           ? "none yet"
           : `${formatDateTime(status.last_check)}${
-              status.last_result === null ? "" : `: ${checkBeforeSwitch ? "checked before the running version changed" : RESULTS[status.last_result]}`
+              checkedOtherChannel ? `: checked on ${status.checked_channel}` : status.last_result === null ? "" : `: ${checkBeforeSwitch ? "checked before the running version changed" : RESULTS[status.last_result]}`
             }`}
       </Fact>
       <Fact term="Next check">

@@ -415,6 +415,7 @@ fn render_candidate(
         }
     }
     strip_auth_indexes_from_root(root);
+    save::omit_stable_update_channel(root);
     save::normalize_collection_node_styles(root);
     // A whole YAML replacement owns the document comments as well as the
     // root. In particular, yaml.v3 attaches a trailing comment to the

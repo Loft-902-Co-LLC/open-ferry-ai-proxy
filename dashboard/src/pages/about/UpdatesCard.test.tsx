@@ -768,3 +768,13 @@ it("shows preview policy, source, and pointer failures", async () => {
   expect(fact(card, "Release source")).toBe("latest");
   expect(fact(card, "Source warning")).toContain("bad signature");
 });
+
+it("shows no install-ready notice for cleared old-channel details", async () => {
+  server(updateStatus({ channel: "stable", checked_channel: "preview", latest_version: null, staged_version: null, release_source: null, channel_error: null, update_available: false, last_result: "staged" }));
+  const { card } = await openUpdates();
+  await within(card).findByText("Running", { selector: "dt" });
+  expect(fact(card, "Latest release")).toBe("not checked yet");
+  expect(fact(card, "Last checked channel")).toBe("preview");
+  expect(fact(card, "Last check")).toMatch(/checked on preview$/);
+  expect(within(card).queryByText(/is ready to install/)).not.toBeInTheDocument();
+});

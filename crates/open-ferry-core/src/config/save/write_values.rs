@@ -216,6 +216,7 @@ fn normalized_document(doc: &Node, migrate: bool) -> Result<Node, SaveError> {
         && let Some(root) = doc.content.first_mut()
     {
         *root = tree::expand_config_aliases(root)?;
+        save::omit_stable_update_channel(root);
     }
     quoted_node(&mut doc);
     if migrate {

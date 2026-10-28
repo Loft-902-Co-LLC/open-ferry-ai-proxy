@@ -1045,3 +1045,46 @@ async fn an_async_stop_aborts_a_timer_restarted_while_it_waits_for_the_gate() {
     assert_eq!(service.check_now(), CheckNow::Off);
     assert!(fake.calls.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn changing_channel_during_manual_or_automatic_preparation_never_submits() {
+    for auto in [false, true] {
+        let f = Fixture::new().await;
+        let (updates, fake, fetch) = service(&f, "auto", "0.2.0", false);
+        let mut preview = config("auto");
+        preview.self_update.channel = "preview".into();
+        updates.set_config(&preview);
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *fetch.gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+        let install = tokio::spawn({
+            let updates = updates.clone();
+            async move { updates.install_now(auto).await }
+        });
+        tokio::time::timeout(TEST_WAIT, arrived.notified())
+            .await
+            .unwrap();
+        updates.set_config(&config("auto"));
+        release.notify_one();
+        assert!(matches!(
+            install.await.unwrap(),
+            Err(SwitchError::Update(crate::UpdateError::ChannelChanged))
+        ));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn neither_automatic_nor_dashboard_installs_reuse_an_old_preview_stage() {
+    for auto in [false, true] {
+        let mut f = Fixture::new().await;
+        f.updater.channel = open_ferry_core::config::SelfUpdateChannel::Preview;
+        f.release("0.3.0-rc.1");
+        let mut state = f.updater.state();
+        let found = f.updater.latest(&state).await.unwrap();
+        f.updater.stage(&found, &mut state).await.unwrap();
+        let (updates, fake, _) = service(&f, "auto", "0.2.0", false);
+        updates.install_now(auto).await.unwrap();
+        assert_eq!(*fake.calls.lock().unwrap(), [("0.2.0".into(), auto)]);
+    }
+}

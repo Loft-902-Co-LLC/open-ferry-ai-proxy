@@ -974,9 +974,9 @@ observability:
 # CLIProxyAPI's loader ignores this section; its v0 management writes to a v8 config comment it
 # out, and its v8 writes refuse a file that has it. It stays at the top level in both layouts;
 # open-ferry init uncomments it.
+# Stable is the default; opt into preview with: open-ferry update -channel preview
 # self-update:
 #   mode: auto # auto, notify or off
-#   channel: stable # stable (default) or preview; preview is opt-in
 #   check-every: 6h # how often to look, a Go duration of at least 1h; default 6h
 
 # Legacy compatibility reference (comments only; not part of this v8 template).

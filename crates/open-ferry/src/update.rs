@@ -434,7 +434,7 @@ fn manual(
             );
         }
     };
-    let updates = Real(updater, home.kind);
+    let updates = Real(updater, home.kind, Some(path.to_owned()));
     let mut terminal = Terminal;
     runtime.block_on(async {
         match updates.supervised(request, &config).await {
@@ -598,9 +598,26 @@ struct RollbackPlan {
 }
 
 /// The updater.
-struct Real(Updater, ServiceKind);
+struct Real(Updater, ServiceKind, Option<PathBuf>);
 
 impl Real {
+    fn ensure_channel(&self) -> Result<(), UpdateError> {
+        if let Some(path) = &self.2 {
+            let current = load_config(&scope::Host, path)
+                .map_err(|error| UpdateError::Io {
+                    what: "re-read the update policy",
+                    error,
+                })?
+                .unwrap_or_default()
+                .self_update
+                .channel();
+            if current != self.0.channel {
+                return Err(UpdateError::ChannelChanged);
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the installed binary may be replaced, asked right after the
     /// update lock is taken. `Ok` holds the binary's install lock, which the
     /// caller keeps until the switch and its records are done. An install
@@ -712,7 +729,7 @@ impl Real {
             ));
         }
         Ok(Some(Supervised {
-            real: Real(self.0.clone(), self.1),
+            real: Real(self.0.clone(), self.1, self.2.clone()),
             service,
             switcher,
             view,
@@ -798,11 +815,13 @@ impl Updates for Real {
     }
 
     async fn update(&self, found: Found) -> Result<Changed, SwitchError> {
+        self.ensure_channel()?;
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
         Updater::record_found(&mut state, &found);
         self.0.stage(&found, &mut state).await?;
+        self.ensure_channel()?;
         self.0
             .switch_to_staged(&mut state)
             .map(Changed::Replaced)
@@ -1000,6 +1019,7 @@ impl Updates for Supervised {
     }
 
     async fn update(&self, release: SupervisedRelease) -> Result<Changed, SwitchError> {
+        self.real.ensure_channel()?;
         let binary = self.binary()?;
         let updater = self.real.0.clone();
         let version = release.version.clone();
@@ -1034,6 +1054,7 @@ impl Updates for Supervised {
         })
         .await
         .map_err(preparation_stopped)??;
+        self.real.ensure_channel()?;
         let handle = self
             .switcher
             .update(&pin, false, Instant::now() + Duration::from_secs(3))
@@ -1944,11 +1965,17 @@ fn set_channel(
     };
     outcome = Outcome::new("channel", &settings);
     outcome.config = Some(path.display().to_string());
-    console.say(format!(
-        "self-update.channel is {} in {}.",
-        channel.as_str(),
-        path.display()
-    ));
+    if channel == SelfUpdateChannel::Stable {
+        console.say(format!(
+            "Update channel is stable (the default); self-update.channel was removed from {}.",
+            path.display()
+        ));
+    } else {
+        console.say(format!(
+            "self-update.channel is preview in {}.",
+            path.display()
+        ));
+    }
     console.say("A running server follows this channel. Updates never install an older version; leaving preview waits for stable to catch up.");
     outcome.with("channel-set", 0)
 }

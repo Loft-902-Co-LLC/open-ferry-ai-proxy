@@ -276,3 +276,58 @@ fn channels_default_validate_and_survive_v8_edits() {
         SelfUpdateChannel::Preview
     );
 }
+
+#[test]
+fn stable_saves_omit_channel_for_pre_channel_validators() {
+    // origin/main's config.SelfUpdate fields, before update-channels.
+    const MAIN_SELF_UPDATE_KEYS: &[&str] = &["check-every", "mode"];
+    let dir = TempDir::new();
+    for spelling in ["", "stable", " STABLE "] {
+        let raw = format!(
+            "config-version: 8\nserver:\n  port: 8317\nself-update:\n  mode: off\n  channel: '{spelling}'\n"
+        );
+        let cfg = Config::parse(&raw).unwrap();
+        let out = saved(&raw, &cfg);
+        let node = super::save::unmarshal(out.as_bytes()).unwrap();
+        if let Some(section) = super::save::yaml_path(&node.content[0], "self-update") {
+            assert!(
+                section
+                    .pairs()
+                    .all(|(key, _)| MAIN_SELF_UPDATE_KEYS.contains(&key.value.as_str())),
+                "{out}"
+            );
+        }
+        validate_v8_config(out.as_bytes()).unwrap();
+        assert!(!out.contains("channel:"), "{out}");
+        let path = dir.write("stable.yaml", &raw);
+        update_nested_scalar(&path, &["self-update", "channel"], "stable").unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("channel:"));
+        let put = V8Edit {
+            method: V8Method::Put,
+            path: vec!["self-update".into(), "channel".into()],
+            body: br#""stable""#.to_vec(),
+            yaml: false,
+        };
+        edit_v8(&path, &put).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("channel:"));
+        super::save::write_file(&path, raw.as_bytes()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("channel:"));
+    }
+}
+
+#[test]
+fn stable_channel_omission_does_not_repair_duplicate_input() {
+    let dir = TempDir::new();
+    let path = dir.write("unchanged.yaml", "port: 8317\n");
+    for prefix in ["", "config-version: 8\n"] {
+        for section in [
+            "self-update:\n  channel: stable\n  channel: preview\n",
+            "self-update:\n  channel: stable\nself-update:\n  channel: preview\n",
+        ] {
+            assert!(
+                super::save::write_file(&path, format!("{prefix}{section}").as_bytes()).is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "port: 8317\n");
+        }
+    }
+}

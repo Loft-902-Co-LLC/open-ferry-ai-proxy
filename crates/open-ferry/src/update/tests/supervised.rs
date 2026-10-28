@@ -522,7 +522,7 @@ async fn the_real_backend_does_not_reuse_a_stage_that_is_already_running() {
     let service = UpdateService::new(updater.clone(), http_fetch(), &Config::default())
         .with_switcher(switcher.clone());
     let real = Supervised {
-        real: Real(updater, ServiceKind::User),
+        real: Real(updater, ServiceKind::User, None),
         service,
         switcher,
         view: {

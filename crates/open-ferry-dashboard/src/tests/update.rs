@@ -1025,3 +1025,99 @@ async fn the_status_exposes_the_explicit_preview_channel() {
     assert_eq!(body["channel"], "preview");
     assert_eq!(body["release_source"], serde_json::Value::Null);
 }
+
+#[tokio::test]
+async fn channel_errors_are_visible_only_for_the_current_channel() {
+    let scratch = tempfile::tempdir().unwrap();
+    let data = DataDir::at(scratch.path());
+    open_ferry_update::State {
+        channel: Some("preview".into()),
+        latest: Some("0.3.0-rc.1".into()),
+        staged: Some("0.3.0-rc.1".into()),
+        release_source: Some("preview".into()),
+        channel_error: Some("preview source: HTTP 503".into()),
+        ..Default::default()
+    }
+    .save(&data.state_file())
+    .unwrap();
+    let fetch = Arc::new(Counting::default());
+    let mut config = config_in("off");
+    config.self_update.channel = "preview".into();
+    let updates = service(&config, &fetch, scratch.path());
+    let dash = Dash::with_updates(config, updates.clone());
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["channel_error"], "preview source: HTTP 503");
+    assert_eq!(body["staged_version"], "0.3.0-rc.1");
+    updates.set_config(&config_in("off"));
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    for field in [
+        "latest_version",
+        "staged_version",
+        "release_source",
+        "channel_error",
+    ] {
+        assert!(body[field].is_null(), "{body}");
+    }
+    assert_eq!(body["channel"], "stable");
+}
+
+#[tokio::test]
+async fn install_now_does_not_reuse_an_old_preview_stage() {
+    let fake = Switcher::new(Duration::ZERO, None);
+    let (dash, scratch) = supervised(fake.clone());
+    let data = DataDir::at(scratch.path());
+    let mut state = open_ferry_update::State::load(&data.state_file());
+    state.channel = Some("preview".into());
+    state.save(&data.state_file()).unwrap();
+    dash.call(Method::POST, INSTALL, "")
+        .await
+        .error(StatusCode::CONFLICT, "switch_failed");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+struct PolicyGateRunner {
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl open_ferry_update::runner::Runner for PolicyGateRunner {
+    fn version<'a>(
+        &'a self,
+        binary: &'a Path,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.arrived.notify_one();
+            self.release.notified().await;
+            std::fs::read_to_string(binary).map_err(|e| e.to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn install_now_rejects_a_channel_change_during_preparation() {
+    let mut f = open_ferry_update::test_support::Fixture::new().await;
+    f.release("0.2.0");
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    f.updater.runner = Arc::new(PolicyGateRunner {
+        arrived: arrived.clone(),
+        release: release.clone(),
+    });
+    let mut config = config_in("off");
+    config.self_update.channel = "preview".into();
+    let fake = Switcher::new(Duration::ZERO, None);
+    let updates = UpdateService::new(
+        f.updater,
+        open_ferry_update::background::http_fetch(),
+        &config,
+    )
+    .with_switcher(fake.clone());
+    let dash = Dash::with_updates(config, updates.clone());
+    let (response, ()) = tokio::join!(dash.call(Method::POST, INSTALL, ""), async {
+        arrived.notified().await;
+        updates.set_config(&config_in("off"));
+        release.notify_one();
+    });
+    response.error(StatusCode::CONFLICT, "update_channel_changed");
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}

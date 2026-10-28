@@ -275,7 +275,11 @@ impl UpdateService {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         tasks.stopped = false;
-        if let Some(old) = tasks.timer.replace(tokio::spawn(run(inner, first_check))) {
+        if let Some(old) = tasks.timer.replace(tokio::spawn(run(
+            inner,
+            first_check,
+            self.settings().channel,
+        ))) {
             old.abort();
             tasks.spawned.push(old);
         }
@@ -319,6 +323,13 @@ impl UpdateService {
         let previous = self.inner.snapshot.borrow().clone();
         if previous == next {
             return;
+        }
+        if previous.settings.channel != next.settings.channel {
+            tracing::info!(
+                from = previous.settings.channel.as_str(),
+                to = next.settings.channel.as_str(),
+                "update channel changed; scheduling a fresh check"
+            );
         }
         self.inner.snapshot.send_replace(next);
         self.log_settings(Some(&previous.settings));
@@ -475,10 +486,10 @@ impl UpdateService {
             what: "prepare the update",
             error: error.to_string(),
         })??;
-        if auto
-            && (self.settings().mode != SelfUpdateMode::Auto
-                || self.settings().channel != selected_channel)
-        {
+        if self.settings().channel != selected_channel {
+            return Err(UpdateError::ChannelChanged.into());
+        }
+        if auto && self.settings().mode != SelfUpdateMode::Auto {
             return Err(SwitchError::UpdatesOff);
         }
         let version = pin.version.clone();
@@ -651,11 +662,15 @@ fn snapshot_of(config: &Config) -> Snapshot {
 }
 
 /// The loop: waits, checks, and waits again, following the config.
-async fn run(inner: Arc<Inner>, first_check: Duration) {
+async fn run(inner: Arc<Inner>, first_check: Duration, mut channel: SelfUpdateChannel) {
     let mut changes = inner.snapshot.subscribe();
     let mut due = Instant::now() + first_check;
     loop {
         let snapshot = changes.borrow_and_update().clone();
+        if snapshot.settings.channel != channel {
+            due = Instant::now();
+            channel = snapshot.settings.channel;
+        }
         if snapshot.settings.mode == SelfUpdateMode::Off {
             set_next_check(&inner, None);
             if changes.changed().await.is_err() {
@@ -680,7 +695,11 @@ async fn run(inner: Arc<Inner>, first_check: Duration) {
             let guard = Arc::clone(&inner.running).lock_owned().await;
             checked(&inner, guard, false).await;
         }
-        due = Instant::now() + settings::jittered(changes.borrow().settings.check_every);
+        due = if changes.borrow().settings.channel != snapshot.settings.channel {
+            Instant::now()
+        } else {
+            Instant::now() + settings::jittered(changes.borrow().settings.check_every)
+        };
     }
 }
 

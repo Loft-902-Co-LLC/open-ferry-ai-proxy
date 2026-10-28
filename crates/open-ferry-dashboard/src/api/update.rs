@@ -282,6 +282,7 @@ impl SwitchRequest {
                     SwitchError::Disabled(_) => "switching_disabled",
                     SwitchError::Update(UpdateError::NotNewer { .. }) => "already_latest",
                     SwitchError::Update(UpdateError::Busy) => "update_busy",
+                    SwitchError::Update(UpdateError::ChannelChanged) => "update_channel_changed",
                     SwitchError::Ended(_) => "switch_ended",
                     SwitchError::Refused(_) => "switch_refused",
                     SwitchError::UpdatesOff
@@ -301,6 +302,7 @@ impl SwitchRequest {
                     SwitchError::TimedOut => "the supervisor did not answer in time; the request may have been accepted; read update status before trying again".to_owned(),
                     SwitchError::Stopped => "the supervisor connection ended without an answer; the outcome is unknown; read update status before trying again".to_owned(),
                     SwitchError::Update(UpdateError::Busy) => "busy, try again shortly".to_owned(),
+                    SwitchError::Update(UpdateError::ChannelChanged) => "the update channel changed while preparing the release; check again before installing".to_owned(),
                     SwitchError::Update(UpdateError::NotNewer { .. }) => "already running the latest release or a newer version".to_owned(),
                     SwitchError::Ended(reason) | SwitchError::Refused(reason) => reason,
                     SwitchError::Untrusted(_) => "the supervisor endpoint was not trusted".to_owned(),

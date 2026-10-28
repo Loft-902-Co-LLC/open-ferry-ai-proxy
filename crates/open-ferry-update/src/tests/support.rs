@@ -289,11 +289,14 @@ impl ReleaseServer {
             &format!("/releases/download/v{version}/SHA256SUMS"),
             Reply::Body(sums.to_vec()),
         );
+        let tagged_signature = format!("/releases/download/v{version}/SHA256SUMS.minisig");
         if let Some(signature) = signature {
             self.reply(
-                &format!("/releases/download/v{version}/SHA256SUMS.minisig"),
+                &tagged_signature,
                 Reply::Body(signature.as_bytes().to_vec()),
             );
+        } else {
+            self.forget(&tagged_signature);
         }
         for (name, data) in archives {
             self.reply(
