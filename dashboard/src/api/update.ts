@@ -79,6 +79,15 @@ export function updateModeOf(written: unknown): UpdateMode {
   return name === "notify" || name === "off" ? name : "auto";
 }
 
+/**
+ * The channel the server uses for `written`: `preview` in any case, with
+ * spaces around, else `stable` (the default, also when it's left out).
+ */
+export function updateChannelOf(written: unknown): "stable" | "preview" {
+  const name = typeof written === "string" ? written.trim().toLowerCase() : "";
+  return name === "preview" ? "preview" : "stable";
+}
+
 /** What set the mode: `OPEN_FERRY_SELF_UPDATE` can only lower the config's. */
 export type UpdateModeSource = "default" | "config" | "environment";
 
