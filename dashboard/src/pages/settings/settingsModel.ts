@@ -14,7 +14,7 @@
 import type { ApiRequest } from "../../api/client";
 import { V8_CONFIG } from "../../api/management";
 import { CONFIG_FIELDS, type SettingInfo } from "../../api/configFields";
-import { UPDATE_MODES, UPDATE_MODE_LABELS, updateModeOf } from "../../api/update";
+import { UPDATE_MODES, UPDATE_MODE_LABELS, updateChannelOf, updateModeOf } from "../../api/update";
 import { countField, wholeNumberField } from "../../lib/fields";
 import { parseGoDuration } from "../../lib/goDuration";
 import { z } from "../../lib/zod";
@@ -286,7 +286,7 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
     errorLogsMaxFiles: errorLogs < 0 ? 10 : errorLogs,
     usageStatisticsEnabled: flag("usage-statistics-enabled"),
     selfUpdateMode: updateModeOf(fieldOf(selfUpdate, "mode")),
-    selfUpdateChannel: String(fieldOf(selfUpdate, "channel") ?? "").trim().toLowerCase() === "preview" ? "preview" : "stable",
+    selfUpdateChannel: updateChannelOf(fieldOf(selfUpdate, "channel")),
     managementAddress: facts?.separateAddress ?? "",
   };
 }
