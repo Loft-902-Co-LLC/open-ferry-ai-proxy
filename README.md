@@ -30,9 +30,10 @@ This example uses an API key for an OpenAI-compatible provider. It needs no brow
    ```sh
    curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh
    ```
-   On Windows, use PowerShell: `irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 | iex`. Follow the script's PATH instructions if needed. [Other ways to install](#install).
+   On Windows, use PowerShell: `irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 | iex`. Follow the script's PATH instructions if needed. [Other ways to install](#install). If it found CLIProxyAPI, follow the [migration guide](docs/migrating-from-cliproxyapi.md#switching-over) instead; a switch uses CLIProxyAPI's config.
 
-2. **Add a provider and start.** In a new directory, run `open-ferry init -config ./config.yaml`. Keep the client key it prints; the management key is for the dashboard. Save this as `provider.yaml`, replacing all three `YOUR-...` values with your provider's values. Keep both files private.
+2. **Add a provider and start.** Use the config the installer wrote or kept. Set its printed path: in sh, `CONFIG='<config path printed by the installer>'`; in PowerShell, `$CONFIG = '<config path printed by the installer>'`. For a new config, the installer printed the client key once. Retrieve it with `open-ferry keys list --reveal --yes --config "$CONFIG"` if needed. Save this as `provider.yaml` in your working directory, replacing all three `YOUR-...` values with your provider's values. Keep the files and keys private.
+   Open Ferry and CLIProxyAPI both default to port 8317: stop CLIProxyAPI first, switch with `open-ferry migrate`, or choose another free port (for example, `open-ferry config set server.port 18317 --config "$CONFIG"`) and change the client URLs below to that port.
    ```yaml
    - name: example
      base-url: "https://YOUR-PROVIDER/v1"
@@ -43,12 +44,12 @@ This example uses an API key for an OpenAI-compatible provider. It needs no brow
          alias: "quick-start"
    ```
    ```sh
-   open-ferry config set api-keys.openai-compatibility --from-file ./provider.yaml --config ./config.yaml
-   open-ferry -config ./config.yaml
+   open-ferry config set api-keys.openai-compatibility --from-file ./provider.yaml --config "$CONFIG"
+   open-ferry -config "$CONFIG"
    ```
    Leave the server running. [Other provider options](docs/agents.md#give-it-credentials) include Codex sign-in and your own Claude Code; the [dashboard](#dashboard) can sign in and upload credentials too.
 
-3. **Connect a tool.** In a second terminal in the same directory, run `open-ferry clients setup claude-code --config ./config.yaml --model quick-start` for an installed Claude Code. Copy its commands, replace the masked key with the client key from `init` (`access.api-keys`) and run them. This uses base URL `http://127.0.0.1:8317` and model `quick-start`. OpenAI-compatible tools use `http://127.0.0.1:8317/v1`. Both need the client key, not the provider or management key. [Codex and SDK examples](docs/agents.md#point-a-client-at-it) are alternatives.
+3. **Connect a tool.** In a second terminal in the same directory, set `CONFIG` again as above, then run `open-ferry clients setup claude-code --config "$CONFIG" --model quick-start` for an installed Claude Code. Copy its commands, replace the masked key with the client key from the installer (`access.api-keys`) and run them. This uses base URL `http://127.0.0.1:8317` and model `quick-start`. OpenAI-compatible tools use `http://127.0.0.1:8317/v1`. Both need the client key, not the provider or management key. [Codex and SDK examples](docs/agents.md#point-a-client-at-it) are alternatives.
 
 4. **Verify a reply.** Save this as `request.json` in the same directory:
    ```json
@@ -60,7 +61,7 @@ This example uses an API key for an OpenAI-compatible provider. It needs no brow
      -H 'Authorization: Bearer YOUR-CLIENT-KEY' -H 'Content-Type: application/json' \
      --data-binary '@request.json'
    ```
-   Success is JSON with the model's reply in `choices[0].message.content`. An HTTP 401 with `{"error":"Invalid API key"}` means the client key is wrong. For other errors, read the server terminal and run `open-ferry check -config ./config.yaml`; check the provider's URL, model and key, or the dashboard's Credentials and Logs pages.
+   Success is JSON with the model's reply in `choices[0].message.content`. An HTTP 401 with `{"error":"Invalid API key"}` means the client key is wrong. For other errors, read the server terminal and run `open-ferry check -config "$CONFIG"`; check the provider's URL, model and key, or the dashboard's Credentials and Logs pages.
 
 ## Install
 
