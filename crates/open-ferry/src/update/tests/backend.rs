@@ -91,7 +91,7 @@ impl Switcher for Endpoint {
     }
 }
 async fn backend(f: &Fixture, endpoint: Arc<Endpoint>, request: Request) -> Supervised {
-    Real(f.updater.clone(), ServiceKind::User)
+    Real(f.updater.clone(), ServiceKind::User, None)
         .supervised_with(request, &Config::default(), endpoint, |_, _| async {
             Ok(Detection::Supervised(client::Running::default()))
         })
@@ -109,7 +109,7 @@ async fn selection_refuses_busy_refused_untrusted_and_unreachable_without_plain_
         Detection::Refuse("refused owner".into()),
     ] {
         let endpoint = Endpoint::new(&f, None);
-        let result = Real(f.updater.clone(), ServiceKind::User)
+        let result = Real(f.updater.clone(), ServiceKind::User, None)
             .supervised_with(
                 Request::Update,
                 &Config::default(),
@@ -139,7 +139,7 @@ async fn selection_refuses_busy_refused_untrusted_and_unreachable_without_plain_
     }
     for reason in ["untrusted", "unreachable"] {
         let endpoint = Endpoint::new(&f, Some(reason));
-        let result = Real(f.updater.clone(), ServiceKind::User)
+        let result = Real(f.updater.clone(), ServiceKind::User, None)
             .supervised_with(
                 Request::Update,
                 &Config::default(),
@@ -160,7 +160,7 @@ async fn clear_selection_keeps_plain_checks_lenient_and_does_not_take_the_update
     let _lock = f.updater.lock().unwrap();
     let endpoint = Endpoint::new(&f, None);
     for request in [Request::Check, Request::Update, Request::Cancel] {
-        let result = Real(f.updater.clone(), ServiceKind::User)
+        let result = Real(f.updater.clone(), ServiceKind::User, None)
             .supervised_with(
                 request,
                 &Config::default(),
@@ -179,7 +179,7 @@ async fn clear_selection_keeps_plain_checks_lenient_and_does_not_take_the_update
         "{truncated"
     );
     assert!(
-        Real(f.updater.clone(), ServiceKind::User)
+        Real(f.updater.clone(), ServiceKind::User, None)
             .status(&settings("auto", None))
             .last_check
             .is_none()
@@ -321,7 +321,7 @@ async fn the_real_detection_entry_point_keeps_a_starting_supervisor_supervised()
     let f = Fixture::new().await;
     let _held = open_ferry_supervisor::process::SupervisorLock::try_acquire(f.data.root()).unwrap();
     let _updating = f.updater.lock().unwrap();
-    let selected = Real(f.updater.clone(), ServiceKind::User)
+    let selected = Real(f.updater.clone(), ServiceKind::User, None)
         .supervised(Request::Cancel, &Config::default())
         .await
         .unwrap();
@@ -421,7 +421,7 @@ async fn plain_checks_ignore_held_and_unopenable_install_locks_without_creating_
         };
         assert!(InstallLock::try_acquire(&f.installed).is_err());
         let before = snapshot(f.temp.path());
-        let real = Real(f.updater.clone(), ServiceKind::User);
+        let real = Real(f.updater.clone(), ServiceKind::User, None);
         let endpoint = Endpoint::new(&f, None);
         let selected = real
             .supervised_with(
@@ -459,7 +459,7 @@ async fn plain_rollback_refuses_a_changed_or_removed_confirmed_target() {
         let mut state = f.updater.state();
         state.previous = Some("0.0.9".into());
         f.updater.save(&state).unwrap();
-        let real = Real(f.updater.clone(), ServiceKind::User);
+        let real = Real(f.updater.clone(), ServiceKind::User, None);
         let plan = real.rollback_plan().unwrap();
         state.previous = actual.map(str::to_owned);
         f.updater.save(&state).unwrap();
@@ -498,5 +498,101 @@ async fn leaving_preview_does_not_reuse_its_supervised_stage() {
     assert!(
         offer.found.found.is_some(),
         "stable must discover its own release"
+    );
+}
+
+struct ChannelGateRunner {
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl open_ferry_update::runner::Runner for ChannelGateRunner {
+    fn version<'a>(
+        &'a self,
+        binary: &'a Path,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.arrived.notify_one();
+            self.release.notified().await;
+            std::fs::read_to_string(binary).map_err(|e| e.to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn cli_rechecks_the_config_channel_after_preparation_and_before_replacing() {
+    let mut f = Fixture::new().await;
+    f.updater.channel = SelfUpdateChannel::Preview;
+    f.release("0.2.0");
+    let path = f.temp.path().join("policy.yaml");
+    std::fs::write(&path, "self-update:\n  channel: preview\n").unwrap();
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    f.updater.runner = Arc::new(ChannelGateRunner {
+        arrived: arrived.clone(),
+        release: release.clone(),
+    });
+    let endpoint = Endpoint::new(&f, None);
+    let mut real = backend(&f, endpoint.clone(), Request::Update).await;
+    real.real.2 = Some(path.clone());
+    let offer = real.latest().await.unwrap();
+    let (result, ()) = tokio::join!(real.update(offer.found), async {
+        arrived.notified().await;
+        std::fs::write(&path, "self-update:\n  mode: off\n").unwrap();
+        release.notify_one();
+    });
+    assert!(matches!(
+        result,
+        Err(SwitchError::Update(UpdateError::ChannelChanged))
+    ));
+    assert!(endpoint.sends.lock().unwrap().is_empty());
+    let plain = Real(f.updater.clone(), ServiceKind::User, Some(path));
+    let found = plain.0.latest(&plain.0.state()).await.unwrap();
+    assert!(matches!(
+        plain.update(found).await,
+        Err(SwitchError::Update(UpdateError::ChannelChanged))
+    ));
+    assert_eq!(f.installed_text(), "open-ferry 0.1.0");
+}
+
+#[tokio::test]
+async fn cli_check_text_shows_source_warning_and_no_downgrade_guidance() {
+    let mut f = Fixture::new().await;
+    f.release("0.2.0");
+    f.updater.channel = SelfUpdateChannel::Preview;
+    f.server.reply(
+        "/releases/download/channel-preview/VERSION",
+        open_ferry_update::test_support::Reply::Status(503),
+    );
+    let real = Real(f.updater.clone(), ServiceKind::User, None);
+    let mut selected = settings("notify", None);
+    selected.channel = SelfUpdateChannel::Preview;
+    let text = go(Request::Check, &real, &selected, false, false, None).await;
+    assert!(
+        text.out.contains("Found release source: latest."),
+        "{}",
+        text.out
+    );
+    assert!(
+        text.out.contains("Warning: preview source:") && text.out.contains("503"),
+        "{}",
+        text.out
+    );
+    f.updater.channel = SelfUpdateChannel::Stable;
+    f.updater.running = "0.3.0".into();
+    let text = go(
+        Request::Check,
+        &Real(f.updater, ServiceKind::User, None),
+        &settings("notify", None),
+        false,
+        false,
+        None,
+    )
+    .await;
+    assert!(
+        text.out
+            .contains("An older release is never installed by an update."),
+        "{}",
+        text.out
     );
 }

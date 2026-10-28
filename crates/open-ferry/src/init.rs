@@ -914,7 +914,6 @@ mod tests {
                 1,
             )
             .replacen("\n# self-update:\n#   mode:", "\nself-update:\n  mode:", 1)
-            .replacen("\n#   channel:", "\n  channel:", 1)
             .replacen("\n#   check-every:", "\n  check-every:", 1);
         assert!(
             text == expected,
@@ -929,6 +928,8 @@ mod tests {
         assert_eq!(written.port, 8317);
         assert!(!config.has_example_api_keys());
         assert_eq!(config.self_update.mode, "auto");
+        assert!(config.self_update.channel.is_empty());
+        assert!(!text.contains("channel:"));
         assert_eq!(
             config.self_update.channel(),
             open_ferry_core::config::SelfUpdateChannel::Stable

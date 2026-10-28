@@ -92,6 +92,7 @@ UNIX_TARGETS = (
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 GNU = "x86_64-unknown-linux-gnu"
 
+PREVIEW_PRE = "1.3.0-rc.10"
 LATEST = "1.2.3"
 OLDER = "1.1.0"  # its SHA256SUMS marks the names binary ("<hash> *<name>")
 TAMPERED = "0.9.0"  # its SHA256SUMS doesn't match its archives
@@ -156,6 +157,10 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # written to the data directory. It waits FAKE_INSTALL_SELF_SLEEP seconds
 # first, and, with FAKE_INSTALL_SELF_EXIT set, changes nothing and exits with
 # that code.
+if [ "${1:-}" = update ] && [ "${2:-}" = -h ]; then
+  if [ -n "${FAKE_OPEN_FERRY_NO_CHANNEL:-}" ]; then echo '  -mode string'; else echo '  -channel string'; fi
+  exit 0
+fi
 log=$FAKE_OPEN_FERRY_LOG
 if [ -n "${FAKE_CWD_LOG:-}" ]; then
   printf '%s\t%s\n' "${1:-}" "$(pwd)" >> "$FAKE_CWD_LOG"
@@ -451,6 +456,10 @@ public static class FakeOpenFerry
         string cwdLog = Environment.GetEnvironmentVariable("FAKE_CWD_LOG");
         if (!String.IsNullOrEmpty(cwdLog))
             File.AppendAllText(cwdLog, args[0] + "\t" + Environment.CurrentDirectory + "\n");
+        if (args.Length == 2 && args[0] == "update" && args[1] == "-h") {
+            Console.WriteLine(String.IsNullOrEmpty(Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_NO_CHANNEL")) ? "  -channel string" : "  -mode string");
+            return 0;
+        }
         string name = "@NAME@";
         bool migrate = args.Length >= 1 && args[0] == "migrate";
         bool installSelf = args.Length >= 1 && args[0] == "install-self";
@@ -938,6 +947,22 @@ class ReleaseHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append(self.path)
         path = self.path.split("?", 1)[0]
+        if path == "/preview-error/download/channel-preview/VERSION":
+            self.send_error(503, "preview unavailable")
+            return
+        if path == "/preview-stream/download/channel-preview/VERSION":
+            self.send_response(200)
+            self.end_headers()  # no Content-Length: exercise the streaming cap
+            self.server.pointer_sent = 0
+            for _ in range(1024):
+                try:
+                    self.wfile.write(b"1" * 1024)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    break
+                self.server.pointer_sent += 1024
+                time.sleep(0.002)
+            return
         for base, version in self.server.latest.items():
             prefix = f"/{base}/latest/download/"
             if path.startswith(prefix):
@@ -994,6 +1019,28 @@ def scratch_inside_target(scratch):
 
 
 class ChannelVersionTests(unittest.TestCase):
+    def test_wget_channel_stream_is_bounded_without_content_length(self):
+        if not SH:
+            self.skipTest("sh is not installed")
+        text = read_text(INSTALL_SH)
+        helper = "preview_error() {" + text.split("preview_error() {", 1)[1].split("# POSIX awk", 1)[0]
+        program = r'''
+run() { "$@"; }
+has() { [ "$1" = wget ]; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+wget() { printf 'HTTP/1.1 200 OK\n' >&2; awk 'BEGIN {for(i=0;i<100000;i++)printf "1"}'; }
+real_uid=1
+tmp=$1
+''' + helper + '\ndownload_pointer http://unused.invalid/VERSION "$tmp/VERSION"'
+        env = clean_env()
+        env["PATH"] = os.pathsep.join([env.get("PATH", ""), *SH_TOOLS])
+        with tempfile.TemporaryDirectory(dir=os.environ["OFP_TEST_SCRATCH"]) as work:
+            result = run([SH, "-c", program, "sh", sh_path(work)], env)
+            self.assertEqual(result.code, 1, result.output)
+            self.assertIn("--channel stable or --version", result.output)
+            self.assertEqual(os.path.getsize(os.path.join(work, "VERSION")), 65)
+
+
     def test_shell_channel_semver_precedence(self):
         if not SH:
             self.skipTest("sh is not installed")
@@ -1092,7 +1139,7 @@ def setUpModule():
         write_file(os.path.join(FAKE_GH, "gh"), FAKE_GH_SH)
         write_file(os.path.join(FAKE_GH, "gh.cmd"), FAKE_GH_CMD, newline="\r\n")
 
-        for version in (LATEST, OLDER):
+        for version in (LATEST, OLDER, PREVIEW_PRE):
             name = top_dir(version, WINDOWS_TARGET)
             if WINDOWS:
                 EXES[name] = compile_fake_exe(fakes, name)
@@ -1111,10 +1158,15 @@ def setUpModule():
         latest = {"good": LATEST, "broken": TAMPERED}
         for label, pointer in (("preview-newer", LATEST + "\n"), ("preview-older", OLDER + "\n"),
                                ("preview-missing", None), ("preview-bad", "1.2.3\n1.1.0\n"),
-                               ("preview-long", "1" * 65 + "\n"), ("preview-nul", "1.2.3\0\n")):
+                               ("preview-long", "1" * 65 + "\n"), ("preview-nul", "1.2.3\0\n"),
+                               ("preview-crlf", "1.2.3\r\n"), ("preview-bom", "\ufeff1.2.3\n"),
+                               ("preview-error", None), ("preview-stream", None),
+                               ("preview-release-missing", MISSING + "\n"), ("preview-prerelease", PREVIEW_PRE + "\n")):
             base = os.path.join(releases, label)
             build_release(base, LATEST, latest_exe)
             build_release(base, OLDER, older_exe)
+            if label == "preview-prerelease":
+                build_release(base, PREVIEW_PRE, EXES[top_dir(PREVIEW_PRE, WINDOWS_TARGET)])
             latest[label] = OLDER if label == "preview-newer" else LATEST
             if pointer is not None:
                 write_file(os.path.join(base, "download", "channel-preview", "VERSION"), pointer)
@@ -1153,8 +1205,25 @@ class Case(unittest.TestCase):
 
 @unittest.skipIf(SH is None, "no sh")
 class InstallShTests(Case):
+    def test_channel_with_an_old_binary_prints_guidance_without_failing(self):
+        for flags, env in ((["--channel", "preview"], {}), ([], {"OPEN_FERRY_INSTALL_CHANNEL": "stable"})):
+            self.reset()
+            result = self.run_sh("--target", GNU, "--version", OLDER, *flags, *self.install_args(), FAKE_OPEN_FERRY_NO_CHANNEL="1", **env)
+            self.assertExit(result, 0)
+            self.assertInstalled(OLDER, GNU)
+            self.assertIn("This release has no update channels", result.output)
+            self.assertIn("update -channel", result.output)
+            self.assertTrue(all("-channel" not in row for row in read_log(self.log)))
+
+    def test_channel_migration_hand_off_prints_the_command(self):
+        result = self.run_sh("--target", GNU, "--channel", "preview", *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json())
+        self.assertExit(result, 0)
+        self.assertIn("update -channel preview -config <config>", result.output)
+        self.assertEqual(read_log(self.log), [])
+
+
     def test_preview_channel_selects_newer_missing_and_older_and_writes_only_when_asked(self):
-        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST)):
+        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST), ("preview-prerelease", PREVIEW_PRE)):
             with self.subTest(label=label):
                 self.reset()
                 result = self.run_sh("--target", GNU, "--channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
@@ -1163,11 +1232,13 @@ class InstallShTests(Case):
                 self.assertIn([name, "update", "-channel", "preview", "-config", sh_path(self.config)], read_log(self.log))
 
     def test_preview_malformed_pointer_is_refused_and_explicit_version_wins(self):
-        for label in ("preview-bad", "preview-long", "preview-nul"):
+        for label in ("preview-bad", "preview-long", "preview-nul", "preview-crlf", "preview-bom", "preview-error", "preview-stream", "preview-release-missing"):
             self.reset()
             result = self.run_sh("--target", GNU, "--channel=preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
             self.assertExit(result, 1)
             self.assertFalse(os.path.exists(self.binary()))
+            self.assertIn("--channel stable or --version", result.output)
+            if label == "preview-stream": self.assertLess(SERVER.httpd.pointer_sent, 1024 * 1024)
         self.reset()
         result = self.run_sh("--target", GNU, "--channel", "preview", "--version", OLDER, *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-bad"))
         self.assertExit(result, 0)
@@ -2198,8 +2269,25 @@ class InstallShTests(Case):
 
 
 class InstallPs1Cases:
+    def test_channel_with_an_old_binary_prints_guidance_without_failing(self):
+        for flags, env in ((["-Channel", "preview"], {}), ([], {"OPEN_FERRY_INSTALL_CHANNEL": "stable"})):
+            shutil.rmtree(self.install_dir, ignore_errors=True)
+            result = self.run_file("-Version", OLDER, *flags, *self.install_args(), FAKE_OPEN_FERRY_NO_CHANNEL="1", **env)
+            self.assertExit(result, 0)
+            self.assertInstalled(OLDER)
+            self.assertIn("This release has no update channels", result.output)
+            self.assertIn("update -channel", result.output)
+            self.assertTrue(all("-channel" not in row for row in read_log(self.log)))
+
+    def test_channel_migration_hand_off_prints_the_command(self):
+        result = self.run_file("-Channel", "preview", *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(summary=CPA_SUMMARY_WINDOWS, config=CPA_CONFIG_WINDOWS))
+        self.assertExit(result, 0)
+        self.assertIn("update -channel preview -config <config>", result.output)
+        self.assertEqual(read_log(self.log), [])
+
+
     def test_preview_channel_selects_newer_missing_and_older_and_writes_only_when_asked(self):
-        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST)):
+        for label, expected in (("preview-newer", LATEST), ("preview-missing", LATEST), ("preview-older", LATEST), ("preview-prerelease", PREVIEW_PRE)):
             with self.subTest(label=label):
                 shutil.rmtree(self.install_dir, ignore_errors=True)
                 result = self.run_file("-Channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
@@ -2208,10 +2296,12 @@ class InstallPs1Cases:
                 self.assertIn([name, "update", "-channel", "preview", "-config", self.config], read_log(self.log))
 
     def test_preview_malformed_pointer_is_refused_and_explicit_version_wins(self):
-        for label in ("preview-bad", "preview-long", "preview-nul"):
+        for label in ("preview-bad", "preview-long", "preview-nul", "preview-crlf", "preview-bom", "preview-error", "preview-stream", "preview-release-missing"):
             result = self.run_file("-Channel", "preview", *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url(label))
             self.assertExit(result, 1)
             self.assertFalse(os.path.exists(self.exe))
+            self.assertIn("-Channel stable or -Version", result.output)
+            if label == "preview-stream": self.assertLess(SERVER.httpd.pointer_sent, 1024 * 1024)
         result = self.run_file("-Channel", "preview", "-Version", OLDER, *self.install_args(), OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("preview-bad"))
         self.assertExit(result, 0)
         self.assertInstalled(OLDER)

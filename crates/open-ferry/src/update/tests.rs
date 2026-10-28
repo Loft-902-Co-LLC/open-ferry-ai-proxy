@@ -1657,6 +1657,14 @@ fn channel_writes_only_the_chosen_policy_and_preserves_other_settings() {
             .unwrap()
             .starts_with("# policy")
     );
+    let result = set_channel(&probe, &path, SelfUpdateChannel::Stable, None, &mut console);
+    assert_eq!(result.code, 0);
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("channel:"), "{text}");
+    let cfg = Config::load(&path).unwrap();
+    assert!(cfg.self_update.channel.is_empty());
+    assert_eq!(cfg.self_update.mode, "off");
+    assert_eq!(cfg.self_update.check_every, "12h");
 }
 
 #[tokio::test]

@@ -9120,3 +9120,17 @@ fn undo_of_a_migrated_supervised_task_waits_for_workers_and_fails_closed() {
     assert_eq!(undo.code, 0, "{}", undo.all());
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
+
+#[test]
+fn migration_does_not_introduce_an_update_channel() {
+    let (mut fake, context) = systemd_user();
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let config = open_ferry_core::config::Config::parse(fake.data(SYSTEMD_CONFIG)).unwrap();
+    assert!(config.self_update.channel.is_empty());
+    assert_eq!(
+        config.self_update.channel(),
+        open_ferry_core::config::SelfUpdateChannel::Stable
+    );
+    assert!(!String::from_utf8_lossy(fake.data(SYSTEMD_CONFIG)).contains("channel:"));
+}

@@ -742,3 +742,48 @@ async fn leaving_preview_stops_a_check_in_progress_before_staging() {
     assert!(!service.status().checking);
     assert!(f.data.kept_versions().is_empty());
 }
+
+#[tokio::test]
+async fn a_channel_change_checks_now_logs_and_honors_notify_and_off() {
+    use crate::background::test_log::Capture;
+    use tracing::instrument::WithSubscriber;
+    for mode in ["notify", "off"] {
+        let f = Fixture::new().await;
+        f.release("0.3.0-rc.1");
+        f.release("0.2.0");
+        f.server.reply(
+            "/releases/download/channel-preview/VERSION",
+            Reply::Body(b"0.3.0-rc.1\n".to_vec()),
+        );
+        let updates = service(&f, mode);
+        updates.start(Duration::from_secs(24 * 3600));
+        let mut changed = config(mode);
+        changed.self_update.channel = "preview".into();
+        let logs = Capture::default();
+        async {
+            updates.set_config(&changed);
+        }
+        .with_subscriber(logs.clone())
+        .await;
+        if mode == "off" {
+            assert_eq!(updates.check_now(), CheckNow::Off);
+            assert_eq!(f.server.requests(), 0);
+            changed.self_update.mode = "notify".into();
+            updates.set_config(&changed);
+        }
+        until(|| updates.status().last_check.is_some()).await;
+        let status = updates.status();
+        assert_eq!(status.latest_version.as_deref(), Some("0.3.0-rc.1"));
+        assert_eq!(status.release_source.as_deref(), Some("preview"));
+        assert!(status.staged_version.is_none());
+        assert!(f.server.paths().iter().all(|p| !p.ends_with(".tar.gz")));
+        assert!(
+            logs.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("update channel changed") && line.contains("preview"))
+        );
+        updates.stop();
+    }
+}

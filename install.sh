@@ -489,23 +489,41 @@ download() {
   fi
 }
 
-# VERSION is optional only when GitHub returns 404. All other failures refuse.
+preview_error() {
+  die "$*. Preview installation stopped; retry with --channel stable or --version VERSION."
+}
+
+# VERSION is optional only for 404. Curl enforces 64 bytes while downloading;
+# wget streams through a 65-byte reader (one overflow byte), never a whole file.
 download_pointer() {
   if has curl; then
     case $1 in
-      https://*) code=$(run_curl --silent --show-error --location --retry 3 --proto =https --proto-redir =https --output "$2" --write-out '%{http_code}' "$1") || die "couldn't download preview VERSION" ;;
-      *) code=$(run_curl --silent --show-error --location --retry 3 --output "$2" --write-out '%{http_code}' "$1") || die "couldn't download preview VERSION" ;;
+      https://*) code=$(run_curl --silent --show-error --location --retry 3 --max-filesize 64 --proto =https --proto-redir =https --output "$2" --write-out '%{http_code}' "$1" 2>"$tmp/pointer-error") || {
+        [ "$code" = 404 ] && return 1
+        preview_error "Couldn't download preview VERSION (HTTP $code; limit 64 bytes)"
+      } ;;
+      *) code=$(run_curl --silent --show-error --location --retry 3 --max-filesize 64 --output "$2" --write-out '%{http_code}' "$1" 2>"$tmp/pointer-error") || {
+        [ "$code" = 404 ] && return 1
+        preview_error "Couldn't download preview VERSION (HTTP $code; limit 64 bytes)"
+      } ;;
     esac
-    case $code in 200) return 0 ;; 404) return 1 ;; *) die "preview VERSION returned HTTP $code" ;; esac
+    case $code in 200) return 0 ;; 404) return 1 ;; *) preview_error "Preview VERSION returned HTTP $code" ;; esac
   else
-    # Server headers distinguish an absent pointer from other download failures.
-    if [ "$real_uid" = 0 ] && run wget --help 2>&1 | run grep -q -- --no-config; then
-      if run wget --no-config -S -O "$2" "$1" 2>"$tmp/pointer-error"; then return 0; fi
-    else
-      if run wget -S -O "$2" "$1" 2>"$tmp/pointer-error"; then return 0; fi
-    fi
+    (
+      if [ "$real_uid" = 0 ] && run wget --help 2>&1 | run grep -q -- --no-config; then
+        if run wget --no-config --timeout=30 --tries=1 -S -O - "$1"; then
+          printf '0' > "$tmp/pointer-status"
+        else printf '1' > "$tmp/pointer-status"; fi
+      else
+        if run wget --timeout=30 --tries=1 -S -O - "$1"; then
+          printf '0' > "$tmp/pointer-status"
+        else printf '1' > "$tmp/pointer-status"; fi
+      fi
+    ) 2>"$tmp/pointer-error" | run head -c 65 > "$2"
+    [ "$(run wc -c < "$2" | run tr -d ' ')" -le 64 ] || preview_error "Preview VERSION is over 64 bytes"
+    if [ "$(run cat "$tmp/pointer-status")" = 0 ]; then return 0; fi
     run grep -Eq 'HTTP/[0-9.]+ 404' "$tmp/pointer-error" && return 1
-    die "couldn't download preview VERSION"
+    preview_error "Couldn't download preview VERSION"
   fi
 }
 
@@ -589,22 +607,22 @@ if [ -z "$version" ]; then
   valid_version "$version" || die "the latest release's archive has an unexpected name: $archive"
   if [ "$channel" = preview ] && download_pointer "$base_url/download/channel-preview/VERSION" "$tmp/VERSION"; then
     bytes=$(run wc -c < "$tmp/VERSION" | run tr -d ' ')
-    [ "$bytes" -le 64 ] || die "preview VERSION is over 64 bytes"
+    [ "$bytes" -le 64 ] || preview_error "preview VERSION is over 64 bytes"
     # Check exactly one line and its final newline before command substitution removes it.
-    [ "$(run wc -l < "$tmp/VERSION" | run tr -d ' ')" = 1 ] || die "malformed preview VERSION"
-    [ "$(run tail -c 1 "$tmp/VERSION" | run od -An -tu1 | run tr -d ' \n')" = 10 ] || die "malformed preview VERSION"
+    [ "$(run wc -l < "$tmp/VERSION" | run tr -d ' ')" = 1 ] || preview_error "malformed preview VERSION"
+    [ "$(run tail -c 1 "$tmp/VERSION" | run od -An -tu1 | run tr -d ' \n')" = 10 ] || preview_error "malformed preview VERSION"
     preview=$(run cat "$tmp/VERSION")
     # Shell variables cannot carry NUL bytes; refuse any bytes lost while reading.
     read_bytes=$(printf '%s\n' "$preview" | run wc -c | run tr -d ' ')
-    [ "$read_bytes" = "$bytes" ] || die "malformed preview VERSION"
-    valid_version "$preview" || die "malformed preview VERSION"
+    [ "$read_bytes" = "$bytes" ] || preview_error "malformed preview VERSION"
+    valid_version "$preview" || preview_error "malformed preview VERSION"
     printf '%s\n' "$preview" | run awk '
       /-/ { sub(/^[^-]*-/, ""); n=split($0,p,"."); for(i=1;i<=n;i++) {
         if(p[i]=="" || (p[i] ~ /^[0-9]+$/ && length(p[i])>1 && substr(p[i],1,1)=="0")) exit 1
-      }}' || die "malformed preview VERSION"
+      }}' || preview_error "malformed preview VERSION"
     if version_newer "$preview" "$version"; then
       version=$preview
-      download "$base_url/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" || die "couldn't download preview SHA256SUMS"
+      download "$base_url/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" || preview_error "couldn't download preview SHA256SUMS"
     fi
   fi
 else
@@ -847,8 +865,12 @@ fi
 
 if [ -n "$channel" ]; then
   if [ -n "$mode_config" ]; then
-    (cd / && run "$installed" update -channel "$channel" -config "$mode_config") ||
-      die "open-ferry update couldn't set self-update.channel to $channel in $mode_config"
+    if (cd / && run "$installed" update -h 2>&1) | run grep -Eq '(^|[[:space:]])-channel([[:space:]]|$)'; then
+      (cd / && run "$installed" update -channel "$channel" -config "$mode_config") ||
+        die "open-ferry update couldn't set self-update.channel to $channel in $mode_config"
+    else
+      say "This release has no update channels; its config was left unchanged. After upgrading to a channel-aware release, run: $command update -channel $channel -config \"$mode_config\""
+    fi
   else
     say "Once open-ferry runs on a config, run: $command update -channel $channel -config <config>"
   fi

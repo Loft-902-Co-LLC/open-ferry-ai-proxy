@@ -468,11 +468,10 @@ function Install-OpenFerry {
 
     # --- Downloads -----------------------------------------------------------
 
-    function Save-Download([string]$Url, [string]$OutFile, [switch]$Optional) {
+    function Save-Download([string]$Url, [string]$OutFile) {
         try {
             $response = Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -PassThru
         } catch {
-            if ($Optional -and $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return $false }
             throw "Couldn't download ${Url}: $($_.Exception.Message)"
         }
         # Never take a download that a redirect moved off HTTPS.
@@ -490,6 +489,55 @@ function Install-OpenFerry {
                 throw "The download of $Url was redirected off HTTPS, to $final"
             }
         }
+    }
+
+    # Read one overflow byte at most; Invoke-WebRequest -OutFile would buffer the full pointer.
+    function Save-PreviewPointer([string]$Url, [string]$OutFile) {
+        $response = $null
+        $stream = $null
+        try {
+            $request = [Net.HttpWebRequest]::Create($Url)
+            $request.Timeout = 30000
+            $request.ReadWriteTimeout = 30000
+            $response = $request.GetResponse()
+            if ($Url.StartsWith('https://') -and $response.ResponseUri.Scheme -ne 'https') {
+                throw 'Preview VERSION was redirected off HTTPS'
+            }
+            if ($response.ContentLength -gt 64) { throw 'Preview VERSION is over 64 bytes' }
+            $stream = $response.GetResponseStream()
+            $bytes = New-Object byte[] 65
+            $count = 0
+            while ($count -lt 65) {
+                $read = $stream.Read($bytes, $count, 65 - $count)
+                if ($read -eq 0) { break }
+                $count += $read
+            }
+            if ($count -gt 64) { throw 'Preview VERSION is over 64 bytes' }
+            $body = New-Object byte[] $count
+            [Array]::Copy($bytes, $body, $count)
+            [IO.File]::WriteAllBytes($OutFile, $body)
+            return $true
+        } catch {
+            $cause = $_.Exception
+            while (-not $cause.Response -and $cause.InnerException) { $cause = $cause.InnerException }
+            if ($cause.Response -and [int]$cause.Response.StatusCode -eq 404) {
+                $cause.Response.Close()
+                return $false
+            }
+            throw "Preview VERSION failed: $($_.Exception.Message). Preview installation stopped; retry with -Channel stable or -Version VERSION."
+        } finally {
+            if ($stream) { $stream.Dispose() }
+            if ($response) { $response.Close() }
+        }
+    }
+
+    function Supports-UpdateChannel {
+        $ErrorActionPreference = 'Continue'
+        Push-Location -LiteralPath $InstallDir
+        try {
+            $help = (& $exe update -h 2>&1 | ForEach-Object { "$_" }) -join "`n"
+            return $LASTEXITCODE -eq 0 -and $help -match '(?m)(^|\s)-channel(\s|$)'
+        } finally { Pop-Location }
     }
 
     function Compare-ReleaseVersion([string]$A, [string]$B) {
@@ -666,17 +714,18 @@ function Install-OpenFerry {
             if ($Version -notmatch $versionPattern) { throw "The latest release's archive has an unexpected name: open-ferry-$Version$suffix" }
             if ($Channel -eq 'preview') {
                 $pointerPath = Join-Path $tmp 'VERSION'
-                $pointerResult = Save-Download "$baseUrl/download/channel-preview/VERSION" $pointerPath -Optional
+                $pointerResult = Save-PreviewPointer "$baseUrl/download/channel-preview/VERSION" $pointerPath
                 if ($pointerResult -ne $false) {
                     $bytes = [IO.File]::ReadAllBytes($pointerPath)
                     $preview = [Text.Encoding]::UTF8.GetString($bytes)
                     if ($bytes.Length -gt 64 -or $preview -cnotmatch ('\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?' + "`n\z")) {
-                        throw 'Malformed preview VERSION: expected one version and a newline, at most 64 bytes'
+                        throw 'Malformed preview VERSION: expected one version and a newline, at most 64 bytes. Preview installation stopped; retry with -Channel stable or -Version VERSION.'
                     }
                     $preview = $preview.Substring(0, $preview.Length - 1)
                     if ((Compare-ReleaseVersion $preview $Version) -gt 0) {
                         $Version = $preview
-                        Save-Download "$baseUrl/download/v$Version/SHA256SUMS" $sumsPath
+                        try { Save-Download "$baseUrl/download/v$Version/SHA256SUMS" $sumsPath }
+                        catch { throw "Preview SHA256SUMS failed: $($_.Exception.Message). Preview installation stopped; retry with -Channel stable or -Version VERSION." }
                         $sums = Read-Sums $sumsPath
                     }
                 }
@@ -990,8 +1039,12 @@ function Install-OpenFerry {
 
     if ($Channel) {
         if ($modeConfig) {
-            if ((Invoke-Native { & $exe update -channel $Channel -config $modeConfig }) -ne 0) {
-                throw "open-ferry update couldn't set self-update.channel to $Channel in $modeConfig"
+            if (Supports-UpdateChannel) {
+                if ((Invoke-Native { & $exe update -channel $Channel -config $modeConfig }) -ne 0) {
+                    throw "open-ferry update couldn't set self-update.channel to $Channel in $modeConfig"
+                }
+            } else {
+                Write-Host "This release has no update channels; its config was left unchanged. After upgrading to a channel-aware release, run: $command update -channel $Channel -config '$($modeConfig.Replace("'", "''"))'"
             }
         } else {
             Write-Host "Once open-ferry runs on a config, run: $command update -channel $Channel -config <config>"
