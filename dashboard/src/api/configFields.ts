@@ -76,6 +76,12 @@ export const CONFIG_FIELDS = {
     configKey: "usage-statistics-enabled",
     path: `${MANAGEMENT}/usage-statistics-enabled`,
   },
+  selfUpdateChannel: {
+    label: "Update channel",
+    configKey: "self-update.channel",
+    path: `${V8_CONFIG}/self-update/channel`,
+    v8: true,
+  },
   selfUpdateMode: {
     label: "Updates",
     configKey: "self-update.mode",

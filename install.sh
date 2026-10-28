@@ -31,6 +31,7 @@
 #                                place of the GitHub repository's releases
 #                                URL (for a mirror, or a test server)
 #   OPEN_FERRY_INSTALL_GH        the GitHub CLI command (default: gh)
+#   OPEN_FERRY_INSTALL_CHANNEL  stable or preview: set the release channel
 #   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
 #                                in the config (--no-auto-update is off)
 #   OPEN_FERRY_INSTALL_MIGRATE   yes: as --migrate; no: as --no-migrate
@@ -58,6 +59,7 @@ Installs open-ferry from a GitHub release.
 Usage: install.sh [options]
 
 Options:
+  --channel CHANNEL  stable (default) or preview; also OPEN_FERRY_INSTALL_CHANNEL
   --version VERSION  install this version (such as 0.1.0) rather than the
                      latest release
   --target TARGET    install the build for this target rather than this
@@ -146,7 +148,7 @@ if [ "$real_uid" = 0 ]; then
   names=$(export -p | run sed -n "s/^export \([A-Za-z_][A-Za-z0-9_]*\).*$/\1/p")
   for name in $names; do
     case $name in
-      OPEN_FERRY_INSTALL_SELF_UPDATE | OPEN_FERRY_INSTALL_SYSTEM | OPEN_FERRY_INSTALL_MIGRATE) continue ;;
+      OPEN_FERRY_INSTALL_CHANNEL | OPEN_FERRY_INSTALL_SELF_UPDATE | OPEN_FERRY_INSTALL_SYSTEM | OPEN_FERRY_INSTALL_MIGRATE) continue ;;
       OPEN_FERRY_INSTALL_* | FAKE_* | TAR_OPTIONS | CURL_HOME | WGETRC | SSL_CERT_FILE | SSL_CERT_DIR | CURL_CA_BUNDLE | PERL5OPT | PERL5LIB | OPENSSL_CONF | GH_*)
         say "Ignoring $name when running as root."
         unset "$name"
@@ -168,16 +170,18 @@ bin_dir=
 config=
 attestation=1
 self_update=${OPEN_FERRY_INSTALL_SELF_UPDATE:-}
+channel=${OPEN_FERRY_INSTALL_CHANNEL:-}
 migrate=
 migrate_why=--migrate
 system=
 while [ "$#" -gt 0 ]; do
   case $1 in
-    --version | --target | --bin-dir | --config)
+    --channel | --version | --target | --bin-dir | --config)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
         usage_error "$1 needs a value"
       fi
       case $1 in
+        --channel) channel=$2 ;;
         --version) version=$2 ;;
         --target) target=$2 ;;
         --bin-dir) bin_dir=$2 ;;
@@ -185,12 +189,13 @@ while [ "$#" -gt 0 ]; do
       esac
       shift 2
       ;;
-    --version=* | --target=* | --bin-dir=* | --config=*)
+    --channel=* | --version=* | --target=* | --bin-dir=* | --config=*)
       value=${1#*=}
       if [ -z "$value" ]; then
         usage_error "${1%%=*} needs a value"
       fi
       case $1 in
+        --channel=*) channel=$value ;;
         --version=*) version=$value ;;
         --target=*) target=$value ;;
         --bin-dir=*) bin_dir=$value ;;
@@ -227,6 +232,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case $channel in
+  '' | stable | preview) ;;
+  *) usage_error "channel is \"$channel\": use stable or preview" ;;
+esac
 
 case $self_update in
   '' | off | notify | auto) ;;
@@ -371,7 +381,7 @@ fi
 # A version is MAJOR.MINOR.PATCH with an optional pre-release part, as the
 # release workflow requires; a leading v is allowed.
 valid_version() {
-  printf '%s\n' "$1" | run grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?'
+  printf '%s\n' "$1" | LC_ALL=C run grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?'
 }
 
 if [ -n "$version" ]; then
@@ -479,6 +489,51 @@ download() {
   fi
 }
 
+# VERSION is optional only when GitHub returns 404. All other failures refuse.
+download_pointer() {
+  if has curl; then
+    case $1 in
+      https://*) code=$(run_curl --silent --show-error --location --retry 3 --proto =https --proto-redir =https --output "$2" --write-out '%{http_code}' "$1") || die "couldn't download preview VERSION" ;;
+      *) code=$(run_curl --silent --show-error --location --retry 3 --output "$2" --write-out '%{http_code}' "$1") || die "couldn't download preview VERSION" ;;
+    esac
+    case $code in 200) return 0 ;; 404) return 1 ;; *) die "preview VERSION returned HTTP $code" ;; esac
+  else
+    # Server headers distinguish an absent pointer from other download failures.
+    if [ "$real_uid" = 0 ] && run wget --help 2>&1 | run grep -q -- --no-config; then
+      if run wget --no-config -S -O "$2" "$1" 2>"$tmp/pointer-error"; then return 0; fi
+    else
+      if run wget -S -O "$2" "$1" 2>"$tmp/pointer-error"; then return 0; fi
+    fi
+    run grep -Eq 'HTTP/[0-9.]+ 404' "$tmp/pointer-error" && return 1
+    die "couldn't download preview VERSION"
+  fi
+}
+
+# POSIX awk semver precedence, including numeric prerelease identifiers.
+version_newer() {
+  LC_ALL=C run awk -v a="$1" -v b="$2" '
+    function cmp(x,y) {
+      if (x ~ /^[0-9]+$/ && y ~ /^[0-9]+$/) {
+        if (length(x) != length(y)) return length(x)>length(y) ? 1 : -1
+        return ("x" x)==("x" y) ? 0 : (("x" x)>("x" y) ? 1 : -1)
+      }
+      if (x ~ /^[0-9]+$/) return -1
+      if (y ~ /^[0-9]+$/) return 1
+      return x==y ? 0 : (x>y ? 1 : -1)
+    }
+    BEGIN {
+      ac=a; bc=b; sub(/-.*/,"",ac); sub(/-.*/,"",bc)
+      split(ac,x,"."); split(bc,y,".")
+      for(i=1;i<=3;i++) { c=cmp(x[i],y[i]); if(c) exit c>0 ? 0 : 1 }
+      if(a==ac) exit b==bc ? 1 : 0
+      if(b==bc) exit 1
+      sub(/^[^-]*-/,"",a); sub(/^[^-]*-/,"",b)
+      n=split(a,x,"."); m=split(b,y,".")
+      for(i=1;i<=n && i<=m;i++) { c=cmp(x[i],y[i]); if(c) exit c>0 ? 0 : 1 }
+      exit n>m ? 0 : 1
+    }'
+}
+
 sha256_of() {
   if has sha256sum; then
     run sha256sum "$1" | run awk '{ print tolower($1) }'
@@ -532,6 +587,26 @@ if [ -z "$version" ]; then
   version=${archive#open-ferry-}
   version=${version%"$suffix"}
   valid_version "$version" || die "the latest release's archive has an unexpected name: $archive"
+  if [ "$channel" = preview ] && download_pointer "$base_url/download/channel-preview/VERSION" "$tmp/VERSION"; then
+    bytes=$(run wc -c < "$tmp/VERSION" | run tr -d ' ')
+    [ "$bytes" -le 64 ] || die "preview VERSION is over 64 bytes"
+    # Check exactly one line and its final newline before command substitution removes it.
+    [ "$(run wc -l < "$tmp/VERSION" | run tr -d ' ')" = 1 ] || die "malformed preview VERSION"
+    [ "$(run tail -c 1 "$tmp/VERSION" | run od -An -tu1 | run tr -d ' \n')" = 10 ] || die "malformed preview VERSION"
+    preview=$(run cat "$tmp/VERSION")
+    # Shell variables cannot carry NUL bytes; refuse any bytes lost while reading.
+    read_bytes=$(printf '%s\n' "$preview" | run wc -c | run tr -d ' ')
+    [ "$read_bytes" = "$bytes" ] || die "malformed preview VERSION"
+    valid_version "$preview" || die "malformed preview VERSION"
+    printf '%s\n' "$preview" | run awk '
+      /-/ { sub(/^[^-]*-/, ""); n=split($0,p,"."); for(i=1;i<=n;i++) {
+        if(p[i]=="" || (p[i] ~ /^[0-9]+$/ && length(p[i])>1 && substr(p[i],1,1)=="0")) exit 1
+      }}' || die "malformed preview VERSION"
+    if version_newer "$preview" "$version"; then
+      version=$preview
+      download "$base_url/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" || die "couldn't download preview SHA256SUMS"
+    fi
+  fi
 else
   download "$base_url/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" ||
     die "couldn't download SHA256SUMS for open-ferry $version: is there a release v$version?"
@@ -767,6 +842,15 @@ if [ -n "$self_update" ]; then
       die "open-ferry update couldn't set self-update.mode to $self_update in $mode_config"
   else
     say "There's no config yet to set self-update.mode to $self_update in. Once open-ferry runs on one, run: $command update -mode $self_update -config <config>"
+  fi
+fi
+
+if [ -n "$channel" ]; then
+  if [ -n "$mode_config" ]; then
+    (cd / && run "$installed" update -channel "$channel" -config "$mode_config") ||
+      die "open-ferry update couldn't set self-update.channel to $channel in $mode_config"
+  else
+    say "Once open-ferry runs on a config, run: $command update -channel $channel -config <config>"
   fi
 fi
 

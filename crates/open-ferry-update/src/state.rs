@@ -141,6 +141,12 @@ pub struct State {
     pub last_error: Option<String>,
     /// The latest release's version, when one was found.
     pub latest: Option<String>,
+    /// Channel used by the last discovery, absent for older state files.
+    pub channel: Option<String>,
+    /// Where the found release came from: latest or preview.
+    pub release_source: Option<String>,
+    /// A failed source when another source remained usable.
+    pub channel_error: Option<String>,
     /// The last version a check reported, so each is reported once.
     pub notified: Option<String>,
     /// The version staged for the next switch.

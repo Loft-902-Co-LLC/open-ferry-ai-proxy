@@ -568,6 +568,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
     let (old_update, new_update) = (&old.self_update, &new.self_update);
     changes.text("self-update.mode", &old_update.mode, &new_update.mode);
     changes.text(
+        "self-update.channel",
+        &old_update.channel,
+        &new_update.channel,
+    );
+    changes.text(
         "self-update.check-every",
         &old_update.check_every,
         &new_update.check_every,

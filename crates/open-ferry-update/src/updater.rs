@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use open_ferry_core::config::SelfUpdateMode;
+use open_ferry_core::config::{SelfUpdateChannel, SelfUpdateMode};
 use serde::Serialize;
 use url::Url;
 
@@ -99,6 +99,8 @@ pub enum UpdateError {
     Busy,
     /// The journal or a pin prevents this mutation.
     Journal(String),
+    /// Neither release source could be used, or a pointer was malformed.
+    Discovery(String),
     /// An immutable version is in use with different bytes.
     VersionInUse(String),
     /// A download failed.
@@ -158,7 +160,7 @@ impl fmt::Display for UpdateError {
             Self::NoDataDir(error) => write!(f, "updates have no data directory: {error}"),
             Self::Io { what, error } => write!(f, "{what}: {error}"),
             Self::Busy => f.write_str("another update is running"),
-            Self::Journal(error) => f.write_str(error),
+            Self::Journal(error) | Self::Discovery(error) => f.write_str(error),
             Self::VersionInUse(version) => write!(f, "version {version} is in use and differs"),
             Self::Fetch { what, error } => write!(f, "downloading {what}: {error}"),
             Self::Verify(error) => error.fmt(f),
@@ -229,6 +231,12 @@ fn io_error(what: &'static str) -> impl FnOnce(io::Error) -> UpdateError {
 /// The latest release, as a check found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
+    /// Channel used for discovery.
+    pub channel: SelfUpdateChannel,
+    /// latest or preview.
+    pub source: &'static str,
+    /// A source failure that did not prevent discovery.
+    pub warning: Option<String>,
     /// The release for this target.
     pub release: Release,
     /// The version installed now.
@@ -335,6 +343,8 @@ impl Report {
 /// Everything updates use.
 #[derive(Clone)]
 pub struct Updater {
+    /// Channel used for every discovery, including supervised preparation.
+    pub channel: SelfUpdateChannel,
     /// How files are downloaded.
     pub fetch: Arc<dyn Fetch>,
     /// The release base URL.
@@ -379,6 +389,7 @@ impl Updater {
             error,
         })?;
         Ok(Self {
+            channel: Default::default(),
             fetch,
             base,
             keys: ReleaseKeys::built_in().unwrap_or_else(|error| {
@@ -553,10 +564,75 @@ impl Updater {
         if self.keys.is_empty() {
             return Err(VerifyError::NoTrustedKey.into());
         }
+        let latest = self.read_release(state, None).await;
+        if self.channel != SelfUpdateChannel::Preview {
+            return latest;
+        }
+        let preview = self.preview(state).await;
+        let (mut found, warning) = match (latest, preview) {
+            (Ok(latest), Ok(Some(preview))) => {
+                if preview.release.semver > latest.release.semver {
+                    (preview, None)
+                } else {
+                    (latest, None)
+                }
+            }
+            (Ok(latest), Ok(None)) => (latest, None),
+            (Ok(latest), Err(error)) => (latest, Some(format!("preview source: {error}"))),
+            (Err(error), Ok(Some(preview))) => (preview, Some(format!("latest source: {error}"))),
+            (Err(error), Ok(None)) => return Err(error),
+            (Err(latest), Err(preview)) => {
+                return Err(UpdateError::Discovery(format!(
+                    "latest source: {latest}; preview source: {preview}"
+                )));
+            }
+        };
+        if let Some(warning) = &warning {
+            tracing::warn!("{warning}");
+        }
+        found.warning = warning;
+        Ok(found)
+    }
+
+    async fn preview(&self, state: &State) -> Result<Option<Found>, UpdateError> {
+        let url = fetch::join(&self.base, "download/channel-preview/VERSION").map_err(|error| {
+            UpdateError::Fetch {
+                what: "preview VERSION",
+                error,
+            }
+        })?;
+        let bytes = match self.fetch.get(&url, 64, self.limits.list_timeout).await {
+            Ok(bytes) => bytes,
+            Err(FetchError::Status(404)) => return Ok(None),
+            Err(error) => {
+                return Err(UpdateError::Fetch {
+                    what: "preview VERSION",
+                    error,
+                });
+            }
+        };
+        let version = std::str::from_utf8(&bytes).ok()
+            .and_then(|text| text.strip_suffix('\n'))
+            .filter(|version| bytes.len() <= 64 && release::valid_version(version)
+                && semver::Version::parse(version).is_ok())
+            .ok_or_else(|| UpdateError::Discovery(
+                "VERSION must contain one semver version followed by a newline, at most 64 bytes".into()))?;
+        self.read_release(state, Some(version)).await.map(Some)
+    }
+
+    async fn read_release(
+        &self,
+        state: &State,
+        version: Option<&str>,
+    ) -> Result<Found, UpdateError> {
         let fetch_error = |what| move |error| UpdateError::Fetch { what, error };
-        let sums_url = fetch::join(&self.base, "latest/download/SHA256SUMS")
+        let path = version.map_or_else(
+            || "latest/download".to_owned(),
+            |v| format!("download/v{v}"),
+        );
+        let sums_url = fetch::join(&self.base, &format!("{path}/SHA256SUMS"))
             .map_err(fetch_error("SHA256SUMS"))?;
-        let signature_url = fetch::join(&self.base, "latest/download/SHA256SUMS.minisig")
+        let signature_url = fetch::join(&self.base, &format!("{path}/SHA256SUMS.minisig"))
             .map_err(fetch_error("SHA256SUMS.minisig"))?;
         let sums = self
             .fetch
@@ -575,8 +651,20 @@ impl Updater {
         let signature = String::from_utf8(signature).map_err(|_| VerifyError::Malformed)?;
         let trusted_comment = self.keys.verify(&sums, &signature)?;
         let release = release::read(&sums, &trusted_comment, &self.target)?;
+        if let Some(expected) = version
+            && release.version != expected
+        {
+            return Err(UpdateError::Discovery(format!(
+                "preview VERSION names {expected}, but the signed release is {}",
+                release.version
+            )));
+        }
         let installed = self.installed_version(state);
-        let verdict = release::compare(&installed, &release.semver);
+        let verdict = release::compare_channel(
+            &installed,
+            &release.semver,
+            self.channel == SelfUpdateChannel::Preview,
+        );
         let archive_url = fetch::join(
             &self.base,
             &format!("download/v{}/{}", release.version, release.archive),
@@ -587,7 +675,22 @@ impl Updater {
             installed,
             verdict,
             archive_url,
+            channel: self.channel,
+            source: if version.is_some() {
+                "preview"
+            } else {
+                "latest"
+            },
+            warning: None,
         })
+    }
+
+    /// Record discovery alongside the version, so stale state never changes policy.
+    pub fn record_found(state: &mut State, found: &Found) {
+        state.latest = Some(found.release.version.clone());
+        state.channel = Some(found.channel.as_str().to_owned());
+        state.release_source = Some(found.source.to_owned());
+        state.channel_error = found.warning.clone();
     }
 
     /// The staged binary of `version`, if it is there and unchanged.
@@ -766,6 +869,7 @@ impl Updater {
             .map_err(io_error("sync the versions directory"))?;
         self.mutate_state_locked("stage", |fresh| {
             fresh.latest = Some(version.to_owned());
+            Self::record_found(fresh, found);
             fresh.staged = Some(version.to_owned());
             fresh.staged_sha256 = Some(sha256);
         })?;
@@ -864,6 +968,9 @@ impl Updater {
             fresh.last_result = state.last_result;
             fresh.last_error = state.last_error;
             fresh.latest = state.latest;
+            fresh.channel = state.channel;
+            fresh.release_source = state.release_source;
+            fresh.channel_error = state.channel_error;
             fresh.notified = state.notified;
         })?;
         outcome
@@ -878,7 +985,7 @@ impl Updater {
     ) -> Result<CheckResult, UpdateError> {
         let found = self.latest(state).await?;
         let version = found.release.version.clone();
-        state.latest = Some(version.clone());
+        Self::record_found(state, &found);
         let report = if !found.is_newer() {
             Report::UpToDate { latest: version }
         } else if let Some(report) = pending.report(state, &version) {
@@ -1172,11 +1279,22 @@ impl Updater {
         state: &State,
     ) -> Status {
         let installed = self.installed_version(state);
-        let update_available = state.latest.as_deref().is_some_and(|latest| {
-            semver::Version::parse(latest)
-                .is_ok_and(|latest| release::compare(&installed, &latest) == Verdict::Newer)
-        });
+        let update_available = state.channel.as_deref().unwrap_or("stable")
+            == settings.channel.as_str()
+            && state.latest.as_deref().is_some_and(|latest| {
+                semver::Version::parse(latest).is_ok_and(|latest| {
+                    release::compare_channel(
+                        &installed,
+                        &latest,
+                        settings.channel == SelfUpdateChannel::Preview,
+                    ) == Verdict::Newer
+                })
+            });
         Status {
+            channel: settings.channel.as_str(),
+            release_source: state.release_source.clone(),
+            checked_channel: state.channel.clone(),
+            channel_error: state.channel_error.clone(),
             mode: settings.mode.as_str(),
             mode_source: settings.source.as_str(),
             updates: settings.describe(),
@@ -1512,6 +1630,14 @@ fn make_executable(_path: &Path) -> io::Result<()> {
 /// --check --json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Status {
+    /// Configured channel: stable or preview.
+    pub channel: &'static str,
+    /// Channel used for the recorded discovery.
+    pub checked_channel: Option<String>,
+    /// Source of the found release: latest or preview.
+    pub release_source: Option<String>,
+    /// Source warning when the other source was usable.
+    pub channel_error: Option<String>,
     /// `auto`, `notify` or `off`.
     pub mode: &'static str,
     /// What set it: `default`, `config` or `environment`.

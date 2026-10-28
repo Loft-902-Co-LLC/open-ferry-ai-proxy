@@ -159,6 +159,7 @@ export const settingsSchema = z.object({
   errorLogsMaxFiles: countField("The number of failed-request logs kept"),
   usageStatisticsEnabled: z.boolean(),
   selfUpdateMode: z.enum(UPDATE_MODES),
+  selfUpdateChannel: z.enum(["stable", "preview"]),
   // Its port is checked against the proxy's too, which isn't a value here:
   // see checkSetting.
   managementAddress: checkedText((value) =>
@@ -285,6 +286,7 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
     errorLogsMaxFiles: errorLogs < 0 ? 10 : errorLogs,
     usageStatisticsEnabled: flag("usage-statistics-enabled"),
     selfUpdateMode: updateModeOf(fieldOf(selfUpdate, "mode")),
+    selfUpdateChannel: String(fieldOf(selfUpdate, "channel") ?? "").trim().toLowerCase() === "preview" ? "preview" : "stable",
     managementAddress: facts?.separateAddress ?? "",
   };
 }
@@ -458,6 +460,8 @@ export function describeSetting<K extends SettingId>(id: K, value: SettingValues
       return PREFERENCE_LABELS[preferenceOf(text)];
     case "quotaCheckAfter":
       return describeCheckAfter(text);
+    case "selfUpdateChannel":
+      return text === "preview" ? "Preview" : "Stable";
     case "selfUpdateMode":
       return UPDATE_MODE_LABELS[updateModeOf(text)];
     case "managementAddress":

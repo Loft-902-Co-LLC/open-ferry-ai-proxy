@@ -15,7 +15,7 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::time::Duration;
 
-use open_ferry_core::config::{SelfUpdate, SelfUpdateMode};
+use open_ferry_core::config::{SelfUpdate, SelfUpdateChannel, SelfUpdateMode};
 
 /// The shortest interval between checks.
 pub const MIN_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -55,6 +55,8 @@ impl fmt::Display for ModeSource {
 /// The settings in force.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
+    /// The explicitly configured channel (stable by default).
+    pub channel: SelfUpdateChannel,
     /// The mode.
     pub mode: SelfUpdateMode,
     /// What set it.
@@ -96,6 +98,7 @@ impl Settings {
             check_every = MIN_CHECK_EVERY;
         }
         Self {
+            channel: section.channel(),
             mode,
             source,
             check_every,

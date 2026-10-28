@@ -479,3 +479,24 @@ async fn plain_rollback_refuses_a_changed_or_removed_confirmed_target() {
         assert_eq!(snapshot(f.temp.path()), before);
     }
 }
+
+#[tokio::test]
+async fn leaving_preview_does_not_reuse_its_supervised_stage() {
+    let mut f = Fixture::new().await;
+    f.updater.channel = SelfUpdateChannel::Preview;
+    f.release("0.3.0");
+    let mut state = f.updater.state();
+    let found = f.updater.latest(&state).await.unwrap();
+    f.updater.stage(&found, &mut state).await.unwrap();
+    assert_eq!(f.updater.state().channel.as_deref(), Some("preview"));
+    f.updater.channel = SelfUpdateChannel::Stable;
+    f.release("0.2.0");
+    let endpoint = Endpoint::new(&f, None);
+    let real = backend(&f, endpoint, Request::Update).await;
+    let offer = real.latest().await.unwrap();
+    assert_eq!(offer.latest, "0.2.0");
+    assert!(
+        offer.found.found.is_some(),
+        "stable must discover its own release"
+    );
+}

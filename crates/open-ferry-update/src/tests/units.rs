@@ -235,6 +235,7 @@ fn versions_compare_by_semver_and_prereleases_are_ignored() {
 
 fn section(mode: &str, every: &str) -> SelfUpdate {
     SelfUpdate {
+        channel: String::new(),
         mode: mode.to_owned(),
         check_every: every.to_owned(),
     }

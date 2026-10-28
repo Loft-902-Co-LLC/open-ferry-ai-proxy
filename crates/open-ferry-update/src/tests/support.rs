@@ -285,6 +285,16 @@ impl ReleaseServer {
             }
             None => self.forget(signature_path),
         }
+        self.reply(
+            &format!("/releases/download/v{version}/SHA256SUMS"),
+            Reply::Body(sums.to_vec()),
+        );
+        if let Some(signature) = signature {
+            self.reply(
+                &format!("/releases/download/v{version}/SHA256SUMS.minisig"),
+                Reply::Body(signature.as_bytes().to_vec()),
+            );
+        }
         for (name, data) in archives {
             self.reply(
                 &format!("/releases/download/v{version}/{name}"),
@@ -437,6 +447,7 @@ impl Fixture {
         write_receipt(&data, &installed);
         let runner = Arc::new(FakeRunner::default());
         let updater = Updater {
+            channel: Default::default(),
             fetch: Arc::new(HttpFetch::new("").unwrap()),
             base: server.base.clone(),
             keys: trusting(&[&key]),

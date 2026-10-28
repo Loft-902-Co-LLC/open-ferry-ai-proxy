@@ -360,7 +360,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ),
     // open-ferry's own section, which upstream's migration would comment
     // out.
-    ("self-update", &["check-every", "mode"]),
+    ("self-update", &["channel", "check-every", "mode"]),
     (
         "server",
         &[

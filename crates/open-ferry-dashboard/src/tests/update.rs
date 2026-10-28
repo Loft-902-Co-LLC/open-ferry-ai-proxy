@@ -89,6 +89,8 @@ async fn the_status_says_the_mode_and_what_set_it() {
 
     let body = dash.get(STATUS).await.json(StatusCode::OK);
 
+    assert_eq!(body["channel"], "stable");
+    assert_eq!(body["release_source"], serde_json::Value::Null);
     assert_eq!(body["mode"], "auto");
     assert_eq!(body["mode_source"], "default");
     assert_eq!(body["updates"], "on");
@@ -1010,4 +1012,16 @@ async fn request_ids_differ_between_requests_and_workers() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn the_status_exposes_the_explicit_preview_channel() {
+    let data = tempfile::tempdir().unwrap();
+    let fetch = Arc::new(Counting::default());
+    let mut config = keyed_config();
+    config.self_update.channel = "preview".into();
+    let dash = Dash::with_updates(config.clone(), service(&config, &fetch, data.path()));
+    let body = dash.get(STATUS).await.json(StatusCode::OK);
+    assert_eq!(body["channel"], "preview");
+    assert_eq!(body["release_source"], serde_json::Value::Null);
 }

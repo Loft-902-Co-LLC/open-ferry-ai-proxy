@@ -6,6 +6,8 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
+- Add opt-in preview updates across the CLI, dashboard, services, and installers, with verified release pointers and stable as the default. Switching back to stable never downgrades.
+
 The first release, 0.1.0, isn't out yet. The releases below are candidates for it, published to test updating from one signed release to the next. This is what is in place today, ported from CLIProxyAPI v8.0.38.
 
 ### Security

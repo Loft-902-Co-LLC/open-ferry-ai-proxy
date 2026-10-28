@@ -40,6 +40,7 @@ const DEFAULTS: SettingValues = {
   errorLogsMaxFiles: 10,
   usageStatisticsEnabled: false,
   selfUpdateMode: "auto",
+  selfUpdateChannel: "stable",
   managementAddress: "",
 };
 
@@ -87,6 +88,7 @@ describe("settingValuesOf", () => {
       errorLogsMaxFiles: 0,
       usageStatisticsEnabled: true,
       selfUpdateMode: "notify",
+      selfUpdateChannel: "stable",
       managementAddress: "127.0.0.1:8318",
     });
   });
@@ -444,4 +446,11 @@ describe("settingChanges", () => {
       { id: "debug", now: false, after: true, movedOnServer: false },
     ]);
   });
+});
+
+it("reads, describes, and saves the explicit preview channel", () => {
+  expect(settingValuesOf({}).selfUpdateChannel).toBe("stable");
+  expect(settingValuesOf({ "self-update": { channel: "preview" } }).selfUpdateChannel).toBe("preview");
+  expect(saveCall("selfUpdateChannel", "preview")).toEqual({ path: "/v8/management/config/self-update/channel", request: { method: "PUT", json: "preview" } });
+  expect(describeSetting("selfUpdateChannel", "preview")).toBe("Preview");
 });

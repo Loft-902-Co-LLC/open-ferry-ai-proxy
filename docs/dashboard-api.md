@@ -605,10 +605,17 @@ open-ferry's own updates, which [docs/updates.md](updates.md) describes. CLIProx
 
 ### `GET /open-ferry/api/v1/update`
 
+The response includes `channel` (`stable` or `preview`), `checked_channel` (the channel of the recorded check, or null), `release_source` (`latest`, `preview`, or null), and `channel_error` (a source failure when another source was usable, or null). If configuration changed since discovery, `checked_channel` distinguishes the old result; availability is false until checked on the current channel. Preview pointer failures are reported here and in logs. `PUT /v8/management/config/self-update/channel` accepts the JSON string `"stable"` or `"preview"` and follows the same validation and reload rules as mode. The dashboard Settings tab edits this field.
+
+
 What updates are doing. It reads the update state on disk and, when supervised, asks the local supervisor for its status. It makes no release or provider request.
 
 ```json
 {
+  "channel": "stable",
+  "checked_channel": "stable",
+  "release_source": "latest",
+  "channel_error": null,
   "mode": "auto",
   "mode_source": "config",
   "updates": "on",

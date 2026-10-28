@@ -25,6 +25,10 @@ use under_test::*;
 mod parent_death;
 
 fn launch(root: &Path, port: u16, base: &str) -> Sup {
+    launch_channel(root, port, base, "stable")
+}
+
+fn launch_channel(root: &Path, port: u16, base: &str, channel: &str) -> Sup {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join(NAME);
@@ -32,6 +36,10 @@ fn launch(root: &Path, port: u16, base: &str) -> Sup {
     let data = data_dir::DataDir::at(root.join("data"));
     releases::write_receipt(&data, &exe);
     let mut config = config_text(root, port, "auto");
+    config = config.replace(
+        "self-update:\n",
+        &format!("self-update:\n  channel: {channel}\n"),
+    );
     config.push_str("remote-management:\n  secret-key: auto-test-password\n");
     std::fs::write(root.join("config.yaml"), config).unwrap();
     let log = std::fs::File::create(root.join("supervisor.log")).unwrap();
@@ -238,6 +246,10 @@ impl Drop for Requests {
 }
 
 async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
+    prepare_channel("stable").await
+}
+
+async fn prepare_channel(channel: &str) -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
     let dir = scratch();
     let root = dir.path();
     let data = data_dir::DataDir::at(root.join("data"));
@@ -259,7 +271,22 @@ async fn prepare() -> (tempfile::TempDir, releases::ReleaseServer, Sup, u16) {
         .local_addr()
         .unwrap()
         .port();
-    let sup = launch(root, port, server.base.as_str());
+    if channel == "preview" {
+        let stable = env!("CARGO_PKG_VERSION");
+        let name = releases::archive_name(stable, open_ferry_update::TARGET);
+        let archive =
+            releases::release_archive(stable, open_ferry_update::TARGET, &artifact_bytes(stable));
+        server.publish(&key, stable, &[(name, archive)]);
+        server.reply(
+            "/releases/download/channel-preview/VERSION",
+            releases::Reply::Body(b"99.0.0\n".to_vec()),
+        );
+    }
+    let sup = if channel == "stable" {
+        launch(root, port, server.base.as_str())
+    } else {
+        launch_channel(root, port, server.base.as_str(), channel)
+    };
     let waits = Waits {
         root,
         port,
@@ -528,5 +555,46 @@ async fn a_release_that_fails_its_watch_is_rolled_back_and_not_retried() {
     assert!(
         recorded,
         "the supervisor recorded the watch failure and return: {state:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_automatically_switches_to_a_pointer_release_that_is_not_latest() {
+    if !can_update_here() {
+        return;
+    }
+    let _permit = Permit::take();
+    let (dir, server, _sup, port) = prepare_channel("preview").await;
+    let root = dir.path();
+    let waits = Waits {
+        root,
+        port,
+        server: &server,
+    };
+    waits
+        .until("the automatic preview check barrier", || {
+            root.join("data/.blue-green-test/auto.before_check.arrived")
+                .exists()
+        })
+        .await;
+    std::fs::write(
+        root.join("data/.blue-green-test/auto.before_check.release"),
+        [],
+    )
+    .unwrap();
+    waits
+        .until("the preview version to become active", || {
+            journal(root)["active"]["version"] == "99.0.0"
+        })
+        .await;
+    let state =
+        open_ferry_update::State::load(&data_dir::DataDir::at(root.join("data")).state_file());
+    assert_eq!(state.channel.as_deref(), Some("preview"));
+    assert_eq!(state.release_source.as_deref(), Some("preview"));
+    assert!(
+        server
+            .paths()
+            .iter()
+            .any(|path| path.ends_with("channel-preview/VERSION"))
     );
 }

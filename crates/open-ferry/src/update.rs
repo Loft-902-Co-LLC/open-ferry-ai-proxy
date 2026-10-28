@@ -39,8 +39,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use open_ferry_core::config::Config;
 use open_ferry_core::config::save::update_nested_scalar;
+use open_ferry_core::config::{Config, SelfUpdateChannel};
 use open_ferry_supervisor::client::{self, Detection};
 use open_ferry_supervisor::endpoint::{Identity, ServiceKind};
 use open_ferry_supervisor::timings::DETECT_TIMEOUT;
@@ -77,16 +77,22 @@ struct Options {
     config: String,
     json: bool,
     mode: Option<String>,
+    channel: Option<String>,
     rollback: bool,
     yes: bool,
 }
 
 /// The flags, sorted by name.
-const DEFINITIONS: [Definition<Options>; 7] = [
+const DEFINITIONS: [Definition<Options>; 8] = [
     Definition {
         name: "cancel",
         usage: "Cancel a supervised switch if it has not taken over yet",
         kind: Kind::Bool(|options, value| options.cancel = value),
+    },
+    Definition {
+        name: "channel",
+        usage: "Set self-update.channel in the config: stable or preview",
+        kind: Kind::String(|options, value| options.channel = Some(value)),
     },
     Definition {
         name: "check",
@@ -95,7 +101,7 @@ const DEFINITIONS: [Definition<Options>; 7] = [
     },
     Definition {
         name: "config",
-        usage: "The config to read, and that -mode writes (default: config.yaml in the working directory, else the installed config)",
+        usage: "The config to read, and that -mode or -channel writes (default: config.yaml in the working directory, else the installed config)",
         kind: Kind::String(|options, value| options.config = value),
     },
     Definition {
@@ -144,6 +150,7 @@ enum Request {
     Update,
     Rollback,
     Mode(SelfUpdateMode),
+    Channel(SelfUpdateChannel),
 }
 
 impl Request {
@@ -154,6 +161,7 @@ impl Request {
             Self::Update => "update",
             Self::Rollback => "rollback",
             Self::Mode(_) => "mode",
+            Self::Channel(_) => "channel",
         }
     }
 }
@@ -165,12 +173,19 @@ fn request(options: &Options) -> Result<Request, String> {
         options.check,
         options.rollback,
         options.mode.is_some(),
+        options.channel.is_some(),
     ]
     .iter()
     .filter(|asked| **asked)
     .count();
     if asked > 1 {
-        return Err("use only one of -cancel, -check, -rollback and -mode".to_owned());
+        return Err("use only one of -cancel, -check, -rollback, -mode and -channel".to_owned());
+    }
+    if let Some(channel) = &options.channel {
+        return SelfUpdateChannel::parse(channel)
+            .filter(|_| !channel.trim().is_empty())
+            .map(Request::Channel)
+            .ok_or_else(|| format!("-channel is {channel:?}; use stable or preview"));
     }
     if let Some(mode) = &options.mode {
         if mode.trim().is_empty() {
@@ -293,6 +308,9 @@ where
     };
     let env = std::env::var(open_ferry_update::MODE_ENV).ok();
     let outcome = match request {
+        Request::Channel(channel) => {
+            set_channel(&scope::Host, &path, channel, env.as_deref(), &mut console)
+        }
         Request::Mode(mode) => set_mode(&scope::Host, &path, mode, env.as_deref(), &mut console),
         request => manual(&scope::Host, request, &path, &options, home, &mut console),
     };
@@ -307,7 +325,9 @@ fn command_home(
     config: &str,
 ) -> Result<scope::Home, scope::Refusal> {
     let home = scope::lookup(probe, binary)?;
-    if request != Request::Check && !(matches!(request, Request::Mode(_)) && !config.is_empty()) {
+    if request != Request::Check
+        && !(matches!(request, Request::Mode(_) | Request::Channel(_)) && !config.is_empty())
+    {
         home.require_privilege()?;
     }
     Ok(home)
@@ -328,7 +348,9 @@ fn command_config(
     working_dir: &Path,
     installed: Option<PathBuf>,
 ) -> Result<PathBuf, String> {
-    if home.scope == scope::Scope::Machine && matches!(request, Request::Mode(_)) && flag.is_empty()
+    if home.scope == scope::Scope::Machine
+        && matches!(request, Request::Mode(_) | Request::Channel(_))
+        && flag.is_empty()
     {
         if let Some(path) = scope::machine_config(probe)?
             && probe.state(&path) == scope::State::File
@@ -393,12 +415,13 @@ fn manual(
     console.mode_line(request, &settings, path, config.is_some());
     let config = config.unwrap_or_default();
     let proxy_url = &config.proxy_url;
-    let updater = match real_updater(home.data, proxy_url, request == Request::Check) {
+    let mut updater = match real_updater(home.data, proxy_url, request == Request::Check) {
         Ok(updater) => updater,
         Err(error) => {
             return Outcome::new(request.action(), &settings).failed(console, error.to_string());
         }
     };
+    updater.channel = settings.channel;
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -501,6 +524,7 @@ async fn clear_to_replace_in(
 
 /// What the commands need of the updater.
 trait Updates {
+    fn found_status(&self, _found: &Self::Found, _status: &mut Status) {}
     /// What a check found, for an update to install.
     type Found;
 
@@ -724,6 +748,12 @@ async fn clear_to_replace_for(
 }
 
 impl Updates for Real {
+    fn found_status(&self, found: &Found, status: &mut Status) {
+        status.checked_channel = Some(found.channel.as_str().into());
+        status.release_source = Some(found.source.into());
+        status.channel_error = found.warning.clone();
+    }
+
     type Found = Found;
 
     fn status(&self, settings: &Settings) -> Status {
@@ -771,7 +801,7 @@ impl Updates for Real {
         let _lock = self.0.lock()?;
         let _install = self.clear_to_replace().await?;
         let mut state = self.0.state();
-        state.latest = Some(found.release.version.clone());
+        Updater::record_found(&mut state, &found);
         self.0.stage(&found, &mut state).await?;
         self.0
             .switch_to_staged(&mut state)
@@ -842,6 +872,12 @@ impl Supervised {
 }
 
 impl Updates for Supervised {
+    fn found_status(&self, release: &SupervisedRelease, status: &mut Status) {
+        if let Some(found) = &release.found {
+            self.real.found_status(found, status);
+        }
+    }
+
     type Found = SupervisedRelease;
 
     fn status(&self, settings: &Settings) -> Status {
@@ -903,14 +939,18 @@ impl Updates for Supervised {
         // A staged release was already signature- and version-checked. Reuse
         // the latest known stage; pinning rechecks its pointer and bytes.
         if !self.check
+            && state.channel.as_deref().unwrap_or("stable") == self.real.0.channel.as_str()
             && let Some(version) = state.staged.as_ref().filter(|version| {
                 state
                     .latest
                     .as_ref()
                     .is_none_or(|latest| latest == *version)
                     && version.parse().is_ok_and(|latest| {
-                        open_ferry_update::release::compare(&installed, &latest)
-                            == open_ferry_update::release::Verdict::Newer
+                        open_ferry_update::release::compare_channel(
+                            &installed,
+                            &latest,
+                            self.real.0.channel == SelfUpdateChannel::Preview,
+                        ) == open_ferry_update::release::Verdict::Newer
                     })
             })
         {
@@ -930,8 +970,11 @@ impl Updates for Supervised {
         let found = self.real.0.latest(&state).await?;
         let version = found.release.version.clone();
         Ok(Offer {
-            newer: open_ferry_update::release::compare(&installed, &found.release.semver)
-                == open_ferry_update::release::Verdict::Newer,
+            newer: open_ferry_update::release::compare_channel(
+                &installed,
+                &found.release.semver,
+                self.real.0.channel == SelfUpdateChannel::Preview,
+            ) == open_ferry_update::release::Verdict::Newer,
             failed_here: state.has_failed(&version),
             rolled_back: state.rolled_back.as_ref() == Some(&version),
             latest: version.clone(),
@@ -1085,10 +1128,11 @@ impl<'a> Console<'a> {
             match request {
                 Request::Check => line.push_str(" Checking because you asked."),
                 Request::Update => line.push_str(" Updating because you asked."),
-                Request::Cancel | Request::Rollback | Request::Mode(_) => {}
+                Request::Cancel | Request::Rollback | Request::Mode(_) | Request::Channel(_) => {}
             }
         }
         let _ = writeln!(self.out, "{line}");
+        let _ = writeln!(self.out, "Update channel: {}.", settings.channel.as_str());
         for note in &settings.notes {
             let _ = writeln!(self.out, "Note: {note}");
         }
@@ -1126,7 +1170,7 @@ fn source(source: ModeSource, path: &Path, config: bool) -> String {
 /// What happened, for `-json` and the exit code.
 #[derive(Debug, Serialize)]
 struct Outcome {
-    /// `check`, `update`, `rollback`, `cancel` or `mode`.
+    /// `check`, `update`, `rollback`, `cancel`, `mode` or `channel`.
     action: &'static str,
     /// `up-to-date`, `update-available`, `cannot-update`,
     /// `needs-confirmation`, `declined`, `updated`, `rolled-back`,
@@ -1139,6 +1183,7 @@ struct Outcome {
     mode: &'static str,
     /// What set it: `default`, `config` or `environment`.
     mode_source: &'static str,
+    channel: &'static str,
     /// The mode as people say it: `on`, `notify-only` or `off`.
     updates: &'static str,
     /// Notes on the settings.
@@ -1155,7 +1200,7 @@ struct Outcome {
     /// For `-check`: the status, as the server's status route gives it.
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>,
-    /// For `-mode`: the config written.
+    /// For `-mode` or `-channel`: the config written.
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1178,6 +1223,7 @@ impl Outcome {
             message: String::new(),
             mode: settings.mode.as_str(),
             mode_source: settings.source.as_str(),
+            channel: settings.channel.as_str(),
             updates: settings.describe(),
             notes: settings.notes.clone(),
             latest_version: None,
@@ -1274,8 +1320,10 @@ async fn run<U: Updates>(
         Request::Check => check(updates, settings, console).await,
         Request::Update => update(updates, settings, yes, prompt, console).await,
         Request::Rollback => rollback(updates, settings, yes, prompt, console).await,
-        Request::Mode(_) => Outcome::new(request.action(), settings)
-            .failed(console, "-mode doesn't use the updater".to_owned()),
+        Request::Mode(_) | Request::Channel(_) => Outcome::new(request.action(), settings).failed(
+            console,
+            "-mode and -channel don't use the updater".to_owned(),
+        ),
     }
 }
 
@@ -1302,6 +1350,15 @@ async fn check<U: Updates>(updates: &U, settings: &Settings, console: &mut Conso
             return outcome;
         }
     };
+    updates.found_status(&offer.found, &mut status);
+    if settings.channel == SelfUpdateChannel::Preview
+        && let Some(source) = &status.release_source
+    {
+        console.say(format!("Found release source: {source}."));
+    }
+    if let Some(warning) = &status.channel_error {
+        console.say(format!("Warning: {warning}"));
+    }
     status.latest_version = Some(offer.latest.clone());
     status.update_available = offer.newer;
     let mut outcome = if !offer.newer {
@@ -1355,7 +1412,7 @@ fn up_to_date<F>(offer: &Offer<F>) -> String {
         )
     } else {
         format!(
-            "open-ferry {} is installed; the latest release is {}, which isn't newer.",
+            "open-ferry {} is installed; the latest release is {}, which isn't newer. An older release is never installed by an update.",
             offer.installed, offer.latest
         )
     }
@@ -1364,7 +1421,7 @@ fn up_to_date<F>(offer: &Offer<F>) -> String {
 fn say_up_to_date<U: Updates>(updates: &U, offer: &Offer<U::Found>, console: &mut Console<'_>) {
     if updates.is_supervised() {
         console.say(format!(
-            "open-ferry {} is running; the latest release is {}.",
+            "open-ferry {} is running; the latest release is {}. An older release is never installed by an update.",
             offer.installed, offer.latest
         ));
     } else {
@@ -1399,6 +1456,16 @@ async fn update<U: Updates>(
         Ok(offer) => offer,
         Err(error) => return outcome.failed(console, error.to_string()),
     };
+    let mut discovery = updates.status(settings);
+    updates.found_status(&offer.found, &mut discovery);
+    if settings.channel == SelfUpdateChannel::Preview
+        && let Some(source) = discovery.release_source
+    {
+        console.say(format!("Found release source: {source}."));
+    }
+    if let Some(warning) = discovery.channel_error {
+        console.say(format!("Warning: {warning}"));
+    }
     outcome.latest_version = Some(offer.latest.clone());
     outcome.installed_version = Some(if updates.is_supervised() {
         updates.status(settings).installed_version
@@ -1836,6 +1903,54 @@ fn load_config(probe: &dyn scope::Probe, path: &Path) -> Result<Option<Config>, 
     Config::load(path)
         .map(Some)
         .map_err(|error| format!("{} doesn't load: {error}", path.display()))
+}
+
+fn set_channel(
+    probe: &dyn scope::Probe,
+    path: &Path,
+    channel: SelfUpdateChannel,
+    env: Option<&str>,
+    console: &mut Console<'_>,
+) -> Outcome {
+    let mut outcome = Outcome::new("channel", &Settings::resolve(&Default::default(), env));
+    outcome.config = Some(path.display().to_string());
+    match scope::authorize_file(probe, path) {
+        Ok(true) if path.is_file() => {}
+        Ok(_) => {
+            return outcome.failed(
+                console,
+                format!(
+                    "{} doesn't exist: write one with `open-ferry init`, or pass -config",
+                    path.display()
+                ),
+            );
+        }
+        Err(refusal) => return outcome.failed(console, refusal.to_string()),
+    }
+    if let Err(error) = update_nested_scalar(path, &["self-update", "channel"], channel.as_str()) {
+        let message = if error.kind() == open_ferry_core::config::save::SaveErrorKind::Unwritable {
+            open_ferry_core::config::v8_edit::safe_unwritable_message(&error.to_string())
+        } else {
+            error.to_string()
+        };
+        return outcome.failed(
+            console,
+            format!("couldn't write {}: {message}", path.display()),
+        );
+    }
+    let settings = match Config::load(path) {
+        Ok(config) => Settings::resolve(&config.self_update, env),
+        Err(error) => return outcome.failed(console, error.to_string()),
+    };
+    outcome = Outcome::new("channel", &settings);
+    outcome.config = Some(path.display().to_string());
+    console.say(format!(
+        "self-update.channel is {} in {}.",
+        channel.as_str(),
+        path.display()
+    ));
+    console.say("A running server follows this channel. Updates never install an older version; leaving preview waits for stable to catch up.");
+    outcome.with("channel-set", 0)
 }
 
 /// `-mode`: writes `mode` as `self-update.mode` in the config at `path`,

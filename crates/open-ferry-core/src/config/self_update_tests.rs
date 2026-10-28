@@ -16,6 +16,7 @@ self-update:
 
 fn full() -> SelfUpdate {
     SelfUpdate {
+        channel: String::new(),
         mode: "notify".into(),
         check_every: "12h".into(),
     }
@@ -228,4 +229,50 @@ fn reload_lines_name_each_change() {
     ] {
         assert!(lines.iter().any(|l| l == line), "{line}: {lines:?}");
     }
+}
+
+#[test]
+fn channels_default_validate_and_survive_v8_edits() {
+    use super::SelfUpdateChannel;
+    for (value, expected) in [
+        ("", SelfUpdateChannel::Stable),
+        ("stable", SelfUpdateChannel::Stable),
+        (" Preview ", SelfUpdateChannel::Preview),
+    ] {
+        let config = Config::parse(format!("self-update:\n  channel: '{value}'\n")).unwrap();
+        assert_eq!(config.self_update.channel(), expected);
+        let out = saved("port: 8317\n", &config);
+        assert_eq!(Config::parse(&out).unwrap().self_update.channel(), expected);
+    }
+    assert_eq!(
+        Config::default().self_update.channel(),
+        SelfUpdateChannel::Stable
+    );
+    assert!(
+        Config::parse("self-update:\n  channel: beta\n")
+            .unwrap_err()
+            .to_string()
+            .contains("self-update.channel: must be stable or preview")
+    );
+    let dir = TempDir::new();
+    let path = dir.write("channel.yaml", "config-version: 8\nserver:\n  port: 8317\n");
+    let put = V8Edit {
+        method: V8Method::Put,
+        path: vec!["self-update".into(), "channel".into()],
+        body: br#""preview""#.to_vec(),
+        yaml: false,
+    };
+    assert_eq!(
+        edit_v8(&path, &put).unwrap().self_update.channel(),
+        SelfUpdateChannel::Preview
+    );
+    let bad = V8Edit {
+        body: br#""beta""#.to_vec(),
+        ..put
+    };
+    assert!(edit_v8(&path, &bad).is_err());
+    assert_eq!(
+        Config::load(&path).unwrap().self_update.channel(),
+        SelfUpdateChannel::Preview
+    );
 }

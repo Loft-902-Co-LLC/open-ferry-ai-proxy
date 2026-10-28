@@ -496,7 +496,11 @@ static CONFIG_ROUTING_QUOTA: Type = Type {
 /// open-ferry's `self-update`, which upstream doesn't have.
 static CONFIG_SELF_UPDATE: Type = Type {
     name: "config.SelfUpdate",
-    fields: &[("check-every", Field::Leaf), ("mode", Field::Leaf)],
+    fields: &[
+        ("channel", Field::Leaf),
+        ("check-every", Field::Leaf),
+        ("mode", Field::Leaf),
+    ],
 };
 
 /// open-ferry's inbound limits, independent of upstream request settings.

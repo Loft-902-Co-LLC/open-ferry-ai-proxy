@@ -164,6 +164,14 @@ function Facts({ status }: { status: UpdateStatus }) {
       <Fact term="Updates">
         <Badge tone={updates.tone}>{updates.label}</Badge> {SOURCES[status.mode_source]}
       </Fact>
+      <Fact term="Channel">{status.channel}</Fact>
+      {status.checked_channel && status.checked_channel !== status.channel && (
+        <Fact term="Last checked channel">{status.checked_channel}</Fact>
+      )}
+      {status.channel === "preview" && status.release_source && (
+        <Fact term="Release source">{status.release_source}</Fact>
+      )}
+      {status.channel_error && <Fact term="Source warning">{status.channel_error}</Fact>}
       <Fact term="Running">
         <Version>{runningVersion}</Version>
       </Fact>
