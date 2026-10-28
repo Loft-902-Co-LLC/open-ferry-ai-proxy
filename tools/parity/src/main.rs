@@ -7,6 +7,7 @@ mod baseline;
 mod cases;
 mod codex_models;
 mod compare;
+mod compatibility;
 mod config_diff;
 mod config_save;
 mod embedded_names;
@@ -48,6 +49,7 @@ const USAGE: &str = "\
 usage: open-ferry-parity --upstream <CLIProxyAPI checkout> [options]
 
 options:
+  --list-suites print translation suite metadata as JSON, standalone (no Go or upstream)
   --random <n>   random cases to generate per translator (default 5000)
   --seed <n>     seed for the random cases (default 1)
   --jobs <n>     concurrent config-save cases (default: available logical processors; 1: sequential)
@@ -273,7 +275,20 @@ fn parse_number<T: FromStr>(flag: &str, value: &str) -> Result<T, String> {
 }
 
 fn main() -> ExitCode {
-    let args = match Args::parse(std::env::args().skip(1)) {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments == ["--list-suites"] {
+        return match compatibility::catalog() {
+            Ok(catalog) => {
+                println!("{catalog}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let args = match Args::parse(arguments.into_iter()) {
         Ok(args) => args,
         Err(message) => {
             if !message.is_empty() {
@@ -296,6 +311,13 @@ fn main() -> ExitCode {
 type Suite = (Translator, Vec<Case>, Vec<Case>);
 
 fn selected_suites(args: &Args) -> Result<Vec<Suite>, String> {
+    suite_registry(args, false)
+}
+
+/// Metadata skips non-translation fixtures, notably config fixtures that
+/// read the upstream checkout. The suite registrations remain shared with
+/// the real parity runner rather than duplicated in a documentation list.
+fn suite_registry(args: &Args, metadata_only: bool) -> Result<Vec<Suite>, String> {
     if let Some(path) = &args.replay_config_failures {
         return baseline::replay_cases(path)
             .map(|cases| vec![(Translator::ConfigSave, cases, vec![])])
@@ -303,8 +325,10 @@ fn selected_suites(args: &Args) -> Result<Vec<Suite>, String> {
     }
     let seed = args.seed;
     let random = args.random;
-    let wanted =
-        |translator: Translator| args.suites.is_empty() || args.suites.contains(translator.slug());
+    let wanted = |translator: Translator| {
+        (args.suites.is_empty() || args.suites.contains(translator.slug()))
+            && (!metadata_only || compatibility::dimensions(translator.key()).is_some())
+    };
     macro_rules! suite {
         ($translator:expr, $handwritten:expr, $random:expr $(,)?) => {{
             let translator = $translator;

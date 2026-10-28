@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import date
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -46,7 +45,7 @@ PROVIDERS = {
     "codex-key": ("Codex", "API key"),
     "codex-siwc": ("Codex", "SIWC nested OAuth"),
     "claude-key": ("Claude", "API key"),
-    "claude-oauth": ("Claude", "OAuth sign-in; see limits above"),
+    "claude-oauth": ("Claude", "OAuth sign-in; see scope limits"),
     "claude-cli": ("Claude via claude-cli", "Installed Claude Code session"),
     "gemini-key": ("Gemini", "API key"),
     "interactions-key": ("Gemini via Interactions executor", "API key"),
@@ -57,6 +56,7 @@ PROVIDERS = {
     "meta-token": ("Meta", "Access token"),
     "xai-key": ("xAI", "API key"),
     "compat-key": ("OpenAI-compatible upstream", "API key"),
+    "route-only": ("Scripted route dispatcher", "Provider credential not exercised"),
 }
 CAPABILITIES = {
     "text": "Text",
@@ -72,6 +72,24 @@ CAPABILITIES = {
     "websocket": "WebSocket",
 }
 
+# Meaningful capabilities of each endpoint, independent of implementation
+# or current coverage. Other dimensions are omitted, not called unsupported.
+MEANINGFUL = {
+    "chat": ("text", "streaming", "tools", "reasoning", "image-in", "image-out", "audio", "video", "tokens"),
+    "completions": ("text", "streaming", "tokens"),
+    "responses": ("text", "streaming", "tools", "reasoning", "image-in", "image-out", "audio", "video", "tokens"),
+    "responses-ws": ("text", "streaming", "tools", "reasoning", "image-in", "image-out", "audio", "video", "tokens", "websocket"),
+    "claude": ("text", "streaming", "tools", "reasoning", "image-in", "tokens"),
+    "gemini": ("text", "streaming", "tools", "reasoning", "image-in", "image-out", "audio", "video", "tokens"),
+    "interactions": ("text", "streaming", "tools", "reasoning", "image-in", "image-out", "audio", "video", "tokens"),
+    "images": ("streaming", "image-in", "image-out"),
+    "speech": ("audio",),
+    "xai-tts": ("audio",),
+    "videos": ("image-in", "video"),
+    "xai-videos": ("image-in", "video"),
+    "models": ("model-list",),
+}
+
 
 def read_source(path: str) -> str:
     source = (ROOT / path).resolve()
@@ -84,7 +102,7 @@ def load_catalog(path: Path = CATALOG) -> dict:
     catalog = json.loads(path.read_text(encoding="utf-8"))
     date.fromisoformat(catalog["reviewed"])
     identifiers = set()
-    cells = set()
+    cells = {}
     for entry in catalog["evidence"]:
         identifier = entry["id"]
         if not re.fullmatch(r"[EU][0-9]+", identifier) or identifier in identifiers:
@@ -113,12 +131,12 @@ def load_catalog(path: Path = CATALOG) -> dict:
         if not entry["cells"] or not entry["scope"].strip():
             raise ValueError(f"Evidence needs cells and a scope: {identifier}")
         for protocol, provider, capability in entry["cells"]:
-            if protocol not in PROTOCOLS or provider not in PROVIDERS or capability not in CAPABILITIES:
+            if protocol not in PROTOCOLS or provider not in PROVIDERS or capability not in MEANINGFUL[protocol]:
                 raise ValueError(f"Unknown matrix dimension in {identifier}")
             cell = (protocol, provider, capability)
-            if cell in cells:
-                raise ValueError(f"Duplicate evidence assignment for {cell}")
-            cells.add(cell)
+            if cell in cells and cells[cell] != entry["level"]:
+                raise ValueError(f"Conflicting evidence levels for {cell}")
+            cells[cell] = entry["level"]
     return catalog
 
 
@@ -131,8 +149,11 @@ def command(args: list[str]) -> str:
 
 def build_harnesses(catalog: dict) -> dict[str, Path]:
     packages = sorted({entry["package"] for entry in catalog["evidence"] if entry["level"] == "fixture-tested"})
-    args = ["cargo", "test", "--locked", "--lib", "--no-run", "--message-format=json"]
-    for package in packages:
+    # Include parity so core's parity feature stays unified exactly as in
+    # cargo test --workspace. Filtering to only the two libtest crates would
+    # otherwise rebuild core/providers/server with a different feature set.
+    args = ["cargo", "test", "--locked", "--no-run", "--message-format=json"]
+    for package in sorted(set(packages) | {"open-ferry-parity"}):
         args.extend(["-p", package])
     print("Building fixture test harnesses...", file=sys.stderr, flush=True)
     output = command(args)
@@ -173,21 +194,53 @@ def validate_evidence(catalog: dict, harnesses: dict[str, Path]) -> None:
 
 
 def matrix(catalog: dict) -> dict:
-    return {
-        tuple(cell): entry
-        for entry in catalog["evidence"]
-        for cell in entry["cells"]
-    }
+    cells = {}
+    for entry in catalog["evidence"]:
+        for cell in entry["cells"]:
+            cells.setdefault(tuple(cell), []).append(entry)
+    return cells
 
 
 def cell_counts(catalog: dict) -> Counter:
     counts = Counter({level: 0 for level in ("fixture-tested", "live-tested", "unsupported", "unknown")})
-    counts.update(entry["level"] for entry in matrix(catalog).values())
-    counts["unknown"] = len(PROTOCOLS) * len(PROVIDERS) * len(CAPABILITIES) - sum(counts.values())
+    counts.update(entries[0]["level"] for entries in matrix(catalog).values())
+    counts["unknown"] = len(PROVIDERS) * sum(map(len, MEANINGFUL.values())) - sum(counts.values())
     return counts
 
 
-def render(catalog: dict) -> str:
+def load_parity() -> list[dict]:
+    # Workspace CI already builds the parity test harness. The normal binary
+    # needs one small additional compile/link, reusing those dependencies.
+    output = command([
+        "cargo", "run", "--quiet", "--locked", "-p", "open-ferry-parity",
+        "--features", "open-ferry-providers/test-support", "--", "--list-suites",
+    ])
+    entries = json.loads(output)
+    slugs = set()
+    for entry in entries:
+        if entry["slug"] in slugs or entry["cases"] <= 0:
+            raise ValueError(f"Invalid parity suite metadata: {entry}")
+        slugs.add(entry["slug"])
+    if not entries:
+        raise ValueError("Empty parity suite registry")
+    return entries
+
+
+def parity_cells(parity: list[dict]) -> dict:
+    cells = {}
+    for entry in parity:
+        if entry["direction"] in ("reasoning", "model-list"):
+            continue
+        cells.setdefault((entry["client_format"], entry["upstream_format"]), []).append(entry)
+    return cells
+
+
+def evidence_cell(entries: list[dict]) -> str:
+    marker = "F" if entries[0]["level"] == "fixture-tested" else "U"
+    return marker + " " + ", ".join(f"[{entry['id']}](#{entry['id'].lower()})" for entry in entries)
+
+
+def render(catalog: dict, parity: list[dict]) -> str:
     cells = matrix(catalog)
     counts = cell_counts(catalog)
     upstream = read_source("UPSTREAM.md")
@@ -201,85 +254,125 @@ def render(catalog: dict) -> str:
         "<!-- Written by .github/scripts/compatibility.py; don't edit by hand. -->",
         "",
         "Open Ferry is a credited Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).",
-        f"The pinned reference is **{version}**, commit `{commit}` ({pinned_date}); see [UPSTREAM.md](../UPSTREAM.md#pinned-reference).",
         "",
-        "This matrix describes **client protocols and transports**, providers, credential types, and individual capabilities separately.",
-        "Evidence is deliberately narrow: executor fixtures exercise the named client format and a fake upstream, without a real client application or provider account.",
-        "They do not establish every model, every request shape, or the public HTTP/WebSocket route. Evidence that exercises a server route says so explicitly.",
-        "A provider's upstream WebSocket test alone does not prove a client's WebSocket transport.",
+        "## Legend",
         "",
-        "## Legend and scope",
+        "- **F [E…] — fixture-tested:** the exact linked Rust test compiles and passes offline in the required CI tests job; its scope says which assertions and boundary it exercises.",
+        "- **P — parity-tested:** a maintained translation suite is exercised by the separate offline parity CI job. A passing comparison allows only identical/equivalent outputs or recorded known differences; see the translation section for timing and limits.",
+        "- **live-tested:** requires a recorded real provider/client result. **There are no recorded live results or live-tested cells.**",
+        "- **U [U…] — unsupported:** the linked code explicitly refuses the capability.",
+        "- **? — unknown:** no evidence is mapped for this meaningful combination. Implementation or coverage of another credential is not proof.",
         "",
-        "- **F [E…] — fixture-tested**: the linked, exact Rust test is run offline by the generator's check in required CI. Each reference identifies its source, fixture revision, review date, and the assertions it covers.",
-        "- **live-tested**: requires a recorded result from a real provider and client. **There are no recorded live results, and no live-tested cells.**",
-        "- **U [U…] — unsupported**: explicit refusal code is linked and checked for existence. A refusal is not a successful capability test.",
-        "- **? — unknown**: no evidence mapped for this exact combination. Implementation, translator parity, or support for another credential type does not promote it to tested.",
+        "## What is fixture-tested",
         "",
-        "Text means text request/response handling; streaming means incremental protocol events; tools means only the tool behavior described by its evidence.",
-        "Reasoning means the named reasoning fields or events, not model quality. Images in/out are separate; audio and video evidence specifies its direction.",
-        "Token counting may be local estimation; its evidence states which. Unknown also covers dimensions that are not meaningful for an endpoint; it is not a claim of refusal.",
+        "Each fraction is tested capabilities / meaningful capabilities for that protocol and provider/credential row. These are fixture assertions, not tested application versions or general model support.",
+        "",
+        "| Client protocol / transport | Provider / credential: capabilities tested |",
+        "|---|---|",
+    ]
+    for protocol, label in PROTOCOLS.items():
+        summaries = []
+        for provider, (name, credential) in PROVIDERS.items():
+            tested = sum(
+                cells.get((protocol, provider, capability), [{}])[0].get("level") == "fixture-tested"
+                for capability in MEANINGFUL[protocol]
+            )
+            if tested:
+                summaries.append(f"{name} / {credential}: **{tested}/{len(MEANINGFUL[protocol])}**")
+        if summaries:
+            lines.append(f"| {label} | " + "; ".join(summaries) + " |")
+    absent = [label for protocol, label in PROTOCOLS.items() if not any(key[0] == protocol for key in cells)]
+    lines.extend([
+        "", "Protocols with no provider/credential fixture or refusal evidence yet: " + "; ".join(absent) + ".",
+        "", "## Scope and client application versions", "",
+        "Client application versions are **not tested yet**. Protocol fixtures, synthetic client-version headers, and documented minimum versions do not establish a Codex CLI, Claude Code, or other real application recipe.",
+        "Future recorded recipes belong here with application/version, provider/model, credential type, protocol/transport, capabilities, artifact, and test date.",
+        "",
+        "Executor fixtures exercise the named client format and a fake upstream. Public-route fixtures say so in their scope.",
+        "The **Scripted route dispatcher** row exercises a public route with fake dispatch; it does not exercise a provider account or provider credential. It is not promoted to any provider/credential row.",
+        "Text includes the request/response behavior described by the evidence; tools and reasoning mean only the named tool/field/event assertions. Audio and video scopes state direction. Token counts may be local estimates.",
         "",
         "**Claude OAuth sign-in limits:** this route goes against Anthropic's terms; in testing only Haiku models worked. Accounts may be limited or suspended.",
-        "The synthetic OAuth fixture below does not establish real Sonnet/Opus access. See [Claude subscriptions](claude-subscription.md#the-claude-sign-in).",
-        "`claude-cli` instead runs the user's installed Claude Code and stores no Claude Code token.",
-        "",
-        "## Client application versions",
-        "",
-        "Client application versions are **not tested yet**. No Codex CLI, Claude Code, or other application version is claimed by these protocol fixtures.",
-        "A future recorded client recipe should add application/version, provider/model, credential type, protocol/transport, capabilities, evidence artifact, and test date here.",
-        "A documented minimum version or a synthetic User-Agent is not a tested client recipe.",
-        "",
-        "## Cell counts",
-        "",
-        "Counts cover capability cells in the protocol tables only, including unknown combinations.",
-        "",
-        "| Evidence level | Cells |",
-        "|---|---:|",
-    ]
-    lines.extend(f"| {level} | {count} |" for level, count in counts.items())
-    lines.extend(["", f"Total: {sum(counts.values())} cells ({len(PROTOCOLS)} protocol/transport entries × {len(PROVIDERS)} provider/credential entries × {len(CAPABILITIES)} capabilities)."])
-    for protocol, label in PROTOCOLS.items():
-        lines.extend(["", f"## {label}", "", "| Provider | Credential | " + " | ".join(CAPABILITIES.values()) + " |", "|---|---|" + "---|" * len(CAPABILITIES)])
-        for provider, (name, credential) in PROVIDERS.items():
-            values = []
-            for capability in CAPABILITIES:
-                evidence = cells.get((protocol, provider, capability))
-                if evidence is None:
-                    values.append("?")
-                else:
-                    identifier = evidence["id"]
-                    marker = "F" if evidence["level"] == "fixture-tested" else "U"
-                    values.append(f"{marker} [{identifier}](#{identifier.lower()})")
-            lines.append(f"| {name} | {credential} | " + " | ".join(values) + " |")
-    lines.extend([
-        "", "## Evidence catalog", "",
-        f"Catalog review date: **{catalog['reviewed']}** (the mapping review, not a live run or a generation timestamp).",
-        "Fixture versions below are SHA-256 digests of the linked Rust source file after LF normalization, so they also work in shallow CI checkouts.",
-        "The review date stays fixed until the mapping is reviewed; source changes update the fixture revision and require regeneration.",
-        "The upstream pin above identifies the port's reference, not an executed parity comparison for these provider fixtures.",
+        "The synthetic OAuth fixture does not establish real Sonnet/Opus access. See [Claude subscriptions](claude-subscription.md#the-claude-sign-in). `claude-cli` runs the user's installed Claude Code and stores no Claude Code token.",
+        "", "## Counts and meaningful combinations", "",
+        "For each protocol, the generator defines the meaningful capability columns before considering evidence. Counts include every listed provider/credential row (including scripted dispatch) against that set, even when the row is hidden below.",
+        "A cell with several passing fixtures counts once. Dimensions outside that endpoint's set are omitted, not marked unsupported. For example, speech counts audio, and model discovery counts model list.",
+        "", "| Provider/credential evidence level | Meaningful cells |", "|---|---:|",
     ])
-    for entry in catalog["evidence"]:
-        source = read_source(entry["path"])
-        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        needle = f"fn {entry['test'].split('::')[-1]}(" if entry["level"] == "fixture-tested" else entry["refusal"]
-        line = source[:source.index(needle)].count("\n") + 1
-        lines.extend(["", f"### {entry['id']}", "", f"{entry['level']}; reviewed {catalog['reviewed']}; fixture revision `sha256:{digest}`.", ""])
-        if entry["level"] == "fixture-tested":
-            lines.append(f"Test: [`{entry['path']}::{entry['test']}`](../{entry['path']}#L{line}).")
-        else:
-            lines.append(f"Refusal: [`{entry['path']}`](../{entry['path']}#L{line}); `{entry['refusal']}`.")
-        lines.extend(["", entry["scope"]])
+    lines.extend(f"| {level} | {count} |" for level, count in counts.items())
+    lines.extend([
+        "", f"Total: **{sum(counts.values())}** meaningful provider/credential capability cells. Translation evidence below is counted separately.",
+        "", f"## Translation parity with CLIProxyAPI {version}", "",
+        f"Pinned reference: **{version}**, commit `{commit}` ({pinned_date}); [pin](../UPSTREAM.md#pinned-reference). Catalog reviewed **{catalog['reviewed']}**.",
+        "",
+        "**parity-tested** describes maintained suite coverage, not a newly recorded Go comparison for this checkout. A passing translator run compares the same inputs against the pinned Go implementation and permits only identical outputs, equivalence under recorded rules, or cases with recorded known differences; an unaccepted Different result fails the job. Build/setup errors also fail it.",
+        "The separate config-save suite has its own recorded certification-failure baseline; it is outside this translation table.",
+        "",
+        "[PR parity CI](../.github/workflows/ci.yml) runs seed 1 with 25 random cases per generator only when translators, providers, core, the pin, parity tooling, manifests, or similar listed paths change; a docs-only PR does not trigger that comparison.",
+        "[Scheduled parity](../.github/workflows/parity-scheduled.yml) runs nightly at 06:23 UTC, and manually, with 2,000 random cases per generator by default. The existing tests job checks metadata on PRs, merge groups and manual runs when its Rust job runs; pushes to main only warm test caches. Metadata export does not execute Go.",
+        "",
+        "This is translation evidence only: it proves no provider account, credential type, or public route, and fills none of the provider/credential cells.",
+        "Format names are registry identifiers: openai/openai-chat mean Chat Completions, openai-responses means Responses, claude means Messages, gemini means generateContent, interactions means Gemini Interactions, and codex is the Codex backend's Responses format.",
+        "Counts in links are maintained **hand-written cases**, including signature-relay cases, with seed 1 and zero random cases; CI's generated random cases are additional. Request compatibility variants are listed separately.",
+        "",
+    ])
+    translations = parity_cells(parity)
+    clients = sorted({client for client, _ in translations})
+    upstreams = sorted({provider for _, provider in translations})
+    lines.extend([
+        "| Client protocol | " + " | ".join(upstreams) + " |",
+        "|---|" + "---|" * len(upstreams),
+    ])
+    directions = {"request": "Request", "request-compat": "Request (compat)", "streamed-response": "Streamed response", "whole-response": "Whole response"}
+    for client in clients:
+        values = []
+        for provider in upstreams:
+            entries = translations.get((client, provider), [])
+            values.append("<br>".join(
+                f"P {directions[entry['direction']]}: [{entry['slug']} ({entry['cases']})](#p-{entry['slug']})"
+                for entry in entries
+            ) or "? (no direct suite)")
+        lines.append(f"| {client} | " + " | ".join(values) + " |")
+    helpers = [entry for entry in parity if entry["direction"] in ("reasoning", "model-list")]
+    lines.extend(["", "Protocol helpers from the same registry:", "", "| Client operation | Upstream format | Evidence |", "|---|---|---|"])
+    for entry in helpers:
+        lines.append(f"| {entry['client_format']} | {entry['upstream_format']} | P {entry['direction']}: [{entry['slug']} ({entry['cases']})](#p-{entry['slug']}) |")
+    parity_unknown = len(clients) * len(upstreams) - len(translations)
+    lines.extend(["", f"Parity count: **{len(parity)} parity-tested suites**, covering **{len(translations)}** nonempty client/upstream translation cells and **{len(helpers)}** protocol-helper entries. The other **{parity_unknown}** direct-translation cells are unknown; they do not imply an indirect chain is unsupported."])
+    lines.extend(["", "## Provider and route fixture details", "", "Only rows with fixture or refusal evidence are shown. Each table uses its meaningful capability set; absent provider/credential rows stay unknown."])
+    for protocol, label in PROTOCOLS.items():
+        providers = [provider for provider in PROVIDERS if any(key[:2] == (protocol, provider) for key in cells)]
+        if not providers:
+            continue
+        capabilities = MEANINGFUL[protocol]
+        lines.extend(["", f"### {label}", "", "| Provider | Credential | " + " | ".join(CAPABILITIES[capability] for capability in capabilities) + " |", "|---|---|" + "---|" * len(capabilities)])
+        for provider in providers:
+            name, credential = PROVIDERS[provider]
+            values = [evidence_cell(cells[(protocol, provider, capability)]) if (protocol, provider, capability) in cells else "?" for capability in capabilities]
+            lines.append(f"| {name} | {credential} | " + " | ".join(values) + " |")
+        missing = [f"{name} / {credential}" for provider, (name, credential) in PROVIDERS.items() if provider not in providers]
+        lines.extend(["", "No evidence yet: " + "; ".join(missing) + "."])
     lines.extend([
         "", "## Regeneration and checks", "",
-        "Run from the repository root (Rust and Python 3.11+; no Go or upstream checkout needed):", "",
-        "```sh", "python .github/scripts/compatibility.py", "python .github/scripts/compatibility.py --check", "python -I .github/scripts/test_compatibility.py", "```", "",
-        "The small hand-kept mapping is [compatibility-evidence.json](../.github/scripts/compatibility-evidence.json).",
-        "Generation and checking validate each source declaration, compile the referenced crate's test harness, require its exact test name, and run it with one pass and zero ignored tests.",
-        "Missing, renamed, ignored, failing, or conditionally absent tests fail the check. Explicit refusal snippets must still exist, and every dimension and evidence ID is validated.",
-        "Required CI runs these checks in the existing tests job, alongside the workspace tests; it also checks the committed document byte for byte.",
-        "Translation-only parity suites are not promoted to provider/credential/transport evidence. Their separate results remain in the [parity tool](../tools/parity/README.md).",
-        "Extending coverage means reviewing and mapping an actual test, then regenerating; implemented combinations without mapped assertions remain unknown.", "",
+        "Run from the repository root with Rust and Python 3.11+; no Go, credentials, live proxy, upstream checkout, or git history is needed:",
+        "", "```sh", "python .github/scripts/compatibility.py", "python .github/scripts/compatibility.py --check", "python -I .github/scripts/test_compatibility.py", "cargo run --locked -p open-ferry-parity -- --list-suites", "```", "",
+        "The [fixture mapping](../.github/scripts/compatibility-evidence.json) names exact tests; generation/checking verify their source declarations and compiled test names, and run each with one pass and zero ignored tests. Required CI checks committed document bytes in the existing tests job.",
+        "The parity JSON export derives formats and directions from each registered translator's key and counts the registry's actual hand-written fixtures. It skips non-translation/configuration fixtures without opening the upstream tree.",
+        "Evidence identity is file path, fully qualified test name (or suite slug/label), pinned upstream version/commit, and catalog review date. Unrelated source edits and line shifts do not change the document. No file digest, line anchor, workspace version, or generation timestamp is used.",
+        "", "## Evidence catalog", "",
+        f"All entries below identify the reference **{version}**, commit `{commit}`, and catalog review date **{catalog['reviewed']}**. This dates the mapping review, not a live run or a new parity result.",
     ])
+    for entry in catalog["evidence"]:
+        lines.extend(["", f"### {entry['id']}", "", f"{entry['level']}; {version} / `{commit}`; reviewed {catalog['reviewed']}.", ""])
+        if entry["level"] == "fixture-tested":
+            lines.append(f"Test: [`{entry['path']}::{entry['test']}`](../{entry['path']}).")
+        else:
+            lines.append(f"Refusal: [`{entry['path']}`](../{entry['path']}); `{entry['refusal']}`.")
+        lines.extend(["", entry["scope"]])
+    lines.extend(["", "### Parity suite evidence", "", "Each slug is selectable with `--suite SLUG` in a real offline comparison. Labels come from the [translator registry](../tools/parity/src/translator.rs) and its [Interactions families](../tools/parity/src/interactions/mod.rs).", "", "| Suite slug | Registry label | Hand-written cases |", "|---|---|---:|"])
+    for entry in parity:
+        lines.append(f"| <a id=\"p-{entry['slug']}\"></a>`{entry['slug']}` | `{entry['label']}` | {entry['cases']} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -295,12 +388,13 @@ def main() -> int:
     try:
         catalog = load_catalog()
         validate_evidence(catalog, build_harnesses(catalog))
-        output = render(catalog)
+        parity = load_parity()
+        output = render(catalog, parity)
         if args.check:
             check_document(output)
         else:
             DOCUMENT.write_bytes(output.encode("utf-8"))
-        print(json.dumps(dict(cell_counts(catalog))))
+        print(json.dumps({**cell_counts(catalog), "parity-tested-suites": len(parity), "parity-translation-cells": len(parity_cells(parity))}))
         return 0
     except (ValueError, KeyError, OSError) as error:
         print(error, file=sys.stderr)

@@ -186,6 +186,246 @@
       "cells": [["xai-videos", "xai-key", "video"]]
     },
     {
+      "id": "E24",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/codex/executor/tests.rs",
+      "test": "codex::executor::tests::drops_invalid_reasoning_encrypted_content",
+      "scope": "Executor fixture: Codex API-key Responses requests retain valid encrypted reasoning and remove invalid reasoning IDs/content, on whole, streaming and compaction request paths. This asserts request-side reasoning handling.",
+      "cells": [["responses", "codex-key", "reasoning"]]
+    },
+    {
+      "id": "E25",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
+      "test": "claude::executor::tests::openai_call_reads_claudes_stream",
+      "scope": "Executor fixture: a Chat Completions request through a Claude API key returns asserted text Hello there and the stop finish reason from fake Claude SSE.",
+      "cells": [["chat", "claude-key", "text"]]
+    },
+    {
+      "id": "E26",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
+      "test": "claude::executor::tests::openai_stream_is_translated",
+      "scope": "Executor fixture: fake Claude SSE through an API key becomes Chat Completions chunks with asserted concatenated text and finish reason.",
+      "cells": [["chat", "claude-key", "streaming"]]
+    },
+    {
+      "id": "E27",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
+      "test": "claude::executor::tests::thinking_suffix_is_applied",
+      "scope": "Executor fixture: a Claude API-key Messages request carries the asserted enabled thinking configuration with a 16384-token budget. This covers request-side reasoning settings.",
+      "cells": [["claude", "claude-key", "reasoning"]]
+    },
+    {
+      "id": "E28",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/claude/executor/tests.rs",
+      "test": "claude::executor::tests::counts_tokens_with_anthropic",
+      "scope": "Executor fixture: synthetic Claude OAuth Messages token counting calls the fake Anthropic count_tokens endpoint and returns its asserted input_tokens value. It does not prove live model access; the OAuth limits above still apply.",
+      "cells": [["claude", "claude-oauth", "tokens"]]
+    },
+    {
+      "id": "E29",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
+      "test": "openai_compat::executor::tests::count_tokens",
+      "scope": "Executor fixture: an OpenAI-compatible API-key credential gets an asserted local tokenizer estimate for Chat Completions. No upstream tokenizer or credential validity is tested.",
+      "cells": [["chat", "compat-key", "tokens"]]
+    },
+    {
+      "id": "E30",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/openai_compat/executor/tests.rs",
+      "test": "openai_compat::executor::tests::count_tokens_for_a_claude_client",
+      "scope": "Executor fixture: a Claude Messages request with an OpenAI-compatible API-key credential gets an asserted local input_tokens estimate, without an upstream count call.",
+      "cells": [["claude", "compat-key", "tokens"]]
+    },
+    {
+      "id": "E31",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/xai/executor/tests.rs",
+      "test": "xai::executor::tests::count_tokens_answers_in_the_clients_format_unsent",
+      "scope": "Executor fixture: xAI API-key credentials get positive local token estimates in Responses and Claude Messages formats; the fake upstream receives no request.",
+      "cells": [["responses", "xai-key", "tokens"], ["claude", "xai-key", "tokens"]]
+    },
+    {
+      "id": "E32",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/meta/tests.rs",
+      "test": "meta::tests::count_tokens_answers_in_the_clients_format",
+      "scope": "Executor fixture: Meta API-key credentials get positive local token estimates in Responses and Claude Messages formats; no Meta request is made.",
+      "cells": [["responses", "meta-key", "tokens"], ["claude", "meta-key", "tokens"]]
+    },
+    {
+      "id": "E33",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
+      "test": "gemini::vertex::tests::apply_patch_reuses_the_executor",
+      "scope": "Executor fixture: Responses apply_patch tool declarations, returned custom-tool patch output, and streamed tool events are asserted through a Vertex API key and fake upstream.",
+      "cells": [["responses", "vertex-key", "tools"], ["responses", "vertex-key", "streaming"]]
+    },
+    {
+      "id": "E34",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
+      "test": "gemini::vertex::tests::service_accounts_call_imagen_with_its_own_requests",
+      "scope": "Executor fixture: a Vertex service account exchanges a fake token, calls the project Imagen predict endpoint, and returns asserted base64 image bytes in Gemini response shape. Image direction: output.",
+      "cells": [["gemini", "vertex-sa", "image-out"]]
+    },
+    {
+      "id": "E35",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/gemini/vertex/tests.rs",
+      "test": "gemini::vertex::tests::api_keys_call_imagen_with_the_gemini_request",
+      "scope": "Executor fixture: a Vertex API key routes Gemini text input to Imagen predict and returns asserted base64 prediction bytes. Image direction: output.",
+      "cells": [["gemini", "vertex-key", "image-out"]]
+    },
+    {
+      "id": "E36",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
+      "test": "codex::executor::tests::images::tool_generation",
+      "scope": "Executor fixture: a Codex API key turns an Images generation request into an image_generation Responses tool and returns asserted image data URL and metadata. Image direction: output.",
+      "cells": [["images", "codex-key", "image-out"]]
+    },
+    {
+      "id": "E37",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
+      "test": "codex::executor::tests::images::tool_json_edit",
+      "scope": "Executor fixture: Codex API-key Images edits preserve input image URLs/data URLs and masks in the translated tool request, and return asserted base64 image output. This entry covers the input-image cell.",
+      "cells": [["images", "codex-key", "image-in"]]
+    },
+    {
+      "id": "E38",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/codex/executor/tests/images.rs",
+      "test": "codex::executor::tests::images::tool_stream",
+      "scope": "Executor fixture: a Codex API-key Images edit returns asserted partial-image and completed-image SSE events and base64 payloads.",
+      "cells": [["images", "codex-key", "streaming"]]
+    },
+    {
+      "id": "E39",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
+      "test": "openai_compat::executor::tests::images::images_generations_passthrough",
+      "scope": "Executor fixture: an OpenAI-compatible API key passes an Images generation request to a fake images endpoint and returns the exact asserted base64 image response. Image direction: output.",
+      "cells": [["images", "compat-key", "image-out"]]
+    },
+    {
+      "id": "E40",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
+      "test": "openai_compat::executor::tests::images::images_edits_multipart_rewrites_model",
+      "scope": "Executor fixture: an OpenAI-compatible API-key Images edit preserves asserted multipart image bytes and MIME type while rewriting the model. Image direction: input.",
+      "cells": [["images", "compat-key", "image-in"]]
+    },
+    {
+      "id": "E41",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-providers/src/openai_compat/executor/tests/images.rs",
+      "test": "openai_compat::executor::tests::images::images_generations_streams_upstream",
+      "scope": "Executor fixture: an OpenAI-compatible API-key Images generation forwards the fake partial-generation and DONE SSE events with the asserted streaming request headers.",
+      "cells": [["images", "compat-key", "streaming"]]
+    },
+    {
+      "id": "E42",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
+      "test": "handlers::interactions::tests::native::a_vertex_model_uses_the_native_interactions_endpoint",
+      "scope": "Public-route fixture: POST /v1beta/interactions passes through the real credential manager and Vertex executor with an API key; input text, upstream key, native endpoint, and returned vertex-ok text are asserted.",
+      "cells": [["interactions", "vertex-key", "text"]]
+    },
+    {
+      "id": "E43",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
+      "test": "handlers::interactions::tests::native::an_agent_uses_the_native_interactions_endpoint",
+      "scope": "Public-route fixture: POST /v1beta/interactions with agent and text input goes through the real Interactions executor and API-key credential; the selected agent, credential header, endpoint and response ID are asserted. This covers request-side text handling.",
+      "cells": [["interactions", "interactions-key", "text"]]
+    },
+    {
+      "id": "E44",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/interactions/tests/native.rs",
+      "test": "handlers::interactions::tests::native::an_agent_stream_passes_the_frames_through",
+      "scope": "Public-route fixture: an Interactions agent stream goes through the real Interactions executor and API-key credential; the HTTP SSE content type and exact returned frames are asserted.",
+      "cells": [["interactions", "interactions-key", "streaming"]]
+    },
+    {
+      "id": "E45",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
+      "test": "handlers::images::tests::codex_generation_is_sent_on",
+      "scope": "Public-route fixture: POST /v1/images/generations selects Codex and returns asserted base64 output through a scripted dispatcher. Provider credentials are not exercised.",
+      "cells": [["images", "route-only", "image-out"]]
+    },
+    {
+      "id": "E46",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
+      "test": "handlers::images::tests::xai_streams_are_written_as_completed_events",
+      "scope": "Public-route fixture: POST /v1/images/generations with stream=true writes exact completed-image SSE events and asserted base64/URL fields from scripted xAI dispatch. Provider credentials are not exercised.",
+      "cells": [["images", "route-only", "streaming"]]
+    },
+    {
+      "id": "E47",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/images/tests.rs",
+      "test": "handlers::images::tests::codex_form_edits_are_written_again",
+      "scope": "Public-route fixture: POST /v1/images/edits preserves asserted multipart PNG bytes, MIME type and fields in the scripted Codex dispatch. Provider credentials are not exercised.",
+      "cells": [["images", "route-only", "image-in"]]
+    },
+    {
+      "id": "E48",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/openai_speech/tests.rs",
+      "test": "handlers::openai_speech::tests::speech_endpoints_route_speech_models_to_the_executor",
+      "scope": "Public-route fixture: POST /v1/audio/speech and POST /v1/tts select xAI and return asserted ID3audio bytes and audio/mpeg content type from a scripted dispatcher. Audio direction: output; provider credentials are not exercised.",
+      "cells": [["speech", "route-only", "audio"], ["xai-tts", "route-only", "audio"]]
+    },
+    {
+      "id": "E49",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/codex_client/tests.rs",
+      "test": "handlers::codex_client::tests::responses_ready_tools_for_http_and_sse",
+      "scope": "Public-route fixture: POST /v1/responses in HTTP and SSE modes prepares asserted collaboration-tool schemas and descriptions for scripted Codex dispatch. This covers request-side tool handling; no real client version or provider credential is exercised.",
+      "cells": [["responses", "route-only", "tools"]]
+    },
+    {
+      "id": "E50",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/codex_client/tests.rs",
+      "test": "handlers::codex_client::tests::websocket_readies_tools",
+      "scope": "Public-route fixture: a real socket at /v1/responses accepts response.create and prepares asserted collaboration-tool schemas for scripted Codex dispatch. This covers request-side tool handling and the client WebSocket, without a provider credential or real client application.",
+      "cells": [["responses-ws", "route-only", "tools"], ["responses-ws", "route-only", "websocket"]]
+    },
+    {
+      "id": "E51",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/responses_ws/tests.rs",
+      "test": "handlers::responses_ws::tests::merges_transcript_for_non_passthrough_upstream",
+      "scope": "Public-route fixture: a real /v1/responses WebSocket emits asserted completed events over two turns and sends the asserted merged transcript via scripted Codex dispatch. No provider credential or upstream WebSocket is exercised.",
+      "cells": [["responses-ws", "route-only", "streaming"], ["responses-ws", "route-only", "websocket"]]
+    },
+    {
+      "id": "E52",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/models/codex/tests.rs",
+      "test": "handlers::models::codex::tests::serves_the_codex_catalog",
+      "scope": "Public-route fixture: GET /v1/models?client_version returns asserted Codex catalog entries, capabilities and token limits from a registered model list. Synthetic client-version headers are not a tested application recipe; provider credentials are not exercised.",
+      "cells": [["models", "route-only", "model-list"]]
+    },
+    {
+      "id": "E53",
+      "level": "fixture-tested",
+      "path": "crates/open-ferry-server/src/handlers/openai_videos/tests/native.rs",
+      "test": "handlers::openai_videos::tests::native::write_video_content_from_url",
+      "scope": "Public-route fixture: GET /openai/v1/videos/video_123/content goes through the real xAI executor and API-key credential, returning asserted video bytes, video/mp4 type and attachment disposition from fake upstreams. Video direction: output.",
+      "cells": [["videos", "xai-key", "video"]]
+    },
+    {
       "id": "U01",
       "level": "unsupported",
       "path": "crates/open-ferry-providers/src/claude_cli/prompt.rs",

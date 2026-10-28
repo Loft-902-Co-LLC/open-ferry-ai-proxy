@@ -637,20 +637,41 @@ can be reused in a reviewed refresh.
 ## Generated compatibility evidence
 
 [`docs/compatibility.md`](../../docs/compatibility.md) is generated with
-`python .github/scripts/compatibility.py`; `--check` fails on drift. The
-small map in `.github/scripts/compatibility-evidence.json` identifies exact
-Rust fixture tests, source paths, client formats, credentials and the
-capabilities their assertions exercise. Generation and CI compile the real
-libtest harnesses and run every mapped test by its exact name, requiring one
-pass and zero ignored tests. Source declarations and refusal snippets must
-also exist. `python -I .github/scripts/test_compatibility.py` checks these
-conditions and byte-for-byte document freshness in the existing CI tests job.
+`python .github/scripts/compatibility.py`; `--check` rejects stale output.
+The small map in `.github/scripts/compatibility-evidence.json` connects exact
+Rust provider/server fixtures to the client format, credential and capability
+assertions they exercise. Generation and CI compile the libtest harnesses and
+run each named test, requiring one pass and zero ignored tests. Public-route
+fixtures identify whether they use real provider executors or only scripted
+dispatch; scripted dispatch never fills a real provider/credential row.
 
-Fixture revisions are LF-normalized source SHA-256 digests, with a stable
-catalog review date; neither git history nor generation time affects output.
-No live result or client application version is inferred. Translator-only
-parity suites do not exercise credentials or the public server transport,
-so they are not promoted to those matrix cells. The matrix instead maps the
-existing provider and server fixtures, and leaves other combinations unknown.
-The upstream version, commit and date come from `UPSTREAM.md`; generation
-needs neither Go nor the upstream submodule.
+`cargo run --locked -p open-ferry-parity -- --list-suites` exports JSON from
+`main.rs`'s actual suite registry and `translator.rs`'s keys/slugs, including
+Interactions families. Client/upstream formats and direction come from the
+registered key, not a separate list of suites. Counts are hand-written cases
+with seed 1 and zero random cases, including signature-relay cases. The export
+skips configuration/non-translation fixtures and requires no Go, upstream tree,
+credentials or live proxy. The generated translation table uses its own
+`parity-tested` level: passing parity compares identical/equivalent output or
+recorded known differences, and an unaccepted Different result fails. It does
+not establish a provider account, credential type, public route or application
+version. PR parity runs only for the paths selected by ci.yml, using seed 1 and
+25 random cases; the scheduled job runs nightly with 2,000 by default.
+
+Evidence identity is source path, exact test name or suite slug/label, the
+upstream version/commit from UPSTREAM.md, and the stable catalog review date.
+No file digest, line anchor, workspace version or run timestamp affects output.
+An unrelated comment or line shift in a fixture file leaves the doc unchanged.
+Meaningful capability sets are explicit per endpoint. The overview lists tested
+coverage; detail tables omit entirely unknown rows and unrelated capability
+columns while counting unknown meaningful combinations separately.
+
+`python -I .github/scripts/test_compatibility.py` checks exact evidence execution,
+document freshness, unchanged output after unrelated source comments, and drift
+when a suite slug changes. It runs in the existing required CI tests job after
+the workspace tests. Those tests already build the parity test harness; exporting
+JSON adds a small normal-binary compile/link using the same dependencies. No
+new action or required check is added.
+The fixture-harness build includes the parity package, and the export build
+enables `open-ferry-providers/test-support`, matching the workspace tests'
+features so Cargo can reuse their compiled core/provider dependencies.

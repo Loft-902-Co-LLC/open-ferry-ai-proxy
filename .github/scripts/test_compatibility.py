@@ -19,6 +19,10 @@ spec.loader.exec_module(compatibility)
 
 
 class CompatibilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.parity = compatibility.load_parity()
+
     def setUp(self):
         self.catalog = compatibility.load_catalog()
 
@@ -26,10 +30,10 @@ class CompatibilityTests(unittest.TestCase):
         compatibility.validate_evidence(self.catalog, compatibility.build_harnesses(self.catalog))
 
     def test_generated_document_is_current(self):
-        compatibility.check_document(compatibility.render(self.catalog))
+        compatibility.check_document(compatibility.render(self.catalog, self.parity))
 
     def test_hand_edited_cell_is_rejected(self):
-        expected = compatibility.render(self.catalog)
+        expected = compatibility.render(self.catalog, self.parity)
         changed = expected.replace("F [E01](#e01)", "?", 1)
         self.assertNotEqual(changed, expected)
         with tempfile.TemporaryDirectory(prefix="compatibility-test-") as directory:
@@ -78,7 +82,31 @@ class CompatibilityTests(unittest.TestCase):
         counts = compatibility.cell_counts(self.catalog)
         self.assertEqual(counts["live-tested"], 0)
         self.assertGreater(counts["unknown"], 0)
-        self.assertEqual(sum(counts.values()), len(compatibility.PROTOCOLS) * len(compatibility.PROVIDERS) * len(compatibility.CAPABILITIES))
+        self.assertEqual(sum(counts.values()), len(compatibility.PROVIDERS) * sum(map(len, compatibility.MEANINGFUL.values())))
+
+    def test_unrelated_source_comment_does_not_change_document(self):
+        expected = compatibility.render(self.catalog, self.parity)
+        mapped_path = self.catalog["evidence"][0]["path"]
+        original_read = compatibility.read_source
+
+        def commented(path):
+            source = original_read(path)
+            return "// Unrelated comment above every mapped test.\n" + source if path == mapped_path else source
+
+        with patch.object(compatibility, "read_source", side_effect=commented):
+            changed_catalog = compatibility.load_catalog()
+            self.assertEqual(expected, compatibility.render(changed_catalog, self.parity))
+
+    def test_suite_slug_change_makes_document_stale(self):
+        changed = copy.deepcopy(self.parity)
+        changed[0]["slug"] += "-renamed"
+        expected = compatibility.render(self.catalog, self.parity)
+        self.assertNotEqual(expected, compatibility.render(self.catalog, changed))
+        with tempfile.TemporaryDirectory(prefix="compatibility-test-") as directory:
+            path = Path(directory) / "compatibility.md"
+            path.write_bytes(expected.encode("utf-8"))
+            with self.assertRaisesRegex(ValueError, "out of date"):
+                compatibility.check_document(compatibility.render(self.catalog, changed), path)
 
 
 if __name__ == "__main__":
