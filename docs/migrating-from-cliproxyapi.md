@@ -4,6 +4,11 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 
 ## Switching over
 
+Before switching a client or credential type, check the generated
+[compatibility evidence matrix](compatibility.md). It separates offline
+fixture evidence, explicit refusals, and combinations without mapped tests;
+client application versions and live combinations are not yet tested there.
+
 Install open-ferry as the [README](../README.md#install) says, then run:
 
 ```sh

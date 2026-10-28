@@ -633,3 +633,24 @@ missing either wrapper retain their previous classification behavior; import
 does not reconstruct their missing oracle evidence. GitHub summaries
 show each kind's count/rate and the total bound; the always-uploaded observation
 can be reused in a reviewed refresh.
+
+## Generated compatibility evidence
+
+[`docs/compatibility.md`](../../docs/compatibility.md) is generated with
+`python .github/scripts/compatibility.py`; `--check` fails on drift. The
+small map in `.github/scripts/compatibility-evidence.json` identifies exact
+Rust fixture tests, source paths, client formats, credentials and the
+capabilities their assertions exercise. Generation and CI compile the real
+libtest harnesses and run every mapped test by its exact name, requiring one
+pass and zero ignored tests. Source declarations and refusal snippets must
+also exist. `python -I .github/scripts/test_compatibility.py` checks these
+conditions and byte-for-byte document freshness in the existing CI tests job.
+
+Fixture revisions are LF-normalized source SHA-256 digests, with a stable
+catalog review date; neither git history nor generation time affects output.
+No live result or client application version is inferred. Translator-only
+parity suites do not exercise credentials or the public server transport,
+so they are not promoted to those matrix cells. The matrix instead maps the
+existing provider and server fixtures, and leaves other combinations unknown.
+The upstream version, commit and date come from `UPSTREAM.md`; generation
+needs neither Go nor the upstream submodule.

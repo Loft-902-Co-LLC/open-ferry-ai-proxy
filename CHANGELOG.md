@@ -16,6 +16,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Added
 
 - **A README quick start** from installation through an API-key provider and client setup to a verified model reply, using the installer's config and keys, with key recovery and port-conflict guidance. The Status section is shorter; its full feature inventory is in [docs/features.md](docs/features.md).
+- **Generated compatibility evidence matrix** separates client protocols and transports, providers, credential types and capabilities, with exact offline fixture references, stable revisions and dates, explicit refusals and unknown combinations. Existing CI tests reject stale output and missing, ignored or failing evidence ([matrix](docs/compatibility.md)).
 - **Config-save parity proofs follow comments that upstream moves.** The parity tool replays the pinned Go edits on the exact input to find where each comment ends up, and accepts a moved comment block only if every line is kept there, in order. Partial or misplaced blocks stay Different. The recalibrated baseline records the measured counts.
 - **Config-save parity can prove comments retained at their source owners when
   Go moved or dropped them.** A separate Go run checks each comment against
