@@ -312,6 +312,10 @@ fn locate(data_dir: &Path, identity: &Identity) -> Result<Location, String> {
 }
 
 fn time_left(deadline: Instant) -> Duration {
+    #[cfg(test)]
+    if tests::CONNECTED_EXPIRED.with(std::cell::Cell::get) {
+        return Duration::ZERO;
+    }
     deadline.saturating_duration_since(Instant::now())
 }
 
@@ -320,7 +324,16 @@ fn time_left(deadline: Instant) -> Duration {
 /// `None` when nothing valid answers, and on Unix when the data directory has
 /// no readable record: then nothing names its supervisor's socket.
 async fn probe(data_dir: &Path, identity: &Identity, deadline: Instant) -> Option<Running> {
-    let deadline = deadline.min(Instant::now() + DETECT_TIMEOUT);
+    let cap = DETECT_TIMEOUT;
+    // These tests control expiry after writable, rather than testing the
+    // probe cap. Give their real filesystem/socket setup a hang bound too.
+    #[cfg(test)]
+    let cap = if tests::EXPIRE_ON_CONNECT.with(std::cell::Cell::get) {
+        Duration::from_secs(30)
+    } else {
+        cap
+    };
+    let deadline = deadline.min(Instant::now() + cap);
     if time_left(deadline).is_zero() {
         return None;
     }
@@ -511,10 +524,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     thread_local! {
-        /// How long the client waits between its connect and its send, for the
-        /// test that runs it (the exchange runs on the test's own thread).
-        pub(super) static CONNECTED_DELAY: std::cell::Cell<Duration> =
-            const { std::cell::Cell::new(Duration::ZERO) };
+        /// Expire the test's clock only once the connection is writable. The
+        /// exchange runs on this current-thread test runtime, so concurrent
+        /// tests and filesystem helper threads cannot see this clock.
+        pub(super) static EXPIRE_ON_CONNECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static CONNECTED_EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         /// Whether the exchange got as far as that point.
         static CONNECTED_REACHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
@@ -523,7 +537,27 @@ mod tests {
     /// right before the deadline check and the send.
     pub(super) fn after_writable() {
         CONNECTED_REACHED.with(|reached| reached.set(true));
-        std::thread::sleep(CONNECTED_DELAY.with(std::cell::Cell::get));
+        if EXPIRE_ON_CONNECT.with(std::cell::Cell::get) {
+            CONNECTED_EXPIRED.with(|expired| expired.set(true));
+        }
+    }
+
+    struct ExpireOnConnect;
+
+    impl ExpireOnConnect {
+        fn new() -> Self {
+            CONNECTED_REACHED.with(|reached| reached.set(false));
+            CONNECTED_EXPIRED.with(|expired| expired.set(false));
+            EXPIRE_ON_CONNECT.with(|expire| expire.set(true));
+            Self
+        }
+    }
+
+    impl Drop for ExpireOnConnect {
+        fn drop(&mut self) {
+            EXPIRE_ON_CONNECT.with(|expire| expire.set(false));
+            CONNECTED_EXPIRED.with(|expired| expired.set(false));
+        }
     }
 
     /// How long a file-system step takes, by data directory, and whether it
@@ -1359,51 +1393,54 @@ mod tests {
     async fn a_deadline_that_passes_between_the_connect_and_the_send_sends_no_stop() {
         let dirs = Dirs::new();
         let _supervisor = SupervisorLock::try_acquire(dirs.data()).unwrap();
-        let (endpoint, asked) = watched(&dirs, r#"{"type":"stopping","v":1}"#);
+        let (endpoint, mut received) = observe_connection(&dirs);
         write_record(dirs.data(), &endpoint.location, 1);
-        // The connect is done in time; the deadline passes while the client
-        // is held after it.
-        CONNECTED_REACHED.with(|reached| reached.set(false));
-        CONNECTED_DELAY.with(|delay| delay.set(Duration::from_millis(600)));
-        let outcome = stop(
-            dirs.data(),
-            &identity(),
-            Instant::now() + Duration::from_millis(300),
-        )
-        .await;
-        CONNECTED_DELAY.with(|delay| delay.set(Duration::ZERO));
+        // Startup gets real I/O headroom; expiry happens exactly at the seam,
+        // rather than racing the connect against a 300 ms wall deadline.
+        let _clock = ExpireOnConnect::new();
+        let outcome = stop(dirs.data(), &identity(), soon(30)).await;
         assert!(
             CONNECTED_REACHED.with(std::cell::Cell::get),
             "the exchange never reached the connect-to-send point"
         );
         assert!(matches!(outcome, StopOutcome::TimedOut(_)), "{outcome:?}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+        let request = tokio::time::timeout(Duration::from_secs(30), received.recv())
+            .await
+            .expect("the endpoint did not observe client EOF")
+            .unwrap();
+        assert!(request.is_empty(), "a request was sent: {request}");
     }
 
     #[tokio::test]
     async fn a_deadline_that_passes_between_the_connect_and_the_send_sends_no_status_request() {
         let dirs = Dirs::new();
         let _held = InstallLock::try_acquire(&dirs.installed()).unwrap();
-        let (endpoint, asked) = watched(&dirs, r#"{"type":"status","v":1,"snapshot":{}}"#);
+        let (endpoint, mut received) = observe_connection(&dirs);
         write_record(dirs.data(), &endpoint.location, 1);
-        CONNECTED_REACHED.with(|reached| reached.set(false));
-        CONNECTED_DELAY.with(|delay| delay.set(Duration::from_millis(600)));
-        let detection = detect(
-            dirs.data(),
-            &identity(),
-            &dirs.installed(),
-            Instant::now() + Duration::from_millis(300),
-        )
-        .await;
-        CONNECTED_DELAY.with(|delay| delay.set(Duration::ZERO));
+        let _clock = ExpireOnConnect::new();
+        let detection = detect(dirs.data(), &identity(), &dirs.installed(), soon(30)).await;
         assert!(
             CONNECTED_REACHED.with(std::cell::Cell::get),
             "the exchange never reached the connect-to-send point"
         );
         assert_busy(detection);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+        let request = tokio::time::timeout(Duration::from_secs(30), received.recv())
+            .await
+            .expect("the endpoint did not observe client EOF")
+            .unwrap();
+        assert!(request.is_empty(), "a request was sent: {request}");
+    }
+
+    /// Reports the bytes read through a request newline or client EOF. Waiting
+    /// for this observation makes the no-send assertion independent of how
+    /// quickly the server task is scheduled.
+    fn observe_connection(dirs: &Dirs) -> (Endpoint, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+        let endpoint = serve(location_for(dirs.data()), move |request, _stream| {
+            sent.send(request).unwrap();
+            async {}
+        });
+        (endpoint, received)
     }
 
     #[cfg(unix)]
