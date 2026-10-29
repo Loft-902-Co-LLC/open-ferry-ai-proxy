@@ -275,6 +275,10 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     .unwrap();
     let misses = Arc::new(AtomicUsize::new(0));
     api.state.oauth_sessions().overrides().bind_file_misses = Some(misses.clone());
+    // B may briefly miss the process-wide lock registry too. Only A's held
+    // credential should enter this pause or count toward A's retry attempts.
+    api.state.oauth_sessions().overrides().bind_file_miss_target =
+        Some(dir.path().join("codex-bind.json"));
     let (miss_release, miss_released) = std::sync::mpsc::channel();
     let miss_pause = Arc::new((
         tokio::sync::Notify::new(),

@@ -178,6 +178,9 @@ pub(crate) struct Overrides {
     pub(crate) bind_turn_started: Option<std::sync::Arc<tokio::sync::Notify>>,
     #[cfg(test)]
     pub(crate) bind_file_misses: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Restricts the file-miss counter and pause to one credential.
+    #[cfg(test)]
+    pub(crate) bind_file_miss_target: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) bind_worker_error: Option<std::io::ErrorKind>,
     #[cfg(test)]
@@ -232,6 +235,8 @@ impl Default for Overrides {
             bind_turn_started: None,
             #[cfg(test)]
             bind_file_misses: None,
+            #[cfg(test)]
+            bind_file_miss_target: None,
             #[cfg(test)]
             bind_worker_error: None,
             #[cfg(test)]
