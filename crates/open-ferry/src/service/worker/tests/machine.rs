@@ -30,6 +30,72 @@ async fn within<T>(step: &str, future: impl std::future::Future<Output = T>) -> 
         .unwrap_or_else(|error| panic!("{step}: did not finish within {STEP_WAIT:?}: {error}"))
 }
 
+#[derive(Clone)]
+struct TestSteps(std::sync::mpsc::Sender<Option<&'static str>>);
+
+impl TestSteps {
+    fn at(&self, step: &'static str) {
+        let _ = self.0.send(Some(step));
+    }
+}
+
+/// A Tokio timeout cannot bound a synchronous block or runtime destruction.
+/// Keep this watchdog outside the runtime, including while unwinding a test.
+fn checked_runtime<F, Fut>(name: &'static str, threads: usize, test: F)
+where
+    F: FnOnce(TestSteps) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    struct Watchdog {
+        steps: TestSteps,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for Watchdog {
+        fn drop(&mut self) {
+            let _ = self.steps.0.send(None);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    let (sent, received) = std::sync::mpsc::channel();
+    let steps = TestSteps(sent);
+    let _watchdog = Watchdog {
+        steps: steps.clone(),
+        thread: Some(std::thread::spawn(move || {
+            let mut step = "runtime setup";
+            loop {
+                match received.recv_timeout(STEP_WAIT) {
+                    Ok(Some(next)) => step = next,
+                    Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        eprintln!(
+                            "{name}: {step}: did not finish within {STEP_WAIT:?} of wall time"
+                        );
+                        // A blocked runtime cannot unwind itself. Fail the test process
+                        // instead of leaving nextest to kill it after ten minutes.
+                        std::process::abort();
+                    }
+                }
+            }
+        })),
+    };
+    let mut builder = if threads == 1 {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(threads);
+        builder
+    };
+    let runtime = builder.enable_all().build().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(test(steps.clone()));
+    }));
+    steps.at("runtime shutdown (including cancelled tasks and blocking work)");
+    drop(runtime);
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// What a stop that took its budget must finish well inside, on a busy
 /// machine too. The budgets these tests give are 100 to 500 ms; the
 /// wrong behaviours they guard take the 5 s default budgets of [`Setup`], a
@@ -254,6 +320,7 @@ impl Setup {
                 status_every: Duration::from_secs(3600),
                 lease_retry: Duration::from_millis(20),
                 send_timeout: Timing::default().send_timeout,
+                send_expired: None,
                 shutdown_reserve: Duration::from_millis(10_100),
                 routes: axum::Router::new(),
                 wedge_service: None,
@@ -2189,73 +2256,118 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     assert!(!rig.lease_is_free());
 }
 
-#[tokio::test]
-async fn a_stalled_status_does_not_mask_an_api_server_failure() {
-    let probe = Arc::new(WriteProbe::default());
-    let failure = Arc::new(tokio::sync::Notify::new());
-    let mut setup = Setup::new(Role::Active);
-    setup.stop_ms = 200;
-    setup.timing.send_timeout = Duration::from_millis(300);
-    let seen = Arc::new(tokio::sync::Notify::new());
-    setup.timing.fail_server = Some((failure.clone(), seen.clone()));
-    setup.write_probe = Some(probe.clone());
-    let mut rig = setup.start();
-    assert_eq!(rig.fake().recv_status().await.2, "active");
-    probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
-    rig.fake().send(Message::Ping).await;
-    tokio::time::timeout(WAIT, probe.arrived.notified())
-        .await
-        .unwrap();
-    failure.notify_one();
-    tokio::time::timeout(WAIT, seen.notified()).await.unwrap();
-    assert_eq!(rig.exit().await, ExitCode::FAILURE);
-    assert!(!rig.lease_is_free());
+#[test]
+fn a_stalled_status_does_not_mask_an_api_server_failure() {
+    checked_runtime(
+        "a_stalled_status_does_not_mask_an_api_server_failure",
+        1,
+        |steps| async move {
+            let expired = Arc::new(tokio::sync::Notify::new());
+            let probe = Arc::new(WriteProbe::default());
+            let failure = Arc::new(tokio::sync::Notify::new());
+            let mut setup = Setup::new(Role::Active);
+            setup.stop_ms = 200;
+            // Expire only after the failure is recorded, never after an assumed
+            // scheduling window on a busy CI runner. Other tests cover real send timers.
+            setup.timing.send_expired = Some(expired.clone());
+            let seen = Arc::new(tokio::sync::Notify::new());
+            setup.timing.fail_server = Some((failure.clone(), seen.clone()));
+            setup.write_probe = Some(probe.clone());
+            steps.at("start active worker");
+            let mut rig = setup.start();
+            assert_eq!(rig.fake().recv_status().await.2, "active");
+            steps.at("observe stalled status write");
+            probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
+            rig.fake().send(Message::Ping).await;
+            tokio::time::timeout(WAIT, probe.arrived.notified())
+                .await
+                .expect("status write never stalled");
+            steps.at("observe injected API server failure while the send is stalled");
+            failure.notify_one();
+            tokio::time::timeout(WAIT, seen.notified())
+                .await
+                .expect("the worker did not observe the injected API server failure");
+            expired.notify_one();
+            steps.at("worker failure exit");
+            assert_eq!(rig.exit().await, ExitCode::FAILURE);
+            steps.at("retained lease check");
+            assert!(!rig.lease_is_free());
+            steps.at("fixture cleanup");
+            drop(rig);
+        },
+    );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stalled_status_does_not_mask_a_concurrent_service_panic() {
-    let (release, blocked) = std::sync::mpsc::channel::<()>();
-    struct Release(std::sync::mpsc::Sender<()>);
-    impl Drop for Release {
-        fn drop(&mut self) {
-            let _ = self.0.send(());
-        }
-    }
-    let release = Release(release);
-    let blocked = Mutex::new(blocked);
-    let (arrived, arrival) = tokio::sync::oneshot::channel();
-    let arrived = Mutex::new(Some(arrived));
-    let probe = Arc::new(WriteProbe::default());
-    let mut setup = Setup::new(Role::Active);
-    setup.stop_ms = 200;
-    setup.timing.send_timeout = Duration::from_millis(300);
-    setup.write_probe = Some(probe.clone());
-    setup.timing.wedge_service = Some(Arc::new(move || {
-        if let Some(arrived) = arrived.lock().unwrap().take() {
-            let _ = arrived.send(());
-        }
-        let _ = blocked.lock().unwrap().recv();
-        panic!("synchronized service panic");
-    }));
-    let mut rig = setup.start();
-    assert_eq!(rig.fake().recv_status().await.2, "active");
-    tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
-    let mut request = stuck_request(rig.main).await;
-    rig.fake().wait_live(1).await;
-    probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
-    rig.fake().send(Message::Ping).await;
-    tokio::time::timeout(WAIT, probe.arrived.notified())
-        .await
-        .unwrap();
-    drop(release);
-    assert_eq!(rig.exit().await, ExitCode::FAILURE);
-    assert!(!rig.lease_is_free());
-    let mut rest = Vec::new();
-    let read = tokio::time::timeout(WAIT, request.read_to_end(&mut rest))
-        .await
-        .unwrap();
-    assert!(read.is_ok() || read.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset);
-    assert!(rest.is_empty(), "panic answered the request: {rest:?}");
+#[test]
+fn a_stalled_status_does_not_mask_a_concurrent_service_panic() {
+    checked_runtime(
+        "a_stalled_status_does_not_mask_a_concurrent_service_panic",
+        2,
+        |steps| async move {
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            struct Release(std::sync::mpsc::Sender<()>);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    let _ = self.0.send(());
+                }
+            }
+            let release = Release(release);
+            let blocked = Mutex::new(blocked);
+            let (arrived, arrival) = tokio::sync::oneshot::channel();
+            let arrived = Mutex::new(Some(arrived));
+            let expired = Arc::new(tokio::sync::Notify::new());
+            let probe = Arc::new(WriteProbe::default());
+            let mut setup = Setup::new(Role::Active);
+            setup.stop_ms = 200;
+            // Expire only after the failure is recorded, never after an assumed
+            // scheduling window on a busy CI runner. Other tests cover real send timers.
+            setup.timing.send_expired = Some(expired.clone());
+            setup.write_probe = Some(probe.clone());
+            setup.timing.wedge_service = Some(Arc::new(move || {
+                if let Some(arrived) = arrived.lock().unwrap().take() {
+                    let _ = arrived.send(());
+                }
+                let _ = blocked.lock().unwrap().recv();
+                panic!("synchronized service panic");
+            }));
+            steps.at("start active worker");
+            let failed = setup.timing.failed.clone();
+            let mut rig = setup.start();
+            assert_eq!(rig.fake().recv_status().await.2, "active");
+            tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
+            let mut request = stuck_request(rig.main).await;
+            rig.fake().wait_live(1).await;
+            steps.at("observe stalled status write");
+            probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
+            rig.fake().send(Message::Ping).await;
+            tokio::time::timeout(WAIT, probe.arrived.notified())
+                .await
+                .unwrap();
+            steps.at("observe service panic while the send is stalled");
+            drop(release);
+            within("record the concurrent service panic", async {
+                while !failed.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            expired.notify_one();
+            steps.at("worker failure exit");
+            assert_eq!(rig.exit().await, ExitCode::FAILURE);
+            steps.at("retained lease check");
+            assert!(!rig.lease_is_free());
+            let mut rest = Vec::new();
+            let read = tokio::time::timeout(WAIT, request.read_to_end(&mut rest))
+                .await
+                .unwrap();
+            assert!(
+                read.is_ok() || read.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset
+            );
+            assert!(rest.is_empty(), "panic answered the request: {rest:?}");
+            steps.at("fixture cleanup");
+            drop(rig);
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
