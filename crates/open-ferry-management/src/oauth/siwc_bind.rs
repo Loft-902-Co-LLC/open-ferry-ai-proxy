@@ -249,19 +249,19 @@ pub(super) async fn save(
                 let Some(guard) = try_acquire_credential_lock(&target.path)? else {
                     file_busy = true;
                     #[cfg(test)]
-                    if let Some(misses) = checking
-                        .oauth_sessions()
-                        .overrides()
-                        .bind_file_misses
-                        .clone()
-                        && checking
-                            .oauth_sessions()
-                            .overrides()
-                            .bind_file_miss_target
-                            .as_ref()
-                            .is_none_or(|path| path == &target.path)
                     {
-                        misses.fetch_add(1, Ordering::SeqCst);
+                        let misses = {
+                            let overrides = checking.oauth_sessions().overrides();
+                            overrides.bind_file_misses.clone().filter(|_| {
+                                overrides
+                                    .bind_file_miss_target
+                                    .as_ref()
+                                    .is_none_or(|path| path == &target.path)
+                            })
+                        };
+                        if let Some(misses) = misses {
+                            misses.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                     #[cfg(test)]
                     if let Some(signal) =
@@ -373,19 +373,16 @@ pub(super) async fn save(
                 // Test pauses are after deferral and all transaction guards.
                 #[cfg(test)]
                 {
-                    let pause = checking
-                        .oauth_sessions()
-                        .overrides()
-                        .bind_after_file_miss
-                        .clone();
-                    if let Some(pause) = pause
-                        && checking
-                            .oauth_sessions()
-                            .overrides()
-                            .bind_file_miss_target
-                            .as_ref()
-                            .is_none_or(|path| path == &target.path)
-                    {
+                    let pause = {
+                        let overrides = checking.oauth_sessions().overrides();
+                        overrides.bind_after_file_miss.clone().filter(|_| {
+                            overrides
+                                .bind_file_miss_target
+                                .as_ref()
+                                .is_none_or(|path| path == &target.path)
+                        })
+                    };
+                    if let Some(pause) = pause {
                         pause.0.notify_one();
                         pause
                             .1
