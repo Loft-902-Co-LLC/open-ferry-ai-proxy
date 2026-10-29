@@ -1214,12 +1214,13 @@ impl ActiveMutation {
             manager
                 .edit_unsaved(&id, |_| {
                     started.send(()).unwrap();
-                    released.recv_timeout(Duration::from_secs(10)).unwrap();
+                    // Drop releases this permit, including when the test fails.
+                    released.recv().unwrap();
                     Ok::<_, ()>(false)
                 })
                 .unwrap();
         });
-        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        ready.recv_timeout(Duration::from_secs(30)).unwrap();
         Self {
             release,
             task: Some(task),
@@ -1375,29 +1376,42 @@ async fn busy_bind_releases_both_locks_for_an_upload() {
     let waiting = watch_admission(&api);
     let active = ActiveMutation::start(&api);
     deliver(&api, &session, "codex", issued());
-    tokio::time::timeout(Duration::from_secs(2), waiting.notified())
+    tokio::time::timeout(Duration::from_secs(30), waiting.notified())
         .await
         .unwrap();
     let mut body: Value = serde_json::from_str(OUTER).unwrap();
     body["upload_marker"] = json!(true);
     let body = body.to_string();
     let mut upload = Box::pin(api.post("/v8/management/credentials?name=codex-bind.json", &body));
-    // Only synchronization waits for the other credential's active mutation.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut upload)
-            .await
-            .is_err()
-    );
+    // Drive the upload until its write is visible and its management lock is
+    // released. The active mutation keeps synchronization (and the response)
+    // pending throughout; elapsed time is not evidence that the write happened.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                _ = &mut upload => panic!("upload finished before the active mutation was released"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {
+                    if dir.read_json("codex-bind.json")["upload_marker"] == true
+                        && api.state.credential_lock().try_lock().is_ok()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("upload writes the file and releases the management lock before synchronization");
     assert_eq!(dir.read_json("codex-bind.json")["upload_marker"], true);
     assert!(api.state.credential_lock().try_lock().is_ok());
-    let lock = tokio::time::timeout(Duration::from_millis(200), acquire_credential_lock(&path))
+    let lock = tokio::time::timeout(Duration::from_secs(30), acquire_credential_lock(&path))
         .await
         .unwrap()
         .unwrap();
     drop(lock);
     wait_for_bind_task(&api).await;
     drop(active);
-    tokio::time::timeout(Duration::from_secs(2), upload)
+    tokio::time::timeout(Duration::from_secs(30), upload)
         .await
         .unwrap()
         .expect(StatusCode::OK);
