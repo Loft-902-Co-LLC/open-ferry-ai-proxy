@@ -254,6 +254,12 @@ pub(super) async fn save(
                         .overrides()
                         .bind_file_misses
                         .clone()
+                        && checking
+                            .oauth_sessions()
+                            .overrides()
+                            .bind_file_miss_target
+                            .as_ref()
+                            .is_none_or(|path| path == &target.path)
                     {
                         misses.fetch_add(1, Ordering::SeqCst);
                     }
@@ -372,7 +378,14 @@ pub(super) async fn save(
                         .overrides()
                         .bind_after_file_miss
                         .clone();
-                    if let Some(pause) = pause {
+                    if let Some(pause) = pause
+                        && checking
+                            .oauth_sessions()
+                            .overrides()
+                            .bind_file_miss_target
+                            .as_ref()
+                            .is_none_or(|path| path == &target.path)
+                    {
                         pause.0.notify_one();
                         pause
                             .1
