@@ -1008,15 +1008,23 @@ async fn request_to_wedge(address: SocketAddr, arrived: &tokio::sync::Notify) ->
 #[tokio::test]
 async fn stop_cuts_what_is_left_at_the_budget() {
     let mut setup = Setup::new(Role::Active);
+    // Give the wedged request the whole budget. Cleanup has the same absolute
+    // deadline, so it cannot extend the stop after the connection is cut.
+    setup.timing.shutdown_reserve = Duration::ZERO;
     let arrived = wedge_response(&mut setup);
     let mut rig = setup.start();
     rig.fake().recv_active_start().await;
     let mut stuck = request_to_wedge(rig.main, &arrived).await;
     rig.fake().wait_live(1).await;
-    let started = Instant::now();
+    // Disk, listener and request setup have completed. From here the request
+    // never makes progress; only Tokio's stop deadline can end it.
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 400 }).await;
     assert!(succeeded(rig.exit().await));
     let took = started.elapsed();
+    tokio::time::resume();
+    assert!(took >= Duration::from_millis(400), "cut early: {took:?}");
     assert!(took < STOPPED_BY, "cut late: {took:?}");
     let mut rest = Vec::new();
     let read = tokio::time::timeout(WAIT, stuck.read_to_end(&mut rest))
@@ -1110,6 +1118,11 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
     let (arrived, arrival) = tokio::sync::oneshot::channel();
     let arrived = Mutex::new(Some(arrived));
     let mut setup = Setup::new(Role::Active);
+    let control = Arc::new(Mutex::new(None));
+    setup.timing.wedge_watcher = Some(Arc::new({
+        let control = control.clone();
+        move |serving, _| *control.lock().unwrap() = Some(serving.clone())
+    }));
     setup.timing.wedge_service = Some(Arc::new(move || {
         if let Some(arrived) = arrived.lock().unwrap().take() {
             let _ = arrived.send(());
@@ -1118,6 +1131,7 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
     }));
     let mut rig = setup.start();
     rig.fake().recv_active_start().await;
+    let control = control.lock().unwrap().take().unwrap();
     tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
     assert_eq!(rig.fake().ping().await, "active");
     assert_eq!(rig.fake().ping().await, "active");
@@ -1127,7 +1141,16 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
     rig.fake().send(Message::Stop { budget_ms: 200 }).await;
     let address = rig.main;
     let probe = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        // A queued Stop is not an acknowledgement that accept loops have
+        // dropped their listeners. Synchronize that before the negative
+        // probe, even if the worker was descheduled after receiving Stop.
+        tokio::time::timeout(WAIT, async {
+            while !control.accepting_is_stopped() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("stop did not close acceptance");
         let Ok(Ok(mut connection)) =
             tokio::time::timeout(Duration::from_millis(75), TcpStream::connect(address)).await
         else {
@@ -1141,6 +1164,8 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
             return false;
         }
         let mut byte = [0];
+        // Once acceptance is stopped, a successful response is always a
+        // failure; delayed scheduling can only lengthen this quiet window.
         matches!(
             tokio::time::timeout(Duration::from_millis(75), connection.read(&mut byte)).await,
             Ok(Ok(1))

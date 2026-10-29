@@ -280,6 +280,11 @@ impl ServeControl {
         *self.shared.mode.borrow() == Mode::Paused && self.stats().accepting == 0
     }
 
+    #[cfg(test)]
+    pub(crate) fn accepting_is_stopped(&self) -> bool {
+        *self.shared.mode.borrow() == Mode::Stopping && self.stats().accepting == 0
+    }
+
     /// Stops accepting once the loops have dropped their listeners, which
     /// are the std sockets' duplicates: the sockets and their backlogs
     /// persist, so a client that connects meanwhile waits. Connections
