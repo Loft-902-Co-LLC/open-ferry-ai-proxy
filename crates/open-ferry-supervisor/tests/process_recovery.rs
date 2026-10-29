@@ -9,6 +9,133 @@
 mod under_test;
 use under_test::*;
 
+mod artifact_writes {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn other_write_errors_fail_on_the_first_attempt() {
+        let dir = scratch();
+        let mut attempts = 0;
+        let error = retry_artifact_write(
+            || {
+                attempts += 1;
+                // A directory cannot be overwritten as an artifact.
+                std::fs::write(dir.path(), b"replacement")
+            },
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .unwrap_err();
+        assert_ne!(error.raw_os_error(), Some(32));
+        assert_eq!(attempts, 1);
+    }
+
+    #[cfg(windows)]
+    fn sharing_reader(path: &std::path::Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_sharing_hold_is_released_only_after_the_first_write_fails() {
+        let dir = scratch();
+        let path = dir.path().join("artifact.exe");
+        std::fs::write(&path, b"original").unwrap();
+        let mut held = Some(sharing_reader(&path));
+        let mut attempts = 0;
+        retry_artifact_write(
+            || {
+                attempts += 1;
+                let written = std::fs::write(&path, b"replacement");
+                if attempts == 1 {
+                    assert_eq!(written.as_ref().unwrap_err().raw_os_error(), Some(32));
+                    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                    // Explicitly release after observing the real OS error;
+                    // no sleep assumes when the first attempt happened.
+                    drop(held.take());
+                }
+                written
+            },
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(attempts >= 2);
+        assert_eq!(std::fs::read(path).unwrap(), b"replacement");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_sharing_hold_is_not_retried_past_the_deadline() {
+        let dir = scratch();
+        let path = dir.path().join("artifact.exe");
+        std::fs::write(&path, b"original").unwrap();
+        let _held = sharing_reader(&path);
+        let mut attempts = 0;
+        let error = retry_artifact_write(
+            || {
+                attempts += 1;
+                std::fs::write(&path, b"replacement")
+            },
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(32));
+        assert_eq!(attempts, 1);
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn corruption_does_not_truncate_an_artifact_with_a_data_mapping() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READONLY};
+
+        let dir = scratch();
+        let path = dir.path().join("artifact.exe");
+        std::fs::write(&path, b"original").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        // SAFETY: the borrowed file handle is valid; a null name makes this
+        // mapping private to the test and its size is the existing file size.
+        let mapping = unsafe {
+            CreateFileMappingW(
+                file.as_raw_handle(),
+                std::ptr::null(),
+                PAGE_READONLY,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert!(!mapping.is_null(), "{}", std::io::Error::last_os_error());
+        // SAFETY: CreateFileMappingW returned a valid owned handle. Closing
+        // it on every path also releases the mapping after an assertion fails.
+        let _mapping = unsafe { OwnedHandle::from_raw_handle(mapping) };
+        // Holding the real mapping makes the old truncating write fail.
+        let mut attempts = 0;
+        let error = retry_artifact_write(
+            || {
+                attempts += 1;
+                std::fs::write(&path, b"originaM")
+            },
+            Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(1224));
+        assert_eq!(attempts, 1, "1224 must not join the sharing-error retry");
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        corrupt_artifact(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"originam");
+        // Repair is the same exact one-byte operation with the mapping held.
+        corrupt_artifact(&path);
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
+    }
+}
+
 const BACKOFF_MS: u64 = 800;
 
 fn timings() -> Tm {
