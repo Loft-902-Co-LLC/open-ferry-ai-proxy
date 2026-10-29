@@ -1393,7 +1393,7 @@ mod tests {
     async fn a_deadline_that_passes_between_the_connect_and_the_send_sends_no_stop() {
         let dirs = Dirs::new();
         let _supervisor = SupervisorLock::try_acquire(dirs.data()).unwrap();
-        let (endpoint, mut received) = observe_connection(&dirs);
+        let (endpoint, received) = observe_connection(&dirs);
         write_record(dirs.data(), &endpoint.location, 1);
         // Startup gets real I/O headroom; expiry happens exactly at the seam,
         // rather than racing the connect against a 300 ms wall deadline.
@@ -1404,18 +1404,22 @@ mod tests {
             "the exchange never reached the connect-to-send point"
         );
         assert!(matches!(outcome, StopOutcome::TimedOut(_)), "{outcome:?}");
-        let request = tokio::time::timeout(Duration::from_secs(30), received.recv())
+        let first_byte = tokio::time::timeout(Duration::from_secs(30), received)
             .await
             .expect("the endpoint did not observe client EOF")
-            .unwrap();
-        assert!(request.is_empty(), "a request was sent: {request}");
+            .expect("the endpoint observer stopped")
+            .expect("reading the client connection");
+        assert!(
+            first_byte.is_none(),
+            "a request byte was sent: {first_byte:?}"
+        );
     }
 
     #[tokio::test]
     async fn a_deadline_that_passes_between_the_connect_and_the_send_sends_no_status_request() {
         let dirs = Dirs::new();
         let _held = InstallLock::try_acquire(&dirs.installed()).unwrap();
-        let (endpoint, mut received) = observe_connection(&dirs);
+        let (endpoint, received) = observe_connection(&dirs);
         write_record(dirs.data(), &endpoint.location, 1);
         let _clock = ExpireOnConnect::new();
         let detection = detect(dirs.data(), &identity(), &dirs.installed(), soon(30)).await;
@@ -1424,23 +1428,52 @@ mod tests {
             "the exchange never reached the connect-to-send point"
         );
         assert_busy(detection);
-        let request = tokio::time::timeout(Duration::from_secs(30), received.recv())
+        let first_byte = tokio::time::timeout(Duration::from_secs(30), received)
             .await
             .expect("the endpoint did not observe client EOF")
-            .unwrap();
-        assert!(request.is_empty(), "a request was sent: {request}");
+            .expect("the endpoint observer stopped")
+            .expect("reading the client connection");
+        assert!(
+            first_byte.is_none(),
+            "a request byte was sent: {first_byte:?}"
+        );
     }
 
-    /// Reports the bytes read through a request newline or client EOF. Waiting
-    /// for this observation makes the no-send assertion independent of how
-    /// quickly the server task is scheduled.
-    fn observe_connection(dirs: &Dirs) -> (Endpoint, tokio::sync::mpsc::UnboundedReceiver<String>) {
-        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
-        let endpoint = serve(location_for(dirs.data()), move |request, _stream| {
-            sent.send(request).unwrap();
-            async {}
+    /// Reports the first byte, or `None` only after EOF. Observe the transport
+    /// directly: on macOS Tokio's peer-PID lookup fails after the client has
+    /// disconnected, so authenticated `Server::accept` may discard this very
+    /// connection before `serve` can read its EOF. The client must be free to
+    /// close before the observer is scheduled, on every OS.
+    fn observe_connection(
+        dirs: &Dirs,
+    ) -> (
+        Endpoint,
+        tokio::sync::oneshot::Receiver<io::Result<Option<u8>>>,
+    ) {
+        let location = location_for(dirs.data());
+        let lock_dir = tempfile::tempdir().unwrap();
+        let lock = SupervisorLock::try_acquire(lock_dir.path()).unwrap();
+        let mut server = Server::bind(&location, &identity(), &lock).unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _lock = lock;
+            let observation = async {
+                let mut stream = server.accept_stream_for_test().await?;
+                let mut byte = [0u8; 1];
+                let count = stream.read(&mut byte).await?;
+                Ok((count != 0).then_some(byte[0]))
+            }
+            .await;
+            let _ = sent.send(observation);
         });
-        (endpoint, received)
+        (
+            Endpoint {
+                location,
+                task,
+                _lock_dir: lock_dir,
+            },
+            received,
+        )
     }
 
     #[cfg(unix)]
