@@ -471,10 +471,10 @@ async fn ingress_slow_sse_reader_is_cut_and_live_handles_return_to_baseline() {
     };
     get_request(&mut stream, "/sse", false).await;
     until(|| traffic(&served).is_some_and(|traffic| traffic.has_pending_write())).await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3)).await;
-    settle().await;
-    tokio::time::resume();
+    // The first Pending write need not be the final stall: the kernel can
+    // accept more buffered bytes and renew the progress deadline afterward.
+    // Keep real socket time and wait for reclamation, bounded only by WAIT.
+    until(|| served.control.live_count() == 0).await;
     assert_eq!(
         served.control.live_count(),
         0,
