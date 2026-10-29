@@ -63,11 +63,73 @@ pub const POLL: Duration = Duration::from_millis(20);
 /// Writes a worker binary the supervisor can execute: on Unix a file made by
 /// `fs::write` has no execute bit, and the worker would not start.
 pub fn write_executable(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
+    write_artifact(path, bytes);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Call only before a worker starts from this path, or after observing its
+/// exit. Windows can briefly retain the exited image (or a scanner's handle)
+/// after the process handle is signalled. Wait for that sharing hold only;
+/// access, path and other I/O errors must still fail immediately.
+#[track_caller]
+pub fn write_artifact(path: &Path, bytes: &[u8]) {
+    retry_artifact_write(
+        || std::fs::write(path, bytes),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap_or_else(|error| panic!("could not write artifact {}: {error}", path.display()));
+}
+
+/// Flip one byte without truncating the artifact. A post-exit data mapping can
+/// still forbid truncation (Windows error 1224) even when writes are allowed.
+/// The corruption changes neither the file's length nor any other byte.
+#[track_caller]
+pub fn corrupt_artifact(path: &Path) {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut original = std::fs::File::open(path).unwrap();
+    original.seek(SeekFrom::End(-1)).unwrap();
+    let mut byte = [0];
+    original.read_exact(&mut byte).unwrap();
+    byte[0] ^= 1;
+    drop(original);
+    retry_artifact_write(
+        || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
+            file.seek(SeekFrom::End(-1))?;
+            // Keep the desired byte outside the retry: a retry must never
+            // flip it back if a write was interrupted.
+            file.write_all(&byte)
+        },
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap_or_else(|error| panic!("could not corrupt artifact {}: {error}", path.display()));
+}
+
+pub fn retry_artifact_write(
+    mut write: impl FnMut() -> io::Result<()>,
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        let error = match write() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if !cfg!(windows) || error.raw_os_error() != Some(32) {
+            return Err(error);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(error);
+        }
+        std::thread::sleep(POLL.min(left));
+        if Instant::now() >= deadline {
+            return Err(error);
+        }
     }
 }
 
@@ -454,7 +516,8 @@ impl Driver for Logged {
                     };
                     log.pids.lock().unwrap().push(pid);
                     log.line(json!({
-                        "k": "spawn", "n": number, "pid": pid, "role": role,
+                        "k": "spawn", "n": number, "pid": pid,
+                        "started": port.identity.started, "role": role,
                         "version": version, "binary": binary, "sha": sha, "alive": before,
                     }));
                     let real = port.cmd.clone();
@@ -1291,6 +1354,7 @@ impl Fx {
     /// nothing is written while a supervisor forks.
     pub fn stage(&self, version: &str, marker: &str) -> Staged {
         let binary = self.data_dir().binary(version, NAME);
+        self.assert_artifact_exited(&binary);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         write_executable(&binary, &artifact_bytes(version));
         std::fs::write(binary.parent().unwrap().join("test-marker"), marker).unwrap();
@@ -1309,6 +1373,7 @@ impl Fx {
     /// the workers' config becomes the directory it reads the mode from.
     pub fn stage_probe(&self, version: &str, mode: &str) -> Staged {
         let binary = self.data_dir().binary(version, NAME);
+        self.assert_artifact_exited(&binary);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         write_executable(&binary, &probe_bytes(version));
         std::fs::create_dir_all(self.root().join("cfg")).unwrap();
@@ -1327,20 +1392,40 @@ impl Fx {
 
     /// Changes one byte of the kept artifact of `version`, so its hash no
     /// longer matches what the journal holds.
+    #[track_caller]
     pub fn corrupt(&self, version: &str) {
         let binary = self.data_dir().binary(version, NAME);
-        let mut bytes = std::fs::read(&binary).unwrap();
-        *bytes.last_mut().unwrap() ^= 1;
-        std::fs::write(&binary, bytes).unwrap();
+        self.assert_artifact_exited(&binary);
+        corrupt_artifact(&binary);
     }
 
     /// The same for the installed file: its bytes no longer match any version.
     /// Call when no worker runs from it.
+    #[track_caller]
     pub fn corrupt_installed(&self) {
         let binary = self.installed();
-        let mut bytes = std::fs::read(&binary).unwrap();
-        *bytes.last_mut().unwrap() ^= 1;
-        std::fs::write(&binary, bytes).unwrap();
+        self.assert_artifact_exited(&binary);
+        corrupt_artifact(&binary);
+    }
+
+    /// A write retry must never hide a test that mutates a live worker's image.
+    #[track_caller]
+    fn assert_artifact_exited(&self, binary: &Path) {
+        for event in self.driver_log().iter().filter(|event| {
+            event["k"] == "spawn"
+                && event["binary"]
+                    .as_str()
+                    .is_some_and(|p| Path::new(p) == binary)
+        }) {
+            let pid = event["pid"].as_u64().unwrap() as u32;
+            // A previous worker's PID can have been reused by this point.
+            let started = event["started"].as_u64().expect("spawn creation identity");
+            assert!(
+                !open_ferry_supervisor::process::process_alive(pid, started),
+                "worker {pid} still runs from {} before a fixture write",
+                binary.display()
+            );
+        }
     }
 
     /// Fixes the hash every supervisor child started from now on takes as its
