@@ -105,8 +105,8 @@ async fn cancelled_waiter_and_error_release_the_lock() {
     let dir = scratch();
     let path = dir.path().join("codex.json");
     let first = acquire_credential_lock(&path).await.unwrap();
-    let (started, started_rx) = std::sync::mpsc::channel();
-    let (acquired, acquired_rx) = std::sync::mpsc::channel();
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (acquired, mut acquired_rx) = tokio::sync::mpsc::unbounded_channel();
     set_test_hook(
         &path,
         Some(Arc::new(move |event| {
@@ -118,17 +118,20 @@ async fn cancelled_waiter_and_error_release_the_lock() {
             }
         })),
     );
-    let waiter = tokio::spawn(acquire_with_timeout(
-        path.clone(),
-        Duration::from_millis(200),
-    ));
-    tokio::task::yield_now().await;
-    // The hook rendezvous proves the blocking acquisition reached contention.
-    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let waiter = tokio::spawn(acquire_with_timeout(path.clone(), Duration::from_secs(30)));
+    // Let the runtime submit the blocking acquisition, then cancel only once
+    // its hook proves contention. The deadlines only bound a stuck test.
+    tokio::time::timeout(Duration::from_secs(30), started_rx.recv())
+        .await
+        .expect("the waiter reaches the held lock")
+        .unwrap();
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
     drop(first);
-    acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), acquired_rx.recv())
+        .await
+        .expect("the cancelled waiter's blocking acquisition finishes")
+        .unwrap();
     set_test_hook(&path, None);
     let fail = async {
         let _guard = acquire_credential_lock(&path).await?;
@@ -137,7 +140,7 @@ async fn cancelled_waiter_and_error_release_the_lock() {
     .await;
     assert!(fail.is_err());
     drop(
-        acquire_with_timeout(path, Duration::from_millis(200))
+        acquire_with_timeout(path, Duration::from_secs(30))
             .await
             .unwrap(),
     );
