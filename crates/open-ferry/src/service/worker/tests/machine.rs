@@ -30,6 +30,10 @@ async fn within<T>(step: &str, future: impl std::future::Future<Output = T>) -> 
         .unwrap_or_else(|error| panic!("{step}: did not finish within {STEP_WAIT:?}: {error}"))
 }
 
+/// The watchdog's limit for one step. Longer than any Tokio bound a step
+/// awaits, so a step that only waits too long fails its own timeout first.
+const WATCHDOG_WAIT: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 struct TestSteps(std::sync::mpsc::Sender<Option<&'static str>>);
 
@@ -63,12 +67,16 @@ where
         thread: Some(std::thread::spawn(move || {
             let mut step = "runtime setup";
             loop {
-                match received.recv_timeout(STEP_WAIT) {
+                match received.recv_timeout(WATCHDOG_WAIT) {
                     Ok(Some(next)) => step = next,
                     Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        eprintln!(
-                            "{name}: {step}: did not finish within {STEP_WAIT:?} of wall time"
+                        // Not `eprintln!`: libtest captures that on this thread too,
+                        // and an abort throws the capture away.
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "{name}: {step}: did not finish within {WATCHDOG_WAIT:?} of wall time"
                         );
                         // A blocked runtime cannot unwind itself. Fail the test process
                         // instead of leaving nextest to kill it after ten minutes.
@@ -2347,7 +2355,7 @@ fn a_stalled_status_does_not_mask_a_concurrent_service_panic() {
             drop(release);
             within("record the concurrent service panic", async {
                 while !failed.load(std::sync::atomic::Ordering::SeqCst) {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
             .await;
