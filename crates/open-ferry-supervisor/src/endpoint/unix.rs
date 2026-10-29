@@ -644,6 +644,13 @@ impl Server {
         }
     }
 
+    /// Lets tests observe EOF even if a disconnected peer's credentials can no longer
+    /// be read. Production callers must use the authenticated `accept` above.
+    #[cfg(test)]
+    pub(crate) async fn accept_stream_for_test(&mut self) -> io::Result<ServerStream> {
+        self.listener.accept().await.map(|(stream, _)| stream)
+    }
+
     /// How many connections [`Server::accept`] dropped for a wrong or unreadable uid.
     pub fn rejected_peers(&self) -> u64 {
         self.rejected

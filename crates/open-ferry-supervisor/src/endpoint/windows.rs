@@ -212,6 +212,13 @@ impl Server {
         })
     }
 
+    /// The transport observation used by the client deadline tests. The pipe's
+    /// DACL admits the peer; an unavailable client PID does not discard the stream.
+    #[cfg(test)]
+    pub(crate) async fn accept_stream_for_test(&mut self) -> io::Result<ServerStream> {
+        self.accept().await.map(|connection| connection.stream)
+    }
+
     pub fn pipe_name(&self) -> &str {
         &self.name
     }
