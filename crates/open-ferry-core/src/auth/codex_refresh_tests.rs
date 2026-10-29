@@ -1007,7 +1007,12 @@ fn contended_credential_does_not_hold_store_save_lock() {
         let _ = finished.send("finished");
         result.unwrap();
     });
-    assert_eq!(waiting_rx.recv().unwrap(), "waiting");
+    assert_eq!(
+        waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("credential A reaches the held lock"),
+        "waiting"
+    );
     let mut other = fixture();
     other.id = "other.json".into();
     other.file_name = other.id.clone();
@@ -1017,7 +1022,9 @@ fn contended_credential_does_not_hold_store_save_lock() {
         saved.save_new(&other).unwrap();
         let _ = finished.send(());
     });
-    let result = finished_rx.recv_timeout(std::time::Duration::from_secs(1));
+    // A stays locked until B finishes; the deadline only bounds a deadlock,
+    // rather than requiring B's file I/O to finish within one second.
+    let result = finished_rx.recv_timeout(std::time::Duration::from_secs(30));
     drop(guard);
     waiter.join().unwrap();
     second.join().unwrap();
@@ -1089,12 +1096,14 @@ fn held_guard_saves_without_reacquiring_and_rejects_wrong_guard() {
         let _ = saved.send(result);
     });
     waiting_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the non-holder's save reaches the held lock");
+    // The hook proves contention while this thread still owns the guard;
+    // no observation window is needed to show the save cannot finish yet.
     assert!(saved_rx.try_recv().is_err());
     drop(guard);
     saved_rx
-        .recv_timeout(std::time::Duration::from_secs(2))
+        .recv_timeout(std::time::Duration::from_secs(30))
         .unwrap()
         .unwrap();
     worker.join().unwrap();
