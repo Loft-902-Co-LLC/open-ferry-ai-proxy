@@ -176,6 +176,9 @@ pub(super) struct Timing {
     pub(super) status_every: Duration,
     pub(super) lease_retry: Duration,
     pub(super) send_timeout: Duration,
+    /// Lets a test expire a stalled send after its failure precondition is observed.
+    #[cfg(test)]
+    pub(super) send_expired: Option<Arc<tokio::sync::Notify>>,
     pub(super) shutdown_reserve: Duration,
     activation_stop_budget: Duration,
     /// The test seams of the worker. `None` builds them from the data
@@ -224,6 +227,8 @@ impl Default for Timing {
             status_every: STATUS_EVERY,
             lease_retry: LEASE_RETRY,
             send_timeout: CONTROL_SEND_TIMEOUT,
+            #[cfg(test)]
+            send_expired: None,
             activation_stop_budget: Duration::from_secs(5),
             shutdown_reserve: super::LEDGER_SHUTDOWN_TIMEOUT + Duration::from_millis(100),
             // A test's worker has no seams unless the test gives it some.
@@ -1438,7 +1443,22 @@ where
         let Some(channel) = self.channel.as_mut() else {
             return;
         };
-        match tokio::time::timeout(self.send_timeout, channel.send(message)).await {
+        let send = channel.send(message);
+        #[cfg(test)]
+        let result = if let Some(expired) = &self.timing.send_expired {
+            tokio::select! {
+                biased;
+                result = send => Ok(result),
+                _ = expired.notified() => {
+                    tokio::time::timeout(Duration::ZERO, pending()).await
+                }
+            }
+        } else {
+            tokio::time::timeout(self.send_timeout, send).await
+        };
+        #[cfg(not(test))]
+        let result = tokio::time::timeout(self.send_timeout, send).await;
+        match result {
             Ok(Ok(())) => {}
             result => {
                 tracing::debug!("couldn't send to the supervisor: {result:?}; stopping");
