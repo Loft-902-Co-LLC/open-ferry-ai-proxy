@@ -106,32 +106,38 @@ async fn wait_logged(logged: &Logged, needle: &str) {
 impl Fake {
     /// Everything the worker sends until it closes the channel.
     async fn until_closed(&mut self) -> Vec<Message> {
-        let mut all = Vec::new();
-        while let Some(frame) = tokio::time::timeout(WAIT, self.channel.receive::<Message>())
-            .await
-            .expect("the exited worker kept the channel open")
-            .unwrap()
-        {
-            all.push(frame.message);
-        }
-        all
+        within("receive worker channel EOF", async {
+            let mut all = Vec::new();
+            while let Some(frame) = tokio::time::timeout(WAIT, self.channel.receive::<Message>())
+                .await
+                .expect("the exited worker kept the channel open")
+                .unwrap()
+            {
+                all.push(frame.message);
+            }
+            all
+        })
+        .await
     }
 
     /// Everything the worker has sent before it answers a message of a type
     /// it doesn't know: it answers in order, so this is what it sent for
     /// the messages before.
     async fn sync(&mut self) -> Vec<Message> {
-        self.send_raw(serde_json::json!({"type": "sync_point"}))
-            .await;
-        let mut seen = Vec::new();
-        loop {
-            match self.recv().await {
-                Message::Unsupported { message_type } if message_type == "sync_point" => {
-                    return seen;
+        within("supervisor sync_point acknowledgement", async {
+            self.send_raw(serde_json::json!({"type": "sync_point"}))
+                .await;
+            let mut seen = Vec::new();
+            loop {
+                match self.recv_for("supervisor sync_point acknowledgement").await {
+                    Message::Unsupported { message_type } if message_type == "sync_point" => {
+                        return seen;
+                    }
+                    other => seen.push(other),
                 }
-                other => seen.push(other),
             }
-        }
+        })
+        .await
     }
 }
 
@@ -144,7 +150,7 @@ fn managed(role: Role) -> Setup {
 
 async fn active_rig(setup: Setup) -> Rig {
     let mut rig = setup.start();
-    rig.fake().recv_active_start().await;
+    within("active worker startup", rig.fake().recv_active_start()).await;
     rig
 }
 
@@ -189,8 +195,11 @@ async fn peers_gone(rig: &mut Rig) {
 }
 
 async fn stop(rig: &mut Rig) -> ExitCode {
-    rig.fake().send(Message::Stop { budget_ms: 1_000 }).await;
-    rig.exit().await
+    within("stop worker: send stop and await exit", async {
+        rig.fake().send(Message::Stop { budget_ms: 1_000 }).await;
+        rig.exit().await
+    })
+    .await
 }
 
 fn is_hex_id(id: &str) -> bool {
@@ -1312,6 +1321,7 @@ mod seams {
     struct Barriers {
         dir: PathBuf,
         held: Vec<&'static str>,
+        hooks: Hooks,
     }
 
     impl Barriers {
@@ -1319,6 +1329,7 @@ mod seams {
             Self {
                 dir: rig.data.join(".blue-green-test"),
                 held: Vec::new(),
+                hooks: rig.hooks.clone(),
             }
         }
 
@@ -1345,13 +1356,15 @@ mod seams {
 
         /// Waits for the worker to be at `name`.
         async fn arrived(&self, name: &str) {
-            for _ in 0..500 {
-                if self.has(&format!("{name}.arrived")) {
-                    return;
+            within(&format!("arrive at seam barrier {name}"), async {
+                loop {
+                    if self.has(&format!("{name}.arrived")) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            panic!("the worker never arrived at {name}");
+            })
+            .await;
         }
     }
 
@@ -1359,6 +1372,21 @@ mod seams {
         fn drop(&mut self) {
             for name in &self.held {
                 let _ = std::fs::write(self.dir.join(format!("{name}.release")), "");
+            }
+            // Cancellation detaches the blocking poll. Keep its release file
+            // until it has ended: partial TempDir cleanup can delete that file
+            // yet leave the directory, making runtime shutdown wait forever.
+            if let Err(error) = self.hooks.settle_barriers(STEP_WAIT) {
+                let step = format!(
+                    "seam barrier cleanup {:?} at {}: {error}",
+                    self.held,
+                    self.dir.display()
+                );
+                if std::thread::panicking() {
+                    eprintln!("{step}");
+                } else {
+                    panic!("{step}");
+                }
             }
         }
     }
@@ -1391,13 +1419,57 @@ mod seams {
     }
 
     async fn wait_event(rig: &Rig, name: &str) {
-        for _ in 0..500 {
-            if events(rig).iter().any(|(seen, _)| seen == name) {
-                return;
+        within(&format!("wait for seam event {name}"), async {
+            loop {
+                if events(rig).iter().any(|(seen, _)| seen == name) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the worker never logged the event {name}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_file_barrier_is_settled_before_fixture_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let hooks = Hooks::in_data_dir_marked(&data, "a");
+        let mut barriers = Barriers {
+            dir: data.join(".blue-green-test"),
+            held: Vec::new(),
+            hooks: hooks.clone(),
+        };
+        barriers.hold(LEASE_RELEASE);
+        let observer = tokio::spawn({
+            let hooks = hooks.clone();
+            async move {
+                hooks
+                    .barrier(crate::service::worker::hooks::Barrier::LeaseRelease, true)
+                    .await
+            }
+        });
+        barriers.arrived(LEASE_RELEASE).await;
+        observer.abort();
+        assert!(
+            within("cancel barrier observer", observer)
+                .await
+                .unwrap_err()
+                .is_cancelled()
+        );
+        // The observer ended, but the actual poll is still held. A timed-out
+        // settlement must also retain ownership so teardown can finish it.
+        assert!(hooks.settle_barriers(Duration::ZERO).is_err());
+        assert!(
+            hooks.settle_barriers(Duration::ZERO).is_err(),
+            "a timed-out settlement forgot its unfinished poll"
+        );
+        assert!(!barriers.has(&format!("{LEASE_RELEASE}.release")));
+        drop(barriers);
+        hooks
+            .settle_barriers(Duration::ZERO)
+            .expect("fixture cleanup left a detached file poll");
+        drop(dir);
     }
 
     // L9.3: the gate closes in two steps, then the state is written, then
@@ -1487,6 +1559,7 @@ mod seams {
         rig.fake().send(Message::Resume).await;
         let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
+        assert!(!barriers.has(&format!("{LEASE_RELEASE}.release")));
         assert!(!rig.lease_is_free(), "the lease was kept");
         let answer = get(management, MANAGEMENT_CONFIG).await;
         assert!(!is_updating(&answer), "{answer}");
@@ -2043,6 +2116,7 @@ mod seams {
         rig.fake().send(Message::Resume).await;
         let next = rig.fake().recv_other_for("resume: resumed").await;
         assert!(matches!(next, Message::Resumed), "{next:?}");
+        assert!(!barriers.has(&format!("{GATE_CLOSED}.release")));
         assert!(!rig.lease_is_free(), "the lease was kept");
         let answer = get(management, MANAGEMENT_CONFIG).await;
         assert!(!is_updating(&answer), "{answer}");
@@ -2089,22 +2163,27 @@ mod seams {
 
     /// The answer to a `GET` that carries `key` as a bearer token.
     async fn get_bearer(address: SocketAddr, path: &str, key: &str) -> String {
-        let mut stream = TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(
-                format!(
-                    "GET {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n\r\n"
+        within(&format!("authenticated GET {path} from {address}"), async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "GET {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {key}\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut answer = String::new();
-        tokio::time::timeout(WAIT, stream.read_to_string(&mut answer))
-            .await
-            .expect("no answer in time")
-            .unwrap();
-        answer
+                .await
+                .unwrap();
+            let mut answer = String::new();
+            tokio::time::timeout(WAIT, stream.read_to_string(&mut answer))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("authenticated GET {path} from {address}: response read: {error}")
+                })
+                .unwrap();
+            answer
+        })
+        .await
     }
 
     /// The management listing acknowledges that every fixture credential was

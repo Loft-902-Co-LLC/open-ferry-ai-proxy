@@ -20,6 +20,15 @@ use crate::service::worker::{
 };
 
 const WAIT: Duration = Duration::from_secs(10);
+const STEP_WAIT: Duration = Duration::from_secs(30);
+
+/// A bound for a whole fixture step, including repeated frames or every
+/// stage of a socket exchange. Per-read bounds alone can be reset forever.
+async fn within<T>(step: &str, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(STEP_WAIT, future)
+        .await
+        .unwrap_or_else(|error| panic!("{step}: did not finish within {STEP_WAIT:?}: {error}"))
+}
 
 /// What a stop that took its budget must finish well inside, on a busy
 /// machine too. The budgets these tests give are 100 to 500 ms; the
@@ -39,11 +48,18 @@ struct Fake {
 
 impl Fake {
     async fn send(&mut self, message: Message) {
-        self.channel.send(&message).await.unwrap();
+        within(
+            &format!("send to worker: {message:?}"),
+            self.channel.send(&message),
+        )
+        .await
+        .unwrap();
     }
 
     async fn send_raw(&mut self, json: serde_json::Value) {
-        self.channel.send(&json).await.unwrap();
+        within("send raw supervisor frame", self.channel.send(&json))
+            .await
+            .unwrap();
     }
 
     async fn recv(&mut self) -> Message {
@@ -93,24 +109,30 @@ impl Fake {
     }
 
     async fn recv_other_for(&mut self, step: &str) -> Message {
-        loop {
-            match self.recv_for(step).await {
-                Message::Status { .. } => {}
-                other => return other,
+        within(step, async {
+            loop {
+                match self.recv_for(step).await {
+                    Message::Status { .. } => {}
+                    other => return other,
+                }
             }
-        }
+        })
+        .await
     }
 
     /// The mode, live count and phase of the next `status`.
     async fn recv_status(&mut self) -> (String, u64, String) {
-        loop {
-            if let Message::Status {
-                mode, live, phase, ..
-            } = self.recv().await
-            {
-                return (mode, live, phase);
+        within("receive worker status", async {
+            loop {
+                if let Message::Status {
+                    mode, live, phase, ..
+                } = self.recv_for("receive worker status").await
+                {
+                    return (mode, live, phase);
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Pings, and gives the phase of the first status that follows.
@@ -418,19 +440,22 @@ impl Rig {
 
 /// The answer to a `GET`.
 async fn get(address: SocketAddr, path: &str) -> String {
-    let mut stream = TcpStream::connect(address).await.unwrap();
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
-        )
-        .await
-        .unwrap();
-    let mut answer = String::new();
-    tokio::time::timeout(WAIT, stream.read_to_string(&mut answer))
-        .await
-        .expect("no answer in time")
-        .unwrap();
-    answer
+    within(&format!("GET {path} from {address}"), async {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        tokio::time::timeout(WAIT, stream.read_to_string(&mut answer))
+            .await
+            .unwrap_or_else(|error| panic!("GET {path} from {address}: response read: {error}"))
+            .unwrap();
+        answer
+    })
+    .await
 }
 
 /// Captures what the worker logs on this thread's runtime.

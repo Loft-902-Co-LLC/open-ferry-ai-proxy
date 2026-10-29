@@ -108,10 +108,17 @@ pub(crate) struct Hooks {
     /// test can't survive `process::exit`.
     #[cfg(all(feature = "blue-green-test", test))]
     exits: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    /// A cancelled observer still owns a blocking file poll. The fixture
+    /// must keep its release files until those polls have actually ended.
+    #[cfg(all(feature = "blue-green-test", test))]
+    barrier_tasks: BarrierTasks,
     /// Holds one mutating step of the hand over inside its blocking closure.
     #[cfg(test)]
     pub(crate) step_hold: Option<Arc<StepHold>>,
 }
+
+#[cfg(all(feature = "blue-green-test", test))]
+type BarrierTasks = Arc<std::sync::Mutex<Vec<std::sync::mpsc::Receiver<()>>>>;
 
 /// A test's hold on one blocking step of the hand over: the step reports
 /// that it arrived, then waits until the test releases it.
@@ -176,6 +183,8 @@ impl Hooks {
                 seams: Some(Arc::new(seams)),
                 #[cfg(test)]
                 exits: Arc::default(),
+                #[cfg(test)]
+                barrier_tasks: Arc::default(),
                 #[cfg(test)]
                 step_hold: None,
             },
@@ -258,9 +267,51 @@ impl Hooks {
         let Some(seams) = self.seams.clone() else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || seams.barrier_blocking(barrier, lease))
-            .await
-            .map_err(io::Error::other)?
+        #[cfg(test)]
+        let finished = {
+            let (finished, wait) = std::sync::mpsc::channel();
+            self.barrier_tasks.lock().unwrap().push(wait);
+            finished
+        };
+        tokio::task::spawn_blocking(move || {
+            // Dropping this sender also signals a panic, and happens in the
+            // blocking closure rather than in its cancellable observer.
+            #[cfg(test)]
+            let _finished = finished;
+            seams.barrier_blocking(barrier, lease)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Test teardown only: after releasing the files, join the actual polls
+    /// before deleting their directory. An observer's cancellation is not
+    /// the end of its `spawn_blocking` closure.
+    #[cfg(test)]
+    pub(crate) fn settle_barriers(&self, within: std::time::Duration) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let waits = std::mem::take(&mut *self.barrier_tasks.lock().unwrap());
+            if waits.is_empty() {
+                return Ok(());
+            }
+            let mut waits = waits.into_iter();
+            while let Some(wait) = waits.next() {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if matches!(
+                    wait.recv_timeout(left),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let mut pending = self.barrier_tasks.lock().unwrap();
+                    pending.push(wait);
+                    pending.extend(waits);
+                    return Err(format!(
+                        "{} blocking barrier poll(s) did not end within {within:?}",
+                        pending.len()
+                    ));
+                }
+            }
+        }
     }
 
     pub(crate) fn clear_arrivals(&self, barriers: &[Barrier]) {
