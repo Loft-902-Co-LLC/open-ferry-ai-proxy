@@ -18,6 +18,7 @@ mod blue_green;
 mod catalog_credential_quota_regression;
 mod classification;
 mod claude_ratelimit_cooldown;
+mod codex_client_partitions;
 mod codex_forcemap_ws_forward;
 mod codex_lease;
 mod codex_lease_owed;

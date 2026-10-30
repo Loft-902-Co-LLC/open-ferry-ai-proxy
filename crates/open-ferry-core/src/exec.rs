@@ -133,6 +133,16 @@ impl Options {
         }
     }
 
+    /// Whether the retained incoming headers identify a Codex client.
+    pub fn is_codex_client_request(&self) -> bool {
+        self.headers
+            .get_all(http::header::USER_AGENT)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| !value.trim().is_empty())
+            .is_some_and(crate::auth::is_codex_client_user_agent)
+    }
+
     /// The call's observation when any tap sees it.
     pub fn tapped(&self) -> Option<&Arc<Observation>> {
         self.observation
