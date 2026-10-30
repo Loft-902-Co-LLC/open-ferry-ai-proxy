@@ -7,11 +7,11 @@ use serde_json::json;
 
 // Only the measuring thread counts allocations, so parallel tests cannot affect
 // the root-transfer regression. The unusual size identifies its literal string.
-mod sibling_allocations {
+pub(crate) mod sibling_allocations {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
 
-    pub(super) const BYTES: usize = 4093;
+    pub(crate) const BYTES: usize = 4093;
 
     thread_local! {
         static MEASUREMENT: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
@@ -49,7 +49,7 @@ mod sibling_allocations {
     #[global_allocator]
     static ALLOCATOR: Allocator = Allocator;
 
-    pub(super) fn measure<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, usize) {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

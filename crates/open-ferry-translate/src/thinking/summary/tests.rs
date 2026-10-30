@@ -758,3 +758,132 @@ fn hiding_summaries_needs_active_thinking() {
         json!({"thinking": {"type": "Enabled", "budget_tokens": -1, "display": "summarized"}})
     );
 }
+
+// The shared test allocator counts copies of a sentinel string on this thread.
+// Keeping it alongside a large prefix detects even a temporary document clone.
+fn large_summary_body(settings: Value) -> Value {
+    use crate::gemini_schema::local_refs::tests::sibling_allocations::BYTES;
+    let mut body = json!({"input":"x".repeat(1 << 20),"sentinel":"s".repeat(BYTES)});
+    body.as_object_mut()
+        .unwrap()
+        .extend(settings.as_object().unwrap().clone());
+    body
+}
+
+#[test]
+fn absent_summary_deletes_preserve_output_without_document_copies() {
+    use crate::gemini_schema::local_refs::tests::sibling_allocations::measure;
+    let models = ModelCatalog::embedded();
+    let control = large_summary_body(json!({}));
+    let (copy, allocations) = measure(|| control.clone());
+    assert_eq!(copy, control);
+    assert_eq!(allocations, 1, "the allocator must detect a document clone");
+
+    for (format, summary, settings) in [
+        ("codex", HIDDEN, json!({})),
+        ("codex", HIDDEN, json!({"reasoning":{"effort":"high"}})),
+        ("codex", HIDDEN, json!({"reasoning":null})),
+        ("codex", HIDDEN, json!({"reasoning":false})),
+        ("codex", HIDDEN, json!({"reasoning":"kept"})),
+        ("codex", HIDDEN, json!({"reasoning":[]})),
+        (
+            "openai-response",
+            HIDDEN,
+            json!({"reasoning":{"effort":"high"}}),
+        ),
+        (
+            "codex",
+            SHOWN,
+            json!({"reasoning":{"summary":"auto","effort":"high"}}),
+        ),
+        (
+            "gemini",
+            SHOWN,
+            json!({"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}),
+        ),
+        (
+            "gemini",
+            HIDDEN,
+            json!({"generationConfig":{"thinkingConfig":{"includeThoughts":false}}}),
+        ),
+        (
+            "interactions",
+            SHOWN,
+            json!({"generation_config":{"thinking_summaries":"auto"}}),
+        ),
+        (
+            "interactions",
+            HIDDEN,
+            json!({"generation_config":{"thinking_summaries":"none"}}),
+        ),
+    ] {
+        let mut body = large_summary_body(settings);
+        let before = serde_json::to_vec(&body).unwrap();
+        let input_pointer = body["input"].as_str().unwrap().as_ptr();
+        let sentinel_pointer = body["sentinel"].as_str().unwrap().as_ptr();
+        let (_, copies) = measure(|| apply_for_model(&mut body, format, "", summary, models));
+        assert_eq!(copies, 0, "{format}/{summary:?}");
+        assert_eq!(body["input"].as_str().unwrap().as_ptr(), input_pointer);
+        assert_eq!(
+            body["sentinel"].as_str().unwrap().as_ptr(),
+            sentinel_pointer
+        );
+        assert_eq!(
+            serde_json::to_vec(&body).unwrap(),
+            before,
+            "{format}/{summary:?}"
+        );
+    }
+}
+
+#[test]
+fn present_summary_deletes_remove_only_aliases_without_document_copies() {
+    use crate::gemini_schema::local_refs::tests::sibling_allocations::{BYTES, measure};
+    let models = ModelCatalog::embedded();
+    for (format, summary, settings, expected) in [
+        (
+            "codex",
+            HIDDEN,
+            json!({"reasoning":{"summary":null,"generate_summary":false,"effort":"high"}}),
+            json!({"reasoning":{"effort":"high"}}),
+        ),
+        (
+            "openai-response",
+            HIDDEN,
+            json!({"reasoning":{"summary":"detailed","generate_summary":"auto"}}),
+            json!({}),
+        ),
+        ("codex", HIDDEN, json!({"reasoning":{}}), json!({})),
+        (
+            "codex",
+            SHOWN,
+            json!({"reasoning":{"summary":"concise","generate_summary":"x".repeat(BYTES)}}),
+            json!({"reasoning":{"summary":"auto"}}),
+        ),
+        (
+            "gemini",
+            SHOWN,
+            json!({"generationConfig":{"thinkingConfig":{"includeThoughts":false,"include_thoughts":true}},
+                "generation_config":{"thinking_config":{"include_thoughts":false,"includeThoughts":true}}}),
+            json!({"generationConfig":{"thinkingConfig":{"includeThoughts":true}},
+                "generation_config":{"thinking_config":{}}}),
+        ),
+        (
+            "interactions",
+            HIDDEN,
+            json!({"generation_config":{"thinking_summaries":"auto","thinkingSummaries":"auto","temperature":0.5}}),
+            json!({"generation_config":{"thinking_summaries":"none","temperature":0.5}}),
+        ),
+    ] {
+        let mut body = large_summary_body(settings);
+        let expected = large_summary_body(expected);
+        let input_pointer = body["input"].as_str().unwrap().as_ptr();
+        let (_, copies) = measure(|| apply_for_model(&mut body, format, "", summary, models));
+        assert_eq!(copies, 0, "{format}/{summary:?}");
+        assert_eq!(body["input"].as_str().unwrap().as_ptr(), input_pointer);
+        assert_eq!(
+            serde_json::to_vec(&body).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+}
