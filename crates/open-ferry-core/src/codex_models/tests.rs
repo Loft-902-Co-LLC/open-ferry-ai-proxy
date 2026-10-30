@@ -1015,21 +1015,16 @@ fn non_template_models_follow_the_catalog_by_display_name() {
         .iter()
         .map(|entry| (string_value(entry, "slug"), int_value(entry, "priority")))
         .collect();
-    let templates = CodexClientCatalog::embedded().unwrap();
-    let base = templates.templates().map(model_priority).max().unwrap();
-    // Non-template priorities follow the catalog's maximum, 100 apart.
-    let mut expected = vec![
-        (
-            "gpt-6-astra",
-            model_priority(templates.template("gpt-6-astra").unwrap()),
-        ),
-        ("gpt-5.5", model_priority(templates.default_template())),
-        ("Alpha", base + 100),
-        ("alpha-model", base + 200),
-        ("zeta-model", base + 300),
-    ];
-    expected.sort_by_key(|(_, priority)| *priority);
-    assert_eq!(order, expected);
+    assert_eq!(
+        order,
+        [
+            ("gpt-5.5", 1),
+            ("gpt-6-astra", 2),
+            ("Alpha", 143),
+            ("alpha-model", 243),
+            ("zeta-model", 343),
+        ]
+    );
 }
 
 #[test]
@@ -1183,4 +1178,49 @@ fn synthesized_model_inherits_current_template_version_when_opt_in_is_disabled()
         entries["custom-template-version"]["multi_agent_version"],
         templates.default_template()["multi_agent_version"]
     );
+}
+
+#[test]
+fn synthesized_models_keep_default_template_tools_and_unclamped_agent_effort() {
+    let registry = ModelRegistry::new();
+    let constrained = ModelInfo {
+        thinking: thinking(&["low", "medium"]),
+        ..model("custom-limited-agent")
+    };
+    registry.register_client(
+        "custom",
+        "openai-compatible-custom",
+        std::slice::from_ref(&constrained),
+    );
+    let providers = |id: &str| registry.model_providers(id);
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let template = templates.default_template();
+    for optimize in [false, true] {
+        let entries = build(
+            &registry,
+            std::slice::from_ref(&constrained),
+            Some(&providers),
+            optimize,
+            "0.153.4",
+        );
+        let entry = &entries[0];
+        assert_eq!(
+            entry["experimental_supported_tools"],
+            json!(["send_user_message_async", "clock"])
+        );
+        assert_eq!(
+            entry["experimental_supported_tools"],
+            template["experimental_supported_tools"]
+        );
+        assert_eq!(entry["multi_agent_reasoning_effort"], "xhigh");
+        assert_eq!(entry["node_repl_auto_review_required"], true);
+        assert_eq!(efforts(entry), ["low", "medium"]);
+        assert_eq!(entry["default_reasoning_level"], "medium");
+        assert_eq!(entry["tool_mode"], "direct");
+        assert_eq!(entry["use_responses_lite"], false);
+        assert_eq!(entry["supports_reasoning_effort_updates"], false);
+        assert_eq!(entry["supports_search_tool"], false);
+        assert_null(entry, "upgrade");
+        assert_null(entry, "availability_nux");
+    }
 }
