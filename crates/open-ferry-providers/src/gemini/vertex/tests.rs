@@ -283,7 +283,7 @@ fn location_endpoints() {
     }
     assert_eq!(
         vertex_base_url(""),
-        "https://us-central1-aiplatform.googleapis.com"
+        "https://aiplatform.googleapis.com"
     );
     assert_eq!(
         vertex_base_url(" global "),
@@ -363,7 +363,7 @@ fn reads_the_credential() {
     };
     assert_eq!(
         (project.as_str(), location.as_str()),
-        ("other", "us-central1")
+        ("other", "global")
     );
 }
 

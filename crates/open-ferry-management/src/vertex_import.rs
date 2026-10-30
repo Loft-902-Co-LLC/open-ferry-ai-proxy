@@ -13,7 +13,7 @@
 //!
 //! The account's JSON key file is sent as field `file` of a
 //! `multipart/form-data` form, with the region in field `location`, else
-//! in `?location=`, else `us-central1`. Its `private_key` must be an RSA
+//! in `?location=`, else `global`. Its `private_key` must be an RSA
 //! key, which is saved as PKCS #1 (see
 //! [`normalize_service_account`]), and it must have a `project_id`. The
 //! credential is saved as `vertex-<project_id>.json` in the auth directory
@@ -80,7 +80,7 @@ use crate::state::ManagementState;
 use crate::token_record::save_token_record;
 
 /// The region when none is given.
-const DEFAULT_LOCATION: &str = "us-central1";
+const DEFAULT_LOCATION: &str = "global";
 
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {

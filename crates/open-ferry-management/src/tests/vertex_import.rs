@@ -162,7 +162,7 @@ async fn imports_a_service_account() {
 }
 
 // Not upstream's: the region is the form's `location`, else the query's,
-// else `us-central1`.
+// else `global`.
 #[tokio::test]
 async fn location_falls_back_to_the_query_then_the_default() {
     let auth_dir = AuthDir::new();
@@ -181,7 +181,7 @@ async fn location_falls_back_to_the_query_then_the_default() {
             "asia-east1",
         ),
         (format!("{IMPORT}?location=asia-east1"), None, "asia-east1"),
-        (IMPORT.to_owned(), None, "us-central1"),
+        (IMPORT.to_owned(), None, "global"),
     ] {
         let body = import_at(&api, &path, contents.as_bytes(), location)
             .await

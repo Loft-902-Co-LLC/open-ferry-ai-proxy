@@ -88,7 +88,7 @@ const API_VERSION: &str = "v1";
 /// Vertex AI's global endpoint, for API keys.
 const GLOBAL_BASE_URL: &str = "https://aiplatform.googleapis.com";
 /// The location of a service account that names none.
-const DEFAULT_LOCATION: &str = "us-central1";
+const DEFAULT_LOCATION: &str = "global";
 
 /// Calls Gemini models on Vertex AI with service accounts or API keys
 /// (upstream's `GeminiVertexExecutor`).
