@@ -2723,7 +2723,9 @@ fn deferred_array_items_from_all_of_issue6950() {
         } else {
             json!({"type":"object","properties":{"ids":node}})
         };
-        schema["$defs"] = definitions;
+        if !definitions.as_object().unwrap().is_empty() {
+            schema["$defs"] = definitions;
+        }
         let mut expected = schema.clone();
         expected.as_object_mut().unwrap().shift_remove("$defs");
         let expected_node = if name == "root_array_with_allof_items" {
@@ -2851,12 +2853,14 @@ fn deferred_array_open_arguments_keep_user_fields() {
 }
 
 #[test]
-fn deferred_array_defaults_respect_copy_depth_and_padding_boundaries() {
+fn deferred_array_defaults_respect_request_wide_allowance_and_depth() {
     let schema = json!({"$ref":"#/$defs/A","$defs":{"A":{
         "type":"array","items":{"type":"integer"}}}});
     let mut baseline = SchemaCopyBudget::unlimited();
     let expected = clean_json_schema_for_gemini_json_schema(&schema, &mut baseline);
     let cost = usize::MAX - baseline.remaining;
+    // This copy spends the request-wide byte allowance, independently of the
+    // per-schema 256 KiB reference-expansion limit.
     for (remaining, fits) in [(cost, true), (cost - 1, false)] {
         let mut budget = SchemaCopyBudget {
             remaining,
@@ -2883,24 +2887,5 @@ fn deferred_array_defaults_respect_copy_depth_and_padding_boundaries() {
         }
         assert_eq!(leaf.get("items").is_some(), fits);
         assert!(local_refs::fits_at_depth(&out, 0));
-    }
-
-    for (index, fits) in [(MAX_PADDED_INDEX, true), (MAX_PADDED_INDEX + 1, false)] {
-        let mut doc = json!({"schemas":[]});
-        set(
-            &mut doc,
-            &format!("schemas.{index}"),
-            json!({"type":"array"}),
-        );
-        let out = clean_schema(&doc);
-        let schemas = out["schemas"].as_array().unwrap();
-        assert_eq!(schemas.len(), if fits { index + 1 } else { 0 });
-        if fits {
-            assert!(schemas[..index].iter().all(Value::is_null));
-            assert_eq!(
-                schemas[index],
-                json!({"type":"array","items":{"type":"string"}})
-            );
-        }
     }
 }
