@@ -1,5 +1,5 @@
 //! Ported from CLIProxyAPI internal/client/codex/optimize-multi-agent-v2/
-//! optimize_multi_agent_v2_test.go (v8.0.38, MIT).
+//! optimize_multi_agent_v2_test.go (v8.0.42, MIT).
 //!
 //! Moved: `TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata` and
 //! `TestCodexSpawnAgentModelsCacheInvalidation`, which test how the model

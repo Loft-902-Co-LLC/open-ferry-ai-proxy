@@ -3,7 +3,7 @@
 // applyMetaAPIHeaders) and meta_test.go (TestMetaExecutor_MetaCredsResolution,
 // TestMetaExecutor_PreservesPreviousResponseID, and the
 // ClientIdHeader_Issue6117 tests, inverted), with the translation errors
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a Meta call is made of: the credential's token and base URL, the

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/filelock_windows.go and
-// filelock_unix.go (v8.0.38, MIT); additional lock safety regression tests.
+// filelock_unix.go (v8.0.42, MIT); additional lock safety regression tests.
 use super::*;
 use std::fs;
 

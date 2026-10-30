@@ -199,7 +199,7 @@ Differences retained in these ports:
 - **Every ported file gets a header** naming its source, for example:
 
   ```rust
-  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.38, MIT).
+  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.42, MIT).
   // https://github.com/router-for-me/CLIProxyAPI
   ```
 

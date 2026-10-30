@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/server_routes.go (codexAlphaSearch,
-// sanitizeCodexAlphaSearchBody, rewriteCodexAlphaSearchModel) (v8.0.38, MIT).
+// sanitizeCodexAlphaSearchBody, rewriteCodexAlphaSearchModel) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search, the manager's [`Dispatcher::codex_alpha_search`].

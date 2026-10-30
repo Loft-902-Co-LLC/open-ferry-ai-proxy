@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/session_affinity_priority_test.go
-// and sdk/cliproxy/service_executionregistry_test.go (v8.0.38, MIT).
+// and sdk/cliproxy/service_executionregistry_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Quota-only rebinding through the manager's selection and outcome hooks.

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_overrides_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_overrides_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Per-credential overrides and the error handling around them: request

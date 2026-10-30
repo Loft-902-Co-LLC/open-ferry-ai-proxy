@@ -3,7 +3,7 @@
 // normalizeGeminiModelResourceName, buildInteractionsExecutionRequest,
 // Interactions, handleInteractionsNonStream, handleInteractionsStream and
 // forwardInteractionsStream), and the forced-provider branch of
-// providersForExecution in sdk/api/handlers/handlers_routing.go (v8.0.38, MIT).
+// providersForExecution in sdk/api/handlers/handlers_routing.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Gemini Interactions API: `POST /v1beta/interactions`.

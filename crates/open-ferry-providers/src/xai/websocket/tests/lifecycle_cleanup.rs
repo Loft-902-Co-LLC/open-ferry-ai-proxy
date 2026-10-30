@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
-// (auth removal and ID-state acquisition regression tests) (v8.0.38, MIT).
+// (auth removal and ID-state acquisition regression tests) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

@@ -4,7 +4,7 @@
 // geminiResponsesCarrierMatchesAdjacent, hasInternalCarrierFields,
 // stripGeminiResponsesCarrierMetadata, normalizeGeminiResponsesCarriers,
 // geminiResponsesCarrierDirection, geminiResponsesCarrierTarget,
-// isOpenAIResponsesDetachedCarrier) (v8.0.38, MIT).
+// isOpenAIResponsesDetachedCarrier) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Signature carriers: reasoning items that hold a Gemini thought signature

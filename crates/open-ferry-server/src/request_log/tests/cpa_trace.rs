@@ -1,4 +1,4 @@
-//! Ports CLIProxyAPI internal/logging/cpa_trace_test.go (v8.0.38, MIT);
+//! Ports CLIProxyAPI internal/logging/cpa_trace_test.go (v8.0.42, MIT);
 //! `TestFormatCPATraceID` is in open-ferry-core's `request_log/tests.rs`.
 //!
 //! Upstream's handlers set the trace through a callback; here a handler

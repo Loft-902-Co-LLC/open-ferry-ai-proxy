@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/logging/request_logger_writer.go
 // (generateFilename, generateErrorFilename, createUniqueLogFile,
 // sanitizeForFilename) and internal/api/handlers/management/logs.go
-// (parseLogMetadata, logFileIsNewer) (v8.0.38, MIT).
+// (parseLogMetadata, logFileIsNewer) (v8.0.42, MIT).
 // Filename hardening follows upstream 179d43dc from v8.0.42, ahead of the pin.
 // https://github.com/router-for-me/CLIProxyAPI
 

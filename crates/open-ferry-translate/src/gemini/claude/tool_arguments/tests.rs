@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/util/sanitize_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

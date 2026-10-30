@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/gemini/init.go,
 // internal/translator/gemini/claude/init.go and
-// internal/translator/gemini/openai/chat-completions/init.go (v8.0.38, MIT).
+// internal/translator/gemini/openai/chat-completions/init.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The translators to a Gemini upstream.

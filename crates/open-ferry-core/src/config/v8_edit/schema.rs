@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (legacyConfig) and
 // the structs it holds in internal/config, internal/pluginstore and
-// internal/registry (v8.0.38, MIT): their YAML field names, as yaml.v3
+// internal/registry (v8.0.42, MIT): their YAML field names, as yaml.v3
 // reads them with reflection.
 // https://github.com/router-for-me/CLIProxyAPI
 

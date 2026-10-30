@@ -3,7 +3,7 @@
 // Identifier, RequestToFormat, the Interactions branches of Execute and
 // ExecuteStream, executeInteractions, executeInteractionsStream,
 // shouldExecuteNativeInteractions, nativeInteractionsSourceFormat,
-// isNativeInteractionsAuth) (v8.0.38, MIT).
+// isNativeInteractionsAuth) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`InteractionsExecutor`]: the `gemini-interactions` provider, which

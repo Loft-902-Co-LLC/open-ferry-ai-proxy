@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/auth/filestore.go, and the existing-file merge
 // in Manager.Login in sdk/auth/manager.go, and
-// sdk/cliproxy/auth/codex_siwc_bind.go (v8.0.38, MIT).
+// sdk/cliproxy/auth/codex_siwc_bind.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`FileStore`]: credentials kept as JSON files in an auth directory.

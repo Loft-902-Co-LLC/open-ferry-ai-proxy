@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/codex/token.go, filename.go and
 // openai.go, and CreateTokenStorage and UpdateTokenStorage in
-// openai_auth.go (v8.0.38, MIT).
+// openai_auth.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex tokens, and the credential file that keeps them.

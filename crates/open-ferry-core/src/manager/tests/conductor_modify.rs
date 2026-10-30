@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
-// auth_files_patch_fields_test.go (v8.0.38, MIT).
+// auth_files_patch_fields_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::support::*;

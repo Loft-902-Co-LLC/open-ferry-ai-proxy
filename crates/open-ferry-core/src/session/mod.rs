@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/session (info.go and identity.go)
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session a request belongs to, for session affinity: read from what

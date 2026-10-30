@@ -8,7 +8,7 @@
 // TestXAIVideosNativeRetrieveUsesCanonicalBoundModel,
 // TestVideosCreatePreviewAliasUsesPreviewAuthWithGAPayload,
 // TestVideosCreatePreviewAliasUsesDefaultXAIModelsWithGAPayload,
-// TestXAIVideosNativePreviewAliasUsesPreviewAuthWithGAPayload) (v8.0.38, MIT).
+// TestXAIVideosNativePreviewAliasUsesPreviewAuthWithGAPayload) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The video routes through the credential manager and the real xAI

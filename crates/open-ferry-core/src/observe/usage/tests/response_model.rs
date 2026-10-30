@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI
-// internal/runtime/executor/helps/response_model_test.go (v8.0.38, MIT).
+// internal/runtime/executor/helps/response_model_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the Codex served model, the substitution check and its

@@ -2,7 +2,7 @@
 // (ProviderSupportsQuotaObservation, ObserveResponseHeadersForProvider,
 // ClearObservationSignals, cooldownFieldsOf, applyCooldownFields,
 // collectQuotaSignals, validQuotaSignalValue, quotaSignalRetentionRank,
-// isQuotaSignalHeaderForProvider and mergeQuotaObservation) (v8.0.38, MIT).
+// isQuotaSignalHeaderForProvider and mergeQuotaObservation) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Passive quota observations: what the provider's last response said of a

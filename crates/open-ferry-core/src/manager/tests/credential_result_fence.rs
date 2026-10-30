@@ -1,4 +1,4 @@
-// Regression coverage for the API-key exception to upstream v8.0.38's
+// Regression coverage for the API-key exception to upstream v8.0.42's
 // unchanged-bearer result fence (conductor_cooldown.go).
 use super::siwc::fixture;
 use super::support::*;

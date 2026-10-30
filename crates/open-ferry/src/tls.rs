@@ -1,5 +1,5 @@
 // Ported from the TLS half of Server.Start in CLIProxyAPI
-// internal/api/server.go (v8.0.38, MIT).
+// internal/api/server.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving over TLS when the config's `tls.enable` is on.

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_merge.go
 // (MergeRefreshedAuth, mergeAuthContent, IsAuthTokenPayloadKey) and
-// sdk/cliproxy/auth/metadata_keys.go (v8.0.38, MIT).
+// sdk/cliproxy/auth/metadata_keys.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Folding a refreshed credential back into the live one.

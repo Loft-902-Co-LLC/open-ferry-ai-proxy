@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response_test.go
-// (v8.0.38, MIT), and its v8.0.38 tests (v8.0.38, MIT).
+// (v8.0.42, MIT), and its v8.0.42 tests (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported. The tests without an upstream name are new; their

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/oauth_siwc.go
-// (GetSIWCStatus, v8.0.38, MIT).
+// (GetSIWCStatus, v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Read-only local SIWC status. The manager is always present in this port;

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_request_test.go
-// and noop_optimization_test.go (v8.0.38, MIT), and claude_gemini_user_turn_test.go
-// (v8.0.38, MIT).
+// and noop_optimization_test.go (v8.0.42, MIT), and claude_gemini_user_turn_test.go
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Changed: TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs

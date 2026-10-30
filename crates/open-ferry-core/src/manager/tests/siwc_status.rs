@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_issue6819_test.go
-// (v8.0.38, MIT), with registration and partition concurrency regressions.
+// (v8.0.42, MIT), with registration and partition concurrency regressions.
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::siwc::{at, fixture};

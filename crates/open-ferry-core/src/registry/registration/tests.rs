@@ -7,7 +7,7 @@
 // and oauth_model_alias_test.go, internal/config/oauth_model_alias_test.go
 // and oauth_settings_test.go, internal/modelconfig/model_info_test.go,
 // internal/auth/codex/jwt_parser_test.go and
-// internal/watcher/synthesizer/file_test.go (v8.0.38, MIT).
+// internal/watcher/synthesizer/file_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of registration.
@@ -2399,7 +2399,7 @@ fn vertex_declared_openapi_names_and_aliases_are_registered() {
 }
 
 // Ported from service_vertex_openapi_capabilities_test.go and
-// auth/vertex_openapi_capabilities_test.go (v8.0.38, MIT).
+// auth/vertex_openapi_capabilities_test.go (v8.0.42, MIT).
 #[test]
 fn vertex_openapi_registration_ownership_and_reasoning() {
     use crate::config::{Config, VertexCompatKey, VertexCompatModel};

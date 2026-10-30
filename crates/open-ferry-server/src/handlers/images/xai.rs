@@ -6,7 +6,7 @@
 // collectXAIImagesFromJSON, xaiImagesEditOptionsFromJSON,
 // mimeTypeFromOutputFormat, extractXAIImagesResponse,
 // buildImagesAPIResponseFromXAI and the events of streamImagesWithModel)
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI image requests, and the OpenAI images API answers and events made
