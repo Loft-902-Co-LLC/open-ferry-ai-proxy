@@ -877,13 +877,11 @@ mod tests {
             normalize_claude_tool_choice("claude", model, &mut body);
             assert_eq!(body, before, "{model}");
         }
-        {
-            let provider = "claude-cli";
-            let mut body = json!({"tool_choice":{"type":"any"}});
-            let before = body.clone();
-            normalize_claude_tool_choice(provider, "claude-opus-5-5", &mut body);
-            assert_eq!(body, before, "{provider}");
-        }
+        let provider = "claude-cli";
+        let mut body = json!({"tool_choice":{"type":"any"}});
+        let before = body.clone();
+        normalize_claude_tool_choice(provider, "claude-opus-5-5", &mut body);
+        assert_eq!(body, before, "{provider}");
         for choice in [
             json!({"type":"auto"}),
             json!({"type":"none"}),

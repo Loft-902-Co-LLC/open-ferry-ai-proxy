@@ -3260,24 +3260,22 @@ fn claude_55_forced_tools_leave_claude_cli_translation_unchanged() {
         model: "claude-opus-5-5".into(),
         payload: Bytes::from(payload.to_string()),
     };
-    {
-        let provider = "claude-cli";
-        let auth = Auth {
-            provider: provider.into(),
-            ..Auth::default()
-        };
-        let body = translate_request_for_auth(
-            None,
-            &auth,
-            &request,
-            &options(Format::CLAUDE),
-            "claude-opus-5-5",
-            false,
-            None,
-        )
-        .unwrap();
-        assert_eq!(body["tool_choice"], payload["tool_choice"], "{provider}");
-    }
+    let provider = "claude-cli";
+    let auth = Auth {
+        provider: provider.into(),
+        ..Auth::default()
+    };
+    let body = translate_request_for_auth(
+        None,
+        &auth,
+        &request,
+        &options(Format::CLAUDE),
+        "claude-opus-5-5",
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(body["tool_choice"], payload["tool_choice"], "{provider}");
 }
 
 #[test]
