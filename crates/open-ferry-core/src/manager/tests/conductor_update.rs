@@ -240,3 +240,117 @@ async fn manager_update_active_inherits_model_states() {
         .expect("expected model state to be present");
     assert_eq!(state.quota.backoff_level, backoff_level);
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47_relogin_recovers_refresh_failures_and_preserves_live_holds() {
+    use crate::auth::{AuthError, ModelState, QuotaState};
+    for invalid_grant in [false, true] {
+        for quota in [false, true] {
+            let h = Harness::new(Settings::default());
+            let deadline = h.now() + TimeDelta::hours(1);
+            let error = AuthError {
+                http_status: if invalid_grant { 400 } else { 503 },
+                message: if invalid_grant {
+                    "invalid_grant"
+                } else {
+                    "token endpoint outage"
+                }
+                .into(),
+                ..Default::default()
+            };
+            let mut old = auth_with_metadata(
+                "a",
+                "claude",
+                json!({"access_token":"old", "refresh_token":"old-r"}),
+            );
+            old.status = Status::Error;
+            old.unavailable = true;
+            old.last_error = Some(error.clone());
+            old.next_refresh_after = Some(deadline);
+            if invalid_grant {
+                old.next_retry_after = Some(deadline);
+            }
+            if quota {
+                old.next_retry_after = Some(deadline);
+                old.quota = QuotaState {
+                    exceeded: true,
+                    reason: "credential_quota".into(),
+                    next_recover_at: Some(deadline),
+                    backoff_level: 3,
+                    ..Default::default()
+                };
+            }
+            old.model_states.insert(
+                "unauthorized".into(),
+                ModelState {
+                    unavailable: true,
+                    status: Status::Error,
+                    last_error: Some(AuthError {
+                        http_status: 400,
+                        message: "invalid_grant".into(),
+                        ..Default::default()
+                    }),
+                    next_retry_after: Some(deadline),
+                    ..Default::default()
+                },
+            );
+            old.model_states.insert(
+                "unrelated".into(),
+                ModelState {
+                    unavailable: true,
+                    status: Status::Error,
+                    next_retry_after: Some(deadline),
+                    last_error: Some(AuthError {
+                        http_status: 503,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            );
+            h.add(old, &[]);
+            {
+                h.manager
+                    .lock()
+                    .auths
+                    .get_mut("a")
+                    .unwrap()
+                    .refresh_failures = 3;
+            }
+            let unchanged = (*h.get("a")).clone();
+            h.manager
+                .adopt_observed(&unchanged, None, |_| {
+                    Ok(crate::auth::AdoptionRead::Record(unchanged.clone()))
+                })
+                .unwrap();
+            assert_eq!(h.refresh_failures("a"), 3);
+            assert_eq!(h.get("a").next_refresh_after, Some(deadline));
+            let mut fresh = (*h.get("a")).clone();
+            fresh.metadata.insert("access_token".into(), json!("new"));
+            h.manager
+                .adopt_observed(&fresh, None, |_| {
+                    Ok(crate::auth::AdoptionRead::Record(fresh.clone()))
+                })
+                .unwrap();
+            let live = h.get("a");
+            assert_eq!(
+                h.refresh_failures("a"),
+                0,
+                "relogin clears refresh failures"
+            );
+            assert!(
+                live.next_refresh_after.is_none(),
+                "relogin clears refresh delay"
+            );
+            assert!(!live.model_states["unauthorized"].unavailable);
+            assert_eq!(
+                live.model_states["unrelated"].next_retry_after,
+                Some(deadline)
+            );
+            if quota {
+                assert!(live.quota.exceeded);
+                assert_eq!(live.quota.next_recover_at, Some(deadline));
+                assert_eq!(live.quota.backoff_level, 3);
+            }
+        }
+    }
+}

@@ -1373,7 +1373,7 @@ impl Manager {
         let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
         *slot = (*slot).max(existing_epoch);
         let live_epoch = *slot;
-        let refresh_failures = match mode {
+        let mut refresh_failures = match mode {
             UpdateMode::Replace => {
                 if context.metadata_unchanged {
                     auth.metadata = existing_auth.metadata.clone();
@@ -1606,6 +1606,11 @@ impl Manager {
         let mut generation = existing_generation.saturating_add(1);
         let existing_version = existing_auth.credential_version.max(1);
         let changed = credentials_changed(&existing_auth, &auth);
+        if !changed && !is_refresh && !is_disabled(&auth) {
+            refresh_failures = existing_failures;
+            auth.next_refresh_after = existing_auth.next_refresh_after;
+            auth.codex_refresh_failure = existing_auth.codex_refresh_failure.clone();
+        }
         auth.credential_version = if changed {
             auth.credential_version
                 .max(existing_version)
@@ -1642,11 +1647,23 @@ impl Manager {
                 auth.model_states = existing_auth.model_states.clone();
             }
             if (changed || is_refresh) && !auth.is_active_access_token_rejected() {
-                let new_unauthorized = auth
-                    .last_error
-                    .as_ref()
-                    .is_some_and(|err| is_unauthorized_error(ErrView::Auth(err)));
-                if has_unauthorized_auth_failure(&existing_auth) || new_unauthorized {
+                if changed {
+                    refresh_failures = 0;
+                    auth.next_refresh_after = None;
+                    auth.codex_refresh_failure = None;
+                }
+                let new_unauthorized = auth.last_error.as_ref().is_some_and(|err| {
+                    is_unauthorized_error(ErrView::Auth(err))
+                        || super::classify::is_invalid_grant_result_error(err)
+                });
+                let stale_unavailable = auth.unavailable
+                    && auth.next_retry_after.is_none_or(|time| time <= now)
+                    && !(auth.quota.exceeded
+                        && auth.quota.next_recover_at.is_none_or(|time| time > now));
+                if has_unauthorized_auth_failure(&existing_auth)
+                    || new_unauthorized
+                    || stale_unavailable
+                {
                     auth.unavailable = false;
                     auth.next_retry_after = None;
                     auth.cooldown_recorded_seq = 0;
