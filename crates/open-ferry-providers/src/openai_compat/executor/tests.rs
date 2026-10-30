@@ -44,6 +44,7 @@ use super::*;
 use crate::json::{exists, get};
 
 mod images;
+mod usage_finalizer;
 
 /// One request the mock received.
 #[derive(Clone, Debug)]
