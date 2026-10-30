@@ -366,3 +366,113 @@ async fn p47_relogin_recovers_refresh_failures_and_preserves_live_holds() {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_token_changing_still_due_refresh_keeps_ineffective_backoff() {
+    let h = Harness::new(Settings::default());
+    let executor = FakeExecutor::new("claude");
+    executor.set_lead(Some(std::time::Duration::from_secs(60)));
+    executor.set_refresh(|before| {
+        let mut after = before.clone();
+        after
+            .metadata
+            .insert("access_token".into(), json!("dummy-rotated"));
+        Ok(after)
+    });
+    h.executor(&executor);
+    h.add(
+        auth_with_metadata(
+            "a",
+            "claude",
+            json!({
+                "access_token":"dummy-old", "refresh_token":"dummy-refresh",
+                "expires_at": (h.now() - TimeDelta::hours(1)).to_rfc3339()
+            }),
+        ),
+        &[],
+    );
+    h.manager
+        .lock()
+        .auths
+        .get_mut("a")
+        .unwrap()
+        .refresh_failures = 3;
+    h.manager.force_refresh("a").await.unwrap();
+    let live = h.get("a");
+    assert_eq!(
+        live.next_refresh_after,
+        Some(h.now() + TimeDelta::seconds(30))
+    );
+    assert_eq!(h.refresh_failures("a"), 0);
+    assert!(!crate::manager::refresh::should_refresh(
+        &live,
+        Some(std::time::Duration::from_secs(60)),
+        h.now()
+    ));
+    assert_eq!(executor.refresh_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_token_edit_keeps_its_explicit_refresh_delay() {
+    for explicit in [false, true] {
+        let h = Harness::new(Settings::default());
+        let old_delay = h.now() + TimeDelta::hours(1);
+        let new_delay = h.now() + TimeDelta::hours(2);
+        let mut initial = auth_with_metadata("a", "claude", json!({"access_token":"dummy-old"}));
+        initial.next_refresh_after = Some(old_delay);
+        h.add(initial, &[]);
+        h.manager
+            .edit_unsaved("a", |auth| {
+                auth.metadata
+                    .insert("access_token".into(), json!("dummy-edit"));
+                if explicit {
+                    auth.next_refresh_after = Some(new_delay);
+                }
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        assert_eq!(h.get("a").next_refresh_after, explicit.then_some(new_delay));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_relogin_retains_aggregated_quota_status_without_auth_error() {
+    for status in [400, 401] {
+        let h = Harness::new(Settings::default());
+        let deadline = h.now() + TimeDelta::hours(1);
+        let mut initial = auth_with_metadata("a", "claude", json!({"access_token":"dummy-old"}));
+        initial.status = Status::Error;
+        initial.unavailable = true;
+        initial.next_retry_after = Some(deadline);
+        initial.quota = QuotaState {
+            exceeded: true,
+            reason: "quota".into(),
+            next_recover_at: Some(deadline),
+            ..Default::default()
+        };
+        initial.last_error = Some(crate::auth::AuthError {
+            http_status: status,
+            message: if status == 400 {
+                "invalid_grant"
+            } else {
+                "unauthorized"
+            }
+            .into(),
+            ..Default::default()
+        });
+        h.add(initial, &[]);
+        h.manager
+            .edit_unsaved("a", |auth| {
+                auth.metadata
+                    .insert("access_token".into(), json!("dummy-login"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        let live = h.get("a");
+        assert_eq!(live.status, Status::Error);
+        assert!(live.unavailable);
+        assert_eq!(live.next_retry_after, Some(deadline));
+        assert!(live.last_error.is_none());
+        assert_eq!(live.status_message, "quota");
+    }
+}

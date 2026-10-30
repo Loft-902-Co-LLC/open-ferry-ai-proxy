@@ -4474,6 +4474,11 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
     for quota in [false, true] {
         for order in &orders {
             let h = Harness::new(Settings::default());
+            let partition_deadline = partition_hold(&h.manager);
+            let executor = FakeExecutor::new("claude");
+            executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
+            h.manager.register_executor(executor);
+            let mut refresh_deadline = None;
             let mut initial = auth_with_metadata(
                 ID,
                 "claude",
@@ -4490,7 +4495,8 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                     },
                 );
             }
-            let base = h.add(initial, &[OPUS, ROUTE]);
+            initial.status = crate::auth::Status::Active;
+            h.add(initial, &[OPUS, ROUTE]);
             let old_seq = h.manager.next_execution_seq();
             let end = h.now() + TimeDelta::from_std(FIVE_DAYS).unwrap();
             let mut held = if quota {
@@ -4515,9 +4521,25 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                             crate::manager::classify::ErrView::Exec(&error),
                         ));
                         stale.execution_seq = old_seq;
+                        let current = h.get(ID);
+                        stale.credential_version = current.credential_version;
+                        stale.registration_epoch = current.registration_epoch;
                         h.manager.mark_result(&stale);
                     }
                     "relogin" => {
+                        let current = h.get(ID);
+                        let mut unauthorized = other_failure("", 401, Duration::ZERO);
+                        unauthorized.credential_version = current.credential_version;
+                        unauthorized.registration_epoch = current.registration_epoch;
+                        h.manager.mark_result(&unauthorized);
+                        assert_eq!(h.get(ID).status, crate::auth::Status::Error);
+                        assert!(h.manager.force_refresh(ID).await.is_err());
+                        assert!(
+                            h.get(ID)
+                                .last_error
+                                .as_ref()
+                                .is_some_and(|error| error.message.contains("invalid_grant"))
+                        );
                         let mut fresh = h.get(ID).as_ref().clone();
                         fresh
                             .metadata
@@ -4527,22 +4549,31 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                                 Ok(crate::auth::AdoptionRead::Record(fresh.clone()))
                             })
                             .unwrap();
+                        refresh_deadline = None;
                     }
                     "refresh" => {
+                        // Use the current version so a preceding relogin cannot
+                        // make this test pass through the older-version fence.
+                        let base = h.get(ID);
                         let mut refreshed = base.as_ref().clone();
                         refreshed
                             .metadata
                             .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
+                        refreshed.metadata.insert(
+                            "expires_at".into(),
+                            serde_json::json!("2000-01-01T00:00:00Z"),
+                        );
+                        refresh_deadline = Some(h.now() + TimeDelta::seconds(30));
+                        refreshed.next_refresh_after = refresh_deadline;
                         h.manager
                             .update_refreshed(&base, base.registration_epoch, refreshed)
                             .unwrap();
+                        rotate_outer_with_partition_hold(&h.manager);
                     }
                     "merge" => merge_the_alias(&h),
                     "recovery" => {
-                        // A fresh recognized quota claim after the merge must
-                        // still respect the foreign hold and standing refusal.
-                        h.manager
-                            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+                        // Recover the original claim: never recreate the hold
+                        // whose survival this family is asserting.
                         assert!(
                             !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
                             "{INVARIANT}: quota={quota}, {order:?}, recovery"
@@ -4551,6 +4582,16 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                     _ => unreachable!(),
                 }
                 let live = h.get(ID);
+                assert_eq!(
+                    live.next_refresh_after, refresh_deadline,
+                    "refresh hold: quota={quota}, {order:?}, {step}"
+                );
+                assert_partition_hold(&h.manager, partition_deadline);
+                assert_ne!(
+                    live.status,
+                    crate::auth::Status::Disabled,
+                    "status: {order:?}, {step}"
+                );
                 assert!(
                     blocked(&h, OPUS)
                         && live

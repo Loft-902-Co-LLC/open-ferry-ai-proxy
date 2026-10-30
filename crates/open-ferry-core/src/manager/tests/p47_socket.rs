@@ -36,6 +36,13 @@ async fn p47_socket_loss_never_replays_or_cools_a_credential() {
         assert!(error.stops_replay());
         assert!(error.ws_close.is_none());
         assert_eq!(
+            crate::manager::classify::result_error_from_error(
+                crate::manager::classify::ErrView::Exec(&error)
+            )
+            .code,
+            "request_scoped"
+        );
+        assert_eq!(
             executor.ids(Kind::Stream).len(),
             1,
             "lost generation replayed"

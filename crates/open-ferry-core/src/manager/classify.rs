@@ -200,6 +200,7 @@ pub(crate) fn result_error_from_error(err: ErrView<'_>) -> AuthError {
     }
     if let ErrView::Exec(error) = err
         && let Some(code) = error.failure_code()
+        && code != "upstream_websocket_turn"
     {
         result.code = code.into();
     } else if is_explicit_model_not_found_error(err, "") {

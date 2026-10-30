@@ -65,8 +65,22 @@ async fn p47_issue7017_model_and_auth_hints_never_create_quota() {
                     .get("sibling")
                     .is_some_and(|state| state.unavailable)
             );
-            for view in crate::manager::cooldown_snapshot_for_auth(&live, h.now()) {
-                assert_ne!(view.reason, "quota");
+            let views = crate::manager::cooldown_snapshot_for_auth(&live, h.now());
+            assert_eq!(views.len(), usize::from(hint != Some(Duration::ZERO)));
+            for view in views {
+                assert_eq!(view.reason, "transient_rate_limit");
+                assert_eq!(
+                    view.scope,
+                    if model.is_empty() {
+                        "credential"
+                    } else {
+                        "model"
+                    }
+                );
+                assert_eq!(view.model_key, model);
+                assert_eq!(Some(view.retry_at), next);
+                assert!(view.remaining_seconds > 0);
+                assert_eq!(view.http_status, 429);
                 assert!(view.backoff_level.is_none());
             }
         }
@@ -233,7 +247,10 @@ async fn p47_issue7017_wait_floor_uses_own_live_quota_only() {
 async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers() {
     for path in [0, 1, 2, 3, 4] {
         for credentials in [1, 2] {
-            let h = Harness::new(Settings::default());
+            let h = Harness::new(Settings {
+                disable_cooling: true,
+                ..Default::default()
+            });
             let executor = FakeExecutor::with("codex", move |_| {
                 let mut e = error(Some(Duration::from_secs(256)));
                 e.headers.insert("retry-after", "9999".parse().unwrap());
@@ -268,8 +285,12 @@ async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers()
                     .execute_stream(&providers, request("m"), options())
                     .await
                 {
-                    Err(e) => e,
-                    Ok(stream) => collect(stream).await.1.unwrap(),
+                    Err(e) if path == 2 => e,
+                    Err(_) => panic!("bootstrap and accepted failures must return a stream"),
+                    Ok(stream) => {
+                        assert_ne!(path, 2, "a pre-stream error is not a bootstrap stream");
+                        collect(stream).await.1.unwrap()
+                    }
                 },
             };
             assert_eq!(e.http_status(), 429);
@@ -332,7 +353,7 @@ fn p47_issue7017_trusted_deadline_identity_precedence_decay_and_expiry() {
     assert_eq!(cause.retry_after_header().unwrap(), "256");
     let mut zero = error(Some(Duration::ZERO));
     zero.headers.insert("retry-after", "9999".parse().unwrap());
-    assert!(zero.has_retry_after_override());
+    assert!(!zero.has_retry_after_override());
     assert!(zero.retry_after_header().is_none());
     let mut e = cause.with_trusted_retry_after(Duration::from_secs(8));
     assert_eq!(e.to_string(), original);
@@ -434,4 +455,133 @@ async fn p47_issue7017_disabled_transient_default_preserves_quota() {
     h.manager.mark_result(&result("fresh", None));
     assert!(!h.get("a").model_states["fresh"].unavailable);
     assert!(!h.get("a").model_states["fresh"].quota.exceeded);
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_retry_deadline_uses_only_the_errors_own_positive_hint() {
+    for path in 0..5 {
+        for cooling_disabled in [false, true] {
+            for (status, hint) in [
+                (429, Some(Duration::from_secs(3))),
+                (429, None),
+                (503, Some(Duration::from_secs(3))),
+                (503, None),
+            ] {
+                let h = Harness::new(Settings {
+                    disable_cooling: cooling_disabled,
+                    ..Default::default()
+                });
+                let executor = FakeExecutor::with("codex", move |_| {
+                    let mut error = ExecError::upstream(status, "dummy upstream failure");
+                    error.retry_after = hint;
+                    error.headers.insert("retry-after", "9999".parse().unwrap());
+                    match path {
+                        3 => Reply::chunks(vec![Err(error)]),
+                        4 => Reply::chunks(vec![Ok("accepted".into()), Err(error)]),
+                        _ => Reply::Err(error),
+                    }
+                });
+                h.executor(&executor);
+                h.add(auth("a", "codex"), &["m"]);
+                let providers = providers(&["codex"]);
+                let error = match path {
+                    0 => h
+                        .manager
+                        .execute(&providers, request("m"), options())
+                        .await
+                        .unwrap_err(),
+                    1 => h
+                        .manager
+                        .count_tokens(&providers, request("m"), options())
+                        .await
+                        .unwrap_err(),
+                    _ => {
+                        let stream = h
+                            .manager
+                            .execute_stream(&providers, request("m"), options())
+                            .await;
+                        if path == 2 {
+                            stream.err().expect("pre-stream failure")
+                        } else {
+                            collect(stream.expect("bootstrap/accepted failure stream"))
+                                .await
+                                .1
+                                .unwrap()
+                        }
+                    }
+                };
+                assert_eq!(error.http_status(), status);
+                assert_eq!(
+                    error.has_trusted_retry_deadline(),
+                    hint.is_some(),
+                    "path={path}, status={status}, cooling_disabled={cooling_disabled}"
+                );
+                if hint.is_some() {
+                    assert_eq!(
+                        error.retry_after_header().unwrap(),
+                        "3",
+                        "must not advertise the cooldown floor"
+                    );
+                    assert!(error.effective_retry_after().unwrap() <= Duration::from_secs(3));
+                }
+                assert_eq!(executor.calls().len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_cooling_followup_has_a_deadline_without_another_attempt() {
+    let h = Harness::new(Settings::default());
+    let executor = FakeExecutor::with("codex", |_| {
+        Reply::Err(error(Some(Duration::from_secs(256))))
+    });
+    h.executor(&executor);
+    h.add(auth("a", "codex"), &["m"]);
+    let providers = providers(&["codex"]);
+    let first = h
+        .manager
+        .execute(&providers, request("m"), options())
+        .await
+        .unwrap_err();
+    assert_eq!(first.retry_after_header().unwrap(), "256");
+    let followup = h
+        .manager
+        .execute(&providers, request("m"), options())
+        .await
+        .unwrap_err();
+    assert!(followup.has_trusted_retry_deadline());
+    assert!(followup.retry_after_header().is_some());
+    assert_eq!(executor.calls().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r2_capacity_after_an_expired_newer_cooldown_is_recorded() {
+    for model in ["", "m"] {
+        let h = Harness::new(Settings::default());
+        h.add(auth("a", "codex"), &["m"]);
+        let seq = h.manager.next_execution_seq();
+        let mut outage = result(model, Some(Duration::from_secs(30)));
+        outage.error = Some(result_error_from_error(ErrView::Exec(
+            &ExecError::upstream(503, "dummy outage"),
+        )));
+        outage.execution_seq = seq;
+        h.manager.mark_result(&outage);
+        h.clock.advance(Duration::from_secs(31));
+        let deadline = h.now() + TimeDelta::seconds(60);
+        let mut capacity = result(model, Some(Duration::from_secs(60)));
+        capacity.execution_seq = seq;
+        h.manager.mark_result(&capacity);
+        let live = h.get("a");
+        let next = if model.is_empty() {
+            live.next_retry_after
+        } else {
+            live.model_states[model].next_retry_after
+        };
+        assert_eq!(
+            next,
+            Some(deadline),
+            "an expired watermark must not discard capacity"
+        );
+    }
 }

@@ -813,37 +813,13 @@ impl Manager {
         Err(preferred(last, preferred_upstream).err)
     }
 
-    /// Trust the current recorded scope, never a sibling's aggregate or a
-    /// captured snapshot. A concurrent newer cooldown may extend this bound.
-    fn annotate_retry_deadline(&self, auth: &Auth, model: &str, error: ExecError) -> ExecError {
-        if error.status != 429 || error.has_trusted_retry_deadline() {
+    /// Trust only the error's positive hint, never a scheduler cooldown floor.
+    /// An existing deadline retains its identity, including after expiry.
+    fn annotate_retry_deadline(&self, error: ExecError) -> ExecError {
+        if error.has_trusted_retry_deadline() {
             return error;
         }
-        let now = self.now();
-        let next = self
-            .get(&auth.id)
-            .filter(|live| {
-                live.registration_epoch == auth.registration_epoch
-                    && live.credential_version == auth.credential_version
-            })
-            .and_then(|live| {
-                let own = if model.is_empty() {
-                    live.next_retry_after
-                } else {
-                    live.model_states
-                        .get(&super::text::canonical_model_key(model))
-                        .and_then(|state| state.next_retry_after)
-                };
-                if live.quota.reason == "credential_quota" {
-                    own.max(live.quota.next_recover_at)
-                } else {
-                    own
-                }
-            });
-        let wait = next
-            .and_then(|next| (next - now).to_std().ok())
-            .or(error.retry_after);
-        match wait {
+        match error.effective_retry_after().filter(|wait| !wait.is_zero()) {
             Some(wait) => error.with_trusted_retry_after(wait),
             None => error,
         }
@@ -1130,7 +1106,7 @@ impl Manager {
                         result.credential_scope
                     }
                 };
-                let err = self.annotate_retry_deadline(&auth, &attempt.result_model, err);
+                let err = self.annotate_retry_deadline(err);
                 if let Some(previous) = &mut upstream {
                     previous.err = err.clone();
                 }
@@ -1358,7 +1334,7 @@ impl Manager {
                     let result = failure_result(&attempt, &auth, &err, action, true);
                     self.mark_call_result_async(&result, attempt.session())
                         .await;
-                    let err = self.annotate_retry_deadline(&auth, &attempt.result_model, err);
+                    let err = self.annotate_retry_deadline(err);
                     if let Some(previous) = &mut upstream {
                         previous.err = err.clone();
                     }
@@ -1428,7 +1404,7 @@ impl Manager {
                     result.response_headers = stream_failure_headers(&headers, &err);
                     self.mark_call_result_async(&result, attempt.session())
                         .await;
-                    let err = self.annotate_retry_deadline(&auth, &attempt.result_model, err);
+                    let err = self.annotate_retry_deadline(err);
                     if let Some(previous) = &mut upstream {
                         previous.err = err.clone();
                     }
@@ -1682,9 +1658,7 @@ impl Forwarder {
                         .mark_call_result_async(&result, attempt.session())
                         .await;
                 }
-                let err = self
-                    .manager
-                    .annotate_retry_deadline(&self.auth, &self.result_model, err);
+                let err = self.manager.annotate_retry_deadline(err);
                 return self.tx.send(Err(err)).await.is_ok();
             }
             Ok(payload) => payload,

@@ -214,15 +214,16 @@ impl ExecError {
             ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
-    /// A trusted deadline or explicit capacity hint owns Retry-After delivery. Header
-    /// writers must remove raw passthrough even for zero or expired overrides.
+    /// Trusted deadlines suppress raw passthrough even after expiry. A capacity
+    /// hint owns delivery only when positive; zero leaves raw headers alone.
     pub fn has_retry_after_override(&self) -> bool {
         self.has_trusted_retry_deadline()
-            || (matches!(
+            || matches!(
                 self.kind,
                 ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
-            ) || self.failure_code() == Some("transient_rate_limit"))
-                && self.retry_after.is_some()
+            ) && self.retry_after.is_some()
+            || self.failure_code() == Some("transient_rate_limit")
+                && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
     /// A live trusted deadline wins over the provider hint. After natural

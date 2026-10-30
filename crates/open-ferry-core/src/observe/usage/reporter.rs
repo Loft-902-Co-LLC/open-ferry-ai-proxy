@@ -665,7 +665,11 @@ struct Failure {
 impl Failure {
     fn of(error: &ExecError) -> Self {
         Self {
-            code: error.failure_code().unwrap_or_default(),
+            code: if error.failure_class == Some(crate::exec::FailureClass::StreamTruncated) {
+                "stream_truncated"
+            } else {
+                ""
+            },
             status: i64::from(error.http_status()),
             body: error.to_string().trim().to_owned(),
             keeps_usage: error.keeps_usage,

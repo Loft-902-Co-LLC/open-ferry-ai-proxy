@@ -1868,7 +1868,7 @@ async fn configuration_completion_preserves_newer_partition_failure() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn outer_only_refresh_preserves_unattempted_siwc_failure() {
+async fn p47r2_outer_token_rotation_preserves_unattempted_siwc_failure() {
     let (_dir, store, manager, _gate) = disk_manager();
     // The fault or hook is on the unleased refresh save, so the store gives no lease.
     store.lease_unsupported.store(true, Ordering::SeqCst);
@@ -1877,6 +1877,12 @@ async fn outer_only_refresh_preserves_unattempted_siwc_failure() {
     let executor = expiry_executor();
     executor.set_refresh(|before| {
         let mut after = before.clone();
+        after
+            .metadata
+            .insert("access_token".into(), json!("dummy-outer-r3"));
+        after
+            .metadata
+            .insert("refresh_token".into(), json!("dummy-outer-refresh-r3"));
         after
             .metadata
             .insert("expired".into(), json!("2099-02-01T00:00:00Z"));

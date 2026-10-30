@@ -1661,9 +1661,11 @@ impl Manager {
                 auth.model_states = existing_auth.model_states.clone();
             }
             if (changed || is_refresh) && !auth.is_active_access_token_rejected() {
-                if changed {
-                    refresh_failures = 0;
-                    auth.next_refresh_after = None;
+                refresh_failures = 0;
+                if changed && !is_refresh {
+                    if auth.next_refresh_after == existing_auth.next_refresh_after {
+                        auth.next_refresh_after = None;
+                    }
                     auth.codex_refresh_failure = None;
                 }
                 let new_unauthorized = auth.last_error.as_ref().is_some_and(|err| {
@@ -1674,16 +1676,19 @@ impl Manager {
                     && auth.next_retry_after.is_none_or(|time| time <= now)
                     && !(auth.quota.exceeded
                         && auth.quota.next_recover_at.is_none_or(|time| time > now));
-                if has_unauthorized_auth_failure(&existing_auth)
-                    || new_unauthorized
-                    || stale_unavailable
-                {
+                let auth_failure =
+                    has_unauthorized_auth_failure(&existing_auth) || new_unauthorized;
+                let live_quota = auth.quota.next_recover_at.is_some_and(|time| time > now);
+                if !live_quota && (auth_failure || stale_unavailable) {
                     auth.unavailable = false;
                     auth.next_retry_after = None;
                     auth.cooldown_recorded_seq = 0;
                     auth.last_error = None;
                     auth.status_message.clear();
                     auth.status = Status::Active;
+                } else if auth_failure && auth.quota.exceeded && live_quota {
+                    auth.last_error = None;
+                    auth.status_message = auth.quota.reason.clone();
                 }
                 clear_unauthorized_model_states(&mut auth, now);
             }

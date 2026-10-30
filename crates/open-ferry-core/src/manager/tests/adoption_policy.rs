@@ -635,24 +635,31 @@ fn round7_repeated_edit_published_during_read_retries_the_observation() {
     assert_eq!(final_disk.metadata["note"], "operator");
 }
 
-#[test]
-fn p47_adoption_ordering_family_preserves_a_later_disable() {
+#[tokio::test(start_paused = true)]
+async fn p47_adoption_ordering_family_preserves_a_later_disable() {
     const INVARIANT: &str = "a later persisted disable is never undone by captured scan/persist/relogin notifications or an older refresh";
     let orders = five_step_orderings(["scan", "persist", "disable", "relogin", "refresh"]);
     assert_eq!(orders.len(), 120);
     for order in orders {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(FileStore::new(dir.path()));
-        let manager = Manager::new(
+        let clock = TestClock::new();
+        let manager = Manager::with_clock(
             Settings::default(),
             Arc::new(FakeModels::default()),
             Some(store.clone()),
+            clock.clock(),
         );
+        let partition_deadline = partition_hold(&manager);
+        let executor = FakeExecutor::new("claude");
+        executor.set_refresh(|_| Err(crate::exec::ExecError::upstream(400, "invalid_grant")));
+        manager.register_executor(executor);
         let mut auth = auth_with_metadata(
             "ordering.json",
             "claude",
             serde_json::json!({"type":"claude", "access_token":"dummy-before", "refresh_token":"dummy-before-refresh", "disabled":false}),
         );
+        auth.status = Status::Active;
         auth.file_name = auth.id.clone();
         let base = manager.register(auth).unwrap();
         let scan = store.read_back(&base).unwrap().unwrap();
@@ -673,19 +680,70 @@ fn p47_adoption_ordering_family_preserves_a_later_disable() {
             .metadata
             .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
         let mut disabled = false;
+        let mut refresh_deadline = None;
         for step in order {
             match step {
                 "disable" => {
-                    manager
-                        .edit_at_epoch(&base.id, base.registration_epoch, |auth| {
-                            auth.disabled = true;
-                            auth.status = Status::Disabled;
-                            auth.metadata
-                                .insert("disabled".into(), serde_json::json!(true));
-                            Ok::<_, ()>(true)
+                    // Capture the current credential, not the pre-relogin base:
+                    // only the post-read/F2 fences can reject this observation.
+                    let current = manager.get(&base.id).unwrap();
+                    let (read_tx, read_rx) = mpsc::channel();
+                    let (published_tx, published_rx) = mpsc::channel();
+                    let (release_tx, release_rx) = mpsc::channel();
+                    let release_rx = Mutex::new(release_rx);
+                    let once = std::sync::atomic::AtomicBool::new(true);
+                    *lock(&manager.shared.persist_hook) = Some(Arc::new(move |auth| {
+                        if auth.disabled && once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            published_tx.send(()).unwrap();
+                            lock(&release_rx)
+                                .recv_timeout(Duration::from_secs(30))
+                                .unwrap();
+                        }
+                    }));
+                    let editor = manager.clone();
+                    let edit = std::thread::spawn(move || {
+                        read_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                        editor
+                            .edit("ordering.json", |auth| {
+                                auth.disabled = true;
+                                auth.status = Status::Disabled;
+                                auth.metadata
+                                    .insert("disabled".into(), serde_json::json!(true));
+                                Ok::<_, ()>(true)
+                            })
+                            .unwrap()
+                            .unwrap();
+                    });
+                    let observed = manager
+                        .adopt_observed(&current, None, |live| {
+                            let record = store.read_back(live).unwrap().unwrap();
+                            read_tx.send(()).unwrap();
+                            published_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                            Ok(AdoptionRead::Record(record))
                         })
-                        .unwrap()
                         .unwrap();
+                    let mut read_again = false;
+                    let followup = manager
+                        .adopt_observed(&current, None, |_| {
+                            read_again = true;
+                            Ok(AdoptionRead::Missing)
+                        })
+                        .unwrap();
+                    release_tx.send(()).unwrap();
+                    edit.join().unwrap();
+                    *lock(&manager.shared.persist_hook) = None;
+                    assert!(
+                        matches!(observed, AdoptionResult::Retry),
+                        "post-read: {order:?}"
+                    );
+                    assert!(
+                        matches!(followup, AdoptionResult::Retry) && !read_again,
+                        "F2: {order:?}"
+                    );
+                    assert_eq!(
+                        current.credential_version,
+                        manager.get(&base.id).unwrap().credential_version
+                    );
                     disabled = true;
                 }
                 "refresh" => {
@@ -699,9 +757,50 @@ fn p47_adoption_ordering_family_preserves_a_later_disable() {
                     if disabled {
                         assert!(merged.disabled, "{INVARIANT}: {order:?}, refresh merge");
                     }
-                    manager
-                        .update_refreshed(&base, base.registration_epoch, refresh.clone())
-                        .unwrap();
+                    if !disabled {
+                        manager.mark_result(&crate::manager::CallResult {
+                            auth_id: base.id.clone(),
+                            provider: "claude".into(),
+                            credential_version: live.credential_version,
+                            registration_epoch: live.registration_epoch,
+                            error: Some(crate::auth::AuthError {
+                                http_status: 401,
+                                message: "dummy unauthorized".into(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        });
+                        assert_eq!(manager.get(&base.id).unwrap().status, Status::Error);
+                        assert!(manager.force_refresh(&base.id).await.is_err());
+                        assert!(
+                            manager
+                                .get(&base.id)
+                                .unwrap()
+                                .last_error
+                                .as_ref()
+                                .is_some_and(|error| error.message.contains("invalid_grant"))
+                        );
+                        let current = manager.get(&base.id).unwrap();
+                        let mut due = current.as_ref().clone();
+                        due.metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-still-due"));
+                        due.metadata.insert(
+                            "expires_at".into(),
+                            serde_json::json!("2000-01-01T00:00:00Z"),
+                        );
+                        due.status = Status::Active;
+                        due.last_error = None;
+                        refresh_deadline = Some(manager.now() + chrono::TimeDelta::seconds(30));
+                        due.next_refresh_after = refresh_deadline;
+                        manager
+                            .update_refreshed(&current, current.registration_epoch, due)
+                            .unwrap();
+                    } else {
+                        manager
+                            .update_refreshed(&base, base.registration_epoch, refresh.clone())
+                            .unwrap();
+                    }
+                    rotate_outer_with_partition_hold(&manager);
                 }
                 _ => {
                     let hint = match step {
@@ -718,10 +817,24 @@ fn p47_adoption_ordering_family_preserves_a_later_disable() {
                         .unwrap();
                 }
             }
+            let live = manager.get(&base.id).unwrap();
+            assert_eq!(
+                live.next_refresh_after, refresh_deadline,
+                "refresh hold: {order:?}, {step}"
+            );
+            assert_eq!(
+                live.status,
+                if disabled {
+                    Status::Disabled
+                } else {
+                    Status::Active
+                },
+                "status: {order:?}, {step}"
+            );
+            assert_partition_hold(&manager, partition_deadline);
             if disabled {
                 assert!(
-                    manager.get(&base.id).unwrap().disabled
-                        && store.read_back(&base).unwrap().unwrap().disabled,
+                    live.disabled && store.read_back(&base).unwrap().unwrap().disabled,
                     "{INVARIANT}: {order:?}, after {step}"
                 );
             }
