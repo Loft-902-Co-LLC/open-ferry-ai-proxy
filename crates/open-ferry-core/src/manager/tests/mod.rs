@@ -68,6 +68,7 @@ mod conductor_update;
 mod conductor_websocket_ready_error;
 mod conductor_weight_validation;
 mod config_apikey;
+mod configured_401;
 mod connection_lifecycle_cooldown;
 mod cooldown_backoff;
 mod cooldown_state;

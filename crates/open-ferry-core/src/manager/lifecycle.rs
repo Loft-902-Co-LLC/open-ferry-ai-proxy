@@ -3112,13 +3112,7 @@ impl Manager {
             if is_stale_result(result, &entry.auth) {
                 let stale_epoch = result.registration_epoch > 0
                     && result.registration_epoch < entry.auth.registration_epoch;
-                if !stale_epoch
-                    && !result.success
-                    && !super::classify::should_skip_credential_cooldown(result.error.as_ref())
-                    && result.error.as_ref().is_some_and(|error| {
-                        error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
-                    })
-                {
+                if !stale_epoch && super::scoped::rejects_access_token(result) {
                     let auth = Arc::make_mut(&mut entry.auth);
                     if auth.record_rejected_token(&result.access_token) {
                         auth.generation = auth.generation.saturating_add(1);
