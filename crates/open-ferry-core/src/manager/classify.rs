@@ -200,6 +200,7 @@ pub(crate) fn result_error_from_error(err: ErrView<'_>) -> AuthError {
     }
     if let ErrView::Exec(error) = err
         && let Some(code) = error.failure_code()
+        && code != "upstream_websocket_turn"
     {
         result.code = code.into();
     } else if is_explicit_model_not_found_error(err, "") {
@@ -237,8 +238,10 @@ pub(crate) fn should_skip_credential_cooldown(err: Option<&AuthError>) -> bool {
     if err.code == CODE_FORCE_COOLDOWN {
         return false;
     }
-    matches!(err.code.as_str(), "stream_truncated")
-        || is_request_scoped_result_error(err)
+    matches!(
+        err.code.as_str(),
+        "stream_truncated" | "upstream_websocket_turn"
+    ) || is_request_scoped_result_error(err)
         || is_connection_lifecycle_result_error(err)
         || is_transient_transport_result_error(err)
 }

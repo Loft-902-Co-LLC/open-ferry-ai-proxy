@@ -182,7 +182,7 @@ impl ExecError {
     pub fn stops_replay(&self) -> bool {
         matches!(
             self.failure_class,
-            Some(super::FailureClass::StreamTruncated)
+            Some(super::FailureClass::StreamTruncated | super::FailureClass::UpstreamWebsocketTurn)
         )
     }
 
@@ -232,6 +232,22 @@ impl ExecError {
             .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
             .filter(|remaining| !remaining.is_zero())
             .or(self.retry_after)
+    }
+
+    /// Ends one turn after upstream loss. No client close, replay, credential
+    /// cooldown or configurable request-error rule may follow this error.
+    /// Group C can mark its correlated not-sent/continuation body the same way.
+    pub fn with_websocket_turn(mut self) -> Self {
+        self.failure_class = Some(super::FailureClass::UpstreamWebsocketTurn);
+        self.request_scoped = true;
+        self.ws_close = None;
+        self
+    }
+
+    /// A safe public error for an accepted turn lost with its upstream socket.
+    /// Transport causes stay out of the client body.
+    pub fn upstream_websocket_lost() -> Self {
+        Self::upstream(502, r#"{"error":{"message":"Upstream websocket disconnected. The turn was not replayed and its outcome may be unknown. Send a new response.create with full conversation input without previous_response_id.","type":"server_error","code":"upstream_websocket_lost"}}"#).with_websocket_turn()
     }
 
     /// No credential serves the model.

@@ -575,3 +575,27 @@ fn p47_truncation_keeps_partial_usage_tier_and_classification() {
     }
 }
 
+#[test]
+fn p47r2_only_truncation_adds_a_usage_failure_code() {
+    for error in [
+        ExecError::transient_capacity("dummy capacity", None),
+        ExecError::upstream_websocket_lost(),
+        ExecError::stream_truncated("dummy truncation"),
+    ] {
+        let h = Harness::new();
+        let driver = ClientCall::new("m").stream().tap(&h);
+        driver.attempt(AttemptKind::Stream, "codex", "m", &auth("a", "0", "codex"));
+        driver.fail(&error);
+        let record = h.record();
+        assert_eq!(
+            int_at(&record, "/fail/status_code"),
+            i64::from(error.http_status())
+        );
+        if error.failure_code() == Some("stream_truncated") {
+            assert_eq!(record["fail"]["code"], "stream_truncated");
+        } else {
+            assert!(record["fail"].get("code").is_none());
+        }
+    }
+}
+
