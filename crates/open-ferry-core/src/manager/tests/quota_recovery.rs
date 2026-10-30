@@ -4406,3 +4406,29 @@ async fn an_out_of_range_check_time_costs_no_cooldown_record() {
         "live and restored agree"
     );
 }
+
+// Upstream d5816d5e must preserve a recovery that overtakes a file observation.
+#[tokio::test(start_paused = true)]
+async fn a_pending_file_observation_keeps_the_cooldown_a_usage_read_recovered() {
+    use crate::auth::AdoptionRead;
+    use crate::manager::AdoptionResult;
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, SONNET]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    let stale = h.get(ID);
+    h.clock.advance(Duration::from_secs(60));
+    let result = h
+        .manager
+        .adopt_observed(&stale, None, |_| {
+            assert!(recover(
+                &h,
+                &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])
+            ));
+            Ok(AdoptionRead::Record(stale.as_ref().clone()))
+        })
+        .unwrap();
+    assert!(matches!(result, AdoptionResult::Published { .. }));
+    assert!(!blocked(&h, OPUS));
+    assert!(!h.get(ID).model_states[OPUS].quota.exceeded);
+}
