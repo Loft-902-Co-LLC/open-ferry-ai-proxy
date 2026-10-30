@@ -960,7 +960,14 @@ impl CodexExecutor {
         .map_err(|error| failure(error.to_string()))?;
         // `applyCodexDirectImageHeaders`: the client's headers without its
         // `User-Agent`.
-        let mut headers = build_headers(auth, &options.headers, stream)?;
+        let mut client = options.headers.clone();
+        client.remove(header::USER_AGENT);
+        let mut headers = crate::codex::request::build_headers_from_sources(
+            auth,
+            &options.headers,
+            &client,
+            stream,
+        )?;
         headers.insert(
             header::USER_AGENT,
             HeaderValue::from_static(crate::codex::client::USER_AGENT),
