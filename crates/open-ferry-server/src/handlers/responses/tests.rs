@@ -108,6 +108,66 @@ async fn http_fragmented_metadata_json_colon_is_joined_then_filtered() {
     assert!(body.contains("response.completed"), "{body}");
 }
 
+// Rust cancellation drops the owning future/stream; it is not a second ready
+// channel competing with EOF as in Go's select. Verify both HTTP ownership points.
+#[tokio::test]
+async fn dropping_http_body_releases_the_provider_after_first_payload() {
+    for _ in 0..200 {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Hang(
+                HeaderMap::new(),
+                vec![Ok(Bytes::from_static(CREATED.as_bytes()))],
+            )],
+        );
+        let response = app
+            .oneshot(post("/v1/responses", STREAM, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        assert!(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .starts_with(b"event: response.created")
+        );
+        assert_eq!(dispatcher.live_streams(), 1);
+        drop(body);
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+#[tokio::test]
+async fn canceled_error_followed_by_eof_does_not_become_success() {
+    for before_first in [true, false] {
+        let mut chunks = Vec::new();
+        if !before_first {
+            chunks.push(Ok(Bytes::from_static(CREATED.as_bytes())));
+        }
+        chunks.push(Err(ExecError::new(ErrorKind::Canceled, "context canceled")));
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Stream(HeaderMap::new(), chunks)],
+        );
+        let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+        assert_eq!(
+            status.as_u16(),
+            if before_first { 499 } else { 200 },
+            "{body}"
+        );
+        assert!(body.contains("context canceled"), "{body}");
+        assert!(
+            !body.contains("response.completed") && !body.contains("[DONE]"),
+            "{body}"
+        );
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
 const CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n";
 const DELTA: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n";
