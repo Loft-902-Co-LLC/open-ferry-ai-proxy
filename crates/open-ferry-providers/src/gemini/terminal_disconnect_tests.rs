@@ -745,7 +745,7 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
     for provider in PROVIDERS {
         for format in [Format::OPENAI, Format::CLAUDE] {
             let reply = Reply::sse(
-                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
+                "data: {\"service_tier\":\"flex\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
             );
             let mock = Mock::answering(move |seen| {
                 if seen.path == "/token" {
@@ -790,6 +790,7 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             let mut config = Config::default();
             config.usage_statistics_enabled = true;
             let usage = Usage::new(&config);
+            open_ferry_core::observe::usage::reconfigure(&usage, None, &config, true);
             let (records, _subscription) = usage.observe();
             let context = Arc::new(RequestContext::new(http::Method::POST, "/test".into()));
             let tap = usage.tap(&context, &request, &options).unwrap();
@@ -830,8 +831,144 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             assert_eq!(record.total_tokens, 15);
             assert_eq!(record.tokens.input.total_tokens, 11);
             assert_eq!(record.tokens.output.total_tokens, 4);
-            assert_eq!(record.service_tier, "priority");
+            let queued = usage.pop_oldest(2);
+            assert_eq!(queued.len(), 1);
+            let record: serde_json::Value = serde_json::from_slice(&queued[0]).unwrap();
+            assert_eq!(record["service_tier"], "priority");
+            assert_eq!(record["response_service_tier"], "flex");
+            assert_eq!(record["fail"]["code"], "stream_truncated");
             assert!(records.try_recv().is_err());
+        }
+    }
+}
+
+// be929f07 provider handoff. Control lines must never start an interaction;
+// release each chunk independently and keep the upstream connection open.
+#[tokio::test]
+async fn vertex_generate_content_interactions_sse_framing() {
+    use bytes::Bytes;
+    for provider in ["vertex_api_key", "vertex_service_account"] {
+        for variant in [
+            "combined",
+            "split",
+            "whitespace",
+            "prefixed_done",
+            "duplicate_done",
+        ] {
+            let (reply, sender) = Reply::controlled();
+            let mock = Mock::answering(move |seen| {
+                if seen.path == "/token" {
+                    Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+                } else {
+                    reply.clone()
+                }
+            })
+            .await;
+            let (exec, auth) = executor(provider, &mock);
+            let req = request("gemini-2.5-flash", r#"{"input":"hello"}"#);
+            let mut response = exec
+                .execute_stream(auth, req, stream_options(&Format::INTERACTIONS))
+                .await
+                .unwrap();
+            for control in [
+                ": keepalive\n",
+                "event: message\n",
+                "id: bridge-1\n",
+                "retry: 1000\n",
+                "  : keepalive\r\n",
+                "\n",
+            ] {
+                sender.send(Bytes::from_static(control.as_bytes())).unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), response.chunks.next())
+                        .await
+                        .is_err(),
+                    "{provider}/{variant}/{control}: control line produced output"
+                );
+            }
+            let mut content = json!({"responseId":"framing", "candidates":[{"content":{"role":"model","parts":[
+                {"text":"bridge text"}, {"thought":true,"text":"bridge thought"},
+                {"functionCall":{"id":"call_weather","name":"weather","args":{"city":"Chicago"}}}
+            ]}, "finishReason":"STOP"}]});
+            let usage =
+                json!({"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15});
+            if variant != "split" {
+                content["usageMetadata"] = usage.clone();
+            }
+            let prefix = if variant == "whitespace" {
+                "  data:  "
+            } else {
+                "data: "
+            };
+            sender
+                .send(Bytes::from(format!("{prefix}{content}\r\n\n")))
+                .unwrap();
+            let mut output = String::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !output.contains("function_call") {
+                    output.push_str(
+                        std::str::from_utf8(&response.chunks.next().await.unwrap().unwrap())
+                            .unwrap(),
+                    );
+                }
+            })
+            .await
+            .unwrap();
+            if variant == "split" {
+                assert!(!output.contains("interaction.completed"));
+                sender
+                    .send(Bytes::from(format!(
+                        "data: {}\n\n",
+                        json!({"usageMetadata":usage})
+                    )))
+                    .unwrap();
+            }
+            let done = if variant == "prefixed_done" {
+                "  data: [DONE]\r\n\n"
+            } else {
+                "[DONE]\n"
+            };
+            sender.send(Bytes::from_static(done.as_bytes())).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !output.contains("[DONE]") {
+                    output.push_str(
+                        std::str::from_utf8(&response.chunks.next().await.unwrap().unwrap())
+                            .unwrap(),
+                    );
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                output.contains("bridge text")
+                    && output.contains("bridge thought")
+                    && output.contains("call_weather"),
+                "{output}"
+            );
+            assert_eq!(
+                output.matches("event: interaction.completed\n").count(),
+                1,
+                "{output}"
+            );
+            assert!(output.contains("\"total_tokens\":15"), "{output}");
+            assert_eq!(output.matches("[DONE]").count(), 1);
+            if variant == "duplicate_done" {
+                sender
+                    .send(Bytes::from_static(b"data: [DONE]\n\n"))
+                    .unwrap();
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), response.chunks.next())
+                    .await
+                    .is_err(),
+                "duplicate completion or DONE"
+            );
+            assert!(
+                mock.requests()
+                    .iter()
+                    .filter(|r| r.path != "/token")
+                    .all(|r| r.path.ends_with(":streamGenerateContent"))
+            );
         }
     }
 }

@@ -147,6 +147,17 @@ impl State {
                 let payload = payload.to_vec();
                 self.send(&payload).await;
             }
+            Lines::Raw if self.setup.response_format == Format::INTERACTIONS => {
+                let trimmed = open_ferry_translate::go::trim_space(&line);
+                let payload = open_ferry_translate::go::trim_space(
+                    trimmed.strip_prefix(b"data:").unwrap_or(trimmed),
+                );
+                if payload == b"[DONE]" {
+                    self.send(payload).await;
+                } else if let Some(payload) = json_payload(payload) {
+                    self.send(payload).await;
+                }
+            }
             Lines::Raw => self.send(&line).await,
         }
         if self.translated_error.is_some()
