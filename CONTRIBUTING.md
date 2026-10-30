@@ -58,6 +58,10 @@ checks. Both keep failing synthetic inputs for 14 days. See
 [parity in CI](tools/parity/README.md#in-ci) for manual dispatch, local reproduction
 and turning an artifact into a regression fixture.
 
+Local differential parity uses Go 1.26.10 with `GOTOOLCHAIN=local`. Check the
+selected binary with `go version` and pass it using `--go <path>`. See
+[Checking parity](UPSTREAM.md#checking-parity) for installation instructions.
+
 The merge queue also runs the two slowest, which a PR's own run leaves out: the blue-green process tests, split between three runners per OS, and the release builds, which must hold none of their test seams:
 
 ```sh

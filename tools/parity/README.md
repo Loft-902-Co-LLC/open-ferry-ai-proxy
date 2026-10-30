@@ -158,9 +158,9 @@ gh workflow run parity-scheduled.yml --ref main -f seed=42 -f random=100
 ```
 
 Both runs use the same reusable job. It checks out the exact
-`reference/cliproxyapi` gitlink (currently `911f49cbd49f4fe2516979754a7488a3fd14fe64`,
-v8.0.38), checks that the checkout matches, and uses Go 1.26.10, satisfying that
-pin's `go 1.26.0`. Cargo uses CI's shared Rust dependency cache, filled by the
+`reference/cliproxyapi` gitlink (currently `bc0643405a1d0adf77dd0f109972ac3313d66397`,
+v8.0.42), checks that the checkout matches, and uses Go 1.26.10, satisfying that
+pin's `go 1.26.10`. Cargo uses CI's shared Rust dependency cache, filled by the
 existing main-branch test job. The Go module downloads and the harness's own
 `target/parity/go-build` cache are kept separately. No credentials or live
 provider calls are used. The log and job summary show both commits, seed, random

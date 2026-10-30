@@ -95,12 +95,12 @@ Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. 
 
 ### By hand
 
-You need Git, Go >=1.26.10 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) describes the required Go toolchain) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
+You need Git, Go 1.26.10 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
 
 ```sh
 git clone --branch v8.0.42 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo build --release --locked -p open-ferry
-cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.10 --machine-note "<what the machine is>" --out docs/benchmarks.md
+GOTOOLCHAIN=local cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.10 --machine-note "<what the machine is>" --out docs/benchmarks.md
 ```
 
 It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout, and using the build from before when it was of the same clean commit, with the same Go and flags), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about 12 minutes, and longer when a level has to wait for ports to be freed. The options:

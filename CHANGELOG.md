@@ -18,6 +18,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Added
 
 - **A README quick start** from installation through an API-key provider and client setup to a verified model reply, using the installer's config and keys, with key recovery and port-conflict guidance. The Status section is shorter; its full feature inventory is in [docs/features.md](docs/features.md).
+- **Differential parity coverage for CLIProxyAPI v8.0.42** uses Go 1.26.10 and adds regressions for thinking refusals, Gemini schemas, tool calls and signatures, Interactions usage, Claude speed and search outcomes, and Codex commentary.
 - **Generated compatibility evidence matrix** separates reviewed Open Ferry fixture assertions, tested refusals, scripted routes and translation parity. CI checks exact test definitions and normalized body digests, requires explicit acceptance after body changes, exports every classified parity suite with explicit exclusions, and reuses workspace test harnesses without extra feature-resolution builds ([matrix](docs/compatibility.md)).
 - **Gemini Chat Completions and Responses requests can mix built-in and function tools.**
 - **Gemini model lists and details show token limits**, falling back to the model's context and output limits when Gemini-specific limits are unavailable.

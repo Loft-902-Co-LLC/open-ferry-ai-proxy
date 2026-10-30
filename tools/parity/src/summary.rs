@@ -36,7 +36,7 @@ pub struct SuiteResult {
 
 /// What the run compared against, and how its random cases were made.
 pub struct RunInfo<'a> {
-    /// `git describe` of the upstream checkout, such as `v8.0.38`.
+    /// `git describe` of the upstream checkout, such as `v8.0.42`.
     pub version: &'a str,
     pub commit: &'a str,
     /// `go env GOVERSION`, such as `go1.26.10`.
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn renders_totals_and_each_suite() {
         let run = RunInfo {
-            version: "v8.0.38",
-            commit: "0123456789abcdef0123",
+            version: "v8.0.42",
+            commit: "bc0643405a1d0adf77dd0f109972ac3313d66397",
             go_version: "go1.26.10",
             random: 5000,
             seed: 1,
@@ -226,7 +226,7 @@ mod tests {
             ],
         );
         assert!(text.contains(
-            "CLIProxyAPI v8.0.38 (commit `0123456789ab`), built with go1.26.10, with \
+            "CLIProxyAPI v8.0.42 (commit `bc0643405a1d`), built with go1.26.10, with \
              `--random 5000 --seed 1`: 80 hand-written and 6,160 random cases in all."
         ));
         assert!(text.contains("| 2 | 6,240 | 6,236 | 2 | 0 | 2 |\n"));
