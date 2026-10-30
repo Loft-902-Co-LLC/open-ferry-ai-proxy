@@ -1257,9 +1257,19 @@ async fn unsaved_adoption_returns_promptly_during_save_and_keeps_watermark() {
         .get("codex.json")
         .unwrap()
         .clone();
+    // The store records the write before persist raises the watermark on its
+    // blocking thread, so wait for that last step instead of racing it.
+    let covered = (stale.registration_epoch, stale.generation);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while *lock(&watermark) < covered {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the save raises the watermark");
     assert_eq!(
         *lock(&watermark),
-        (stale.registration_epoch, stale.generation),
+        covered,
         "the unsaved edit did not earn disk coverage"
     );
     manager
