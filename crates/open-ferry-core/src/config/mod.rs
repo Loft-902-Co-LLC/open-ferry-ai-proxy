@@ -88,6 +88,8 @@ mod claude_cli_tests;
 mod decode;
 pub mod diff;
 mod duration;
+#[cfg(test)]
+mod flow_comment_tests;
 mod image_generation;
 #[cfg(test)]
 mod ingress_tests;
