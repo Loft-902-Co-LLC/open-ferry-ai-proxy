@@ -252,7 +252,7 @@ pub struct GeminiToOpenAIResponsesStream {
     evidence: EvidenceStore,
     active_call: Option<partial_args::ActiveCall>,
     incomplete_call: bool,
-    pending_tool_signatures: Vec<String>,
+    saw_completed_call: bool,
     web_search_opened: bool,
     web_search_done: bool,
     web_search_index: i64,
@@ -564,7 +564,7 @@ impl GeminiToOpenAIResponsesStream {
             evidence: EvidenceStore::default(),
             active_call: None,
             incomplete_call: false,
-            pending_tool_signatures: Vec::new(),
+            saw_completed_call: false,
             web_search_opened: false,
             web_search_done: false,
             web_search_index: 0,
@@ -615,7 +615,7 @@ impl GeminiToOpenAIResponsesStream {
                 }
             }
         };
-        let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+        let Ok(parsed) = crate::json::exact::from_str(text) else {
             self.unreadable(&mut out);
             return out;
         };
@@ -671,12 +671,6 @@ impl GeminiToOpenAIResponsesStream {
     pub fn finalize_tool_input(&mut self) -> String {
         let mut out = String::new();
         if self.error.is_some() || self.completed {
-            return out;
-        }
-        if self.active_call.is_some() || self.incomplete_call {
-            if patch_enabled(&self.identities) {
-                self.fail(ToolInputError::Unterminated, &mut out);
-            }
             return out;
         }
         if !self.finish_reason.is_empty() {
@@ -1365,15 +1359,6 @@ impl GeminiToOpenAIResponsesStream {
                 .as_ref()
                 .is_some_and(|active| active.call.can_continue(call))
         });
-        if self.active_call.is_some() && function_call.is_none() {
-            if text.is_empty() {
-                if !signature.is_empty() {
-                    self.pending_tool_signatures.push(signature);
-                }
-                return true;
-            }
-            self.abort_streaming_call();
-        }
         let kind = if is_thought {
             "thought"
         } else if function_call.is_some() {
@@ -1429,7 +1414,13 @@ impl GeminiToOpenAIResponsesStream {
                 && (!self.reasoning_text.is_empty() || !self.reasoning_signature.is_empty()));
         if !signature.is_empty() && !is_thought {
             if continuation {
-                self.pending_tool_signatures.push(signature.clone());
+                if !self.seen_signatures.contains(&signature) {
+                    if !self.pending_signature.is_empty() && self.pending_signature != signature {
+                        let pending = std::mem::take(&mut self.pending_signature);
+                        self.emit_trailing(&pending, out);
+                    }
+                    self.pending_signature = signature.clone();
+                }
             } else if reasoning_active {
                 if self.reasoning_signature.is_empty() || self.reasoning_signature == signature {
                     self.reasoning_signature = signature.clone();
@@ -1468,7 +1459,7 @@ impl GeminiToOpenAIResponsesStream {
                 if !pending.is_empty() && pending != signature {
                     self.emit_trailing(&pending, out);
                 }
-                if self.msg_opened || !self.calls.is_empty() || !self.buffered_deltas.is_empty() {
+                if self.msg_opened || self.saw_completed_call || !self.buffered_deltas.is_empty() {
                     self.emit_trailing(&signature, out);
                 } else if !self.seen_signatures.contains(&signature) {
                     self.pending_signature = signature.clone();
@@ -1488,7 +1479,7 @@ impl GeminiToOpenAIResponsesStream {
         }
 
         if let Some(call) = function_call {
-            return self.function_call(call, args, explicit_index, out);
+            return self.function_call(call, args, explicit_index, continuation, out);
         }
         true
     }
@@ -1593,6 +1584,7 @@ impl GeminiToOpenAIResponsesStream {
         call: &Value,
         args: RawArgs<'_>,
         explicit_index: i64,
+        continuation: bool,
         out: &mut String,
     ) -> bool {
         // Responses streams need every other item done before a call starts.
@@ -1604,13 +1596,8 @@ impl GeminiToOpenAIResponsesStream {
         self.finalize_message(out);
         self.last_kind = FUNCTION;
 
-        if self
-            .active_call
-            .as_ref()
-            .is_some_and(|active| active.call.can_continue(call))
-            || is_streaming(call)
-        {
-            return self.streaming_call(call, explicit_index, out);
+        if continuation || is_streaming(call) {
+            return self.streaming_call(call, explicit_index, continuation, out);
         }
         if self.active_call.is_some() {
             self.abort_streaming_call();
@@ -1846,6 +1833,7 @@ impl GeminiToOpenAIResponsesStream {
                 },
             );
         }
+        self.saw_completed_call = true;
         true
     }
 

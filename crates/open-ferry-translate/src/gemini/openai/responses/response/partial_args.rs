@@ -10,7 +10,6 @@ impl GeminiToOpenAIResponsesStream {
     pub(super) fn abort_streaming_call(&mut self) {
         if self.active_call.take().is_some() {
             self.incomplete_call = true;
-            self.pending_tool_signatures.clear();
         }
     }
 
@@ -18,12 +17,9 @@ impl GeminiToOpenAIResponsesStream {
         &mut self,
         call: &Value,
         explicit_index: i64,
+        continuation: bool,
         out: &mut String,
     ) -> bool {
-        let continuation = self
-            .active_call
-            .as_ref()
-            .is_some_and(|active| active.call.can_continue(call));
         let mut active = if continuation {
             self.active_call.take().expect("active continuation")
         } else {
@@ -78,12 +74,13 @@ impl GeminiToOpenAIResponsesStream {
                 super::super::tool_search::call_item(&id, "in_progress", "{}")
             } else {
                 let mut item = json!({"id":item_id,"type":if identity.custom {"custom_tool_call"} else {"function_call"},
-                    "status":"in_progress","call_id":id});
+                    "status":"in_progress"});
                 item[if identity.custom {
                     "input"
                 } else {
                     "arguments"
                 }] = "".into();
+                item["call_id"] = id.clone().into();
                 set_tool_call_identity(&mut item, &identity.name, &identity.namespace);
                 item
             };
@@ -250,7 +247,7 @@ impl GeminiToOpenAIResponsesStream {
                 evidence.patch_call = active.patch.take();
             }
             json!({"id":format!("ctc_{}",active.call.id),"type":"custom_tool_call","status":"completed",
-                "call_id":active.call.id,"input":input})
+                "input":input,"call_id":active.call.id})
         } else {
             let seq = self.next_seq();
             push_event(
@@ -261,7 +258,7 @@ impl GeminiToOpenAIResponsesStream {
                 "item_id":format!("fc_{}",active.call.id),"output_index":index,"arguments":full}),
             );
             json!({"id":format!("fc_{}",active.call.id),"type":"function_call","status":"completed",
-                "call_id":active.call.id,"arguments":full})
+                "arguments":full,"call_id":active.call.id})
         };
         let call = self.calls.get(&index).expect("streaming call item");
         if !tool_search {
@@ -270,7 +267,9 @@ impl GeminiToOpenAIResponsesStream {
         let mut payload = json!({"type":"response.output_item.done","sequence_number":self.next_seq(),"output_index":index});
         payload["item"] = item;
         push_event(out, "response.output_item.done", &payload);
-        for signature in std::mem::take(&mut self.pending_tool_signatures) {
+        self.saw_completed_call = true;
+        if !self.pending_signature.is_empty() {
+            let signature = std::mem::take(&mut self.pending_signature);
             self.emit_trailing(&signature, out);
         }
         true

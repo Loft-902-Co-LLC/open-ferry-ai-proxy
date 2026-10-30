@@ -25,7 +25,7 @@
 //!
 //! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
-use super::{analyze, array, gjson_array, str_of};
+use super::{analyze, array, budget, gjson_array, str_of};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
@@ -90,7 +90,7 @@ fn repair_properties(
     Some((props, promoted))
 }
 fn repair(mut node: Value, depth: usize) -> Option<Value> {
-    if depth > 64 {
+    if !budget::value(&node) || depth > 64 {
         return None;
     }
     if !node.is_object() {
@@ -112,14 +112,17 @@ fn repair(mut node: Value, depth: usize) -> Option<Value> {
         let bare: Map<_, _> = names
             .into_iter()
             .map(|name| {
+                if !budget::charge(node.as_object().expect("object").len()) {
+                    return None;
+                }
                 let value = node
                     .as_object_mut()
                     .expect("object")
                     .shift_remove(&name)
                     .expect("collected name");
-                (name, value)
+                Some((name, value))
             })
-            .collect();
+            .collect::<Option<_>>()?;
         if !bare.is_empty() {
             let (bare, promoted) = repair_properties(bare, depth)?;
             if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
@@ -236,7 +239,7 @@ fn repair_list(values: Vec<Value>, depth: usize) -> Option<Value> {
 // Cycle fallbacks copy siblings without resolving their references; count those
 // copies too, rather than hiding an arbitrarily large subtree in Value::clone.
 fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Value> {
-    if depth > 64 {
+    if !budget::value(value) || depth > 64 {
         return None;
     }
     *remaining = remaining.checked_sub(1)?;
@@ -259,6 +262,9 @@ fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Va
 // The name-map flag follows upstream's trailing keyword parity, protecting names
 // such as properties.properties while visiting all the same JSON containers.
 fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
+    if !budget::value(value) {
+        return;
+    }
     if let Some(map) = value.as_object_mut() {
         for (key, child) in map {
             if name_map || !crate::gemini_schema::is_literal_value_keyword(key) {
@@ -270,7 +276,9 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
             walk(child, false, phase);
         }
     }
-    phase(value, name_map);
+    if budget::value(value) {
+        phase(value, name_map);
+    }
 }
 fn reference_hint(value: &mut Value, name_map: bool) {
     if !name_map
@@ -298,6 +306,9 @@ fn hint_presence(value: &mut Value, _: bool) {
     map.shift_remove("enum");
 }
 fn merge_missing(destination: &mut Value, incoming: &Value) {
+    if !budget::value(destination) || !budget::value(incoming) {
+        return;
+    }
     if let (Some(destination), Some(incoming)) = (destination.as_object_mut(), incoming.as_object())
     {
         for (key, value) in incoming {
@@ -345,7 +356,18 @@ fn all_of(node: &mut Value, _: bool) {
                             .collect();
                         for name in required {
                             let name = str_of(Some(name)).into_owned();
-                            if !names.contains(&name) {
+                            let mut found = false;
+                            for existing in &names {
+                                if !budget::charge(existing.len().min(name.len()).saturating_add(1))
+                                {
+                                    return;
+                                }
+                                if existing == &name {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
                                 names.push(name);
                             }
                         }
@@ -429,8 +451,9 @@ fn unions(node: &mut Value, name_map: bool) {
                 };
                 let selected: Map<_, _> = names
                     .iter()
-                    .map(|n| (n.clone(), props[n].clone()))
-                    .collect();
+                    .map(|n| budget::value(&props[n]).then(|| (n.clone(), props[n].clone())))
+                    .collect::<Option<_>>()
+                    .unwrap_or_default();
                 branch["type"] = json!("object");
                 branch["properties"] = Value::Object(selected);
             }
@@ -566,13 +589,29 @@ fn placeholders(node: &mut Value, _: bool) {
 }
 
 pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
+    if !budget::value(schema) {
+        return false;
+    }
     let Some(schema) = repair(schema.clone(), 0) else {
         return false;
     };
     let wrapped = Value::Object(Map::from_iter([("schema".into(), schema)]));
+    // The shared inliner owns its existing depth/copy bounds. Charge a
+    // conservative four walks per possible projection level (64), covering
+    // overlapping target scans, sorting, and transient copies, on both sides.
+    // Its own preflight still bounds the one expansion before the output check.
+    if !budget::copies(&wrapped, 4 * 64) {
+        return false;
+    }
     let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
+        // A truncated projection has spent its private allowance without a
+        // measurable output. Do not let later probes repeat that work.
+        let _ = budget::charge(usize::MAX);
         return false;
     };
+    if !budget::copies(&inlined, 4 * 64) {
+        return false;
+    }
     drop(wrapped);
     let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
         return false;

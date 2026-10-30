@@ -41,7 +41,6 @@ impl GeminiToClaudeStream {
                 return true;
             }
             let name = restore_sanitized_tool_name(self.sanitized_names.as_ref(), &raw_name);
-            self.current_tool = map_tool_name(self.tool_names.as_ref(), &name);
             let count = TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
             StreamingCall::new(
                 raw_name,
@@ -50,20 +49,33 @@ impl GeminiToClaudeStream {
                 self.block_index as i64,
             )
         };
-        let clean = |args: &Value| {
-            clean_arguments(
+        let name = restore_sanitized_tool_name(self.sanitized_names.as_ref(), &active.raw_name);
+        let tool = map_tool_name(self.tool_names.as_ref(), &name);
+        let parameterless = !continuation
+            && crate::gemini::claude::tool_arguments::parameterless_bounded(
+                &self.original_request,
+                &tool,
+                active.assembler.work_budget(),
+            );
+        let clean = |args: &Value, work: &crate::common::vertex_partial_args::WorkBudget| {
+            crate::gemini::claude::tool_arguments::clean_arguments_bounded(
                 args,
-                &self.current_tool,
+                &tool,
                 &self.original_request,
                 &self.translated_request,
+                work,
             )
         };
         let (delta, done) = match active.assembler.push(call, Some(&clean)) {
             Ok(result) => result,
             Err(_) => {
-                // The open block must not receive a successful stop on error.
-                self.active_call = Some(active);
-                self.abort_streaming_call();
+                if continuation {
+                    self.active_call = Some(active);
+                    self.abort_streaming_call();
+                } else {
+                    // No block was opened for this failed call. Keep the prior block.
+                    self.incomplete_call = true;
+                }
                 return true;
             }
         };
@@ -73,7 +85,8 @@ impl GeminiToClaudeStream {
             self.close_block(out);
             self.block = Block::None;
             active.index = self.block_index as i64;
-            self.current_parameterless = parameterless(&self.original_request, &self.current_tool);
+            self.current_tool = tool;
+            self.current_parameterless = parameterless;
             self.current_input_emitted = false;
             self.current_pending_empty = false;
             self.push_block_start(

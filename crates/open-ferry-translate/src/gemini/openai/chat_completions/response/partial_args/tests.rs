@@ -1,6 +1,8 @@
 // Native equivalents of 64316127's Gemini-to-Chat partialArgs cases.
 use super::*;
 
+mod review_tests;
+
 fn frame(call: Value, finish: bool) -> Value {
     let mut frame = json!({"candidates":[{"index":0,"content":{"parts":[{"functionCall":call}]}}]});
     if finish {

@@ -16,9 +16,15 @@ use crate::json::{path, str_of};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+mod budget;
 mod reclean;
 
 fn tool_name(tool: &Value) -> String {
+    if !budget::value(tool.get("name").unwrap_or(&Value::Null))
+        || !budget::value(path(tool, "function.name").unwrap_or(&Value::Null))
+    {
+        return String::new();
+    }
     let name = str_of(tool.get("name"));
     if name.trim().is_empty() {
         str_of(path(tool, "function.name")).trim().to_owned()
@@ -55,7 +61,11 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
     if name.is_empty() {
         return None;
     }
-    let tools = request.get("tools")?.as_array()?;
+    let tools = request.get("tools")?;
+    if !budget::value(tools) {
+        return None;
+    }
+    let tools = tools.as_array()?;
     let exact: Vec<_> = tools.iter().filter(|t| tool_name(t) == name).collect();
     let candidates: Vec<_> = if exact.is_empty() {
         let names: BTreeSet<_> = tools
@@ -84,11 +94,11 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
     let first = *schemas.first()?;
     schemas
         .iter()
-        .all(|s| s.map(Value::to_string) == first.map(Value::to_string))
+        .all(|s| s.map(budget::text) == first.map(budget::text))
         .then_some(first)
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct Info<'a> {
     properties: BTreeMap<String, Schemas<'a>>,
     required: BTreeSet<String>,
@@ -100,8 +110,50 @@ struct Info<'a> {
     object: bool,
     branches: Vec<Info<'a>>,
 }
+impl Clone for Info<'_> {
+    fn clone(&self) -> Self {
+        if !self.charge_copy() {
+            return Self::default();
+        }
+        Self {
+            properties: self.properties.clone(),
+            required: self.required.clone(),
+            allows: self.allows,
+            forbids: self.forbids,
+            pattern: self.pattern,
+            complex: self.complex,
+            unsafe_complex: self.unsafe_complex,
+            object: self.object,
+            branches: self.branches.clone(),
+        }
+    }
+}
+
 impl<'a> Info<'a> {
+    fn charge_copy(&self) -> bool {
+        if !budget::enabled() {
+            return true;
+        }
+        for (key, schemas) in &self.properties {
+            if !budget::charge(key.len().saturating_add(32).saturating_mul(16)) {
+                return false;
+            }
+            for text in &schemas.serialized {
+                if !budget::charge(text.len().saturating_add(32)) {
+                    return false;
+                }
+            }
+        }
+        self.required
+            .iter()
+            .all(|key| budget::charge(key.len().saturating_add(32).saturating_mul(16)))
+            && budget::charge(self.branches.len().saturating_mul(32))
+    }
+
     fn merge(&mut self, other: Self) {
+        if !other.charge_copy() {
+            return;
+        }
         for (key, values) in other.properties {
             for value in values.values {
                 unique(self.properties.entry(key.clone()).or_default(), value);
@@ -117,10 +169,15 @@ impl<'a> Info<'a> {
         self.object |= other.object;
     }
     fn dynamic(&self) -> bool {
-        self.pattern || (self.allows && !self.forbids) || self.branches.iter().any(Self::dynamic)
+        budget::charge(1)
+            && (self.pattern
+                || (self.allows && !self.forbids)
+                || self.branches.iter().any(Self::dynamic))
     }
     fn matches(&self, current: &Value) -> bool {
-        self.required.iter().all(|k| current.get(k).is_some())
+        self.required
+            .iter()
+            .all(|k| budget::charge(k.len().saturating_add(1)) && current.get(k).is_some())
     }
     fn branch_accepts(&self, key: &str, current: &Value) -> bool {
         self.pattern
@@ -128,6 +185,9 @@ impl<'a> Info<'a> {
             || self.parent_accepts(key, current)
     }
     fn parent_accepts(&self, key: &str, current: &Value) -> bool {
+        if !budget::charge(key.len().saturating_add(1).saturating_mul(16)) {
+            return false;
+        }
         self.branches
             .iter()
             .any(|b| !b.properties.contains_key(key) && b.branch_accepts(key, current))
@@ -168,6 +228,9 @@ impl<'a, 'b> IntoIterator for &'b Schemas<'a> {
     }
 }
 fn unique<'a>(values: &mut Schemas<'a>, value: &'a Value) {
+    if !budget::value(value) {
+        return;
+    }
     if values.serialized.insert(value.to_string()) {
         values.values.push(value);
     }
@@ -209,6 +272,9 @@ fn branches(schema: &Value) -> Option<Vec<&Value>> {
     Some(out.values)
 }
 fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if !budget::charge(reference.len().saturating_add(1).saturating_mul(16)) {
+        return None;
+    }
     let mut current = root;
     for segment in reference.strip_prefix("#/")?.split('/') {
         let segment = segment.replace("~1", "/").replace("~0", "~");
@@ -229,6 +295,15 @@ struct AnalysisReferences {
     cut: BTreeSet<String>,
 }
 
+impl AnalysisReferences {
+    fn charge_copy(&self) -> bool {
+        !budget::enabled()
+            || self.followed.iter().chain(&self.cut).all(|reference| {
+                budget::charge(reference.len().saturating_add(32).saturating_mul(16))
+            })
+    }
+}
+
 struct CachedAnalysis<T> {
     info: T,
     references: AnalysisReferences,
@@ -244,7 +319,29 @@ struct AnalysisMemo<T> {
     cache_hits: usize,
 }
 
-impl<T: Clone> AnalysisMemo<T> {
+trait CopyWork {
+    fn charge_copy(&self) -> bool;
+}
+impl CopyWork for Info<'_> {
+    fn charge_copy(&self) -> bool {
+        Info::charge_copy(self)
+    }
+}
+impl CopyWork for bool {
+    fn charge_copy(&self) -> bool {
+        budget::charge(1)
+    }
+}
+impl CopyWork for Option<Vec<&Value>> {
+    fn charge_copy(&self) -> bool {
+        budget::charge(
+            self.as_ref()
+                .map_or(1, |values| values.len().saturating_mul(32)),
+        )
+    }
+}
+
+impl<T: Clone + Default + CopyWork> AnalysisMemo<T> {
     fn resolve_with(
         &mut self,
         target: &Value,
@@ -254,6 +351,9 @@ impl<T: Clone> AnalysisMemo<T> {
         walk: impl FnOnce(&mut Self, &mut BTreeSet<String>, &mut AnalysisReferences) -> T,
         cacheable: fn(&T) -> bool,
     ) -> T {
+        if !budget::value(target) {
+            return T::default();
+        }
         if depth > 16 {
             return walk(self, visited, references);
         }
@@ -262,11 +362,16 @@ impl<T: Clone> AnalysisMemo<T> {
             .targets
             .get(&identity)
             .and_then(|depths| depths[depth].as_ref())
-            .filter(|cached| cached.references.followed.is_disjoint(visited))
+            .filter(|cached| {
+                cached.references.charge_copy() && cached.references.followed.is_disjoint(visited)
+            })
         {
             #[cfg(test)]
             {
                 self.cache_hits += 1;
+            }
+            if !cached.info.charge_copy() || !cached.references.charge_copy() {
+                return T::default();
             }
             references
                 .followed
@@ -284,7 +389,13 @@ impl<T: Clone> AnalysisMemo<T> {
         // its followed refs are inactive. Cuts already active at entry depend
         // on the caller, so those results stay uncached. Cacheable walks restore
         // visited; items failures, which can leave refs active, are not cached.
+        if !own.charge_copy() {
+            return T::default();
+        }
         if cacheable(&info) && own.cut.is_disjoint(visited) {
+            if !info.charge_copy() || !own.charge_copy() {
+                return T::default();
+            }
             self.targets
                 .entry(identity)
                 .or_insert_with(|| std::array::from_fn(|_| None))[depth] = Some(CachedAnalysis {
@@ -348,6 +459,9 @@ fn analyze_depth_memo<'a>(
     memo: &mut AnalysisMemo<Info<'a>>,
     references: &mut AnalysisReferences,
 ) -> Info<'a> {
+    if !budget::value(schema) {
+        return Info::default();
+    }
     let mut info = Info::default();
     let Some(map) = schema.as_object().filter(|_| depth <= 16) else {
         info.complex = true;
@@ -443,6 +557,14 @@ fn analyze_depth_memo<'a>(
     info
 }
 
+pub(super) fn parameterless_bounded(
+    request: &Value,
+    name: &str,
+    work: &crate::common::vertex_partial_args::WorkBudget,
+) -> bool {
+    budget::with(work, || parameterless(request, name))
+}
+
 pub(super) fn parameterless(request: &Value, name: &str) -> bool {
     match original_schema(request, name) {
         Some(None) => true,
@@ -453,6 +575,9 @@ pub(super) fn parameterless(request: &Value, name: &str) -> bool {
 
 // `functionNamesFromRequest`: collect raw names, preferring function.name.
 fn collect_function_names(tool: &Value, names: &mut Vec<String>) {
+    if !budget::value(tool) {
+        return;
+    }
     if let Some(tools) = tool.get("tools").and_then(Value::as_array) {
         for tool in tools {
             collect_function_names(tool, names);
@@ -491,10 +616,21 @@ fn sent_tool_name(original: &Value, target: &str) -> Option<String> {
         collect_function_names(tool, &mut names);
     }
     let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let bytes = names.iter().fold(0usize, |bytes, name| {
+        bytes.saturating_add(name.len().saturating_add(32))
+    });
+    if !budget::charge(bytes.saturating_mul(names.len().saturating_add(1))) {
+        return None;
+    }
     crate::responses_tools::sanitize_tool_names(&names).remove(target)
 }
 
 fn translated_schemas<'a>(sent: &'a Value, original: &Value, name: &str) -> Vec<&'a Value> {
+    if !budget::value(sent.get("tools").unwrap_or(&Value::Null))
+        || !budget::value(path(sent, "request.tools").unwrap_or(&Value::Null))
+    {
+        return Vec::new();
+    }
     let sent_name = sent_tool_name(original, name);
     let sanitized = sanitize_gemini_function_name(name);
     let mut exact = Vec::new();
@@ -565,6 +701,9 @@ fn items_memo<'a>(
     memo: &mut AnalysisMemo<Option<Vec<&'a Value>>>,
     references: &mut AnalysisReferences,
 ) -> Option<Vec<&'a Value>> {
+    if !budget::value(schema) {
+        return None;
+    }
     if depth > 16 || !schema.is_object() {
         return None;
     }
@@ -695,6 +834,9 @@ fn declares_deep_memo(
     memo: &mut AnalysisMemo<bool>,
     references: &mut AnalysisReferences,
 ) -> bool {
+    if !budget::value(schema) {
+        return false;
+    }
     if depth > 16 || !schema.is_object() {
         return false;
     }
@@ -745,7 +887,7 @@ fn clean_value(
     top: bool,
     depth: usize,
 ) {
-    if depth > 128 || originals.is_empty() {
+    if !budget::value(value) || depth > 128 || originals.is_empty() {
         return;
     }
     let infos: Vec<_> = originals.iter().map(|s| analyze(s, root)).collect();
@@ -870,21 +1012,34 @@ fn clean_value(
     }
 }
 
+pub(super) fn clean_arguments_bounded(
+    args: &Value,
+    name: &str,
+    original: &Value,
+    sent: &Value,
+    work: &crate::common::vertex_partial_args::WorkBudget,
+) -> Value {
+    budget::with(work, || clean_arguments(args, name, original, sent))
+}
+
 pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: &Value) -> Value {
+    if !budget::value(args) {
+        return Value::Null;
+    }
     let translated = translated_schemas(sent, original, name);
     if !args.is_object() && !translated.is_empty() {
-        return args.clone();
+        return budget::copy(args);
     }
     let Some(schema) = original_schema(original, name) else {
-        return args.clone();
+        return budget::copy(args);
     };
     let Some(schema) = schema else {
         return json!({});
     };
     if !args.is_object() {
-        return args.clone();
+        return budget::copy(args);
     }
-    let mut args = args.clone();
+    let mut args = budget::copy(args);
     clean_value(&mut args, &[schema], &translated, schema, true, 0);
     args
 }

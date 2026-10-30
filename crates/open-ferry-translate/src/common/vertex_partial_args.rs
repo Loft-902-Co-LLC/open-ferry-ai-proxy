@@ -16,7 +16,10 @@ const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NODES: usize = 65_536;
 const MAX_WORK: usize = 64 * 1024 * 1024;
 
-type Cleaner<'a> = Option<&'a dyn Fn(&Value) -> Value>;
+mod work;
+pub(crate) use work::WorkBudget;
+
+type Cleaner<'a> = Option<&'a dyn Fn(&Value, &WorkBudget) -> Value>;
 type Result<T> = std::result::Result<T, ArgumentError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +71,7 @@ pub(crate) struct Assembler {
     last_string: Option<usize>,
     probes: HashMap<Vec<Segment>, bool>,
     buffered: usize,
-    work: usize,
+    work: WorkBudget,
     full: String,
     error: Option<ArgumentError>,
     finished: bool,
@@ -89,6 +92,7 @@ impl Assembler {
     }
 
     fn push_inner(&mut self, call: &Value, cleaner: Cleaner<'_>) -> Result<(String, bool)> {
+        self.work.check()?;
         if self.finished {
             return Err(ArgumentError("Vertex arguments received after completion"));
         }
@@ -114,7 +118,7 @@ impl Assembler {
             let raw = bounded_json(args)?;
             self.charge_work(raw.len())?;
             self.full = match cleaner {
-                Some(clean) => bounded_json(&clean(args))?,
+                Some(clean) => bounded_json(&self.clean(clean, args)?)?,
                 None => raw,
             };
         } else if let Some(root) = self.root {
@@ -124,7 +128,7 @@ impl Assembler {
                 self.charge_work(raw.len())?;
                 let value = crate::json::exact::from_str(&raw)
                     .map_err(|_| ArgumentError("invalid assembled Vertex arguments"))?;
-                let cleaned = clean(&value);
+                let cleaned = self.clean(clean, &value)?;
                 self.prune(root, &cleaned);
             }
             self.emit(root, final_chunk)?;
@@ -133,7 +137,17 @@ impl Assembler {
         Ok((self.full[start..].to_owned(), final_chunk))
     }
 
+    pub(crate) fn work_budget(&self) -> &WorkBudget {
+        &self.work
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_used(&self) -> usize {
+        self.work.used()
+    }
+
     pub(crate) fn full_arguments(&self) -> Result<&str> {
+        self.work.check()?;
         match self.error {
             Some(error) => Err(error),
             None if self.full.is_empty() => Ok("{}"),
@@ -141,12 +155,14 @@ impl Assembler {
         }
     }
 
-    fn charge_work(&mut self, bytes: usize) -> Result<()> {
-        self.work = self.work.saturating_add(bytes);
-        if self.work > MAX_WORK {
-            return Err(ArgumentError("Vertex argument work limit exceeded"));
-        }
-        Ok(())
+    fn charge_work(&self, bytes: usize) -> Result<()> {
+        self.work.charge(bytes)
+    }
+
+    fn clean(&self, clean: &dyn Fn(&Value, &WorkBudget) -> Value, value: &Value) -> Result<Value> {
+        let cleaned = clean(value, &self.work);
+        self.work.check()?;
+        Ok(cleaned)
     }
 
     fn reserve(&mut self, bytes: usize) -> Result<()> {
@@ -171,19 +187,35 @@ impl Assembler {
         Ok(index)
     }
 
-    fn find(&self, segments: &[Segment]) -> Option<usize> {
-        let mut current = self.root?;
-        for segment in segments {
-            current = match (&self.nodes[current].kind, segment) {
-                (Kind::Object(children), Segment::Key(key)) => children
-                    .iter()
-                    .find(|(name, _)| name == key)
-                    .map(|(_, child)| *child)?,
-                (Kind::Array(children), Segment::Index(index)) => *children.get(index)?,
-                _ => return None,
-            };
+    fn object_child(&self, children: &[(String, usize)], key: &str) -> Result<Option<usize>> {
+        for (name, child) in children {
+            // Include compared bytes, not just the number of keys. Equal-length
+            // names can share an arbitrarily long prefix.
+            self.charge_work(1 + name.len().min(key.len()))?;
+            if name == key {
+                return Ok(Some(*child));
+            }
         }
-        Some(current)
+        Ok(None)
+    }
+
+    fn find(&self, segments: &[Segment]) -> Result<Option<usize>> {
+        let Some(mut current) = self.root else {
+            return Ok(None);
+        };
+        for segment in segments {
+            self.charge_work(1)?;
+            let child = match (&self.nodes[current].kind, segment) {
+                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key)?,
+                (Kind::Array(children), Segment::Index(index)) => children.get(index).copied(),
+                _ => None,
+            };
+            let Some(child) = child else {
+                return Ok(None);
+            };
+            current = child;
+        }
+        Ok(Some(current))
     }
 
     fn push_part(&mut self, part: &Value, cleaner: Cleaner<'_>) -> Result<()> {
@@ -193,9 +225,9 @@ impl Assembler {
             ));
         }
         let path = field(part, "jsonPath", "json_path");
-        let raw_path = path.and_then(Value::as_str).unwrap_or_default();
+        let raw_path = crate::json::str_of(path);
         self.charge_work(raw_path.len())?;
-        let segments = parse_path(raw_path)?;
+        let segments = parse_path(&raw_path)?;
         let string = field(part, "stringValue", "string_value").filter(|v| !v.is_null());
         let number = field(part, "numberValue", "number_value").filter(|v| !v.is_null());
         let boolean = field(part, "boolValue", "bool_value").filter(|v| !v.is_null());
@@ -205,7 +237,7 @@ impl Assembler {
             let node = if segments.is_empty() {
                 self.last_string
             } else {
-                self.find(&segments)
+                self.find(&segments)?
             };
             if let Some(node) = node
                 && let Kind::String { open, .. } = &mut self.nodes[node].kind
@@ -231,16 +263,7 @@ impl Assembler {
                 return Err(ArgumentError("cannot modify completed Vertex container"));
             }
             let found = match (&self.nodes[current].kind, segment) {
-                (Kind::Object(children), Segment::Key(key)) => {
-                    self.charge_lookup(children.len())?;
-                    match &self.nodes[current].kind {
-                        Kind::Object(children) => children
-                            .iter()
-                            .find(|(name, _)| name == key)
-                            .map(|(_, node)| *node),
-                        _ => unreachable!(),
-                    }
-                }
+                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key)?,
                 (Kind::Array(children), Segment::Index(index)) => children.get(index).copied(),
                 _ => return Err(ArgumentError("conflicting Vertex container types")),
             };
@@ -257,6 +280,10 @@ impl Assembler {
                     let kind = segments.get(at + 1).map_or(Kind::Unset, container);
                     let child = self.alloc(kind, held)?;
                     let next = self.nodes[current].next;
+                    if let Kind::Object(children) = &self.nodes[current].kind {
+                        // Searching for held entries and shifting the ordered vector.
+                        self.charge_work(children.len().saturating_sub(next).saturating_mul(2))?;
+                    }
                     let insert = match &self.nodes[current].kind {
                         Kind::Object(children) if !held => children
                             .iter()
@@ -328,10 +355,6 @@ impl Assembler {
         Ok(())
     }
 
-    fn charge_lookup(&mut self, count: usize) -> Result<()> {
-        self.charge_work(count)
-    }
-
     fn should_hold(&mut self, path: &[Segment], key: &str, cleaner: Cleaner<'_>) -> Result<bool> {
         let Some(clean) = cleaner else {
             return Ok(false);
@@ -374,7 +397,7 @@ impl Assembler {
             };
         }
         self.charge_work(bounded_json(&probe)?.len())?;
-        let cleaned = clean(&probe);
+        let cleaned = self.clean(clean, &probe)?;
         let mut current = Some(&cleaned);
         for segment in path {
             current = current.and_then(|v| match segment {
@@ -548,44 +571,48 @@ impl Assembler {
         Ok(true)
     }
 
-    fn can_accept(&self, call: &Value) -> bool {
+    fn can_accept(&self, call: &Value) -> Result<bool> {
+        self.work.check()?;
         if self.error.is_some() || self.finished {
-            return false;
+            return Ok(false);
         }
         let Some(parts) = field(call, "partialArgs", "partial_args") else {
-            return true;
+            return Ok(true);
         };
         let Some(parts) = parts.as_array() else {
-            return false;
+            return Ok(false);
         };
-        parts.iter().all(|part| {
+        for part in parts {
             if !part.is_object() {
-                return false;
+                return Ok(false);
             }
-            let Some(path) = field(part, "jsonPath", "json_path").and_then(Value::as_str) else {
-                return true;
+            let path = crate::json::str_of(field(part, "jsonPath", "json_path"));
+            self.charge_work(path.len().saturating_add(1))?;
+            let Ok(segments) = parse_path(&path) else {
+                continue;
             };
-            let Ok(segments) = parse_path(path) else {
-                return true;
-            };
-            let Some(index) = self.find(&segments) else {
-                return true;
+            let Some(index) = self.find(&segments)? else {
+                continue;
             };
             let node = &self.nodes[index];
             if matches!(node.kind, Kind::Unset) {
-                return true;
+                continue;
             }
             let string = field(part, "stringValue", "string_value").is_some_and(|v| !v.is_null());
             let scalar = field(part, "numberValue", "number_value").is_some_and(|v| !v.is_null())
                 || field(part, "boolValue", "bool_value").is_some_and(|v| !v.is_null())
                 || field(part, "nullValue", "null_value").is_some();
             if !string && !scalar && !will_continue(part) {
-                return true;
+                continue;
             }
-            (string || will_continue(part))
-                && !node.closed
-                && matches!(node.kind, Kind::String { open: true, .. })
-        })
+            if !(string || will_continue(part))
+                || node.closed
+                || !matches!(node.kind, Kind::String { open: true, .. })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -612,22 +639,30 @@ impl StreamingCall {
         if !call.is_object() || (call.get("args").is_some() && !is_streaming(call)) {
             return false;
         }
-        let id = call
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
+        if self.assembler.work.check().is_err() {
+            return true;
+        }
+        // Account before coercion and identity comparisons, including the paths
+        // that can bypass can_accept (matching IDs or omitted names).
+        let checked = bounded_json(call)
+            .and_then(|raw| self.assembler.charge_work(raw.len().saturating_add(1)));
+        if checked.is_err() {
+            // Keep this attached to the old call so push poisons it, rather than
+            // treating budget exhaustion as the start of a fresh call.
+            let _ = self.assembler.work.charge(MAX_WORK.saturating_add(1));
+            return true;
+        }
+        let id = crate::json::str_of(call.get("id"));
+        let id = id.trim();
         if !id.is_empty() && !self.upstream_id.is_empty() && id != self.upstream_id {
             return false;
         }
-        let name = call
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
+        let name = crate::json::str_of(call.get("name"));
+        let name = name.trim();
         name.is_empty()
             || (name == self.raw_name
-                && ((!id.is_empty() && id == self.upstream_id) || self.assembler.can_accept(call)))
+                && ((!id.is_empty() && id == self.upstream_id)
+                    || self.assembler.can_accept(call).unwrap_or(true)))
     }
 }
 
@@ -673,7 +708,9 @@ fn number_text(value: &Value) -> Result<String> {
     {
         return Ok(text.trim().to_owned());
     }
-    Ok("0".to_owned())
+    let number =
+        crate::json::float_of(value).ok_or(ArgumentError("non-finite Vertex argument number"))?;
+    bounded_json(&number)
 }
 
 fn append(out: &mut String, text: &str) -> Result<()> {

@@ -1,6 +1,8 @@
 // Native equivalents of 64316127's Gemini-to-Responses partialArgs cases.
 use super::*;
 
+mod review_tests;
+
 fn frame(parts: Value, finish: bool) -> Value {
     let mut frame = json!({"responseId":"resp-fixture","candidates":[{"content":{"parts":parts}}]});
     if finish {
@@ -104,16 +106,15 @@ fn repeated_calls_nested_arrays_scalars_and_deferred_signatures() {
             .iter()
             .filter(|event| event["item"]["type"] == "reasoning")
             .count(),
-        2
+        1
     );
     assert_eq!(of_type(&all, "response.completed").len(), 1);
 }
 
 #[test]
-fn truncated_replaced_interrupted_invalid_calls_have_no_successful_completion() {
+fn truncated_replaced_invalid_calls_have_no_successful_completion() {
     for next in [
         None,
-        Some(json!([{"text":"interrupt"}])),
         Some(
             json!([{"functionCall":{"name":"weather","id":"call_b","partialArgs":[{"jsonPath":"$.city","stringValue":"Paris"}]}}]),
         ),

@@ -4,6 +4,8 @@
 use super::*;
 use serde_json::json;
 
+mod review_tests;
+
 fn assemble(chunks: &[Value]) -> String {
     let mut assembler = Assembler::default();
     let mut joined = String::new();
@@ -202,10 +204,8 @@ fn depth_index_size_node_and_work_limits_poison_the_call() {
             )
             .is_err()
     );
-    let mut work = Assembler {
-        work: MAX_WORK,
-        ..Assembler::default()
-    };
+    let mut work = Assembler::default();
+    work.work.charge(MAX_WORK).unwrap();
     assert!(
         work.push(
             &json!({"partialArgs":[{"jsonPath":"$.a","numberValue":1}]}),
@@ -252,7 +252,7 @@ fn aggregate_output_and_fallback_copy_limits_are_enforced() {
 
 #[test]
 fn cleaner_probes_hold_placeholders_but_preserve_declared_values() {
-    let clean = |value: &Value| {
+    let clean = |value: &Value, _: &WorkBudget| {
         let mut value = value.clone();
         if let Some(object) = value.as_object_mut() {
             object.remove("_");

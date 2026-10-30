@@ -1,6 +1,8 @@
 // Native equivalents of 64316127's Gemini-to-Claude partialArgs cases.
 use super::*;
 
+mod review_tests;
+
 fn frame(parts: Value, finish: bool) -> Value {
     let mut frame = json!({"candidates":[{"content":{"parts":parts}}]});
     if finish {
@@ -183,13 +185,13 @@ fn nested_placeholder_cleaning_preserves_declared_reason_and_dotted_keys() {
         {"jsonPath":"$.real.reason","stringValue":"ke","willContinue":true},
         {"jsonPath":"$.a.b.keep","numberValue":1},
         {"jsonPath":"$['a.b'].junk","stringValue":"drop"},
-        {"jsonPath":"$.options.reason","stringValue":"injected"},
+        {"jsonPath":"$.options.reason","stringValue":"injected","willContinue":true},
         {"jsonPath":"$.items[0]._","boolValue":true},
         {"jsonPath":"$.items[0].id","numberValue":7}]}}]),
             false,
         ),
     );
-    all.extend(events(&mut stream, &frame(json!([{"functionCall":{"partialArgs":[{"jsonPath":"$.real.reason","stringValue":"pt"}]}}]), true)));
+    all.extend(events(&mut stream, &frame(json!([{"functionCall":{"partialArgs":[{"jsonPath":"$.real.reason","stringValue":"pt"},{"jsonPath":"$.options.reason","stringValue":"-more"}]}}]), true)));
     assert_eq!(
         arguments(&all),
         r#"{"real":{"reason":"kept"},"a":{"b":{"keep":1}},"a.b":{},"options":{},"items":[{"id":7}]}"#
