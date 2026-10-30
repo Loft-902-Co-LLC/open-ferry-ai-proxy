@@ -396,6 +396,7 @@ struct PublishedUpdate {
 
 #[derive(Default)]
 struct PublishContext {
+    file_observation: bool,
     origin: Option<(Arc<Auth>, u64)>,
     same_origin: Option<bool>,
     revision: Option<u64>,
@@ -1106,6 +1107,7 @@ impl Manager {
         validate_weight(&incoming)
             .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
         let context = PublishContext {
+            file_observation: !replace,
             origin: Some((captured, binding)),
             same_origin,
             revision: Some(revision),
@@ -1174,6 +1176,7 @@ impl Manager {
                         copy_observed_credentials(&mut auth, &captured);
                     }
                     let context = PublishContext {
+                        file_observation: false,
                         origin: Some((captured, binding)),
                         same_origin: Some(true),
                         policy_only_ineligible: !metadata_unchanged,
@@ -1233,7 +1236,7 @@ impl Manager {
     ) -> Result<Option<PublishedUpdate>, ManagerError> {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
-        let is_file_observation = context.revision.is_some();
+        let is_file_observation = context.file_observation;
         let lease_tail = match &mode {
             UpdateMode::Refresh { lease, .. } => lease.cloned().map(Box::new),
             _ => None,
