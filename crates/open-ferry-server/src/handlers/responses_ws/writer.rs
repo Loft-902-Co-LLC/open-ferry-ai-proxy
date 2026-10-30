@@ -112,10 +112,7 @@ impl Drop for LocalTurn {
     }
 }
 
-pub(super) type FrontendCheck = Arc<dyn Fn() -> Result<(), ErrorMessage> + Send + Sync>;
-
 struct Interrupt<S> {
-    frontend_check: Option<FrontendCheck>,
     dispatcher: Arc<dyn open_ferry_core::exec::Dispatcher>,
     session_id: String,
     sink: Arc<tokio::sync::Mutex<SplitSink<S, Message>>>,
@@ -124,11 +121,8 @@ struct Interrupt<S> {
 
 impl<S: Socket> Interrupt<S> {
     async fn handle(&self, payload: &Bytes) -> Result<(), axum::Error> {
-        if let Some(check) = &self.frontend_check
-            && let Err(error) = check()
-        {
-            return self.reject(&error).await;
-        }
+        // Cancellation only reduces this socket's work, so frontend access
+        // loss must not prevent it. Session and late-turn fences still apply.
         // Capture before the asynchronous lookup: its result belongs only
         // to the turn that was active when the interrupt arrived.
         let generation = {
@@ -301,7 +295,6 @@ impl<S: Socket> Conn<S> {
         socket: S,
         dispatcher: Arc<dyn open_ferry_core::exec::Dispatcher>,
         session_id: String,
-        frontend_check: Option<FrontendCheck>,
     ) -> Self {
         let (sink, stream) = socket.split();
         let sink = Arc::new(tokio::sync::Mutex::new(sink));
@@ -314,7 +307,6 @@ impl<S: Socket> Conn<S> {
             ..LocalState::default()
         }));
         let interrupt = Interrupt {
-            frontend_check,
             dispatcher,
             session_id,
             sink: sink.clone(),
