@@ -1105,3 +1105,6 @@ mod analysis_memo_tests;
 
 #[cfg(test)]
 mod walk_memo_tests;
+
+#[cfg(test)]
+mod round6_tests;
