@@ -7,9 +7,8 @@
 // "claude" (ParseClaudeUsage), "claude-stream" (ParseClaudeStreamUsage),
 // "gemini" (ParseGeminiUsage) or "gemini-stream" (ParseGeminiStreamUsage).
 // The Antigravity and Codex image tool parsers aren't ported, so have no
-// entry. The Interactions parsers are ported, in
-// crates/open-ferry-core/src/observe/usage/parse.rs, but have no entry here
-// either; that file's tests cover them.
+// entry. Interactions whole/stream parsers, public merging and stream
+// sequences use the same entry with their parser option.
 //
 // It is in go/helps/main.go's harness, not go/main.go's, because importing
 // helps registers a translator the registry/* entries must not see (see
@@ -28,7 +27,13 @@ func init() {
 }
 
 type usageOptions struct {
-	Parser string `json:"parser"`
+	Parser   string `json:"parser"`
+	Protocol string `json:"protocol"`
+	Steps    []struct {
+		Parser string `json:"parser"`
+		Body   string `json:"body"`
+	} `json:"steps"`
+	Lines []string `json:"lines"`
 }
 
 // usageDetail is usage.Detail with its fields named for JSON.
@@ -47,10 +52,55 @@ type usageDetail struct {
 func usageParse(in input) []byte {
 	var options usageOptions
 	decodeOptions(in, &options)
-	body := []byte(in.Request)
+	if options.Parser == "merge" {
+		steps := make([]usageDetail, 0, len(options.Steps))
+		var merged usage.Detail
+		for i, step := range options.Steps {
+			update, _ := usageParsed(step.Parser, []byte(step.Body))
+			if i == 0 {
+				merged = update
+			} else {
+				merged = helps.MergeStreamUsageDetail(merged, update)
+			}
+			steps = append(steps, usageJSON(merged))
+		}
+		return marshal(steps)
+	}
+	if options.Parser == "sequence" {
+		var buffer helps.StreamUsageBuffer
+		steps := make([]map[string]interface{}, 0, len(options.Lines))
+		for _, line := range options.Lines {
+			switch options.Protocol {
+			case "openai":
+				buffer.ObserveOpenAIStream([]byte(line))
+			case "claude":
+				buffer.ObserveClaudeStream([]byte(line))
+			case "interactions":
+				detail, found := helps.ParseInteractionsStreamUsage([]byte(line))
+				buffer.Observe(detail, found)
+			default:
+				panic(fmt.Sprintf("unknown sequence protocol %q", options.Protocol))
+			}
+			var value interface{}
+			if detail, found := buffer.Detail(); found {
+				value = usageJSON(detail)
+			}
+			steps = append(steps, map[string]interface{}{"detail": value, "model": buffer.ResponseModel()})
+		}
+		return marshal(steps)
+	}
+	detail, found := usageParsed(options.Parser, []byte(in.Request))
+	if !found {
+		return []byte("null")
+	}
+	return marshal(usageJSON(detail))
+}
+
+// Reads one detail without changing its accounting evidence.
+func usageParsed(parser string, body []byte) (usage.Detail, bool) {
 	var detail usage.Detail
 	found := true
-	switch options.Parser {
+	switch parser {
 	case "codex":
 		detail, found = helps.ParseCodexUsage(body)
 	case "openai":
@@ -61,17 +111,23 @@ func usageParse(in input) []byte {
 		detail = helps.ParseClaudeUsage(body)
 	case "claude-stream":
 		detail, found = helps.ParseClaudeStreamUsage(body)
+	case "interactions":
+		detail = helps.ParseInteractionsUsage(body)
+	case "interactions-stream":
+		detail, found = helps.ParseInteractionsStreamUsage(body)
 	case "gemini":
 		detail = helps.ParseGeminiUsage(body)
 	case "gemini-stream":
 		detail, found = helps.ParseGeminiStreamUsage(body)
 	default:
-		panic(fmt.Sprintf("usage/parse: unknown parser %q", options.Parser))
+		panic(fmt.Sprintf("usage/parse: unknown parser %q", parser))
 	}
-	if !found {
-		return []byte("null")
-	}
-	return marshal(usageDetail{
+	return detail, found
+}
+
+// usageJSON preserves every exported accounting field.
+func usageJSON(detail usage.Detail) usageDetail {
+	return usageDetail{
 		InputTokens:         detail.InputTokens,
 		OutputTokens:        detail.OutputTokens,
 		ReasoningTokens:     detail.ReasoningTokens,
@@ -81,5 +137,5 @@ func usageParse(in input) []byte {
 		TotalTokens:         detail.TotalTokens,
 		TokenBreakdown:      detail.TokenBreakdown,
 		ResponseServiceTier: detail.ResponseServiceTier,
-	})
+	}
 }

@@ -17,6 +17,7 @@ mod live;
 mod multi_agent;
 mod parallel;
 mod payload;
+mod pin42;
 mod quota_signals;
 mod raw_json;
 mod request_witness;
@@ -803,6 +804,11 @@ fn suite_registry(args: &Args, metadata_only: bool) -> Result<Vec<Suite>, String
     // The Gemini Interactions families' suites (see interactions/mod.rs).
     suites.extend(interactions::selected_suites(seed, random, &wanted));
 
+    for (translator, cases, _) in &mut suites {
+        if wanted(*translator) {
+            cases.extend(pin42::for_suite(translator.key()));
+        }
+    }
     filter_suites(&mut suites, &args.suites)?;
     Ok(suites)
 }
@@ -1036,7 +1042,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     Ok(all_match)
 }
 
-/// The Go toolchain's version, such as `go1.26.4`, for the summary.
+/// The Go toolchain's version, such as `go1.26.10`, for the summary.
 fn go_version(go: &Path) -> String {
     std::process::Command::new(go)
         .args(["env", "GOVERSION"])

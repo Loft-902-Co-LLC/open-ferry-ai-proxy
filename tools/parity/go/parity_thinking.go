@@ -27,11 +27,17 @@ import (
 )
 
 type thinkingOptions struct {
-	Source    string         `json:"source"`
-	From      string         `json:"from"`
-	To        string         `json:"to"`
-	Provider  string         `json:"provider"`
-	ModelInfo *thinkingModel `json:"model_info"`
+	Source        string         `json:"source"`
+	From          string         `json:"from"`
+	To            string         `json:"to"`
+	Provider      string         `json:"provider"`
+	ModelInfo     *thinkingModel `json:"model_info"`
+	LookupModel   *string        `json:"lookup_model"`
+	Registrations []struct {
+		Client   string          `json:"client"`
+		Provider string          `json:"provider"`
+		Models   []thinkingModel `json:"models"`
+	} `json:"registrations"`
 }
 
 // thinkingModel holds the registry.ModelInfo fields the thinking package
@@ -61,6 +67,18 @@ func thinkingApply(in input) []byte {
 			SupportConfigurationUpdate: model.SupportConfigurationUpdate,
 			Thinking:                   model.Thinking,
 		}
+	}
+	if options.LookupModel != nil {
+		modelRegistry := registry.GetGlobalRegistry()
+		for _, registration := range options.Registrations {
+			models := make([]*registry.ModelInfo, 0, len(registration.Models))
+			for _, model := range registration.Models {
+				models = append(models, &registry.ModelInfo{ID: model.ID, Type: model.Type, UserDefined: model.UserDefined, Thinking: model.Thinking, SupportConfigurationUpdate: model.SupportConfigurationUpdate})
+			}
+			modelRegistry.RegisterClient(registration.Client, registration.Provider, models)
+			defer modelRegistry.UnregisterClient(registration.Client)
+		}
+		info = registry.LookupModelInfo(*options.LookupModel, options.Provider)
 	}
 	// A setting the model can't take is logged as a warning; keep it off
 	// the harness's stderr.

@@ -1,0 +1,772 @@
+[
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-mixed-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-mixed-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-builtin-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-builtin-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-functions-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-functions-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-mixed-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-mixed-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-builtin-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-builtin-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-mixed-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-mixed-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-builtin-False",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-builtin-True",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"auto\"",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"none\"",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"required\"",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-{\"type\":\"function\",\"name\":\"f\"}",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"auto\"",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"none\"",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"required\"",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-{\"type\":\"function\",\"name\":\"f\"}",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-custom-\"auto\"",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-custom-\"none\"",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-custom-\"required\"",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-custom-{\"type\":\"function\",\"name\":\"f\"}",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-mixed-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-mixed-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-builtin-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-builtin-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-functions-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-google_search-functions-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-code_execution-mixed-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-code_execution-mixed-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-code_execution-builtin-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-code_execution-builtin-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-url_context-mixed-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-url_context-mixed-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-url_context-builtin-False-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-url_context-builtin-True-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]}}}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"auto\"-registry",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"none\"-registry",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-\"required\"-registry",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-2.0-flash-{\"type\":\"function\",\"name\":\"f\"}-registry",
+    "model": "gemini-2.0-flash",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"auto\"-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"none\"-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-\"required\"-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.1-pro-{\"type\":\"function\",\"name\":\"f\"}-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-custom-\"auto\"-registry",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-custom-\"none\"-registry",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-custom-\"required\"-registry",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-custom-{\"type\":\"function\",\"name\":\"f\"}-registry",
+    "model": "custom",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-mixed-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-builtin-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"google_search\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-google_search-functions-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-mixed-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-code_execution-builtin-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"code_execution\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-mixed-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}},{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-tools-url_context-builtin-True-filtered-empty",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"url_context\":{}}],\"tool_choice\":{\"type\":\"allowed_tools\",\"allowed_tools\":{\"mode\":\"auto\",\"tools\":[]}}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"auto\"",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"none\"",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"required\"",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-{\"type\":\"function\",\"name\":\"f\"}",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"auto\"",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"none\"",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"required\"",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-{\"type\":\"function\",\"name\":\"f\"}",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"auto\"-registry",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"none\"-registry",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-\"required\"-registry",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gemini-3.8-flash-high-{\"type\":\"function\",\"name\":\"f\"}-registry",
+    "model": "gemini-3.8-flash-high",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"auto\"-registry",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"auto\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"none\"-registry",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"none\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-\"required\"-registry",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":\"required\"}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-tools-gpt-oss-120b-medium-{\"type\":\"function\",\"name\":\"f\"}-registry",
+    "model": "gpt-oss-120b-medium",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"web_search\"},{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}],\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"}}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  }
+]

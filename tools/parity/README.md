@@ -93,7 +93,11 @@ One hundred and eight suites are covered so far:
 
 ## Running it
 
-You need Go and a CLIProxyAPI checkout. Use the version pinned in [UPSTREAM.md](../../UPSTREAM.md) or one close to it; translator changes made upstream since the pin show up as differences.
+Use Go 1.26.10 with `GOTOOLCHAIN=local` and a CLIProxyAPI checkout. Check
+`go version` first. If it is not your default toolchain, pass its binary with
+`--go`, for example `--go go1.26.10` after installing and downloading
+`golang.org/dl/go1.26.10`. On Windows an absolute path to `go.exe` also works.
+Use the version pinned in [UPSTREAM.md](../../UPSTREAM.md) or one close to it; translator changes made upstream since the pin show up as differences.
 
 ```sh
 git clone https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
@@ -155,7 +159,7 @@ gh workflow run parity-scheduled.yml --ref main -f seed=42 -f random=100
 
 Both runs use the same reusable job. It checks out the exact
 `reference/cliproxyapi` gitlink (currently `911f49cbd49f4fe2516979754a7488a3fd14fe64`,
-v8.0.38), checks that the checkout matches, and uses Go 1.26.4, satisfying that
+v8.0.38), checks that the checkout matches, and uses Go 1.26.10, satisfying that
 pin's `go 1.26.0`. Cargo uses CI's shared Rust dependency cache, filled by the
 existing main-branch test job. The Go module downloads and the harness's own
 `target/parity/go-build` cache are kept separately. No credentials or live

@@ -1,0 +1,237 @@
+[
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-'fast'",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"fast\"}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-'fast'",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"fast\"}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-'standard'",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"standard\"}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-'standard'",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"standard\"}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-' fast '",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\" fast \"}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-' fast '",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\" fast \"}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-''",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"\"}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-''",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"\"}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-'   '",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"   \"}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-'   '",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":\"   \"}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-None",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-None",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-12",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":12}}",
+    "options": {
+      "parser": "claude"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-claude-stream-12",
+    "model": "",
+    "request": "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"speed\":12}}",
+    "options": {
+      "parser": "claude-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-sequence-('fast', None, None)",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_speed\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-sequence-(None, 'fast', None)",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_speed\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10}}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4,\"speed\":\"fast\"}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-sequence-('fast', 'standard', 'fast')",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_speed\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4,\"speed\":\"standard\"}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"speed\":\"fast\",\"output_tokens\":6}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-sequence-(' fast ', ' standard ', None)",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_speed\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10,\"speed\":\" fast \"}}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4,\"speed\":\" standard \"}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-speed-sequence-('fast', '', None)",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_speed\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4,\"speed\":\"\"}}"
+      ]
+    }
+  }
+]

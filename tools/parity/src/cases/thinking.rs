@@ -686,3 +686,34 @@ fn standalone_claude_effort_cases(to: &str) -> Vec<Case> {
     }
     cases
 }
+
+/// Resolve configured compatibility capabilities through the real registry.
+/// This checks registry lookup plus resolved application, not the executor's
+/// private apply_request path or selected-credential resolution.
+pub fn resolved_model_info(case: &Case) -> Option<ModelInfo> {
+    let Some(id) = case.options["lookup_model"].as_str() else {
+        return model_info(&case.options["model_info"]);
+    };
+    let registry = open_ferry_core::registry::ModelRegistry::new();
+    for registration in case.options["registrations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let models: Vec<_> = registration["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(model_info)
+            .collect();
+        registry.register_client(
+            registration["client"].as_str().unwrap_or_default(),
+            registration["provider"].as_str().unwrap_or_default(),
+            &models,
+        );
+    }
+    registry.model_info(
+        id.trim(),
+        case.options["provider"].as_str().unwrap_or_default(),
+    )
+}
