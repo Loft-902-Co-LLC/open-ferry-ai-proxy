@@ -1557,3 +1557,82 @@ async fn siwc_steer_defaults_check_stripped_input() {
         serde_json::json!({"type":"response.steer","previous_response_id":"r1","input":[{"role":"user","content":"x"}]})
     );
 }
+
+// b9bb031d: omitted or rewritten create/append models use the client's
+// bound alias for access; steering cannot spoof another model to evade it.
+#[tokio::test]
+async fn frontend_authorization_checks_bound_model_and_preserves_socket() {
+    for (kind, model) in [
+        ("response.create", ""),
+        ("response.create", MODEL),
+        ("response.create", "client-alias"),
+        ("response.create", "other-model"),
+        ("response.append", ""),
+        ("response.append", MODEL),
+        ("response.steer", "allowed-other-model"),
+    ] {
+        let server = serve(|mut peer| async move {
+            if peer.recv().await.is_none() {
+                return;
+            }
+            peer.send(&response("response.created", "r1")).await;
+            peer.send(&response("response.completed", "r1")).await;
+            if peer.recv().await.is_none() {
+                return;
+            }
+            peer.send(&response("response.created", "r2")).await;
+            peer.send(&response("response.completed", "r2")).await;
+            peer.hold().await;
+        })
+        .await;
+        let (mut client, input) = Client::new(8);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let input = input.with_turn_authorizer(Arc::new(move |payload| {
+            let event: Value = serde_json::from_slice(payload).unwrap();
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                let expected = if kind == "response.create" && model == "other-model" {
+                    "other-model"
+                } else {
+                    "client-alias"
+                };
+                assert_eq!(event["model"], expected);
+                assert_eq!(event["type"], kind);
+                Ok(Some(Bytes::from_static(
+                    br#"{"type":"error","status":429,"error":{"message":"model denied"}}"#,
+                )))
+            } else {
+                assert_eq!(event["model"], "client-alias");
+                Ok(None)
+            }
+        }));
+        let chunks = start(
+            &steering(),
+            &server.url,
+            "A",
+            r#"{"model":"client-alias","input":[]}"#,
+            duplex_options("frontend-bound-model", input),
+        )
+        .await;
+        let mut denied = false;
+        let (_, error) = run(chunks, |event, _| match str_at(event, "type").as_str() {
+            "response.completed" if event["response"]["id"] == "r1" => {
+                client.send(&format!(
+                    r#"{{"type":"{kind}","model":"{model}","input":[]}}"#
+                ));
+            }
+            "error" => {
+                assert_eq!(event["status"], 429);
+                denied = true;
+                client.send(r#"{"type":"response.create","input":[]}"#);
+            }
+            "response.completed" if event["response"]["id"] == "r2" => client.close(),
+            _ => {}
+        })
+        .await;
+        assert!(denied);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(messages(&server).len(), 2, "denied frame reached upstream");
+    }
+}

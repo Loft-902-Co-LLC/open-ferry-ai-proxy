@@ -110,6 +110,7 @@ pub(crate) async fn websocket(
     State(state): State<AppState>,
     method: Method,
     headers: HeaderMap,
+    uri: http::Uri,
     client: ClientRequest,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -125,6 +126,7 @@ pub(crate) async fn websocket(
         }
     };
     let limit = crate::ingress::body_limit(state.settings().config.body_limit);
+    let access = crate::auth::WebsocketAccess::new(&headers, &uri);
     let turn_state = headers
         .get(TURN_STATE_HEADER)
         .map(|value| String::from_utf8_lossy(value.as_bytes()).trim().to_owned())
@@ -132,7 +134,7 @@ pub(crate) async fn websocket(
     let mut response = upgrade
         .max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| session::run(state, client, socket));
+        .on_upgrade(move |socket| session::run(state, client, access, socket));
     if !turn_state.is_empty()
         && let Ok(value) = HeaderValue::from_str(&turn_state)
     {
