@@ -438,9 +438,12 @@ impl Duplex {
             .input
             .live_auth(&self.auth)
             .ok_or_else(|| connection_failure(CREDENTIAL_DISABLED))?;
-        crate::codex::siwc_request::ensure_credentials(&auth)?;
-        if auth.use_siwc() != self.auth.use_siwc()
-            || (auth.use_siwc() && auth.access_token() != self.auth.access_token())
+        crate::codex::siwc_request::ensure_credentials(&auth, &self.options.headers)?;
+        if auth.use_siwc_for_request(&self.options.headers)
+            != self.auth.use_siwc_for_request(&self.options.headers)
+            || (auth.use_siwc_for_request(&self.options.headers)
+                && auth.access_token_for_request(&self.options.headers)
+                    != self.auth.access_token_for_request(&self.options.headers))
         {
             return Err(connection_error(ExecError::replay_required()));
         }
@@ -508,7 +511,7 @@ impl Duplex {
             model: self.request.model.clone(),
             payload: Bytes::copy_from_slice(text.as_bytes()),
         };
-        if self.auth.use_siwc() {
+        if self.auth.use_siwc_for_request(&self.options.headers) {
             crate::thinking::strip_configuration_updates(&mut body);
         }
         let stripped = body.clone();

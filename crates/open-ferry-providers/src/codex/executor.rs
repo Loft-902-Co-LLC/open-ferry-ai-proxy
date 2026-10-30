@@ -353,7 +353,7 @@ impl CodexExecutor {
         let prepared = prepare_body(Kind::Compact, self.context(auth), request, options)?;
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, false)?;
-        let url = endpoint(auth, &self.base_url, true);
+        let url = endpoint(auth, &options.headers, &self.base_url, true);
         let (response, secrets) = self
             .send(
                 auth,
@@ -417,7 +417,7 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        super::siwc_request::ensure_credentials(auth)?;
+        super::siwc_request::ensure_credentials(auth, &options.headers)?;
         if options.alt == COMPACT_ALT {
             return self.execute_compact(auth, request, options).await;
         }
@@ -427,7 +427,7 @@ impl CodexExecutor {
         let prepared = prepare_body(Kind::Execute, self.context(auth), request, options)?;
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, true)?;
-        let url = endpoint(auth, &self.base_url, false);
+        let url = endpoint(auth, &options.headers, &self.base_url, false);
         let (response, secrets) = self
             .send(
                 auth,
@@ -526,7 +526,7 @@ impl CodexExecutor {
         request: Request,
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
-        super::siwc_request::ensure_credentials(auth)?;
+        super::siwc_request::ensure_credentials(auth, &options.headers)?;
         if options.alt == COMPACT_ALT {
             return Err(
                 StatusError::new(400, "streaming not supported for /responses/compact").into(),
@@ -538,7 +538,7 @@ impl CodexExecutor {
         let prepared = prepare_body(Kind::Stream, self.context(auth), &request, &options)?;
         let format = response_format(&options);
         let headers = build_headers(auth, &options.headers, true)?;
-        let url = endpoint(auth, &self.base_url, false);
+        let url = endpoint(auth, &options.headers, &self.base_url, false);
         let (response, secrets) = self
             .send(
                 auth,

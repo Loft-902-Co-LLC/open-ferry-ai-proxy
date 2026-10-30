@@ -23,6 +23,7 @@ use crate::json::{exists, get};
 
 mod images;
 mod replay;
+mod request_credentials;
 mod siwc;
 
 /// One request the mock received.
