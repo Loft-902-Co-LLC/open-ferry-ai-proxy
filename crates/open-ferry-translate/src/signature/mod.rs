@@ -59,6 +59,7 @@ pub use claude_validation::{
 };
 pub use gemini_sanitize::{
     gemini_replay_signature_or_bypass, sanitize_gemini_request_thought_signatures,
+    sanitize_non_vertex_gemini_request_thought_signatures,
 };
 pub use gemini_validation::{
     GEMINI_CONTEXT_ENGINEERING_BYPASS, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, GeminiEnvelope,
