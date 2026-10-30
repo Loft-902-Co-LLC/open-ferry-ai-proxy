@@ -30,7 +30,7 @@ async fn start_request(api: &Api, method: Method, query: &str, body: &str) -> An
 
 async fn start_proxy(api: &Api, provider: &str, proxy: &str) -> String {
     let body = json!({"provider": provider, "proxy_url": proxy}).to_string();
-    let response = start_request(api, Method::POST, "", &body).await;
+    let response = api.post(START, &body).await;
     assert_eq!(response.status, StatusCode::OK);
     let value: Value = serde_json::from_str(&response.body).unwrap();
     assert!(value["status"] == "ok");
@@ -810,5 +810,23 @@ async fn session_proxy_post_handler_accepts_proposed_integration_wiring() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    api.state.shutdown().await;
+}
+
+#[tokio::test]
+async fn oauth_post_start_route_delivers_proxy_body() {
+    let api = Api::new();
+    for provider in ["claude", "codex"] {
+        let invalid = api
+            .post(
+                START,
+                &json!({"provider":provider,"proxy_url":false}).to_string(),
+            )
+            .await;
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert!(invalid.body.contains("invalid proxy_url"));
+        let state = start_proxy(&api, provider, "http://proxy.test:8080").await;
+        assert!(api.state.oauth_sessions().store().cancel(&state));
+    }
     api.state.shutdown().await;
 }

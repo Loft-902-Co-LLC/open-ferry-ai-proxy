@@ -500,7 +500,10 @@ pub(crate) fn routes() -> Vec<Route> {
             get(flows::anthropic_auth_url),
         ),
         Route::key("/v0/management/codex-auth-url", get(flows::codex_auth_url)),
-        Route::key("/v8/management/oauth/auth-url", get(flows::auth_url)),
+        Route::key(
+            "/v8/management/oauth/auth-url",
+            get(flows::auth_url).post(flows::auth_url),
+        ),
         Route::key(
             "/v8/management/oauth/siwc/bind",
             axum::routing::post(flows::siwc_bind),
