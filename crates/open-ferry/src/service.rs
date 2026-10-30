@@ -2804,16 +2804,15 @@ impl Service {
                     // partitioned contract. Legacy Gemini management payloads
                     // retain their Unsupported compatibility path.
                     let native_file = !go::equal_fold(live.provider.trim(), "gemini");
-                    let status = if (tagged || native_file)
-                        && matches!(status, AdoptionRead::Unsupported)
-                    {
-                        store
-                            .read_back(live)
-                            .map_err(ManagerError::Store)?
-                            .map_or(AdoptionRead::Missing, AdoptionRead::Record)
-                    } else {
-                        status
-                    };
+                    let status =
+                        if (tagged || native_file) && matches!(status, AdoptionRead::Unsupported) {
+                            store
+                                .read_back(live)
+                                .map_err(ManagerError::Store)?
+                                .map_or(AdoptionRead::Missing, AdoptionRead::Record)
+                        } else {
+                            status
+                        };
                     let status = match status {
                         AdoptionRead::Record(record) => {
                             let path = identity
@@ -8731,12 +8730,17 @@ self-update:
         let id = service.manager.list()[0].id.clone();
         let queued = auth_file(&path);
         let current = br#"{"type":"claude","access_token":"dummy-after","disabled":true}"#;
-        std::fs::write(&path,current).unwrap();
-        service.handle_and_drain(changed(queued), Path::new("")).await;
+        std::fs::write(&path, current).unwrap();
+        service
+            .handle_and_drain(changed(queued), Path::new(""))
+            .await;
         let live = service.manager.get(&id).unwrap();
-        assert!(live.disabled,"a captured observation cannot undo a newer disk disable");
-        assert_eq!(live.metadata["access_token"],"dummy-after");
-        assert_eq!(std::fs::read(&path).unwrap(),current);
+        assert!(
+            live.disabled,
+            "a captured observation cannot undo a newer disk disable"
+        );
+        assert_eq!(live.metadata["access_token"], "dummy-after");
+        assert_eq!(std::fs::read(&path).unwrap(), current);
     }
 
     #[tokio::test]
