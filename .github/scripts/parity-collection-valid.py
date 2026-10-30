@@ -10,10 +10,15 @@ import sys
 
 
 # One policy table: each row names the inputs and why their identity matters.
+# A path belongs to the first row that matches it.
+# The workspace crates the parity tool links, directly or through each other;
+# a test derives this set from the Cargo manifests.
+CLOSURE = ("crates/open-ferry-core", "crates/open-ferry-providers", "crates/open-ferry-translate")
 GROUPS = (
-    ("config", ("crates/open-ferry-core/src/config",)),  # Load/save/writer verdicts.
+    ("config", ("crates/open-ferry-core/src/config", "config.example.yaml")),  # Load/save/writer verdicts; the root example is a case.
     ("parity", ("tools/parity",)),  # Generators, classifiers, harnesses; exclude docs/baseline.
-    ("build", ("Cargo.lock", "Cargo.toml", "rust-toolchain*")),  # Dependencies/features/compiler.
+    ("build", ("Cargo.lock", "Cargo.toml", "*/Cargo.toml", "rust-toolchain*", ".cargo")),  # Dependencies/features/compiler.
+    ("crates", CLOSURE),  # Other linked code, such as shared JSON and Go-compatibility helpers.
     ("upstream", ("reference/cliproxyapi",)),  # Exact upstream oracle gitlink.
 )
 PIN = "reference/cliproxyapi"
@@ -33,16 +38,28 @@ def commit(root, rev):
     return git(root, "rev-parse", "--verify", "--end-of-options", rev + "^{commit}")
 
 
+def matches(pattern, path):
+    return path == pattern or path.startswith(pattern + "/") or fnmatch.fnmatchcase(path, pattern)
+
+
 def included(group, path):
-    if group != "parity":
+    # Documentation inside the code directories never reaches a verdict.
+    if group not in {"parity", "crates"}:
         return True
     parts = PurePosixPath(path).parts[2:]
     return not (
-        parts[0] == "baseline"
+        (group == "parity" and parts[0] == "baseline")
         or any(part.lower() in {"doc", "docs"} for part in parts[:-1])
         or PurePosixPath(path).name.lower().startswith("readme")
-        or PurePosixPath(path).suffix.lower() in {".md", ".markdown", ".rst", ".txt", ".adoc"}
+        or PurePosixPath(path).suffix.lower() in {".md", ".markdown"}
     )
+
+
+def group_of(path):
+    for name, patterns in GROUPS:
+        if any(matches(pattern, path) for pattern in patterns):
+            return name if included(name, path) else None
+    return None
 
 
 def snapshot(root, rev):
@@ -54,12 +71,8 @@ def snapshot(root, rev):
             metadata, path = entry.split("\t", 1)
             entries[path] = metadata.split()[0]
     groups = {}
-    for name, patterns in GROUPS:
-        paths = sorted(path for path in entries if any(
-            path == pattern or path.startswith(pattern + "/")
-            or ("/" not in path and fnmatch.fnmatchcase(path, pattern))
-            for pattern in patterns
-        ) and included(name, path))
+    for name, _ in GROUPS:
+        paths = sorted(path for path in entries if group_of(path) == name)
         groups[name] = {}
         # Keep Windows command lines comfortably below their length limit.
         for start in range(0, len(paths), 50):

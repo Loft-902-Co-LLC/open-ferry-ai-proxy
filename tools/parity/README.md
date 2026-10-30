@@ -498,9 +498,12 @@ python -I .github/scripts/parity-collection-valid.py --producer <collection-comm
 ```
 
 Proceed only on exit 0 (valid); 1 means stale and 2 means an input error. The
-check compares committed config, parity code (excluding docs and baseline data),
-build inputs and upstream pin, and checks observation pins, fingerprints and
-non-certification counts. For collections split across producer commits, use
+check compares the parity tool and every workspace crate it links (excluding
+docs and baseline data), the root `config.example.yaml`, build inputs
+(`Cargo.lock`, every `Cargo.toml`, `rust-toolchain*` and `.cargo/`) and the
+upstream pin, and checks observation pins, fingerprints and non-certification
+counts. It compares whole crates, so a change the config-save suite never
+reaches can still report stale; the listed paths show what changed. For collections split across producer commits, use
 `--manifest collection.json` instead of `--producer` and `--observation`, with a
 JSON list of `{"observation": "seed30.json", "producer": "<commit>"}` pairs;
 relative observation paths resolve from the manifest's directory. `--head <rev>`
