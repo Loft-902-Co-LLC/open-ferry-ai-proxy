@@ -670,31 +670,7 @@ pub(crate) fn normalize_collection_node_styles(node: &mut Node) {
         Kind::Document => {}
         Kind::Mapping => {
             node.style = Style::NONE;
-            for [key, value] in node.content.as_chunks_mut::<2>().0 {
-                // Compression's moved leaves can leave a flow parent's line
-                // comment on a block mapping, where it cannot be emitted.
-                if value.kind == Kind::Mapping
-                    && !value.line_comment.is_empty()
-                    && (key.value == "response-compression"
-                        || (key.value == "server"
-                            && find_map_key_index(value, "response-compression").is_some()))
-                {
-                    if key.line_comment.is_empty() {
-                        key.line_comment = std::mem::take(&mut value.line_comment);
-                        key.line_comment_id = value.line_comment_id.take();
-                        key.comment_receipts.line =
-                            std::mem::take(&mut value.comment_receipts.line);
-                    } else {
-                        (key.head_comment, key.comment_receipts.head) =
-                            super::tree::join_receipted(&[
-                                (&key.head_comment, &key.comment_receipts.head),
-                                (&value.line_comment, &value.comment_receipts.line),
-                            ]);
-                        value.line_comment.clear();
-                        value.line_comment_id = None;
-                        value.comment_receipts.line.clear();
-                    }
-                }
+            for [key, _] in node.content.as_chunks_mut::<2>().0 {
                 if key.kind == Kind::Scalar
                     && key.tag == STR_TAG
                     && key.style == Style::DOUBLE_QUOTED

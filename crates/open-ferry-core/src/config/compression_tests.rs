@@ -100,31 +100,15 @@ fn compression_partial_response_fields_merge_on_load() {
 
 #[test]
 fn compression_partial_response_fields_survive_save() {
-    for (case, raw) in [
-        "# keep\nresponse-compression: {enabled: false} # legacy\n# canonical\nserver: {response-compression: {min-bytes: 64}}\n",
-        "# keep\nresponse-compression: {enabled: false} # legacy\nserver: {response-compression: {min-bytes: 64}} # canonical\n",
-        "# keep\nresponse-compression: {enabled: false} # legacy\nserver: # parent\n  {response-compression: {min-bytes: 64}} # canonical\n",
-        "# keep\nresponse-compression: {min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {enabled: false}}\n",
-        "# keep\nresponse-compression: {enabled: false, min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {}}\n",
-    ].into_iter().enumerate() {
-        for migrate in [false, true] {
-            let dir = TempDir::new();
-            let path = dir.write("config.yaml", raw);
-            for _ in 0..2 {
-                let cfg = Config::load(&path).unwrap();
-                save::save_preserving_comments(&path, &cfg, migrate).unwrap();
-                let loaded = Config::load(&path).unwrap();
-                assert_eq!(loaded.response_compression.enabled, Some(false));
-                assert_eq!(loaded.response_compression.min_bytes, 64);
-                let text = std::fs::read_to_string(&path).unwrap();
-                if raw.contains("# parent") {
-                    assert!(text.contains("# parent"));
-                }
-                for comment in ["# keep", "# legacy", "# canonical"] {
-                    assert!(text.contains(comment), "case={case}, migrate={migrate}: lost {comment}");
-                }
-            }
-        }
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("compression_save_go_r3.json")).unwrap();
+    for case in cases
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["Name"].as_str().unwrap().starts_with("partial-"))
+    {
+        assert_go_save_history(case);
     }
 }
 
@@ -256,12 +240,15 @@ fn compression_codex_migration_uses_upstream_field_order() {
 }
 
 #[test]
-fn compression_codex_existing_keys_keep_their_order() {
+fn compression_codex_existing_keys_follow_upstream_order() {
     let raw = b"codex: {disable-codex-cloaking: true, upstream-request-compression-min-bytes: 64, upstream-request-compression: true}\nupstream: {codex: {response-steering: true, websocket-compression: false}}\n";
-    for bytes in [
+    for (index, bytes) in [
         save::normalize_config_layout(raw, true).unwrap().0,
         save::render_preserving_comments(raw, &Config::parse(raw).unwrap(), true).unwrap(),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let doc = save::unmarshal(&bytes).unwrap();
         let codex = save::yaml_path(doc.content.first().unwrap(), "upstream.codex").unwrap();
         let keys: Vec<&str> = codex
@@ -271,16 +258,24 @@ fn compression_codex_existing_keys_keep_their_order() {
             .iter()
             .map(|[key, _]| key.value.as_str())
             .collect();
-        assert_eq!(
-            keys,
+        let expected = if index == 0 {
             [
                 "response-steering",
                 "websocket-compression",
                 "upstream-request-compression",
                 "upstream-request-compression-min-bytes",
-                "disable-codex-cloaking"
+                "disable-codex-cloaking",
             ]
-        );
+        } else {
+            [
+                "websocket-compression",
+                "response-steering",
+                "upstream-request-compression",
+                "upstream-request-compression-min-bytes",
+                "disable-codex-cloaking",
+            ]
+        };
+        assert_eq!(keys, expected);
     }
 }
 
@@ -480,4 +475,49 @@ fn discovery_advertise_management_remains_opaque_on_load_and_save() {
             }
         }
     }
+}
+
+// Captured from v8.0.47 ParseConfigBytes + SaveConfigPreserveComments.
+fn assert_go_save_history(case: &serde_json::Value) {
+    let dir = TempDir::new();
+    let path = dir.write("config.yaml", case["Raw"].as_str().unwrap());
+    let migrate = case["Migrate"].as_bool().unwrap();
+    for field in ["Output", "Second", "Third"] {
+        let cfg = Config::load(&path).unwrap();
+        save::save_preserving_comments(&path, &cfg, migrate).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            case[field].as_str().unwrap().as_bytes(),
+            "case={}, save={field}",
+            case["Name"]
+        );
+    }
+    assert_eq!(case["Second"], case["Third"], "Go stabilizes on save two");
+}
+
+#[test]
+fn compression_go_exact_save_histories() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("compression_save_go_r3.json")).unwrap();
+    for case in cases
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| !case["Name"].as_str().unwrap().starts_with("partial-"))
+    {
+        assert_go_save_history(case);
+    }
+}
+
+#[test]
+fn compression_go_exact_flow_patch() {
+    let raw = b"config-version: 8\nserver: {port: 8317, response-compression: {enabled: false}} # main\nrouting: {strategy: fill-first}\n";
+    let edit = v8_edit::V8Edit {
+        method: v8_edit::V8Method::Patch,
+        path: Vec::new(),
+        body: b"{}".to_vec(),
+        yaml: false,
+    };
+    let expected = b"config-version: 8\nserver:\n    port: 8317\n    response-compression:\n        enabled: false\nrouting: # main\n    strategy: fill-first\n";
+    assert_eq!(v8_edit::preview_v8(raw, &edit).unwrap(), expected);
 }
