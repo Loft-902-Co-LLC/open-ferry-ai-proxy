@@ -33,6 +33,45 @@ use crate::sse_check::MAX_EVENT_BYTES;
 use crate::stream::{StreamWriter, forward};
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
 
+#[tokio::test]
+async fn http_metadata_visibility_follows_official_client_classification() {
+    const METADATA: &str = "event: response.metadata\ndata: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n";
+    for (agent, originator, codex) in [
+        (None, None, false),
+        (Some("other-client/1"), None, false),
+        (Some("codex_vscode/1"), None, false),
+        (Some(CODEX_DESKTOP), None, true),
+        (Some("codex-tui/1"), None, true),
+        (Some("codex_cli_rs/1"), None, true),
+        (Some("codex_exec/1"), None, true),
+        (None, Some("codex_cli_rs"), true),
+    ] {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::chunks(&[METADATA, COMPLETED])],
+        );
+        let mut request = post("/v1/responses", STREAM, agent);
+        if let Some(originator) = originator {
+            request
+                .headers_mut()
+                .insert("originator", originator.parse().unwrap());
+        }
+        let (status, _, body) = send(&app, request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body.contains("private"),
+            codex,
+            "agent={agent:?} originator={originator:?}: {body}"
+        );
+        assert_eq!(
+            body.matches("event: response.completed").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
 const CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n";
 const DELTA: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n";

@@ -198,7 +198,7 @@ impl Framer {
             if self.is_codex_client {
                 return name == "codex.rate_limits";
             }
-            name.starts_with("codex.")
+            name.starts_with("codex.") || name == "response.metadata"
         };
         check(stream_event) || check(payload_type)
     }
