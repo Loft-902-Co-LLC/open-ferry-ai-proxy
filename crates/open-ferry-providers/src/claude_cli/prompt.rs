@@ -196,7 +196,7 @@ fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
         empty_last_user_turn = false;
         turns.push((role, content));
     }
-    if empty_last_user_turn {
+    if empty_last_user_turn && turns.last().is_none_or(|(role, _)| role != "user") {
         return Err(invalid("claude-cli: the last user turn is empty"));
     }
     if turns.last().is_some_and(|(role, _)| role != "user") {
@@ -562,5 +562,42 @@ mod empty_commentary_error_tests {
                 prepare(&json!({"messages":messages})).unwrap();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod removed_commentary_turn_tests {
+    use super::*;
+
+    fn check_preserved_user_turn(blank_assistant: bool) {
+        for text in ["", " "] {
+            for count in [1, 2] {
+                let marker =
+                    json!({"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"});
+                let mut messages = vec![
+                    json!({"role":"user","content":"A"}),
+                    json!({"role":"user","content":vec![marker.clone();count]}),
+                ];
+                if blank_assistant {
+                    messages.push(json!({"role":"assistant","content":[marker]}));
+                }
+                let prepared = prepare(&json!({"messages":messages})).unwrap();
+                let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+                assert_eq!(
+                    input["message"]["content"],
+                    json!([{"type":"text","text":"A"}])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r4_cli_preserves_user_before_removed_blank_user() {
+        check_preserved_user_turn(false);
+    }
+
+    #[test]
+    fn r4_cli_preserves_user_before_removed_blank_user_and_assistant() {
+        check_preserved_user_turn(true);
     }
 }
