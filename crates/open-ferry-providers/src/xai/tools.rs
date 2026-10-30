@@ -96,6 +96,8 @@ pub(crate) struct NamespaceRef {
     pub(crate) name: String,
     /// Whether the name is a folded namespace's dispatcher.
     pub(crate) is_dispatcher: bool,
+    /// The dispatcher's declared children, across repeated namespaces.
+    pub(crate) children: HashSet<String>,
 }
 
 /// Flattened and folded tool names and what they stand for.
@@ -508,18 +510,40 @@ pub(crate) fn prune_orphaned_tool_choice(body: &mut Value) {
 
 /// `xaiCountFlattenedTools`: how many tools a list makes once namespaces
 /// are flattened and `tool_search` is dropped.
-fn count_flattened(tools: Option<&Value>) -> usize {
+fn count_flattened(tools: Option<&Value>, seen: &mut HashSet<String>) -> usize {
     let Some(Value::Array(tools)) = tools else {
         return 0;
     };
-    tools
-        .iter()
-        .map(|tool| match text(tool, "type").as_str() {
-            NAMESPACE => array(tool, "tools").map_or(1, Vec::len),
-            TOOL_SEARCH => 0,
-            _ => 1,
-        })
-        .sum()
+    let mut count = 0;
+    for tool in tools {
+        match text(tool, "type").as_str() {
+            NAMESPACE => {
+                let namespace = text(tool, "name");
+                if let Some(children) = array(tool, "tools") {
+                    for child in children {
+                        if text(child, "type") == TOOL_SEARCH {
+                            continue;
+                        }
+                        let name = qualify(&namespace, &text(child, "name"));
+                        if name.is_empty() || seen.insert(name) {
+                            count += 1;
+                        }
+                    }
+                } else {
+                    count += 1;
+                }
+            }
+            TOOL_SEARCH => {}
+            FUNCTION | CUSTOM => {
+                let name = trimmed(tool, "name");
+                if name.is_empty() || seen.insert(name) {
+                    count += 1;
+                }
+            }
+            _ => count += 1,
+        }
+    }
+    count
 }
 
 /// `xaiShouldFoldNamespaceTools`: whether flattening the namespaces would
@@ -528,43 +552,57 @@ fn count_flattened(tools: Option<&Value>) -> usize {
 pub(crate) fn should_fold(body: &Value, will_inject_x_search: bool) -> bool {
     let injected =
         will_inject_x_search && !has_native_x_search(body) && !requires_hosted_tool_only_any(body);
-    let total: usize = tool_lists(body).map(count_flattened).sum::<usize>() + usize::from(injected);
+    let mut seen = HashSet::new();
+    let total: usize = tool_lists(body)
+        .map(|tools| count_flattened(tools, &mut seen))
+        .sum::<usize>()
+        + usize::from(injected);
     total > MAX_TOOLS
 }
 
 /// `buildXAINamespaceDispatcherTool`: a namespace folded into one function,
 /// named as the namespace, whose description lists each child with its
 /// parameters and which takes the child's `name` and `arguments`.
-fn dispatcher(tool: &Value) -> Option<Value> {
+fn dispatcher(tool: &Value, extra: &[&Value]) -> Option<Value> {
     let namespace = trimmed(tool, "name");
     if namespace.is_empty() {
         return None;
     }
-    let description = trimmed(tool, "description");
+    let mut description = trimmed(tool, "description");
     let mut names = Vec::new();
     let mut entries = Vec::new();
-    for child in array(tool, "tools").map_or(&[][..], Vec::as_slice) {
-        let name = trimmed(child, "name");
-        if name.is_empty() {
-            continue;
+    let mut seen = HashSet::new();
+    let declarations = std::iter::once(tool).chain(extra.iter().copied());
+    for declaration in declarations {
+        if description.is_empty() {
+            description = trimmed(declaration, "description");
         }
-        let child_description = trimmed(child, "description");
-        let parameters = child
-            .get("parameters")
-            .or_else(|| child.get("input_schema"))
-            .map(catalogue_parameters)
-            .unwrap_or_default();
-        entries.push(
-            match (child_description.is_empty(), parameters.is_empty()) {
-                (false, false) => {
-                    format!("- {name}: {child_description}\n  Parameters: {parameters}")
-                }
-                (false, true) => format!("- {name}: {child_description}"),
-                (true, false) => format!("- {name}\n  Parameters: {parameters}"),
-                (true, true) => format!("- {name}"),
-            },
-        );
-        names.push(Value::String(name));
+        for child in array(declaration, "tools").map_or(&[][..], Vec::as_slice) {
+            if text(child, "type") == TOOL_SEARCH {
+                continue;
+            }
+            let name = trimmed(child, "name");
+            if name.is_empty() || !seen.insert(name.clone()) {
+                continue;
+            }
+            let child_description = trimmed(child, "description");
+            let parameters = child
+                .get("parameters")
+                .or_else(|| child.get("input_schema"))
+                .map(catalogue_parameters)
+                .unwrap_or_default();
+            entries.push(
+                match (child_description.is_empty(), parameters.is_empty()) {
+                    (false, false) => {
+                        format!("- {name}: {child_description}\n  Parameters: {parameters}")
+                    }
+                    (false, true) => format!("- {name}: {child_description}"),
+                    (true, false) => format!("- {name}\n  Parameters: {parameters}"),
+                    (true, true) => format!("- {name}"),
+                },
+            );
+            names.push(Value::String(name));
+        }
     }
     let full_description = if !entries.is_empty() {
         let catalogue = format!("Available tools in this namespace:\n{}", entries.join("\n"));
@@ -635,12 +673,27 @@ fn catalogue_parameters(parameters: &Value) -> String {
 /// them. Changes nothing if a namespace's function has no name.
 pub(crate) fn normalize_tools(body: &mut Value, fold: bool) {
     let keep_image_generation = supports_native_image_generation(&text(body, "model"));
-    let tools = match body.get("tools") {
-        Some(Value::Array(tools)) => match normalize_tool_array(tools, keep_image_generation, fold)
+    let mut namespaces: HashMap<String, Vec<&Value>> = HashMap::new();
+    if fold {
+        for tool in tool_lists(body)
+            .filter_map(|tools| tools.and_then(Value::as_array))
+            .flatten()
         {
-            Some(tools) => Some(tools),
-            None => return,
-        },
+            if text(tool, "type") == NAMESPACE {
+                let name = trimmed(tool, "name");
+                if !name.is_empty() {
+                    namespaces.entry(name).or_default().push(tool);
+                }
+            }
+        }
+    }
+    let tools = match body.get("tools") {
+        Some(Value::Array(tools)) => {
+            match normalize_tool_array(tools, keep_image_generation, fold, &namespaces) {
+                Some(tools) => Some(tools),
+                None => return,
+            }
+        }
         _ => None,
     };
     let mut additional = Vec::new();
@@ -649,7 +702,7 @@ pub(crate) fn normalize_tools(body: &mut Value, fold: bool) {
             continue;
         }
         if let Some(Value::Array(tools)) = item.get("tools") {
-            match normalize_tool_array(tools, keep_image_generation, fold) {
+            match normalize_tool_array(tools, keep_image_generation, fold, &namespaces) {
                 Some(tools) => additional.push((index, tools)),
                 None => return,
             }
@@ -668,20 +721,32 @@ fn normalize_tool_array(
     tools: &[Value],
     keep_image_generation: bool,
     fold: bool,
+    namespaces: &HashMap<String, Vec<&Value>>,
 ) -> Option<Vec<Value>> {
     let mut out = Vec::with_capacity(tools.len());
+    let mut seen = HashSet::new();
+    let mut append = |tool: Option<Value>| {
+        if let Some(tool) = tool {
+            let name = deduplicated_tool_name(&tool);
+            if name.is_empty() || seen.insert(name) {
+                out.push(tool);
+            }
+        }
+    };
     for tool in tools {
         if text(tool, "type") != NAMESPACE {
-            out.extend(normalize_tool(tool, "", keep_image_generation)?);
+            append(normalize_tool(tool, "", keep_image_generation)?);
             continue;
         }
         if fold {
-            out.extend(dispatcher(tool));
+            let namespace = trimmed(tool, "name");
+            let extra = namespaces.get(&namespace).map_or(&[][..], Vec::as_slice);
+            append(dispatcher(tool, extra));
             continue;
         }
         let namespace = text(tool, "name");
         for child in array(tool, "tools").map_or(&[][..], Vec::as_slice) {
-            out.extend(normalize_tool(child, &namespace, keep_image_generation)?);
+            append(normalize_tool(child, &namespace, keep_image_generation)?);
         }
     }
     Some(out)
@@ -817,8 +882,18 @@ pub(crate) fn clamp_tools(body: &mut Value, max: usize, refs: &NamespaceRefs) {
     normalize_tool_choice_for_tools(body);
 }
 
+/// The name key of callable tools and namespace dispatchers; hosted tools
+/// have none and aren't deduplicated.
+fn deduplicated_tool_name(tool: &Value) -> String {
+    match trimmed(tool, "type").as_str() {
+        FUNCTION | CUSTOM | NAMESPACE => trimmed(tool, "name"),
+        _ => String::new(),
+    }
+}
+
 /// `promoteXAIAdditionalTools`: moves the tools of `additional_tools` input
-/// items, which xAI doesn't take, to the end of the top-level tools.
+/// items, which xAI doesn't take, to the end of the top-level tools. The
+/// first declaration of each name wins, so top-level tools take precedence.
 pub(crate) fn promote_additional_tools(body: &mut Value) {
     if !input_items(body)
         .iter()
@@ -845,6 +920,11 @@ pub(crate) fn promote_additional_tools(body: &mut Value) {
         _ => Vec::new(),
     };
     tools.extend(promoted);
+    let mut seen = HashSet::new();
+    tools.retain(|tool| {
+        let name = deduplicated_tool_name(tool);
+        name.is_empty() || seen.insert(name)
+    });
     json::set(body, "tools", Value::Array(tools));
 }
 
@@ -905,29 +985,62 @@ pub(crate) fn normalize_namespace_tool_choice(body: &mut Value, fold: bool) {
 /// names, and its dispatcher if `fold`.
 pub(crate) fn collect_namespace_refs(body: &Value, fold: bool) -> NamespaceRefs {
     let mut refs = NamespaceRefs::new();
+    let mut claimed = HashSet::new();
     for tools in tool_lists(body).filter_map(|tools| tools.and_then(Value::as_array)) {
         for tool in tools {
-            if text(tool, "type") != NAMESPACE {
+            let tool_type = trimmed(tool, "type");
+            if matches!(tool_type.as_str(), FUNCTION | CUSTOM) {
+                let name = trimmed(tool, "name");
+                if !name.is_empty() {
+                    claimed.insert(name.clone());
+                    if fold
+                        && refs
+                            .get(&name)
+                            .is_some_and(|reference| !reference.is_dispatcher)
+                    {
+                        refs.remove(&name);
+                    }
+                }
+                continue;
+            }
+            if tool_type != NAMESPACE {
                 continue;
             }
             let namespace = trimmed(tool, "name");
             if namespace.is_empty() {
                 continue;
             }
-            if fold {
+            if fold && claimed.insert(namespace.clone()) {
                 refs.insert(
                     namespace.clone(),
                     NamespaceRef {
                         namespace: namespace.clone(),
                         name: String::new(),
                         is_dispatcher: true,
+                        children: HashSet::new(),
                     },
                 );
             }
             for child in elements(tool.get("tools")) {
+                if text(child, "type") == TOOL_SEARCH {
+                    continue;
+                }
                 let name = trimmed(child, "name");
                 let qualified = qualify(&namespace, &name);
                 if qualified.is_empty() {
+                    continue;
+                }
+                if fold {
+                    if let Some(reference) = refs
+                        .get_mut(&namespace)
+                        .filter(|reference| reference.is_dispatcher)
+                    {
+                        reference.children.insert(name.clone());
+                    }
+                    if claimed.contains(&qualified) || refs.contains_key(&qualified) {
+                        continue;
+                    }
+                } else if !claimed.insert(qualified.clone()) {
                     continue;
                 }
                 refs.insert(
@@ -936,6 +1049,7 @@ pub(crate) fn collect_namespace_refs(body: &Value, fold: bool) -> NamespaceRefs 
                         namespace: namespace.clone(),
                         name,
                         is_dispatcher: false,
+                        children: HashSet::new(),
                     },
                 );
             }
@@ -1110,3 +1224,7 @@ fn dispatcher_arguments(name: String, arguments: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tools/deduplication_tests.rs"]
+mod deduplication_tests;
