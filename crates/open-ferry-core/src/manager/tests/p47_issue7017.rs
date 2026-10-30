@@ -501,7 +501,10 @@ async fn p47r2_retry_deadline_uses_only_the_errors_own_positive_hint() {
                             .execute_stream(&providers, request("m"), options())
                             .await;
                         if path == 2 {
-                            stream.err().expect("pre-stream failure")
+                            match stream {
+                                Err(error) => error,
+                                Ok(_) => panic!("expected pre-stream failure"),
+                            }
                         } else {
                             collect(stream.expect("bootstrap/accepted failure stream"))
                                 .await
