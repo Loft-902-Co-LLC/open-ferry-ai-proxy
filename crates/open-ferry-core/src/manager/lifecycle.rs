@@ -2525,7 +2525,7 @@ impl Manager {
                         (path, unwritten)
                     }
                     GuardedSave::Deferred(reason) => {
-                        self.record_owed_save(&auth.id, epoch, generation, reason);
+                        self.record_owed_save(auth, epoch, generation, reason);
                         return Ok(super::Persisted::Deferred(reason));
                     }
                 }
@@ -2872,7 +2872,8 @@ impl Manager {
     /// writes and clears it, and then be refused behind a pass that has
     /// already looked for the flag, so recording it would leave it owed
     /// with nothing to flush it.
-    fn record_owed_save(&self, id: &str, epoch: u64, generation: u64, reason: SaveDeferral) {
+    fn record_owed_save(&self, auth: &Auth, epoch: u64, generation: u64, reason: SaveDeferral) {
+        let id = auth.id.as_str();
         if reason == SaveDeferral::RegistrationChanged {
             return;
         }
@@ -2888,7 +2889,10 @@ impl Manager {
                 entry.owed_save = Some(super::OwedSave { reason, version });
             }
         }
-        let id = crate::observe::mask::mask_emails(id);
+        let mut secrets = crate::observe::redact::Secrets::new();
+        secrets.add_auth(auth);
+        let id = secrets.text(auth.id.clone(), crate::observe::redact::Policy::Disk);
+        let id = crate::observe::mask::mask_emails(&id);
         tracing::warn!("credential save deferred for {id}: {reason:?}");
     }
 
