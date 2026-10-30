@@ -36,6 +36,10 @@ models:
 
 # Listener, TLS, and server operation.
 server:
+  # Negotiated downstream HTTP compression (unset enabled: true; min-bytes <= 0: 1024).
+  # response-compression:
+  #   enabled: true
+  #   min-bytes: 1024
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
   # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
   host: ""
@@ -334,6 +338,11 @@ client:
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
   codex:
+    # Codex HTTP request zstd is opt-in; a nonpositive minimum means 1024 bytes.
+    # upstream-request-compression: false
+    # upstream-request-compression-min-bytes: 1024
+    # Upstream and downstream WebSocket permessage-deflate defaults to enabled.
+    # websocket-compression: true
     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
     # Keeps one upstream account/model per socket; accepted input is never replayed.
     response-steering: false

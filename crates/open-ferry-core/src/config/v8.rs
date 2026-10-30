@@ -42,6 +42,7 @@ pub(crate) const MAX_CREDENTIAL_WEIGHT: i64 = 1_000_000;
 /// field order.
 pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ("max-request-body-bytes", "server.max-request-body-bytes"),
+    ("response-compression", "server.response-compression"),
     (
         "ingress-limits.max-connections",
         "server.ingress-limits.max-connections",
@@ -367,6 +368,18 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "upstream.codex.response-steering",
     ),
     (
+        "codex.upstream-request-compression",
+        "upstream.codex.upstream-request-compression",
+    ),
+    (
+        "codex.upstream-request-compression-min-bytes",
+        "upstream.codex.upstream-request-compression-min-bytes",
+    ),
+    (
+        "codex.websocket-compression",
+        "upstream.codex.websocket-compression",
+    ),
+    (
         "codex.signin-with-chatgpt-identifier",
         "oauth.providers.codex.signin-with-chatgpt-identifier",
     ),
@@ -492,6 +505,18 @@ pub(crate) const V8_SHARED_PATHS: &[(&str, &str)] = &[
     (
         "oauth.providers.codex.response-steering",
         "upstream.codex.response-steering",
+    ),
+    (
+        "oauth.providers.codex.upstream-request-compression",
+        "upstream.codex.upstream-request-compression",
+    ),
+    (
+        "oauth.providers.codex.upstream-request-compression-min-bytes",
+        "upstream.codex.upstream-request-compression-min-bytes",
+    ),
+    (
+        "oauth.providers.codex.websocket-compression",
+        "upstream.codex.websocket-compression",
     ),
     (
         "oauth.providers.claude.model-level-cooling",
@@ -904,7 +929,7 @@ mod tests {
     fn paths_table_matches_upstream_shape() {
         // Upstream's, open-ferry's management.separate-address, and its
         // eight ingress-limit fields.
-        assert_eq!(V8_PATHS.len(), 124 + 1 + 8);
+        assert_eq!(V8_PATHS.len(), 128 + 1 + 8);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

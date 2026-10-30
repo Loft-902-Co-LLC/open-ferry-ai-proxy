@@ -17,6 +17,7 @@
 //! host (`format_url`), so no user information, path or query.
 //!
 //! Deviations from upstream:
+//! - Compression settings get change lines too; upstream reloads them silently.
 //! - All eight open-ferry `ingress-limits.*` settings get numeric change lines.
 //! - The compatibility-only `codex.signin-with-chatgpt-identifier` gets
 //!   an `updated` line without either value; upstream has no diff line.
@@ -74,6 +75,33 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
     if old.claude_header_defaults != new.claude_header_defaults {
         changes.0.push("claude-header-defaults: updated".to_owned());
     }
+
+    // Compression settings are reported as stored, including explicit overrides.
+    changes.optional_bool(
+        "response-compression.enabled",
+        old.response_compression.enabled,
+        new.response_compression.enabled,
+    );
+    changes.int(
+        "response-compression.min-bytes",
+        old.response_compression.min_bytes,
+        new.response_compression.min_bytes,
+    );
+    changes.optional_bool(
+        "codex.websocket-compression",
+        old.codex.websocket_compression,
+        new.codex.websocket_compression,
+    );
+    changes.flag(
+        "codex.upstream-request-compression",
+        old.codex.upstream_request_compression,
+        new.codex.upstream_request_compression,
+    );
+    changes.int(
+        "codex.upstream-request-compression-min-bytes",
+        old.codex.upstream_request_compression_min_bytes,
+        new.codex.upstream_request_compression_min_bytes,
+    );
 
     // Simple scalars.
     changes.flag(
