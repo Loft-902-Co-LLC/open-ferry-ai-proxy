@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn responses_checks_continuation_only_once_per_part() {
+fn responses_continuation_preserves_assembled_arguments() {
     let first = json!({"name":"weather","willContinue":true,"partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}]});
     let second = json!({"name":"weather","willContinue":true,"partialArgs":[{"jsonPath":"$.city","stringValue":"York","willContinue":true}]});
     let mut expected = StreamingCall::new("weather".into(), String::new(), "fixture".into(), 0);
@@ -11,15 +11,12 @@ fn responses_checks_continuation_only_once_per_part() {
     let mut stream = GeminiToOpenAIResponsesStream::new("gemini-test", &json!({}), &Value::Null);
     feed(&mut stream, &frame(json!([{"functionCall":first}]), false));
     feed(&mut stream, &frame(json!([{"functionCall":second}]), false));
+    expected.assembler.push(&json!({}), None).unwrap();
+    let actual = &mut stream.active_call.as_mut().unwrap().call.assembler;
+    actual.push(&json!({}), None).unwrap();
     assert_eq!(
-        stream
-            .active_call
-            .as_ref()
-            .unwrap()
-            .call
-            .assembler
-            .work_used(),
-        expected.assembler.work_used()
+        actual.full_arguments().unwrap(),
+        expected.assembler.full_arguments().unwrap()
     );
 }
 

@@ -168,7 +168,7 @@ fn continuation_identity_and_completed_values() {
 }
 
 #[test]
-fn depth_index_size_node_and_work_limits_poison_the_call() {
+fn depth_index_and_size_errors_poison_the_call() {
     assert!(parse_path(&format!("${}", ".a".repeat(MAX_DEPTH))).is_ok());
     assert!(parse_path(&format!("${}", ".a".repeat(MAX_DEPTH + 1))).is_err());
     assert!(parse_path("$[1024]").is_ok());
@@ -194,25 +194,6 @@ fn depth_index_size_node_and_work_limits_poison_the_call() {
             )
             .is_err()
     );
-    let mut nodes = Assembler::default();
-    nodes.nodes.resize_with(MAX_NODES, Node::default);
-    assert!(
-        nodes
-            .push(
-                &json!({"partialArgs":[{"jsonPath":"$.a","numberValue":1}]}),
-                None
-            )
-            .is_err()
-    );
-    let mut work = Assembler::default();
-    work.work.charge(MAX_WORK).unwrap();
-    assert!(
-        work.push(
-            &json!({"partialArgs":[{"jsonPath":"$.a","numberValue":1}]}),
-            None
-        )
-        .is_err()
-    );
 }
 
 #[test]
@@ -232,15 +213,6 @@ fn aggregate_output_and_fallback_copy_limits_are_enforced() {
             .is_err()
     );
     assert!(fallback.full_arguments().is_err());
-    let mut deep = json!(1);
-    for _ in 0..=MAX_DEPTH {
-        deep = json!({"a":deep});
-    }
-    assert!(
-        Assembler::default()
-            .push(&json!({"args":deep}), None)
-            .is_err()
-    );
     for call in [
         json!({"partialArgs":{}}),
         json!({"partialArgs":[false]}),
@@ -252,7 +224,7 @@ fn aggregate_output_and_fallback_copy_limits_are_enforced() {
 
 #[test]
 fn cleaner_probes_hold_placeholders_but_preserve_declared_values() {
-    let clean = |value: &Value, _: &WorkBudget| {
+    let clean = |value: &Value| {
         let mut value = value.clone();
         if let Some(object) = value.as_object_mut() {
             object.remove("_");
@@ -281,3 +253,57 @@ fn cleaner_probes_hold_placeholders_but_preserve_declared_values() {
 }
 
 mod round5_tests;
+
+#[test]
+fn round7_five_thousand_keyed_children_complete_in_linear_lookups() {
+    let start = std::time::Instant::now();
+    let mut assembler = Assembler::default();
+    let mut expected = serde_json::Map::new();
+    let mut output = String::new();
+    for at in 0..5_000 {
+        let key = format!("k{at:04}");
+        output.push_str(&assembler.push(&json!({"willContinue":true,"partialArgs":[{"jsonPath":format!("$.{key}"),"stringValue":"x"}]}),None).unwrap().0);
+        assert!(
+            assembler
+                .find(&[Segment::Key(key.clone())])
+                .unwrap()
+                .is_some()
+        );
+        expected.insert(key, json!("x"));
+    }
+    let (delta, done) = assembler.push(&json!({}), None).unwrap();
+    output.push_str(&delta);
+    assert!(done);
+    assert_eq!(output, Value::Object(expected).to_string());
+    let lookups = assembler.lookup_steps.get();
+    assert!(
+        (10_000..=15_000).contains(&lookups),
+        "key lookup steps={lookups}"
+    );
+    eprintln!(
+        "R7_ASSEMBLY keys=5000 complete=true equal=true lookup_steps={lookups} elapsed_ms={}",
+        start.elapsed().as_millis()
+    );
+}
+
+#[test]
+fn upstream_allows_more_than_sixty_five_thousand_argument_nodes() {
+    let mut assembler = Assembler::default();
+    let parts: Vec<_> = (0..65_537)
+        .map(|i| json!({"jsonPath":format!("$.k{i}"),"nullValue":true}))
+        .collect();
+    assert!(
+        assembler
+            .push(&json!({"partialArgs":parts}), None)
+            .unwrap()
+            .1
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(assembler.full_arguments().unwrap())
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        65_537
+    );
+}

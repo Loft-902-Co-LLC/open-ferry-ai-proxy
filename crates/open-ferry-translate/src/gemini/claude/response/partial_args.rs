@@ -58,21 +58,16 @@ impl GeminiToClaudeStream {
                     &tool,
                     &self.original_request,
                     &self.translated_request,
-                    active.assembler.work_budget(),
                 ));
         }
         let schemas = self
             .active_schemas
             .as_ref()
             .expect("schemas resolved for the active call");
-        let parameterless = !continuation && schemas.parameterless(active.assembler.work_budget());
-        let clean = |args: &Value, work: &crate::common::vertex_partial_args::WorkBudget| {
-            schemas.clean(args, work)
-        };
-        let probe = |state: usize,
-                     step: crate::common::vertex_partial_args::ProbeStep<'_>,
-                     work: &crate::common::vertex_partial_args::WorkBudget| {
-            schemas.probe(state, step, work)
+        let parameterless = !continuation && schemas.parameterless();
+        let clean = |args: &Value| schemas.clean(args);
+        let probe = |state: usize, step: crate::common::vertex_partial_args::ProbeStep<'_>| {
+            schemas.probe(state, step)
         };
         let (delta, done) = match active
             .assembler

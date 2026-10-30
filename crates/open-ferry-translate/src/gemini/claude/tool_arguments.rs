@@ -17,7 +17,6 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-mod budget;
 mod call_analysis;
 mod reclean;
 mod schema_index;
@@ -25,11 +24,6 @@ mod schema_index;
 use call_analysis::CallAnalysis;
 
 fn tool_name(tool: &Value) -> String {
-    if !budget::value(tool.get("name").unwrap_or(&Value::Null))
-        || !budget::value(path(tool, "function.name").unwrap_or(&Value::Null))
-    {
-        return String::new();
-    }
     let name = str_of(tool.get("name"));
     if name.trim().is_empty() {
         str_of(path(tool, "function.name")).trim().to_owned()
@@ -67,9 +61,7 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
         return None;
     }
     let tools = request.get("tools")?;
-    if !budget::value(tools) {
-        return None;
-    }
+
     let tools = tools.as_array()?;
     let exact: Vec<_> = tools.iter().filter(|t| tool_name(t) == name).collect();
     let candidates: Vec<_> = if exact.is_empty() {
@@ -99,7 +91,7 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
     let first = *schemas.first()?;
     schemas
         .iter()
-        .all(|s| s.map(budget::text) == first.map(budget::text))
+        .all(|s| s.map(Value::to_string) == first.map(Value::to_string))
         .then_some(first)
 }
 
@@ -119,9 +111,6 @@ struct SchemaInfo<S> {
 }
 impl Clone for Info<'_> {
     fn clone(&self) -> Self {
-        if !self.charge_copy() {
-            return Self::default();
-        }
         Self {
             properties: self.properties.clone(),
             required: self.required.clone(),
@@ -137,26 +126,6 @@ impl Clone for Info<'_> {
 }
 
 impl<'a> Info<'a> {
-    fn charge_copy(&self) -> bool {
-        if !budget::enabled() {
-            return true;
-        }
-        for (key, schemas) in &self.properties {
-            if !budget::charge(key.len().saturating_add(32).saturating_mul(16)) {
-                return false;
-            }
-            for text in &schemas.serialized {
-                if !budget::charge(text.len().saturating_add(32)) {
-                    return false;
-                }
-            }
-        }
-        self.required
-            .iter()
-            .all(|key| budget::charge(key.len().saturating_add(32).saturating_mul(16)))
-            && budget::charge(self.branches.len().saturating_mul(32))
-    }
-
     fn merge(&mut self, other: Self) {
         for (key, values) in other.properties {
             let entry = self.properties.entry(key).or_default();
@@ -177,15 +146,10 @@ impl<'a> Info<'a> {
 
 impl<S> SchemaInfo<S> {
     fn dynamic(&self) -> bool {
-        budget::charge(1)
-            && (self.pattern
-                || (self.allows && !self.forbids)
-                || self.branches.iter().any(Self::dynamic))
+        self.pattern || (self.allows && !self.forbids) || self.branches.iter().any(Self::dynamic)
     }
     fn matches(&self, current: &Value) -> bool {
-        self.required
-            .iter()
-            .all(|k| budget::charge(k.len().saturating_add(1)) && current.get(k).is_some())
+        self.required.iter().all(|k| current.get(k).is_some())
     }
     fn branch_accepts(&self, key: &str, current: &Value) -> bool {
         self.pattern
@@ -193,9 +157,6 @@ impl<S> SchemaInfo<S> {
             || self.parent_accepts(key, current)
     }
     fn parent_accepts(&self, key: &str, current: &Value) -> bool {
-        if !budget::charge(key.len().saturating_add(1).saturating_mul(16)) {
-            return false;
-        }
         self.branches
             .iter()
             .any(|b| !b.properties.contains_key(key) && b.branch_accepts(key, current))
@@ -236,9 +197,6 @@ impl<'a, 'b> IntoIterator for &'b Schemas<'a> {
     }
 }
 fn unique<'a>(values: &mut Schemas<'a>, value: &'a Value) {
-    if !budget::value(value) {
-        return;
-    }
     if values.serialized.insert(value.to_string()) {
         values.values.push(value);
     }
@@ -280,9 +238,6 @@ fn branches(schema: &Value) -> Option<Vec<&Value>> {
     Some(out.values)
 }
 fn local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    if !budget::charge(reference.len().saturating_add(1).saturating_mul(16)) {
-        return None;
-    }
     let mut current = root;
     for segment in reference.strip_prefix("#/")?.split('/') {
         let segment = segment.replace("~1", "/").replace("~0", "~");
@@ -303,15 +258,6 @@ struct AnalysisReferences {
     cut: BTreeSet<String>,
 }
 
-impl AnalysisReferences {
-    fn charge_copy(&self) -> bool {
-        !budget::enabled()
-            || self.followed.iter().chain(&self.cut).all(|reference| {
-                budget::charge(reference.len().saturating_add(32).saturating_mul(16))
-            })
-    }
-}
-
 struct CachedAnalysis<T> {
     info: T,
     references: AnalysisReferences,
@@ -327,29 +273,7 @@ struct AnalysisMemo<T> {
     cache_hits: usize,
 }
 
-trait CopyWork {
-    fn charge_copy(&self) -> bool;
-}
-impl CopyWork for Info<'_> {
-    fn charge_copy(&self) -> bool {
-        Info::charge_copy(self)
-    }
-}
-impl CopyWork for bool {
-    fn charge_copy(&self) -> bool {
-        budget::charge(1)
-    }
-}
-impl CopyWork for Option<Vec<&Value>> {
-    fn charge_copy(&self) -> bool {
-        budget::charge(
-            self.as_ref()
-                .map_or(1, |values| values.len().saturating_mul(32)),
-        )
-    }
-}
-
-impl<T: Clone + Default + CopyWork> AnalysisMemo<T> {
+impl<T: Clone + Default> AnalysisMemo<T> {
     fn resolve_with(
         &mut self,
         target: &Value,
@@ -359,9 +283,6 @@ impl<T: Clone + Default + CopyWork> AnalysisMemo<T> {
         walk: impl FnOnce(&mut Self, &mut BTreeSet<String>, &mut AnalysisReferences) -> T,
         cacheable: fn(&T) -> bool,
     ) -> T {
-        if !budget::value(target) {
-            return T::default();
-        }
         if depth > 16 {
             return walk(self, visited, references);
         }
@@ -370,17 +291,13 @@ impl<T: Clone + Default + CopyWork> AnalysisMemo<T> {
             .targets
             .get(&identity)
             .and_then(|depths| depths[depth].as_ref())
-            .filter(|cached| {
-                cached.references.charge_copy() && cached.references.followed.is_disjoint(visited)
-            })
+            .filter(|cached| cached.references.followed.is_disjoint(visited))
         {
             #[cfg(test)]
             {
                 self.cache_hits += 1;
             }
-            if !cached.info.charge_copy() || !cached.references.charge_copy() {
-                return T::default();
-            }
+
             references
                 .followed
                 .extend(cached.references.followed.iter().cloned());
@@ -397,13 +314,8 @@ impl<T: Clone + Default + CopyWork> AnalysisMemo<T> {
         // its followed refs are inactive. Cuts already active at entry depend
         // on the caller, so those results stay uncached. Cacheable walks restore
         // visited; items failures, which can leave refs active, are not cached.
-        if !own.charge_copy() {
-            return T::default();
-        }
+
         if cacheable(&info) && own.cut.is_disjoint(visited) {
-            if !info.charge_copy() || !own.charge_copy() {
-                return T::default();
-            }
             self.targets
                 .entry(identity)
                 .or_insert_with(|| std::array::from_fn(|_| None))[depth] = Some(CachedAnalysis {
@@ -467,9 +379,6 @@ fn analyze_depth_memo<'a>(
     memo: &mut AnalysisMemo<Info<'a>>,
     references: &mut AnalysisReferences,
 ) -> Info<'a> {
-    if !budget::value(schema) {
-        return Info::default();
-    }
     let mut info = Info::default();
     let Some(map) = schema.as_object().filter(|_| depth <= 16) else {
         info.complex = true;
@@ -575,9 +484,6 @@ pub(super) fn parameterless(request: &Value, name: &str) -> bool {
 
 // `functionNamesFromRequest`: collect raw names, preferring function.name.
 fn collect_function_names(tool: &Value, names: &mut Vec<String>) {
-    if !budget::value(tool) {
-        return;
-    }
     if let Some(tools) = tool.get("tools").and_then(Value::as_array) {
         for tool in tools {
             collect_function_names(tool, names);
@@ -616,15 +522,10 @@ fn sent_tool_name(original: &Value, target: &str) -> Option<String> {
         collect_function_names(tool, &mut names);
     }
     let names: Vec<_> = names.iter().map(String::as_str).collect();
-    crate::responses_tools::sanitize_tool_names_metered(&names, budget::charge)?.remove(target)
+    crate::responses_tools::sanitize_tool_names(&names).remove(target)
 }
 
 fn translated_schemas<'a>(sent: &'a Value, original: &Value, name: &str) -> Vec<&'a Value> {
-    if !budget::value(sent.get("tools").unwrap_or(&Value::Null))
-        || !budget::value(path(sent, "request.tools").unwrap_or(&Value::Null))
-    {
-        return Vec::new();
-    }
     let sent_name = sent_tool_name(original, name);
     let sanitized = sanitize_gemini_function_name(name);
     let mut exact = Vec::new();
@@ -695,9 +596,6 @@ fn items_memo<'a>(
     memo: &mut AnalysisMemo<Option<Vec<&'a Value>>>,
     references: &mut AnalysisReferences,
 ) -> Option<Vec<&'a Value>> {
-    if !budget::value(schema) {
-        return None;
-    }
     if depth > 16 || !schema.is_object() {
         return None;
     }
@@ -833,9 +731,6 @@ fn declares_deep_memo(
     memo: &mut AnalysisMemo<bool>,
     references: &mut AnalysisReferences,
 ) -> bool {
-    if !budget::value(schema) {
-        return false;
-    }
     if depth > 16 || !schema.is_object() {
         return false;
     }
@@ -887,7 +782,7 @@ fn clean_value(
     depth: usize,
     analyses: &mut CallAnalysis,
 ) {
-    if !budget::node(value) || depth > 128 || originals.is_empty() {
+    if depth > 128 || originals.is_empty() {
         return;
     }
     let analysis = analyses.resolve(originals, root);
@@ -940,9 +835,6 @@ fn clean_value(
     // child on every probe, even when the analyses themselves are cached.
     let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
     for key in keys {
-        if !budget::charge(key.len().saturating_add(32).saturating_mul(16)) {
-            return;
-        }
         let Some(children) = info.properties.get(&key) else {
             continue;
         };
@@ -1012,111 +904,68 @@ pub(super) struct CallSchemas {
 }
 
 impl CallSchemas {
-    pub(super) fn resolve(
-        name: &str,
-        original: &Value,
-        sent: &Value,
-        work: &crate::common::vertex_partial_args::WorkBudget,
-    ) -> Self {
-        budget::with(work, || {
-            let mut result = Self {
-                original: original_schema(original, name)
-                    .map(|schema| schema.map(|schema| Box::new(budget::copy(schema)))),
-                analyses: Mutex::default(),
-                indexed: Mutex::default(),
-                translated: translated_schemas(sent, original, name)
-                    .into_iter()
-                    .map(budget::copy)
-                    .collect(),
-            };
-            #[cfg(test)]
-            let use_index = !crate::common::vertex_partial_args::WorkBudget::test_unbounded();
-            #[cfg(not(test))]
-            let use_index = true;
-            if use_index && let Some(Some(schema)) = result.original.as_ref() {
-                result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
-                    schema,
-                    &result.translated,
-                )));
-            }
-            result
-        })
+    pub(super) fn resolve(name: &str, original: &Value, sent: &Value) -> Self {
+        let mut result = Self {
+            original: original_schema(original, name).map(|s| s.map(|s| Box::new(s.clone()))),
+            translated: translated_schemas(sent, original, name)
+                .into_iter()
+                .cloned()
+                .collect(),
+            analyses: Mutex::default(),
+            indexed: Mutex::default(),
+        };
+        if let Some(Some(schema)) = result.original.as_ref() {
+            result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
+                schema,
+                &result.translated,
+            )));
+        }
+        result
     }
-
-    pub(super) fn parameterless(
-        &self,
-        work: &crate::common::vertex_partial_args::WorkBudget,
-    ) -> bool {
-        budget::with(work, || {
-            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
-                return index.parameterless();
-            }
-            match &self.original {
-                Some(None) => true,
-                Some(Some(schema)) => self
-                    .analyses
-                    .lock()
-                    .expect("call analysis cache")
-                    .resolve(&[schema], schema)
-                    .merged
-                    .parameterless(),
-                None => false,
-            }
-        })
+    pub(super) fn parameterless(&self) -> bool {
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return index.parameterless();
+        }
+        matches!(self.original, Some(None))
     }
-
     pub(super) fn probe(
         &self,
         state: usize,
         step: crate::common::vertex_partial_args::ProbeStep<'_>,
-        work: &crate::common::vertex_partial_args::WorkBudget,
     ) -> Option<(bool, usize)> {
-        #[cfg(test)]
-        if crate::common::vertex_partial_args::WorkBudget::test_unbounded() {
-            return None;
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return Some(index.probe(state, step));
         }
-        budget::with(work, || {
-            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
-                return Some(index.probe(state, step));
-            }
-            use crate::common::vertex_partial_args::ProbeStep;
-            let is_index = matches!(step, ProbeStep::Index);
-            let result = match &self.original {
-                None => (false, 2),
-                Some(None) => match state {
-                    1 => (!is_index, 1),
-                    2 => (false, 2),
-                    _ => {
-                        if is_index && !self.translated.is_empty() {
-                            (false, 2)
-                        } else {
-                            (!is_index, 1)
-                        }
+        let is_index = matches!(step, crate::common::vertex_partial_args::ProbeStep::Index);
+        Some(match &self.original {
+            None => (false, 2),
+            Some(None) => match state {
+                1 => (!is_index, 1),
+                2 => (false, 2),
+                _ => {
+                    if is_index && !self.translated.is_empty() {
+                        (false, 2)
+                    } else {
+                        (!is_index, 1)
                     }
-                },
-                Some(Some(_)) => return None,
-            };
-            Some(result)
+                }
+            },
+            Some(Some(_)) => unreachable!("declared schema has an index"),
         })
     }
-
-    pub(super) fn clean(
-        &self,
-        args: &Value,
-        work: &crate::common::vertex_partial_args::WorkBudget,
-    ) -> Value {
-        budget::with(work, || {
-            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
-                return index.clean(args);
-            }
-            let translated: Vec<_> = self.translated.iter().collect();
-            clean_resolved(
-                args,
-                self.original.as_ref().map(|schema| schema.as_deref()),
-                &translated,
-                &mut self.analyses.lock().expect("call analysis cache"),
-            )
-        })
+    pub(super) fn clean(&self, args: &Value) -> Value {
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return index.clean(args);
+        }
+        self.clean_reference(args)
+    }
+    fn clean_reference(&self, args: &Value) -> Value {
+        clean_resolved(
+            args,
+            self.original.as_ref().map(|s| s.as_deref()),
+            &self.translated.iter().collect::<Vec<_>>(),
+            &mut self.analyses.lock().expect("call analyses"),
+        )
     }
 }
 
@@ -1136,22 +985,19 @@ fn clean_resolved(
     translated: &[&Value],
     analyses: &mut CallAnalysis,
 ) -> Value {
-    if !budget::value(args) {
-        return Value::Null;
-    }
     if !args.is_object() && !translated.is_empty() {
-        return budget::copy(args);
+        return Value::clone(args);
     }
     let Some(schema) = original else {
-        return budget::copy(args);
+        return Value::clone(args);
     };
     let Some(schema) = schema else {
         return json!({});
     };
     if !args.is_object() {
-        return budget::copy(args);
+        return Value::clone(args);
     }
-    let mut args = budget::copy(args);
+    let mut args = Value::clone(args);
     clean_value(&mut args, &[schema], translated, schema, true, 0, analyses);
     args
 }

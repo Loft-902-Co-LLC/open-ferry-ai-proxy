@@ -58,9 +58,6 @@ impl SchemaIndex {
         translated == 0 || self.injected_for(translated, key, top, info.forbids)
     }
     pub(crate) fn probe(&mut self, parent: usize, step: ProbeStep<'_>) -> (bool, usize) {
-        if !budget::charge(8) {
-            return (false, 2);
-        }
         let state = self.probe_states[parent];
         let index = matches!(step, ProbeStep::Index);
         match state {
@@ -75,12 +72,7 @@ impl SchemaIndex {
             return (false, 2);
         }
         let key = match step {
-            ProbeStep::Key(text) => {
-                if !budget::charge(text.len()) {
-                    return (false, 2);
-                }
-                self.name_ids.get(text).copied().unwrap_or(usize::MAX)
-            }
+            ProbeStep::Key(text) => self.name_ids.get(text).copied().unwrap_or(usize::MAX),
             ProbeStep::Index => usize::MAX - 1,
         };
         if let Some(result) = self.probe_edges.get(&(parent, key)) {

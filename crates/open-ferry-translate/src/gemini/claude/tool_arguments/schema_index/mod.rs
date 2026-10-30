@@ -11,7 +11,7 @@
 //! branch, item and declaration summaries are shared across probes. Full-object
 //! required-set containment is separate: `ObjectState` evaluates each distinct
 //! list lazily once and updates the cached result after placeholder removal.
-//! Both categories spend the same work allowance; tests meter them separately.
+//! Neither schema preparation nor argument cleaning has a work allowance.
 use super::*;
 mod clean;
 mod deep;
@@ -109,11 +109,9 @@ pub(super) struct SchemaIndex {
     original: Id,
     original_group: Map,
     translated: Map,
-    failed: bool,
     probe_states: Vec<ProbeState>,
     probe_ids: HashMap<ProbeState, usize>,
     probe_edges: HashMap<(usize, usize), (bool, usize)>,
-    allowances: HashMap<usize, usize>,
     deep_sets: HashMap<(Map, usize), bool>,
     injection_sets: HashMap<(Map, usize, bool, bool), bool>,
 }
@@ -148,11 +146,9 @@ impl SchemaIndex {
             original: 0,
             original_group: 0,
             translated: 0,
-            failed: false,
             probe_states: Vec::new(),
             probe_ids: HashMap::new(),
             probe_edges: HashMap::new(),
-            allowances: HashMap::new(),
             deep_sets: HashMap::new(),
             injection_sets: HashMap::new(),
         };
@@ -187,10 +183,7 @@ impl SchemaIndex {
         if let Some(id) = self.name_ids.get(text) {
             return *id;
         }
-        if !budget::charge(text.len().saturating_add(16)) {
-            self.failed = true;
-            return 0;
-        }
+
         let id = self.names.len();
         let value: Arc<str> = text.into();
         self.names.push(Arc::clone(&value));
@@ -201,15 +194,6 @@ impl SchemaIndex {
         let id = std::ptr::from_ref(value) as usize;
         if self.records.contains_key(&id) {
             return id;
-        }
-        let entries = match value {
-            Value::Array(a) => a.len(),
-            Value::Object(o) => o.len(),
-            _ => 0,
-        };
-        if !budget::charge(32 + entries.saturating_mul(32)) {
-            self.failed = true;
-            return 0;
         }
         let raw = match value {
             Value::Null => Raw::Null,
@@ -314,27 +298,15 @@ impl SchemaIndex {
         }
     }
     fn restore(&self, id: Id) -> Value {
-        if !budget::charge(32) {
-            return Value::Null;
-        }
         match &self.records[&id].raw {
             Raw::Null => Value::Null,
             Raw::Bool(b) => Value::Bool(*b),
-            Raw::Number(k) => {
-                budget::charge(self.names[*k].len());
-                crate::json::exact::from_str(&self.names[*k]).unwrap_or(Value::Null)
-            }
-            Raw::String(k) => {
-                budget::charge(self.names[*k].len());
-                Value::String(self.names[*k].to_string())
-            }
+            Raw::Number(k) => crate::json::exact::from_str(&self.names[*k]).unwrap_or(Value::Null),
+            Raw::String(k) => Value::String(self.names[*k].to_string()),
             Raw::Array(v) => Value::Array(v.iter().map(|v| self.restore(*v)).collect()),
             Raw::Object(v) => Value::Object(
                 v.iter()
-                    .map(|(k, v)| {
-                        budget::charge(self.names[*k].len());
-                        (self.names[*k].to_string(), self.restore(*v))
-                    })
+                    .map(|(k, v)| (self.names[*k].to_string(), self.restore(*v)))
                     .collect(),
             ),
         }
@@ -345,9 +317,6 @@ impl SchemaIndex {
         }
         let text = Arc::clone(&self.names[name]);
         let result = (|| {
-            if !budget::charge(text.len() + 1) {
-                return None;
-            }
             let mut current = scope;
             for segment in text.strip_prefix("#/")?.split('/') {
                 let segment = segment.replace("~1", "/").replace("~0", "~");
@@ -434,7 +403,7 @@ impl SchemaIndex {
         if let Some(summary) = self.branch_summaries.get(&branches) {
             return *summary;
         }
-        budget::charge(8);
+
         let result = match self.maps.kind(branches) {
             trie::Kind::Empty => BranchSummary {
                 dynamic: false,

@@ -14,7 +14,7 @@ impl Info<'_> {
             properties: self
                 .properties
                 .into_iter()
-                .map(|(key, schemas)| (key, schemas.into_iter().map(budget::copy).collect()))
+                .map(|(key, schemas)| (key, schemas.into_iter().map(Value::clone).collect()))
                 .collect(),
             required: self.required,
             allows: self.allows,
@@ -53,9 +53,6 @@ impl CallAnalysis {
     }
 
     pub(super) fn translated_children(&mut self, schemas: &[&Value], name: &str) -> CachedSchemas {
-        if !budget::charge(name.len().saturating_add(schemas.len().saturating_mul(32))) {
-            return Arc::default();
-        }
         let key = (Self::identities(schemas), name.to_owned());
         if let Some(cached) = self.children.get(&key) {
             return Arc::clone(cached);
@@ -72,7 +69,7 @@ impl CallAnalysis {
                 }
             }
         }
-        let result = Arc::new(children.into_iter().map(budget::copy).collect());
+        let result = Arc::new(children.into_iter().map(Value::clone).collect());
         self.children.insert(key, Arc::clone(&result));
         result
     }
@@ -84,9 +81,6 @@ impl CallAnalysis {
         schemas: &[&Value],
         root: Option<&Value>,
     ) -> Option<CachedSchemas> {
-        if !budget::charge(schemas.len().saturating_add(1).saturating_mul(32)) {
-            return None;
-        }
         let key = (
             root.map_or(0, |root| std::ptr::from_ref(root) as usize),
             Self::identities(schemas),
@@ -106,19 +100,13 @@ impl CallAnalysis {
                     unique(&mut values, item);
                 }
             }
-            Some(Arc::new(values.into_iter().map(budget::copy).collect()))
+            Some(Arc::new(values.into_iter().map(Value::clone).collect()))
         })();
         self.array_items.insert(key, result.clone());
         result
     }
 
     pub(super) fn resolve(&mut self, schemas: &[&Value], root: &Value) -> Arc<AnalysisSet> {
-        if !budget::charge(schemas.len().saturating_add(1).saturating_mul(32)) {
-            return Arc::new(AnalysisSet {
-                infos: Vec::new(),
-                merged: Arc::new(OwnedInfo::default()),
-            });
-        }
         let key = (
             std::ptr::from_ref(root) as usize,
             schemas
@@ -153,66 +141,11 @@ impl CallAnalysis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::vertex_partial_args::WorkBudget;
-
     #[test]
-    fn round5_warm_deep_probe_work_is_linear_in_path_length() {
-        for depth in [8, 16, 32, 48] {
-            let mut schema = json!({"type":"object","properties":{"value":{"type":"string"}}});
-            let mut probe = json!({"__cpa_probe__":1});
-            for _ in 0..depth {
-                schema = json!({"type":"object","properties":{"next":schema}});
-                probe = json!({"next":probe});
-            }
-            let request = json!({"tools":[{"name":"deep","input_schema":schema}]});
-            let sent = json!({"tools":[{"functionDeclarations":[{"name":"deep","parametersJsonSchema":schema}]}]});
-            let work = WorkBudget::default();
-            let schemas = CallSchemas::resolve("deep", &request, &sent, &work);
-            assert_eq!(schemas.clean(&probe, &work), probe);
-            let before = work.used();
-            assert_eq!(schemas.clean(&probe, &work), probe);
-            let charged = work.used() - before;
-            eprintln!("R5_DEPTH depth={depth} warm_probe={charged}");
-            assert!(
-                charged < 2048 * (depth + 1),
-                "depth={depth}, charge={charged}"
-            );
-            assert!(work.check().is_ok());
-        }
-    }
-
-    #[test]
-    fn round4_root_and_translated_analyses_are_reused_without_copy_charges() {
-        let properties: serde_json::Map<_, _> = (0..200)
-            .map(|index| {
-                (
-                    format!("k{index}"),
-                    json!({"type":"object","properties":{"value":{"type":"string"}}}),
-                )
-            })
-            .collect();
-        let original = json!({"type":"object","properties":properties});
-        let mut translated = original.clone();
-        translated["required"] = json!(["_"]);
-        translated["properties"]["_"] = json!({"type":"boolean"});
-        let work = WorkBudget::default();
-        budget::with(&work, || {
-            let mut cache = CallAnalysis::default();
-            let root = cache.resolve(&[&original], &original);
-            let sent = cache.resolve(&[&translated], &translated);
-            let cold = work.used();
-            let root_again = cache.resolve(&[&original], &original);
-            let sent_again = cache.resolve(&[&translated], &translated);
-            assert!(Arc::ptr_eq(&root, &root_again));
-            assert!(Arc::ptr_eq(&sent, &sent_again));
-            assert_eq!(
-                work.used() - cold,
-                128,
-                "cache hits charge identities, not schema copies"
-            );
-            assert!(cold > 128);
-            assert_eq!(cache.sets.len(), 2);
-        });
-        assert!(work.check().is_ok());
+    fn root_analyses_reuse_owned_results() {
+        let schema = json!({"type":"object","properties":{"value":{"type":"string"}}});
+        let mut cache = CallAnalysis::default();
+        let first = cache.resolve(&[&schema], &schema);
+        assert!(Arc::ptr_eq(&first, &cache.resolve(&[&schema], &schema)));
     }
 }

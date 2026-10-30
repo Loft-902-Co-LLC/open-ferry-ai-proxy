@@ -14,22 +14,17 @@ const MAX_DEPTH: usize = 64;
 const MAX_INDEX: usize = 1024;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 // A single buffered raw string can expand sixfold when quoted. Emitted output
-// is still limited to MAX_BYTES; pre-clean snapshots spend the work allowance.
+// is still limited to MAX_BYTES; pre-clean snapshots are not emitted output.
 const MAX_QUOTED_BYTES: usize = 6 * MAX_BYTES + 2;
-const MAX_NODES: usize = 65_536;
-const MAX_WORK: usize = 64 * 1024 * 1024;
-
-mod work;
-pub(crate) use work::WorkBudget;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProbeStep<'a> {
     Key(&'a str),
     Index,
 }
-type Probe<'a> = Option<&'a dyn Fn(usize, ProbeStep<'_>, &WorkBudget) -> Option<(bool, usize)>>;
+type Probe<'a> = Option<&'a dyn Fn(usize, ProbeStep<'_>) -> Option<(bool, usize)>>;
 
-type Cleaner<'a> = Option<&'a dyn Fn(&Value, &WorkBudget) -> Value>;
+type Cleaner<'a> = Option<&'a dyn Fn(&Value) -> Value>;
 type Result<T> = std::result::Result<T, ArgumentError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,13 +48,20 @@ enum Segment {
 enum Kind {
     #[default]
     Unset,
-    Object(Vec<(String, usize)>),
+    Object(ObjectChildren),
     Array(BTreeMap<usize, usize>),
     String {
         escaped: String,
         open: bool,
     },
     Scalar(String),
+}
+
+// Upstream keeps keyed children and a separate emission-order list.
+#[derive(Default)]
+struct ObjectChildren {
+    by_key: HashMap<String, usize>,
+    order: Vec<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -82,7 +84,8 @@ pub(crate) struct Assembler {
     last_string: Option<usize>,
     probes: HashMap<Vec<Segment>, bool>,
     buffered: usize,
-    work: WorkBudget,
+    #[cfg(test)]
+    lookup_steps: std::cell::Cell<usize>,
     full: String,
     error: Option<ArgumentError>,
     finished: bool,
@@ -117,12 +120,9 @@ impl Assembler {
         cleaner: Cleaner<'_>,
         probe: Probe<'_>,
     ) -> Result<(String, bool)> {
-        self.work.check()?;
         if self.finished {
             return Err(ArgumentError("Vertex arguments received after completion"));
         }
-        // Bound malformed typed values too, before coercion or cleaner copies.
-        charge_json_work(call, &self.work)?;
         let start = self.full.len();
         let final_chunk = !will_continue(call);
         if let Some(parts) = field(call, "partialArgs", "partial_args") {
@@ -139,10 +139,8 @@ impl Assembler {
                 .get("args")
                 .filter(|args| args.is_object())
                 .unwrap_or(&empty);
-            // Check the borrowed input before the cleaner can copy it.
-            charge_json_work(args, &self.work)?;
             self.full = match cleaner {
-                Some(clean) => bounded_json(&self.clean(clean, args)?)?,
+                Some(clean) => bounded_json(&clean(args))?,
                 None => bounded_json(args)?,
             };
         } else if let Some(root) = self.root {
@@ -151,7 +149,7 @@ impl Assembler {
                 self.serialize(root, &mut raw)?;
                 let value = crate::json::exact::from_str(&raw)
                     .map_err(|_| ArgumentError("invalid assembled Vertex arguments"))?;
-                let cleaned = self.clean(clean, &value)?;
+                let cleaned = clean(&value);
                 self.prune(root, &cleaned);
             }
             self.emit(root, final_chunk)?;
@@ -160,32 +158,12 @@ impl Assembler {
         Ok((self.full[start..].to_owned(), final_chunk))
     }
 
-    pub(crate) fn work_budget(&self) -> &WorkBudget {
-        &self.work
-    }
-
-    #[cfg(test)]
-    pub(crate) fn work_used(&self) -> usize {
-        self.work.used()
-    }
-
     pub(crate) fn full_arguments(&self) -> Result<&str> {
-        self.work.check()?;
         match self.error {
             Some(error) => Err(error),
             None if self.full.is_empty() => Ok("{}"),
             None => Ok(&self.full),
         }
-    }
-
-    fn charge_work(&self, bytes: usize) -> Result<()> {
-        self.work.charge(bytes)
-    }
-
-    fn clean(&self, clean: &dyn Fn(&Value, &WorkBudget) -> Value, value: &Value) -> Result<Value> {
-        let cleaned = clean(value, &self.work);
-        self.work.check()?;
-        Ok(cleaned)
     }
 
     fn reserve(&mut self, bytes: usize) -> Result<()> {
@@ -197,9 +175,6 @@ impl Assembler {
     }
 
     fn alloc(&mut self, kind: Kind, held: bool) -> Result<usize> {
-        if self.nodes.len() >= MAX_NODES {
-            return Err(ArgumentError("Vertex argument node limit exceeded"));
-        }
         let index = self.nodes.len();
         self.nodes.push(Node {
             kind,
@@ -209,16 +184,11 @@ impl Assembler {
         Ok(index)
     }
 
-    fn object_child(&self, children: &[(String, usize)], key: &str) -> Result<Option<usize>> {
-        for (name, child) in children {
-            // Include compared bytes, not just the number of keys. Equal-length
-            // names can share an arbitrarily long prefix.
-            self.charge_work(1 + name.len().min(key.len()))?;
-            if name == key {
-                return Ok(Some(*child));
-            }
-        }
-        Ok(None)
+    fn object_child(&self, children: &ObjectChildren, key: &str) -> Option<usize> {
+        #[cfg(test)]
+        self.lookup_steps
+            .set(self.lookup_steps.get() + 1);
+        children.by_key.get(key).copied()
     }
 
     fn find(&self, segments: &[Segment]) -> Result<Option<usize>> {
@@ -226,9 +196,8 @@ impl Assembler {
             return Ok(None);
         };
         for segment in segments {
-            self.charge_work(1)?;
             let child = match (&self.nodes[current].kind, segment) {
-                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key)?,
+                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key),
                 (Kind::Array(children), Segment::Index(index)) => children.get(index).copied(),
                 _ => None,
             };
@@ -248,7 +217,6 @@ impl Assembler {
         }
         let path = field(part, "jsonPath", "json_path");
         let raw_path = crate::json::str_of(path);
-        self.charge_work(raw_path.len())?;
         let segments = parse_path(&raw_path)?;
         let string = field(part, "stringValue", "string_value").filter(|v| !v.is_null());
         let number = field(part, "numberValue", "number_value").filter(|v| !v.is_null());
@@ -285,7 +253,7 @@ impl Assembler {
                 return Err(ArgumentError("cannot modify completed Vertex container"));
             }
             let found = match (&self.nodes[current].kind, segment) {
-                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key)?,
+                (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key),
                 (Kind::Array(children), Segment::Index(index)) => children.get(index).copied(),
                 _ => return Err(ArgumentError("conflicting Vertex container types")),
             };
@@ -299,10 +267,8 @@ impl Assembler {
                                 Segment::Key(key) => ProbeStep::Key(key),
                                 Segment::Index(_) => ProbeStep::Index,
                             },
-                            &self.work,
                         )
                     });
-                    self.work.check()?;
                     let held = match segment {
                         Segment::Key(key) => {
                             self.reserve(key.len())?;
@@ -318,23 +284,21 @@ impl Assembler {
                     let child = self.alloc(kind, held)?;
                     self.nodes[child].probe_state = indexed.map_or(0, |(_, state)| state);
                     let next = self.nodes[current].next;
-                    if let Kind::Object(children) = &self.nodes[current].kind {
-                        // Searching for held entries and shifting the ordered vector.
-                        self.charge_work(children.len().saturating_sub(next).saturating_mul(2))?;
-                    }
                     let insert = match &self.nodes[current].kind {
                         Kind::Object(children) if !held => children
+                            .order
                             .iter()
                             .enumerate()
                             .skip(next)
                             .find(|(_, (_, id))| self.nodes[*id].held)
-                            .map_or(children.len(), |(at, _)| at),
-                        Kind::Object(children) => children.len(),
+                            .map_or(children.order.len(), |(at, _)| at),
+                        Kind::Object(children) => children.order.len(),
                         _ => 0,
                     };
                     match (&mut self.nodes[current].kind, segment) {
                         (Kind::Object(children), Segment::Key(key)) => {
-                            children.insert(insert, (key.clone(), child));
+                            children.by_key.insert(key.clone(), child);
+                            children.order.insert(insert, (key.clone(), child));
                         }
                         (Kind::Array(children), Segment::Index(index)) => {
                             children.insert(*index, child);
@@ -403,15 +367,6 @@ impl Assembler {
         } else {
             "__cpa_probe__"
         };
-        let key_bytes = path
-            .iter()
-            .map(|segment| match segment {
-                Segment::Key(key) => key.len(),
-                Segment::Index(_) => std::mem::size_of::<usize>(),
-            })
-            .sum::<usize>()
-            .saturating_add(probe_key.len());
-        self.charge_work(key_bytes)?;
         let mut cache_key = path.to_vec();
         // An array's schema is the same at every index.
         for segment in &mut cache_key {
@@ -423,8 +378,7 @@ impl Assembler {
         if let Some(held) = self.probes.get(&cache_key) {
             return Ok(*held);
         }
-        // Probe paths are work/cache overhead, not buffered argument bytes.
-        // Their copies and traversal remain covered by the shared work budget.
+        // Probe paths are not buffered argument bytes.
         let mut probe = serde_json::json!({probe_key:1});
         for segment in path.iter().rev() {
             probe = match segment {
@@ -436,8 +390,7 @@ impl Assembler {
                 Segment::Index(_) => Value::Array(vec![probe]),
             };
         }
-        charge_json_work(&probe, &self.work)?;
-        let cleaned = self.clean(clean, &probe)?;
+        let cleaned = clean(&probe);
         let mut current = Some(&cleaned);
         for segment in path {
             current = current.and_then(|v| match segment {
@@ -452,17 +405,15 @@ impl Assembler {
 
     fn serialize(&self, index: usize, out: &mut String) -> Result<()> {
         // Upstream does not apply its emitted-output limit to the pre-clean
-        // snapshot. Meter every copied byte before allocating it instead; this
-        // also covers sparse-array padding not present in buffered raw bytes.
+        // snapshot, including sparse-array padding outside buffered raw bytes.
         let append = |out: &mut String, text: &str| -> Result<()> {
-            self.charge_work(text.len())?;
             out.push_str(text);
             Ok(())
         };
         match &self.nodes[index].kind {
             Kind::Object(children) => {
                 append(out, "{")?;
-                for (at, (key, child)) in children.iter().enumerate() {
+                for (at, (key, child)) in children.order.iter().enumerate() {
                     if at > 0 {
                         append(out, ",")?;
                     }
@@ -500,6 +451,7 @@ impl Assembler {
         let next = self.nodes[index].next;
         let children: Vec<_> = match &self.nodes[index].kind {
             Kind::Object(children) => children
+                .order
                 .iter()
                 .enumerate()
                 .skip(next)
@@ -525,7 +477,8 @@ impl Assembler {
             }
         }
         if let Kind::Object(children) = &mut self.nodes[index].kind {
-            children.retain(|(_, child)| !removed.contains(child));
+            children.order.retain(|(_, child)| !removed.contains(child));
+            children.by_key.retain(|_, child| !removed.contains(child));
         }
     }
 
@@ -560,6 +513,7 @@ impl Assembler {
                     if !final_chunk
                         && let Kind::Object(children) = &self.nodes[index].kind
                         && children
+                            .order
                             .first()
                             .is_some_and(|(_, child)| self.nodes[*child].held)
                     {
@@ -571,7 +525,7 @@ impl Assembler {
                 loop {
                     let at = self.nodes[index].next;
                     let (key, child) = match &self.nodes[index].kind {
-                        Kind::Object(children) => match children.get(at) {
+                        Kind::Object(children) => match children.order.get(at) {
                             Some((key, child)) => (Some(key.clone()), Some(*child)),
                             None => break,
                         },
@@ -620,7 +574,6 @@ impl Assembler {
     }
 
     fn can_accept(&self, call: &Value) -> Result<bool> {
-        self.work.check()?;
         if self.error.is_some() || self.finished {
             return Ok(false);
         }
@@ -635,7 +588,6 @@ impl Assembler {
                 return Ok(false);
             }
             let path = crate::json::str_of(field(part, "jsonPath", "json_path"));
-            self.charge_work(path.len().saturating_add(1))?;
             let Ok(segments) = parse_path(&path) else {
                 continue;
             };
@@ -690,19 +642,6 @@ impl StreamingCall {
         if !call.is_object() || (call.get("args").is_some() && !is_streaming(call)) {
             return false;
         }
-        if self.assembler.work.check().is_err() {
-            return true;
-        }
-        // Account before coercion and identity comparisons, including the paths
-        // that can bypass can_accept (matching IDs or omitted names).
-        let checked = charge_json_work(call, &self.assembler.work)
-            .and_then(|()| self.assembler.charge_work(1));
-        if checked.is_err() {
-            // Keep this attached to the old call so push poisons it, rather than
-            // treating budget exhaustion as the start of a fresh call.
-            let _ = self.assembler.work.charge(MAX_WORK.saturating_add(1));
-            return true;
-        }
         let id = crate::json::str_of(call.get("id"));
         let id = id.trim();
         if !id.is_empty() && !self.upstream_id.is_empty() && id != self.upstream_id {
@@ -741,7 +680,7 @@ fn field<'a>(value: &'a Value, camel: &str, snake: &str) -> Option<&'a Value> {
 
 fn container(segment: &Segment) -> Kind {
     match segment {
-        Segment::Key(_) => Kind::Object(Vec::new()),
+        Segment::Key(_) => Kind::Object(ObjectChildren::default()),
         Segment::Index(_) => Kind::Array(BTreeMap::new()),
     }
 }
@@ -769,46 +708,6 @@ fn append(out: &mut String, text: &str) -> Result<()> {
     Ok(())
 }
 
-// Incoming frames and pre-clean snapshots are not emitted arguments. Meter
-// their actual serialized bytes without allocating a second copy or imposing
-// the output limit before a placeholder can be removed. Structure stays bounded.
-fn charge_json_work(value: &Value, work: &WorkBudget) -> Result<()> {
-    let mut stack = vec![(value, 0)];
-    let mut nodes = 0;
-    while let Some((value, depth)) = stack.pop() {
-        nodes += 1;
-        if depth > MAX_DEPTH || nodes > MAX_NODES {
-            return Err(ArgumentError("Vertex argument structure limit exceeded"));
-        }
-        work.charge(32)?;
-        match value {
-            Value::Object(values) => {
-                for (key, value) in values {
-                    work.charge(key.len().saturating_add(32))?;
-                    stack.push((value, depth + 1));
-                }
-            }
-            Value::Array(values) => {
-                work.charge(values.len().saturating_mul(32))?;
-                stack.extend(values.iter().map(|value| (value, depth + 1)));
-            }
-            _ => {}
-        }
-    }
-    struct Writer<'a>(&'a WorkBudget);
-    impl io::Write for Writer<'_> {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.charge(bytes.len()).map_err(io::Error::other)?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Writer(work), value)
-        .map_err(|_| ArgumentError("Vertex argument work limit exceeded"))
-}
-
 struct BoundedWriter(Vec<u8>, usize);
 
 impl io::Write for BoundedWriter {
@@ -832,35 +731,6 @@ fn bounded_quoted(value: &str) -> Result<String> {
 }
 
 fn bounded_json(value: &Value) -> Result<String> {
-    fn check(value: &Value, depth: usize, nodes: &mut usize, bytes: &mut usize) -> Result<()> {
-        *nodes += 1;
-        if depth > MAX_DEPTH || *nodes > MAX_NODES {
-            return Err(ArgumentError("Vertex argument structure limit exceeded"));
-        }
-        *bytes = bytes.saturating_add(match value {
-            Value::String(text) => text.len(),
-            _ => 1,
-        });
-        if *bytes > MAX_BYTES {
-            return Err(ArgumentError("Vertex argument size limit exceeded"));
-        }
-        match value {
-            Value::Array(values) => {
-                for value in values {
-                    check(value, depth + 1, nodes, bytes)?;
-                }
-            }
-            Value::Object(values) => {
-                for (key, value) in values {
-                    *bytes = bytes.saturating_add(key.len());
-                    check(value, depth + 1, nodes, bytes)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    check(value, 0, &mut 0, &mut 0)?;
     let mut writer = BoundedWriter(Vec::new(), MAX_BYTES);
     serde_json::to_writer(&mut writer, value)
         .map_err(|_| ArgumentError("Vertex argument size limit exceeded"))?;

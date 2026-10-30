@@ -60,57 +60,14 @@ fn wide_call() -> StreamingCall {
 }
 
 #[test]
-fn thousands_of_root_keys_and_many_markers_exhaust_shared_work_cleanly() {
+fn repeated_markers_and_compatibility_checks_complete() {
     let mut call = wide_call();
-    let marker = json!({"willContinue":true,"partialArgs":[{"jsonPath":"$.k2047"}]});
-    let mut rejected = false;
-    for _ in 0..10_000 {
-        if call.assembler.push(&marker, None).is_err() {
-            rejected = true;
-            break;
-        }
-    }
-    assert!(
-        rejected,
-        "marker lookups must spend the aggregate allowance"
-    );
-    assert!(call.assembler.full_arguments().is_err());
-    assert!(call.assembler.full.is_empty());
-    assert!(call.assembler.push(&json!({}), None).is_err());
-}
-
-#[test]
-fn compatibility_checks_spend_work_without_starting_a_fresh_call_on_exhaustion() {
-    let mut call = wide_call();
-    call.assembler.work = WorkBudget::default();
-    call.assembler.work.charge(MAX_WORK - 1024).unwrap();
     let marker = json!({"name":"wide","willContinue":true,"partialArgs":[{"jsonPath":"$.k2047"}]});
-    assert!(call.can_continue(&marker));
-    assert!(call.assembler.work.check().is_err());
-    assert!(call.assembler.full_arguments().is_err());
-    assert!(call.assembler.push(&marker, None).is_err());
-    assert!(call.assembler.full.is_empty());
-}
-
-#[test]
-fn final_and_fallback_cleaners_cannot_hide_exhaustion() {
-    for fallback in [false, true] {
-        let mut assembler = Assembler::default();
-        let clean = |value: &Value, work: &WorkBudget| {
-            if value.get("actual").is_some() {
-                let _ = work.charge(MAX_WORK + 1);
-            }
-            value.clone()
-        };
-        let chunk = if fallback {
-            json!({"args":{"actual":1}})
-        } else {
-            json!({"partialArgs":[{"jsonPath":"$.actual","numberValue":1}]})
-        };
-        assert!(assembler.push(&chunk, Some(&clean)).is_err());
-        assert!(assembler.full_arguments().is_err());
-        assert!(assembler.full.is_empty());
+    for _ in 0..10_000 {
+        assert!(call.can_continue(&marker));
+        call.assembler.push(&marker, None).unwrap();
     }
+    assert!(call.assembler.push(&json!({}), None).unwrap().1);
 }
 
 #[test]

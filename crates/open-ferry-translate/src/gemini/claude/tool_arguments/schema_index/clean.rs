@@ -11,15 +11,12 @@ impl SchemaIndex {
             && !info.dynamic
     }
     pub(crate) fn clean(&mut self, args: &Value) -> Value {
-        if self.failed || !budget::value(args) {
-            return Value::Null;
-        }
         // The upstream entry point cleans objects only; nested arrays are
         // traversed after entering a declared object property.
         if !args.is_object() {
-            return budget::copy(args);
+            return Value::clone(args);
         }
-        let mut args = budget::copy(args);
+        let mut args = Value::clone(args);
         self.clean_value(&mut args, self.original_group, self.translated, true, 0);
         args
     }
@@ -40,9 +37,6 @@ impl SchemaIndex {
         let matched = if let Some(matched) = state.matches.get(&required) {
             *matched
         } else {
-            if !budget::predicate(self.maps.len(required)) {
-                return false;
-            }
             let present = state.present.get_or_insert_with(|| {
                 value
                     .as_object()
@@ -156,29 +150,6 @@ impl SchemaIndex {
             .insert((set.candidates, implicit, state.removed), result);
         result
     }
-    fn allowance(&mut self, set: SetInfo) -> usize {
-        if let Some(value) = self.allowances.get(&set.merged) {
-            return *value;
-        }
-        let branches = self.infos[set.merged].branches;
-        let mut plans = branches;
-        if set.count > 1 {
-            for (candidate, _) in self.maps.entries(set.candidates) {
-                if !self.infos[candidate].complex {
-                    let one = self.maps.singleton(candidate, 1);
-                    plans = self.maps.merge(Op::Union, plans, one);
-                }
-            }
-        }
-        let amount = self
-            .maps
-            .entries(plans)
-            .iter()
-            .map(|(plan, _)| self.maps.len(self.infos[*plan].required))
-            .sum();
-        self.allowances.insert(set.merged, amount);
-        amount
-    }
     pub(super) fn translated_children(&mut self, group: Map, key: usize) -> Map {
         let info = self.set_info(group, 0);
         self.maps
@@ -254,7 +225,7 @@ impl SchemaIndex {
         top: bool,
         depth: usize,
     ) {
-        if depth > 128 || originals == 0 || !budget::node(value) {
+        if depth > 128 || originals == 0 {
             return;
         }
         let set = self.set_info(originals, self.original);
@@ -288,15 +259,8 @@ impl SchemaIndex {
             return;
         }
         let mut state = ObjectState::default();
-        if value.as_object().unwrap().len() > 1 {
-            let allowance = self.allowance(set);
-            budget::predicate_object(allowance);
-        }
         let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         for text in keys {
-            if !budget::charge(8) {
-                return;
-            }
             let Some(key) = self.name_ids.get(text.as_str()).copied() else {
                 continue;
             };

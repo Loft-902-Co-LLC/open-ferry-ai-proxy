@@ -1,9 +1,6 @@
-//! One whole-call invariant, including preparation and the final clean.
+//! Completion and output parity for the round-six family; no work allowance.
 use super::*;
-use crate::common::vertex_partial_args::{StreamingCall, WorkBudget};
-
-const K: usize = 512;
-const K2: usize = 1;
+use crate::common::vertex_partial_args::StreamingCall;
 
 #[derive(Clone)]
 enum Step {
@@ -19,9 +16,6 @@ struct Case {
     paths: Vec<(Vec<Step>, Value)>,
 }
 struct Run {
-    total: usize,
-    predicates: usize,
-    allowance: usize,
     complete: bool,
     output: String,
 }
@@ -70,15 +64,6 @@ fn set(value: &mut Value, steps: &[Step], incoming: Value) {
         }
     }
 }
-fn input_sizes(case: &Case) -> (usize, usize, usize) {
-    let schema = case.schema.to_string().len() * if case.translated { 2 } else { 1 };
-    let paths = case.paths.iter().map(|(steps, _)| path(steps).len()).sum();
-    let mut args = Value::Null;
-    for (steps, value) in &case.paths {
-        set(&mut args, steps, value.clone());
-    }
-    (schema, paths, args.to_string().len())
-}
 fn run(case: &Case) -> Run {
     let request = json!({"tools":[{"name":"tool","input_schema":case.schema}]});
     let sent = if case.translated {
@@ -87,13 +72,12 @@ fn run(case: &Case) -> Run {
         Value::Null
     };
     let mut call = StreamingCall::new("tool".into(), "call".into(), "call".into(), 0);
-    let work = call.assembler.work_budget().clone();
-    let schemas = CallSchemas::resolve("tool", &request, &sent, &work);
-    let _ = schemas.parameterless(&work);
-    let clean = |value: &Value, work: &WorkBudget| schemas.clean(value, work);
-    let probe = |state: usize,
-                 step: crate::common::vertex_partial_args::ProbeStep<'_>,
-                 work: &WorkBudget| schemas.probe(state, step, work);
+    let schemas = CallSchemas::resolve("tool", &request, &sent);
+    let _ = schemas.parameterless();
+    let clean = |value: &Value| schemas.clean(value);
+    let probe = |state: usize, step: crate::common::vertex_partial_args::ProbeStep<'_>| {
+        schemas.probe(state, step)
+    };
     let mut complete = false;
     let mut output = String::new();
     for (index, (steps, value)) in case.paths.iter().enumerate() {
@@ -109,21 +93,14 @@ fn run(case: &Case) -> Run {
             Err(_) => break,
         }
     }
-    if work.check().is_ok()
-        && let Ok((delta, done)) =
-            call.assembler
-                .push_indexed(&json!({}), Some(&clean), Some(&probe))
+    if let Ok((delta, done)) = call
+        .assembler
+        .push_indexed(&json!({}), Some(&clean), Some(&probe))
     {
         output.push_str(&delta);
         complete = done;
     }
-    Run {
-        total: work.used(),
-        predicates: work.predicate_used(),
-        allowance: work.predicate_allowance(),
-        complete,
-        output,
-    }
+    Run { complete, output }
 }
 
 fn wide(width: usize, nested: bool) -> Value {
@@ -449,47 +426,64 @@ fn family() -> Vec<Case> {
     }
     cases
 }
+fn check(case: &Case) {
+    let started = std::time::Instant::now();
+    let actual = run(case);
+    assert!(actual.complete, "{} did not complete", case.name);
+    let request = json!({"tools":[{"name":"tool","input_schema":case.schema}]});
+    let sent = if case.translated {
+        json!({"tools":[{"functionDeclarations":[{"name":"tool","parametersJsonSchema":case.schema}]}]})
+    } else {
+        Value::Null
+    };
+    let schemas = CallSchemas::resolve("tool", &request, &sent);
+    let mut raw = Value::Null;
+    for (steps, value) in &case.paths {
+        set(&mut raw, steps, value.clone());
+    }
+    let expected = schemas.clean_reference(&raw);
+    let actual_value: Value = crate::json::exact::from_str(&actual.output).unwrap();
+    assert_eq!(actual_value, expected, "{}", case.name);
+    eprintln!(
+        "R7_CASE name={} complete=true equal=true elapsed_ms={}",
+        case.name,
+        started.elapsed().as_millis()
+    );
+}
 #[test]
-fn round6_whole_call_work_invariant() {
+fn round6_family_completes_with_equal_output() {
     std::thread::Builder::new()
         .stack_size(8 << 20)
         .spawn(|| {
-            let mut failures = Vec::new();
-            let mut maximum = 0f64;
-            let mut maximum_total = 0f64;
-            let mut count = 0;
-            let opus_only = std::env::var_os("R6_OPUS_ONLY").is_some();
-            let stop = std::env::var_os("R6_STOP_AFTER_FAILURE").is_some();
-            for case in family().into_iter().take(if opus_only { 4 } else { usize::MAX }) {
-                count += 1;
-                let (schema, paths, args) = input_sizes(&case);
-                let size = schema + paths + args;
-                let actual = WorkBudget::with_index_audit(|| run(&case));
-                // The reference uses the pre-index cleaner, not the indexed
-                // implementation with its counters disabled.
-                let expected = WorkBudget::with_test_limit(usize::MAX, || run(&case));
-                let index_probe = actual.total.saturating_sub(actual.predicates);
-                let ratio = index_probe as f64 / size.max(1) as f64;
-                maximum = maximum.max(ratio);
-                maximum_total = maximum_total.max(actual.total as f64 / size.max(1) as f64);
-                let predicate_proof = case.name != "predicate-lists"
-                    || (actual.predicates == 32 * 129 && actual.allowance == 32 * 129);
-                let ok = predicate_proof
-                    && actual.complete
-                    && expected.complete
-                    && actual.output == expected.output
-                    && index_probe <= K * size
-                    && actual.predicates <= K2 * actual.allowance;
-                eprintln!("R6_CASE name={} schema={schema} paths={paths} args={args} total={} index_probe={index_probe} predicate={} allowance={} ratio={ratio:.6} complete={} equal={} ok={ok}", case.name, actual.total, actual.predicates, actual.allowance, actual.complete, actual.output == expected.output);
-                if !ok {
-                    failures.push(case.name);
-                    if stop { break; }
-                }
+            let cases = family();
+            assert_eq!(cases.len(), 400);
+            for case in cases {
+                check(&case);
             }
-            eprintln!("R6_BOUND K={K} K2={K2} max_ratio={maximum:.6} max_total_ratio={maximum_total:.6} members={count} failures={}", failures.len());
-            assert!(failures.is_empty(), "failed family members: {}", failures.join(", "));
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn round7_cyclic_aliases_and_conjuncts_complete() {
+    // The full review input took 46.7 s in debug; preserve it as an opt-in.
+    let (aliases_count, conjuncts_count) = if std::env::var_os("R7_FULL_SIZE").is_some() {(1_000,20_000)}else{(100,2_000)};
+    let mut defs = serde_json::Map::new();
+    let mut conjuncts = vec![json!({"$ref":"#/$defs/B"})];
+    conjuncts.extend((0..conjuncts_count).map(|_| json!({})));
+    defs.insert("B".into(), json!({"allOf":conjuncts}));
+    let aliases: Vec<_> = (0..aliases_count)
+        .map(|at| {
+            defs.insert(format!("A{at}"), json!({"$ref":"#/$defs/B"}));
+            json!({"$ref":format!("#/$defs/A{at}")})
+        })
+        .collect();
+    check(&Case {
+        name: format!("cyclic-{aliases_count}-aliases-{conjuncts_count}-conjuncts"),
+        schema: json!({"allOf":aliases,"$defs":defs}),
+        translated: false,
+        paths: vec![(vec![Key("value".into())], json!("x"))],
+    });
 }

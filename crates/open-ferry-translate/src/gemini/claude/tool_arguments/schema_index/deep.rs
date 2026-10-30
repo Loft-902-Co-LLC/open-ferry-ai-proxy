@@ -19,7 +19,6 @@ impl SchemaIndex {
             children: Arc::default(),
         };
         if self.is_object(node) {
-            budget::charge(16);
             let required = self.own_required(node);
             for (at, name) in ["reason", "_"].into_iter().enumerate() {
                 let key = self.name_ids[name];
@@ -33,7 +32,7 @@ impl SchemaIndex {
             for keyword in ["allOf", "anyOf", "oneOf"] {
                 if let Some(branches) = self.field(node, keyword) {
                     let branches = self.garray(branches);
-                    budget::charge(branches.len().saturating_mul(8));
+
                     children.extend(branches);
                 }
             }
@@ -54,9 +53,7 @@ impl SchemaIndex {
                 if !seen.insert(next) {
                     continue;
                 }
-                if !budget::charge(16) {
-                    return false;
-                }
+
                 if let Some(found) = self.deep.get(&(next, scope)) {
                     distances.insert(next, *found);
                     continue;
@@ -67,9 +64,6 @@ impl SchemaIndex {
                     .reference
                     .and_then(|name| self.reference(scope, name));
                 for child in program.children.iter().copied().chain(target) {
-                    if !budget::charge(8) {
-                        return false;
-                    }
                     reverse.entry(child).or_default().push(next);
                     todo.push(child);
                 }
@@ -90,9 +84,6 @@ impl SchemaIndex {
                         }
                         if let Some(parents) = reverse.get(&child) {
                             for &parent in parents {
-                                if !budget::charge(4) {
-                                    return false;
-                                }
                                 let found = &mut distances.get_mut(&parent).unwrap()[at];
                                 if *found > distance as u8 + 1 {
                                     *found = distance as u8 + 1;

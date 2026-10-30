@@ -35,7 +35,7 @@ impl SchemaIndex {
             node = target;
             depth += 1;
         }
-        if depth > 16 || self.failed {
+        if depth > 16 {
             return 0;
         }
         let own = self.own(node, origin);

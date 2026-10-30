@@ -714,10 +714,8 @@ fn clean_claude_tool_arguments() {
             parse(want),
             "{name}"
         );
-        let work = crate::common::vertex_partial_args::WorkBudget::default();
-        let indexed = CallSchemas::resolve(tool, original, sent, &work);
-        assert_eq!(indexed.clean(&args, &work), parse(want), "indexed {name}");
-        assert!(work.check().is_ok(), "indexed budget {name}");
+        let indexed = CallSchemas::resolve(tool, original, sent);
+        assert_eq!(indexed.clean(&args), parse(want), "indexed {name}");
     }
 }
 

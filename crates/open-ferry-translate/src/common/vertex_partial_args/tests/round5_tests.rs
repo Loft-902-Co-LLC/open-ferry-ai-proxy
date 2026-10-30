@@ -41,7 +41,7 @@ fn round5_buffered_bytes_match_upstream_for_nested_mixed_values() {
 
 #[test]
 fn round5_raw_buffer_and_emitted_output_limits_are_independent() {
-    let clean = |_: &Value, _: &WorkBudget| json!({});
+    let clean = |_: &Value| json!({});
     for (length, succeeds) in [(MAX_BYTES - 5, true), (MAX_BYTES - 4, false)] {
         let mut assembler = Assembler::default();
         let result = assembler.push(

@@ -41,14 +41,8 @@ fn round5_probe_shape_sweep() {
                 stream = stream.with_translated_request(&sent);
             }
             let mut all = Vec::new();
-            let mut maximum = 0;
             let mut probes = 0;
             for index in 0..500 {
-                let work = stream
-                    .active_call
-                    .as_ref()
-                    .map(|call| call.assembler.work_budget().clone());
-                let before = work.as_ref().map_or(0, |work| work.used());
                 all.extend(events(
                     &mut stream,
                     &frame(
@@ -60,9 +54,6 @@ fn round5_probe_shape_sweep() {
                         false,
                     ),
                 ));
-                if let Some(work) = work {
-                    maximum = maximum.max(work.used() - before);
-                }
                 probes += 1;
                 if stream.incomplete_call {
                     break;
@@ -76,12 +67,10 @@ fn round5_probe_shape_sweep() {
             let complete =
                 !stream.incomplete_call && all.iter().any(|event| event["type"] == "message_stop");
             eprintln!(
-                "R5_SWEEP shape={shape} translated={translated} max_probe={maximum} complete={complete} probes={probes}"
+                "R5_SWEEP shape={shape} translated={translated} complete={complete} probes={probes}"
             );
-            if !complete || maximum >= 32 * 1024 {
-                failures.push(format!(
-                    "{shape}/{translated}: complete={complete}, max_probe={maximum}"
-                ));
+            if !complete {
+                failures.push(format!("{shape}/{translated}: complete={complete},"));
             }
             if complete {
                 let args: Value = serde_json::from_str(&arguments(&all)).unwrap();

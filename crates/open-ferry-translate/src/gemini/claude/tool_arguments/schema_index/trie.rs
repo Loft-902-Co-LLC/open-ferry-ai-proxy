@@ -43,9 +43,7 @@ impl Maps {
         if let Some(id) = self.intern.get(&kind) {
             return *id;
         }
-        if !budget::charge(32) {
-            return 0;
-        }
+
         let (sample, len) = match kind {
             Kind::Empty => (0, 0),
             Kind::Leaf(k, _) => (k, 1),
@@ -81,9 +79,6 @@ impl Maps {
     }
     pub(super) fn get(&self, mut map: Map, key: usize) -> Option<usize> {
         while map != 0 {
-            if !budget::charge(1) {
-                return None;
-            }
             match self.nodes[map].kind {
                 Kind::Leaf(k, v) => return (k == key).then_some(v),
                 Kind::Fork(bit, a, b) => map = if key & (1usize << bit) == 0 { a } else { b },
@@ -102,9 +97,6 @@ impl Maps {
         let mut stack = vec![map];
         let mut out = Vec::new();
         while let Some(id) = stack.pop() {
-            if !budget::charge(1) {
-                break;
-            }
             match self.nodes[id].kind {
                 Kind::Leaf(k, v) => out.push((k, v)),
                 Kind::Fork(_, a, b) => {
@@ -116,7 +108,6 @@ impl Maps {
         }
         out
     }
-    // Called only after the required-list primitive has been charged by length.
     pub(super) fn required_keys(&self, map: Map) -> Vec<usize> {
         let mut stack = vec![map];
         let mut out = Vec::new();
@@ -152,9 +143,6 @@ impl Maps {
         id
     }
     pub(super) fn merge(&mut self, op: Op, a: Map, b: Map) -> Map {
-        if !budget::charge(1) {
-            return 0;
-        }
         if a == b {
             return if op == Op::Difference { 0 } else { a };
         }

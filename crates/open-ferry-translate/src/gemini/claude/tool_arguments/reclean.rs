@@ -25,7 +25,7 @@
 //!
 //! The scalar-required and literal-type shapes never come from our Gemini cleaner.
 
-use super::{analyze, array, budget, gjson_array, str_of};
+use super::{analyze, array, gjson_array, str_of};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
@@ -90,7 +90,7 @@ fn repair_properties(
     Some((props, promoted))
 }
 fn repair(mut node: Value, depth: usize) -> Option<Value> {
-    if !budget::value(&node) || depth > 64 {
+    if depth > 64 {
         return None;
     }
     if !node.is_object() {
@@ -112,9 +112,6 @@ fn repair(mut node: Value, depth: usize) -> Option<Value> {
         let bare: Map<_, _> = names
             .into_iter()
             .map(|name| {
-                if !budget::charge(node.as_object().expect("object").len()) {
-                    return None;
-                }
                 let value = node
                     .as_object_mut()
                     .expect("object")
@@ -239,7 +236,7 @@ fn repair_list(values: Vec<Value>, depth: usize) -> Option<Value> {
 // Cycle fallbacks copy siblings without resolving their references; count those
 // copies too, rather than hiding an arbitrarily large subtree in Value::clone.
 fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Value> {
-    if !budget::value(value) || depth > 64 {
+    if depth > 64 {
         return None;
     }
     *remaining = remaining.checked_sub(1)?;
@@ -262,9 +259,6 @@ fn copy_bounded(value: &Value, depth: usize, remaining: &mut usize) -> Option<Va
 // The name-map flag follows upstream's trailing keyword parity, protecting names
 // such as properties.properties while visiting all the same JSON containers.
 fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
-    if !budget::value(value) {
-        return;
-    }
     if let Some(map) = value.as_object_mut() {
         for (key, child) in map {
             if name_map || !crate::gemini_schema::is_literal_value_keyword(key) {
@@ -276,7 +270,7 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
             walk(child, false, phase);
         }
     }
-    if budget::value(value) {
+    {
         phase(value, name_map);
     }
 }
@@ -306,9 +300,6 @@ fn hint_presence(value: &mut Value, _: bool) {
     map.shift_remove("enum");
 }
 fn merge_missing(destination: &mut Value, incoming: &Value) {
-    if !budget::value(destination) || !budget::value(incoming) {
-        return;
-    }
     if let (Some(destination), Some(incoming)) = (destination.as_object_mut(), incoming.as_object())
     {
         for (key, value) in incoming {
@@ -358,10 +349,6 @@ fn all_of(node: &mut Value, _: bool) {
                             let name = str_of(Some(name)).into_owned();
                             let mut found = false;
                             for existing in &names {
-                                if !budget::charge(existing.len().min(name.len()).saturating_add(1))
-                                {
-                                    return;
-                                }
                                 if existing == &name {
                                     found = true;
                                     break;
@@ -451,7 +438,7 @@ fn unions(node: &mut Value, name_map: bool) {
                 };
                 let selected: Map<_, _> = names
                     .iter()
-                    .map(|n| budget::value(&props[n]).then(|| (n.clone(), props[n].clone())))
+                    .map(|n| Some((n.clone(), props[n].clone())))
                     .collect::<Option<_>>()
                     .unwrap_or_default();
                 branch["type"] = json!("object");
@@ -589,16 +576,11 @@ fn placeholders(node: &mut Value, _: bool) {
 }
 
 pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
-    if !budget::value(schema) {
-        return false;
-    }
     let Some(schema) = repair(schema.clone(), 0) else {
         return false;
     };
     let wrapped = Value::Object(Map::from_iter([("schema".into(), schema)]));
-    let Some(inlined) =
-        crate::gemini_schema::local_refs::inline_for_projection_metered(&wrapped, budget::charge)
-    else {
+    let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
         return false;
     };
     drop(wrapped);
@@ -663,29 +645,14 @@ mod depth_tests {
 #[cfg(test)]
 mod round3_tests {
     use super::*;
-    use crate::common::vertex_partial_args::WorkBudget;
-
     #[test]
-    fn round3_truncated_projection_preserves_the_work_allowance() {
+    fn round3_truncated_projection_preserves_arguments() {
         let mut literal = json!("x");
         for _ in 0..65 {
             literal = json!([literal]);
         }
         let schema =
             json!({"type":"object","properties":{"value":{"type":"string","enum":literal}}});
-        let repaired = repair(schema.clone(), 0).unwrap();
-        let wrapped = json!({"schema":repaired});
-        assert!(crate::gemini_schema::local_refs::inline_for_projection(&wrapped).is_none());
-        let work = WorkBudget::default();
-        assert!(!budget::with(&work, || requires(&schema, "reason")));
-        assert!(
-            work.check().is_ok(),
-            "a truncated projection must leave room for call completion"
-        );
-        assert!(
-            work.used() >= (8 << 20) + 100_000 * 32,
-            "truncation must charge the projection's entire private allowance: {}",
-            work.used()
-        );
+        assert!(!requires(&schema, "reason"));
     }
 }

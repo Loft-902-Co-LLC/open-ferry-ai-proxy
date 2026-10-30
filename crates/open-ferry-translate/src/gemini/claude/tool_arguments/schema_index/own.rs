@@ -24,7 +24,7 @@ impl SchemaIndex {
         if let Some(own) = self.own_nodes.get(&key) {
             return Arc::clone(own);
         }
-        budget::analyzed(node, 0, 0, 0);
+
         let mut own = Own {
             head: Info::default(),
             tail: Info::default(),
@@ -37,9 +37,7 @@ impl SchemaIndex {
         };
         if let Some(fields) = self.object(node) {
             own.valid = true;
-            if !budget::charge(32 + fields.len() * 8) {
-                return Arc::new(own);
-            }
+
             own.head.object = self.field(node, "type").is_some_and(|id| {
                 self.is_string(id, "object")
                     || self
@@ -77,9 +75,6 @@ impl SchemaIndex {
                     if let Some(values) = self.object(properties) {
                         own.tail.object = true;
                         for (name, value) in values {
-                            if !budget::charge(32) {
-                                break;
-                            }
                             let group = self.singleton(value);
                             let one = self.maps.singleton(name, group);
                             own.tail.properties =
