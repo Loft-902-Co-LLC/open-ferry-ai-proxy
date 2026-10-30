@@ -16,7 +16,7 @@
 //! groups drops the read-only `auth_index` a management read adds to them.
 //!
 //! Deviations from upstream:
-//! - [`V8_PATHS`] is a fixed table, checked against v8.0.38. Upstream builds
+//! - [`V8_PATHS`] is a fixed table, checked against v8.0.42. Upstream builds
 //!   it by reflecting over its `Config` struct; like upstream's, the table
 //!   also moves sections this port ignores.
 //! - Comments aren't carried along, as the loader only decodes the result.

@@ -102,7 +102,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Changed
 
 - **Ported from CLIProxyAPI v8.0.42**, up from v8.0.38. The upstream changes left out, and why, are listed in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8038-to-v8042-left-out).
-- **Codex clients use their Codex login even when Sign in with ChatGPT is enabled**, across HTTP, compact requests, images and WebSockets. Other clients keep the saved choice; requests never change it.
+- **Requests identified as Codex clients by User-Agent use their Codex login even when Sign in with ChatGPT is enabled**, across HTTP, compact requests, images and WebSockets. Other clients keep the saved choice; requests never change it.
 - New releases go to the preview channel first. The maintainer can promote the same signed build to stable without rebuilding, or withdraw it from channel discovery while keeping its downloads for rollback and investigation. Until a channel-aware release is installed, test a preview by explicit version using that release's own `releases/download/vX.Y.Z/install.sh` or `install.ps1` script, rather than latest's (see [Releasing](RELEASING.md#steps)).
 - **Quota recovery after an upstream reset**: a fresh, successful Claude usage probe can end a cached quota cooldown before its deadline when it confirms capacity for the limit that caused it. Failed or ambiguous reads, authentication failures, other backoffs and unrelated credentials stay unchanged. The dashboard's per-credential **Clear proxy cooldown** action asks for confirmation and distinguishes a proxy reset from a provider quota reset.
 - **Unrecognized model-name thinking suffixes such as `(fast)` now return 400** instead of being ignored. Levels written with spaces, such as `( high )`, now apply. Responses requests sent straight to Codex or xAI models that accept configuration updates keep their existing behavior.
@@ -152,11 +152,11 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Fixed
 
 - **Credential-file updates keep live cooldowns and refresh backoff.** Delayed file events reread the current file and cannot undo a concurrent user edit or an edit whose save failed. Failed scans and remove/rename events that cannot prove absence keep existing credentials.
-- **A configured request-only 401 no longer rejects or refreshes a provider login.** Rules that explicitly request a cooldown still apply it.
+- **A matching `request-scoped-errors` 401 rule no longer rejects or refreshes a provider login.** Actions ending in `-and-cooldown` still apply a cooldown.
 - **Codex and Sign in with ChatGPT login refusals stay independent.** A rejected login stays rejected until its own token changes; refreshing the other login cannot clear it. A Codex request missing its own login returns 401 while a healthy Sign in with ChatGPT login stays usable by other clients.
 - **Open Responses WebSockets use the current client keys and safe-mode settings for each new turn.** Denied create, append and steer messages keep the connection usable; deferred steering is checked again before sending. Usage follows the key that authorized that turn. A socket can still cancel its own work after access is revoked.
-- **Codex moderation metadata no longer exposes early overloads to clients.** Buffered HTTP/SSE and WebSocket requests can try another credential before delivering output; successful metadata and output remain in order.
-- **Codex image requests keep incoming client identity out of custom-header substitutions**, and whitespace-only selected credentials are refused before any request is sent. API-key precedence and Alpha Search destination restrictions remain.
+- **With `codex.stream-bootstrap-buffering` on, a Codex stream that sends moderation metadata and then reports an overload now fails over** instead of passing the error on.
+- **Whitespace-only selected credentials are refused before any request is sent when `use_siwc` is on.** API-key precedence and Alpha Search destination restrictions remain.
 - **Tool schemas sent to Gemini keep their rules.** Supported constraints written beside a `$ref` and inside each `allOf` branch are kept instead of being merged or dropped. The existing size and depth limits still apply.
 - **Tool calls Gemini returns to Claude clients keep their arguments** when the tool's schema is an empty object that allows extra properties. Empty object schemas clear arguments only when they set `additionalProperties: false`.
 - **Claude conversations sent to Gemini no longer fail its signature check when text separates assistant tool calls.**

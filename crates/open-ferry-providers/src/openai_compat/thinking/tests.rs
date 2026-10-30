@@ -568,7 +568,7 @@ fn executor(provider: &str, models: Arc<ModelRegistry>) -> OpenAiCompatExecutor 
     OpenAiCompatExecutor::new(provider, Arc::new(config)).with_models(models)
 }
 
-// openai_compat_executor.go:121, :341 and :723: a call applies the setting,
+// openai_compat_executor.go:143, :378 and :797: a call applies the setting,
 // with the models the executor was given, in Chat Completions or, for a
 // compact call, in OpenAI Responses.
 #[test]

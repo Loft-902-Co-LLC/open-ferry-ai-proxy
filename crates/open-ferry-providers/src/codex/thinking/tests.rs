@@ -940,8 +940,8 @@ fn request(model: &str, body: &str) -> Request {
     }
 }
 
-// codex_executor_execute.go:50 and :233, codex_executor_stream.go:55 and
-// codex_executor_tokens.go:26: every call applies the setting.
+// codex_executor_execute.go:59 and :256, codex_executor_stream.go:63 and
+// codex_executor_tokens.go:33: every call applies the setting.
 #[test]
 fn every_call_applies_the_setting() {
     let responses = Options::new(Format::OPENAI_RESPONSE);
