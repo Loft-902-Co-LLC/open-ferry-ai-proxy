@@ -3956,6 +3956,7 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
         }
     }));
     let (done_tx, done_rx) = mpsc::channel();
+    let before = manager.get("codex.json").unwrap().success;
     let saving = manager.clone();
     let done = done_tx.clone();
     let save = std::thread::spawn(move || {
@@ -3967,15 +3968,20 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
                 })
                 .is_ok_and(|auth| auth.is_some_and(|auth| auth.metadata["note"] == "saved"))
         } else {
-            let before = saving.get("codex.json").unwrap().success;
             saving.mark_result(&success(&saving));
-            saving.get("codex.json").unwrap().success == before + 1
+            true
         };
-        done.send(ok).unwrap();
+        done.send(("save", ok)).unwrap();
     });
     save_entered_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("save admitted to mutation barrier");
+    if !policy {
+        // The save hook acknowledges the increment while its mutation admission
+        // is still held. After mark_result returns, load may already have
+        // replaced this live counter, so inspect it before queuing the reload.
+        assert_eq!(manager.get("codex.json").unwrap().success, before + 1);
+    }
     let (read_tx, read_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let adopting = manager.clone();
@@ -3994,13 +4000,14 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
         if policy {
             read_tx.send(()).unwrap();
         }
-        done.send(
+        done.send((
+            "adoption",
             (if policy {
                 matches!(result, Ok(crate::manager::AdoptionResult::Retry))
             } else {
                 matches!(result, Ok(crate::manager::AdoptionResult::Published { .. }))
             }) && (!policy || adopting.get("codex.json").unwrap().metadata["note"] == "saved"),
-        )
+        ))
         .unwrap();
     });
     read_rx
@@ -4008,7 +4015,8 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
         .expect("adoption admitted before queued load");
     let loading = manager.clone();
     let load = std::thread::spawn(move || {
-        done_tx.send(loading.load().is_ok()).unwrap();
+        let result = loading.load();
+        done_tx.send(("load", result.is_ok())).unwrap();
     });
     let deadline = Instant::now() + Duration::from_secs(5);
     while lock(&manager.shared.load_gate.state).waiting_exclusive == 0 && Instant::now() < deadline
@@ -4023,16 +4031,17 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
     if !policy {
         release_tx.send(()).unwrap();
     }
-    let complete = (0..3).all(|_| {
-        done_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or(false)
-    });
+    let results: Vec<_> = (0..3)
+        .map(|_| done_rx.recv_timeout(Duration::from_secs(5)))
+        .collect();
+    let complete = results.iter().all(|result| matches!(result, Ok((_, true))));
     // Negative nested-admission control may deadlock. Leak ONLY these owned
     // threads and their isolated manager on timeout; never block in join.
     if !complete {
         drop((save, adoption, load));
-        panic!("owned save adoption and load complete within the bound");
+        panic!(
+            "owned save adoption and load complete within the bound: policy={policy}, {results:?}"
+        );
     }
     *lock(&manager.shared.persist_hook) = None;
     for thread in [save, adoption, load] {
