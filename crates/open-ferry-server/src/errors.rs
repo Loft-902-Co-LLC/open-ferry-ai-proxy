@@ -35,8 +35,6 @@ pub struct ErrorMessage {
     pub text: String,
     /// Whether the provider rejected the credential for good.
     pub terminal_auth: bool,
-    /// The `Retry-After` value upstream trusts the error to set.
-    pub retry_after: Option<HeaderValue>,
     /// The provider's headers that came with the error, sent on when
     /// `passthrough-headers` is on.
     pub addon: HeaderMap,
@@ -51,7 +49,6 @@ impl ErrorMessage {
             status,
             text: text.into(),
             terminal_auth: false,
-            retry_after: None,
             addon: HeaderMap::new(),
             source: None,
         }
@@ -67,7 +64,6 @@ impl ErrorMessage {
             status,
             text: error.to_string(),
             terminal_auth: error.terminal_auth,
-            retry_after: error.retry_after_header(),
             addon: error.headers.clone(),
             source: Some(error),
         }
@@ -533,7 +529,10 @@ mod tests {
         let message = ErrorMessage::from_exec(ExecError::auth_unavailable(Duration::from_secs(3)));
         assert_eq!(message.status, 503);
         assert_eq!(message.text, "auth_unavailable: no auth available");
-        assert_eq!(message.retry_after.as_ref().unwrap(), "3");
+        assert_eq!(
+            openai_error_response(&message, false).headers()[header::RETRY_AFTER],
+            "3"
+        );
 
         let message = ErrorMessage::from_exec(ExecError::auth_not_found());
         assert_eq!(message.status, 500);
@@ -549,8 +548,7 @@ mod tests {
             .headers
             .insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
         let mut message = ErrorMessage::from_exec(error);
-        // A cached safe value and an independent add-on must not restart the clock.
-        message.retry_after = Some(HeaderValue::from_static("90"));
+        // An independent add-on must not restart the clock.
         message
             .addon
             .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
@@ -606,9 +604,8 @@ mod tests {
     }
 
     #[test]
-    fn retry_headers_without_source_ignore_the_cached_hint() {
+    fn retry_headers_without_source_follow_passthrough() {
         let mut message = ErrorMessage::new(503, "busy");
-        message.retry_after = Some(HeaderValue::from_static("5"));
         message
             .addon
             .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
@@ -681,6 +678,27 @@ mod tests {
                         .collect::<Vec<_>>(),
                     ["999", "998"]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn r3_zero_wait_model_cooldown_overrides_addon() {
+        let mut message = ErrorMessage::from_exec(ExecError::model_cooldown(
+            "test-model",
+            Some("test-provider"),
+            Duration::ZERO,
+            None,
+        ));
+        message
+            .addon
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+        for passthrough in [false, true] {
+            for response in [
+                openai_error_response(&message, passthrough),
+                claude_error_response(&message, passthrough),
+            ] {
+                assert_eq!(response.headers()[header::RETRY_AFTER], "0");
             }
         }
     }
