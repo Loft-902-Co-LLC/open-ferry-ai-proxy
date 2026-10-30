@@ -306,7 +306,7 @@ async fn round7_refused_detached_save_logs_masked_file_and_cause() {
 }
 
 #[test]
-fn round7_save_deferral_masks_an_email_in_the_credential_id() {
+fn round8_save_deferral_scrubs_tokens_before_masking_email() {
     use crate::auth::{
         Auth, AuthStore, CodexOrigin, GuardedSave, SaveDeferral, WithheldPartitions,
     };
@@ -333,38 +333,49 @@ fn round7_save_deferral_masks_an_email_in_the_credential_id() {
             Ok(GuardedSave::Deferred(reason))
         }
     }
-    let manager = Manager::new(
-        Settings::default(),
-        Arc::new(FakeModels::default()),
-        Some(Arc::new(DeferredStore)),
-    );
-    let mut auth = auth_with_metadata(
+    for id in [
         "codex-1a2b3c4d-john.doe@example.com-plus.json",
-        "codex",
-        json!({"access_token":"dummy-access", "refresh_token":"dummy-refresh"}),
-    );
-    auth.file_name = auth.id.clone();
-    let initial = manager.register_unsaved(auth).unwrap();
-    let events = captured_log_events(|| {
-        manager
-            .edit(&initial.id, |auth| {
-                auth.metadata.insert("note".into(), json!("operator"));
-                Ok::<_, ()>(true)
-            })
-            .unwrap()
-            .unwrap();
-    });
-    let deferred: Vec<_> = events
-        .iter()
-        .filter(|(_, line)| line.contains("credential save deferred for "))
-        .collect();
-    assert!(!deferred.is_empty());
-    for (level, line) in deferred {
-        assert_eq!(*level, tracing::Level::WARN);
-        assert!(line.contains("codex-1a2b3c4d-j***@e***.com-plus.json"));
-        assert!(line.contains("RefreshInFlight"));
-        assert!(!line.contains("john.doe@example.com"));
-        assert!(!line.contains("dummy-access"));
-        assert!(!line.contains("dummy-refresh"));
+        "codex-1a2b3c4d-john.doe@example.com-plus.json/dummy-access/dummy-refresh",
+    ] {
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(Arc::new(DeferredStore)),
+        );
+        let mut auth = auth_with_metadata(
+            id,
+            "codex",
+            json!({"access_token":"dummy-access", "refresh_token":"dummy-refresh"}),
+        );
+        auth.file_name = auth.id.clone();
+        let initial = manager.register_unsaved(auth).unwrap();
+        let events = captured_log_events(|| {
+            manager
+                .edit(&initial.id, |auth| {
+                    auth.metadata.insert("note".into(), json!("operator"));
+                    Ok::<_, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+        });
+        let deferred: Vec<_> = events
+            .iter()
+            .filter(|(_, line)| line.contains("credential save deferred for "))
+            .collect();
+        assert!(!deferred.is_empty());
+        for (level, line) in deferred {
+            assert_eq!(*level, tracing::Level::WARN);
+            assert!(
+                !line.contains("dummy-access"),
+                "Round 8: deferred-save ID must not expose the saving snapshot's access token"
+            );
+            assert!(!line.contains("dummy-refresh"));
+            assert!(line.contains("j***@e***.com-plus.json"));
+            if !id.contains("dummy-access") {
+                assert!(line.contains("codex-1a2b3c4d-j***@e***.com-plus.json"));
+            }
+            assert!(line.contains("RefreshInFlight"));
+            assert!(!line.contains("john.doe@example.com"));
+        }
     }
 }
