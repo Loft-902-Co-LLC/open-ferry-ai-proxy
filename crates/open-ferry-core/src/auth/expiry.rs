@@ -42,7 +42,71 @@ const EXPIRE_KEYS: [&str; 6] = [
     "expires",
 ];
 
+/// Whether a user agent identifies one of the Codex clients.
+pub fn is_codex_client_user_agent(user_agent: &str) -> bool {
+    let ua = user_agent.trim().to_ascii_lowercase();
+    [
+        "codex-desktop",
+        "codex desktop",
+        "codex-rs",
+        "codex_cli_rs",
+        "codex-tui",
+        "codex_exec",
+    ]
+    .iter()
+    .any(|name| ua.contains(name))
+}
+
 impl Auth {
+    /// Request-local selection only. Never write this decision to metadata.
+    pub fn use_siwc_for_request(&self, headers: &http::HeaderMap) -> bool {
+        self.use_siwc()
+            && !headers
+                .get_all(http::header::USER_AGENT)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|value| !value.trim().is_empty())
+                .is_some_and(is_codex_client_user_agent)
+    }
+
+    /// The bearer this request uses; a missing selected bearer has no fallback.
+    pub fn access_token_for_request(&self, headers: &http::HeaderMap) -> &str {
+        if self.use_siwc_for_request(headers) {
+            self.siwc_access_token()
+        } else {
+            self.outer_access_token()
+        }
+    }
+
+    /// The request's rejection and refresh partition.
+    pub fn credential_partition_for_request(
+        &self,
+        headers: &http::HeaderMap,
+    ) -> super::CodexCredentialPartition {
+        if self.use_siwc_for_request(headers) {
+            super::CodexCredentialPartition::Siwc
+        } else {
+            super::CodexCredentialPartition::Outer
+        }
+    }
+
+    /// Bearer captured for result fencing. API-key calls keep the version fence.
+    pub fn result_access_token_for_request(&self, headers: &http::HeaderMap) -> &str {
+        if super::codex_refresh::is_codex_auth(self)
+            && !self.use_siwc_for_request(headers)
+            && self.attribute("api_key").is_some_and(|key| !key.is_empty())
+        {
+            ""
+        } else {
+            self.access_token_for_request(headers)
+        }
+    }
+
+    /// An unchanged outer bearer survives a sibling SIWC rotation too.
+    pub(crate) fn matches_access_token_partition(&self, token: &str) -> bool {
+        !token.is_empty() && (self.access_token() == token || self.outer_access_token() == token)
+    }
+
     /// When the credential expires: the access token's JWT `exp` claim, or
     /// else an expiry in the metadata.
     pub fn expiration_time(&self) -> Option<Timestamp> {
@@ -198,7 +262,8 @@ impl Auth {
         let token = token.trim();
         !token.is_empty()
             && ((token == self.siwc_access_token() && self.rejected_siwc_access_token != token)
-                || (token == self.access_token() && self.rejected_access_token != token))
+                || (self.matches_access_token_partition(token)
+                    && self.rejected_access_token != token))
     }
 
     /// Called under the manager state lock, using the bearer actually sent.
@@ -210,7 +275,7 @@ impl Auth {
         if token == self.siwc_access_token() {
             self.rejected_siwc_access_token = token.to_owned();
         }
-        if token == self.access_token() {
+        if self.matches_access_token_partition(token) {
             self.rejected_access_token = token.to_owned();
         }
         true

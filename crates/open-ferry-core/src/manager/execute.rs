@@ -409,7 +409,10 @@ fn failure_result(
         credential_scope: credential_scope && is_credential_scoped_error(ErrView::Exec(err)),
         response_headers: err.headers.clone(),
         credential_version: auth.credential_version,
-        access_token: super::credential::result_access_token(auth).to_owned(),
+        credential_partition: Some(auth.credential_partition_for_request(&attempt.client_headers)),
+        access_token: auth
+            .result_access_token_for_request(&attempt.client_headers)
+            .to_owned(),
         registration_epoch: auth.registration_epoch,
         execution_seq: attempt.execution_seq,
         ..CallResult::default()
@@ -440,6 +443,7 @@ struct Attempt<'a> {
     /// The sequence stamp of the latest upstream dispatch of this attempt,
     /// or 0 before the first.
     execution_seq: u64,
+    client_headers: HeaderMap,
 }
 
 impl Attempt<'_> {
@@ -970,6 +974,7 @@ impl Manager {
                     ),
                     session: session.as_ref(),
                     execution_seq: 0,
+                    client_headers: opts.headers.clone(),
                 };
                 let mut exec_req = req.clone();
                 exec_req.model = if restore_execution_model {
@@ -992,7 +997,12 @@ impl Manager {
                 if let Err(err) = &outcome {
                     upstream = Some(Failure::upstream(err.clone()));
                     if let Some(refreshed) = self
-                        .try_refresh_after_unauthorized(&auth, err, did_refresh)
+                        .try_refresh_after_unauthorized_for_request(
+                            &auth,
+                            err,
+                            did_refresh,
+                            &exec_opts.headers,
+                        )
                         .await
                     {
                         auth = refreshed;
@@ -1025,7 +1035,11 @@ impl Manager {
                                 // A token count says nothing of the quota.
                                 skip_quota_observation: kind == CallKind::CountTokens,
                                 credential_version: auth.credential_version,
-                                access_token: super::credential::result_access_token(&auth)
+                                credential_partition: Some(
+                                    auth.credential_partition_for_request(&attempt.client_headers),
+                                ),
+                                access_token: auth
+                                    .result_access_token_for_request(&attempt.client_headers)
                                     .to_owned(),
                                 registration_epoch: auth.registration_epoch,
                                 execution_seq: attempt.execution_seq,
@@ -1249,6 +1263,7 @@ impl Manager {
                 ),
                 session,
                 execution_seq: 0,
+                client_headers: opts.headers.clone(),
             };
             let mut exec_req = req.clone();
             exec_req.model = if execution_model.is_empty() {
@@ -1270,7 +1285,12 @@ impl Manager {
             if let Err(err) = &outcome {
                 upstream = Some(Failure::upstream(err.clone()));
                 if let Some(refreshed) = self
-                    .try_refresh_after_unauthorized(&auth, err, did_refresh)
+                    .try_refresh_after_unauthorized_for_request(
+                        &auth,
+                        err,
+                        did_refresh,
+                        &exec_opts.headers,
+                    )
                     .await
                 {
                     auth = refreshed;
@@ -1319,7 +1339,12 @@ impl Manager {
             if let Bootstrap::Failed(err) = &bootstrap {
                 upstream = Some(Failure::bootstrap(err.clone(), headers.clone()));
                 if let Some(refreshed) = self
-                    .try_refresh_after_unauthorized(&auth, err, did_refresh)
+                    .try_refresh_after_unauthorized_for_request(
+                        &auth,
+                        err,
+                        did_refresh,
+                        &exec_opts.headers,
+                    )
                     .await
                 {
                     auth = refreshed;
@@ -1393,7 +1418,12 @@ impl Manager {
                             error: Some(result_error_from_error(ErrView::Exec(&empty))),
                             response_headers: headers.clone(),
                             credential_version: auth.credential_version,
-                            access_token: super::credential::result_access_token(&auth).to_owned(),
+                            credential_partition: Some(
+                                auth.credential_partition_for_request(&attempt.client_headers),
+                            ),
+                            access_token: auth
+                                .result_access_token_for_request(&attempt.client_headers)
+                                .to_owned(),
                             registration_epoch: auth.registration_epoch,
                             execution_seq: attempt.execution_seq,
                             ..CallResult::default()
@@ -1471,6 +1501,7 @@ impl Manager {
             headers: headers.clone(),
             session: attempt.session.cloned(),
             execution_seq: attempt.execution_seq,
+            client_headers: attempt.client_headers.clone(),
             rewriter,
             failed: false,
             tx,
@@ -1526,7 +1557,15 @@ impl Manager {
                             success: true,
                             response_headers: forwarder.headers.clone(),
                             credential_version: forwarder.auth.credential_version,
-                            access_token: forwarder.auth.access_token().to_owned(),
+                            credential_partition: Some(
+                                forwarder
+                                    .auth
+                                    .credential_partition_for_request(&forwarder.client_headers),
+                            ),
+                            access_token: forwarder
+                                .auth
+                                .result_access_token_for_request(&forwarder.client_headers)
+                                .to_owned(),
                             registration_epoch: forwarder.auth.registration_epoch,
                             execution_seq: forwarder.execution_seq,
                             ..CallResult::default()
@@ -1562,6 +1601,7 @@ struct Forwarder {
     session: Option<Arc<Session>>,
     /// The sequence stamp of the dispatch that opened the stream.
     execution_seq: u64,
+    client_headers: HeaderMap,
     rewriter: Option<StreamRewriter>,
     failed: bool,
     tx: mpsc::Sender<Result<Bytes, ExecError>>,
@@ -1585,6 +1625,7 @@ impl Forwarder {
                         result_model: self.result_model.clone(),
                         session: self.session.as_ref(),
                         execution_seq: self.execution_seq,
+                        client_headers: self.client_headers.clone(),
                     };
                     let mut result = failure_result(&attempt, &self.auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&self.headers, &err);
@@ -1821,6 +1862,7 @@ mod tests {
             result_model: "model".to_owned(),
             session: None,
             execution_seq: 0,
+            client_headers: HeaderMap::new(),
         };
         let polls = Arc::new(AtomicUsize::new(0));
         let count = polls.clone();
