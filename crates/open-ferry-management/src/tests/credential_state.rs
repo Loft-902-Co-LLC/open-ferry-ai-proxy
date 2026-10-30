@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_status_sync_test.go, auth_files_patch_fields_test.go and
-// auth_files_refresh_test.go (v8.0.38, MIT).
+// auth_files_refresh_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes of `crate::credential_state`: turning credentials on and off,
@@ -1547,7 +1547,7 @@ fn auth_json_matches_go() {
     );
 }
 
-// Ported from auth_files_excluded_models_test.go (v8.0.38).
+// Ported from auth_files_excluded_models_test.go (v8.0.42).
 #[tokio::test]
 async fn exclusion_patches_rebuild_only_credential_owned_rules() {
     for (fields, expected) in [

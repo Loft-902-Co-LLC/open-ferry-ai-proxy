@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/claude_ratelimit.go
-// (db1bab01, v8.0.38, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (db1bab01, v8.0.42, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Decode the three fields as Go's encoding/json does: case-insensitive names,
 //! ordered duplicate assignments, merged nested objects and ignored nulls.

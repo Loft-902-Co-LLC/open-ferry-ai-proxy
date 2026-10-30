@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_handlers_stream_test.go,
 // openai_responses_handlers_stream_error_test.go,
-// openai_responses_compact_test.go and issue6332_test.go (v8.0.38, MIT).
+// openai_responses_compact_test.go and issue6332_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses stream writer, from upstream's tests, and the routes end to

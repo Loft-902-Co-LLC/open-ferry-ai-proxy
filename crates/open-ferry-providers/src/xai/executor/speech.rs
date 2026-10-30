@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_speech.go
 // (xaiSpeechModelUnavailablePatterns, xaiSpeechModelUnavailable,
 // xaiSpeechStatusErr, executeSpeech) and xai_executor_request.go
-// (xaiSpeechRequestURL, xaiIsSpeechRequest) (v8.0.38, MIT).
+// (xaiSpeechRequestURL, xaiIsSpeechRequest) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`]'s speech calls (upstream's `executeSpeech`).

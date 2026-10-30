@@ -11,7 +11,7 @@
 // sdk/api/handlers/openai/openai_responses_websocket_forward.go, and
 // isResponsesWebsocketCompletionEvent and
 // responsesWebsocketErrorMessageFromPayload in
-// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.38,
+// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.42,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

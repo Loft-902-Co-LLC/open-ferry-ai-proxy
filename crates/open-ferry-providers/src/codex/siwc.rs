@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/auth/codex/siwc_auth.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Sign in with ChatGPT's dynamic-client OAuth transport.

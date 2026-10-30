@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_request_test.go
-// (v8.0.38, MIT), and openai_openai-responses_user_turn_test.go (v8.0.38, MIT).
+// (v8.0.42, MIT), and openai_openai-responses_user_turn_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 64 tests are ported, with the request-side tests of

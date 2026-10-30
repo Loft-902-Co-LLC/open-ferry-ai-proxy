@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/gemini/interactions/interactions_gemini_common_test.go
-// and interactions_gemini_file_data_test.go (v8.0.38, MIT), and
+// and interactions_gemini_file_data_test.go (v8.0.42, MIT), and
 // interactions_gemini_user_turn_test.go, interactions_gemini_uri_test.go and
-// interactions_gemini_instruction_test.go (v8.0.38, MIT).
+// interactions_gemini_instruction_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request translators' tests: upstream's request tests are here, and

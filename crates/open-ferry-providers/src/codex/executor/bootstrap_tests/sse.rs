@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/codex_executor_sse_events_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/codex_executor_sse_events_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Split SSE events keep their physical-line budgets and every fragment

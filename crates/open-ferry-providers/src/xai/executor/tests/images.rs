@@ -3,7 +3,7 @@
 // TestXAIExecutorExecuteImagesPublishesFailureUsage,
 // TestXAIExecutorExecuteImagesPublishesRequestBuildFailureUsage,
 // TestXAIExecutorExecuteImagesUsesEditsEndpoint,
-// TestXAIExecutorExecuteImagesRewritesImageURLToURL) (v8.0.38, MIT).
+// TestXAIExecutorExecuteImagesRewritesImageURLToURL) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Image calls against the mock xAI server. Upstream's tests sign in with

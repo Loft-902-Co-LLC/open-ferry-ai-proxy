@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_execution_error_priority_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_execution_error_priority_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When a retry round ends in a cancellation or a passed deadline, the call

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/util/translator.go (FixJSON, CanonicalToolName,
-// ToolNameMapFromClaudeRequest, UnambiguousToolNameMapFromClaudeRequest, MapToolName) (v8.0.38, MIT).
+// ToolNameMapFromClaudeRequest, UnambiguousToolNameMapFromClaudeRequest, MapToolName) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Repairing tool call arguments that use single quotes, and restoring the

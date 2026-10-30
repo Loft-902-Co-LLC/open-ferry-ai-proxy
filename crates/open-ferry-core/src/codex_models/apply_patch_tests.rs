@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/client/codex/models/apply_patch_test.go
-//! (v8.0.38, MIT).
+//! (v8.0.42, MIT).
 //!
 //! Changed:
 //! - `TestCodexCatalogApplyPatchCapability` builds its baseline without a

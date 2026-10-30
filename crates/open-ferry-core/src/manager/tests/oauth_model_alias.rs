@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/oauth_model_alias_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/oauth_model_alias_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OAuth model aliases: which upstream model an alias resolves to, how the

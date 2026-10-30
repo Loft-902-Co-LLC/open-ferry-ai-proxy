@@ -3,8 +3,8 @@
 // executeStreamWithServiceAccount and executeStreamWithAPIKey),
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.38, MIT).
-// Buffered usage on read failure follows b12db8c3 (v8.0.38).
+// (v8.0.42, MIT).
+// Buffered usage on read failure follows b12db8c3 (v8.0.42).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini or Vertex AI SSE stream, read a line at a time and translated

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/grok_validation_test.go (v8.0.38,
+// Ported from CLIProxyAPI internal/signature/grok_validation_test.go (v8.0.42,
 // MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

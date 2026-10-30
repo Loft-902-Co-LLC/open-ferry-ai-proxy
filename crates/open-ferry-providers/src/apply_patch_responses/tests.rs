@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/apply_patch_responses_test.go
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // TestApplyPatchResponsesHelperDispatcherLifecycle also checks that the state

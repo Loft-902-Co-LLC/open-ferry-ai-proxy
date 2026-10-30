@@ -1,4 +1,4 @@
-# Ported from CLIProxyAPI Dockerfile (v8.0.38, MIT).
+# Ported from CLIProxyAPI Dockerfile (v8.0.42, MIT).
 # https://github.com/router-for-me/CLIProxyAPI
 #
 # open-ferry's container image, ghcr.io/loft-902-co-llc/open-ferry, for

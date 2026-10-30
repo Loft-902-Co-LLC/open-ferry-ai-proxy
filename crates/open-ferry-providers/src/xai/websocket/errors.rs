@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (parseXAIWebsocketError, xaiBareWebsocketErrorStatus,
-// mapXAIWebsocketReadError, mapXAIWebsocketWriteError) (v8.0.38, MIT).
+// mapXAIWebsocketReadError, mapXAIWebsocketWriteError) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI's error events, and the errors of a broken connection.

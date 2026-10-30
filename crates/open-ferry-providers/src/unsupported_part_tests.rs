@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/unsupported_part_executor_test.go
 // (TestExecutorsRefuseAFileOnlyTurnBeforeCallingUpstream) and
 // helps/request_pair_error_test.go (TestResponsesFileIDOnlyReturns400OnEveryPath,
-// TestResponsesAudioAndTextBesideFileIDOnCompatPath) (v8.0.38, MIT).
+// TestResponsesAudioAndTextBesideFileIDOnCompatPath) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A turn whose only content is a part the provider can't receive is

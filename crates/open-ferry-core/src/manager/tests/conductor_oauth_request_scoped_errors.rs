@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_oauth_request_scoped_errors_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_oauth_request_scoped_errors_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `oauth-request-scoped-errors` rules apply to OAuth credentials of

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/util/gemini_schema.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Local reference expansion for cleaners that discard definitions. Each schema
