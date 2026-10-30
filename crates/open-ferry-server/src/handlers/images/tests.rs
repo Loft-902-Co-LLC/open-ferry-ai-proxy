@@ -44,6 +44,9 @@ use crate::json;
 use crate::router;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
 
+#[path = "payload_tests.rs"]
+mod payload_tests;
+
 const GENERATIONS: &str = "/v1/images/generations";
 const EDITS: &str = "/v1/images/edits";
 

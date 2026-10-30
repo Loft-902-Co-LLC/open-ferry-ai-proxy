@@ -15,7 +15,9 @@
 //! shaped as a video call's is: its image references rewritten to xAI's
 //! shape (see [`super::super::request::normalize_image_refs`]), then the
 //! config's payload rules applied for that model, protocol `openai`, their
-//! defaults checked against the request's payload as it came. The request
+//! defaults checked against the un-defaulted original when the handler
+//! supplies one, else the request's payload. Both have their image references
+//! normalized before the check. The request
 //! has the credential's key and custom headers, and asks for JSON. xAI's
 //! answer comes back with its headers; a failure is an error with xAI's
 //! status and body (see [`super::super::errors`]). The call's usage record
@@ -41,20 +43,24 @@
 //! - Only API keys: upstream's OAuth credentials, which go to Grok's CLI
 //!   chat proxy unless they name a `base_url`, aren't served.
 
+use bytes::Bytes;
 use http::Method;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request, Response};
 use open_ferry_core::observe::AttemptKind;
+use open_ferry_translate::json::exact;
+use serde_json::Value;
 
-use super::videos::{payload_model, shape_body};
+use super::videos::payload_model;
 use super::{MAX_ERROR_BODY, XaiExecutor};
 use crate::codex::client::{error_chain, read_body, read_body_prefix};
 use crate::codex::request::refuse_control_characters;
 use crate::codex::stream::MAX_LINE;
 use crate::observe_send::{self, Attempt};
+use crate::payload;
 use crate::redact::Policy;
 use crate::xai::errors;
-use crate::xai::request::{PROVIDER, base_url, build_headers};
+use crate::xai::request::{PROVIDER, base_url, build_headers, normalize_image_refs};
 
 /// The source format of upstream's image handlers (`xaiImageHandlerType`).
 const IMAGE_SOURCE: &str = "openai-image";
@@ -79,6 +85,47 @@ pub(super) fn endpoint(options: &Options) -> Option<&'static str> {
 /// The URL of `path` under `base`, less one trailing slash.
 fn url(base: &str, path: &str) -> String {
     format!("{}{path}", base.strip_suffix('/').unwrap_or(base))
+}
+
+/// Normalizes both the prepared body and the un-defaulted original before
+/// applying payload rules. An unchanged body keeps its original bytes.
+fn shape_body(
+    executor: &XaiExecutor,
+    model: &str,
+    request: &Request,
+    options: &Options,
+) -> (Bytes, Value) {
+    let prepared = match exact::from_slice(&request.payload) {
+        Ok(body @ Value::Object(_)) => body,
+        _ => return (request.payload.clone(), Value::Null),
+    };
+    let mut body = prepared.clone();
+    normalize_image_refs(&mut body);
+    let normalize_original = |mut original: Value| {
+        normalize_image_refs(&mut original);
+        original
+    };
+    let target = payload::Target {
+        executor: PROVIDER,
+        protocol: &Format::OPENAI,
+        model,
+        root: "",
+        stream: false,
+        tracked: &[],
+        translate: Some(&normalize_original),
+    };
+    payload::apply(
+        executor.config.as_deref(),
+        &target,
+        request,
+        options,
+        &mut body,
+    );
+    if body == prepared {
+        (request.payload.clone(), body)
+    } else {
+        (Bytes::from(body.to_string()), body)
+    }
 }
 
 impl XaiExecutor {
