@@ -789,6 +789,18 @@ pub(crate) fn restore_v8_layout(
             set_yaml_path_with_comments(root, current, &copy);
         }
     }
+    if let (Some(original), Some(current)) = (
+        yaml_path(layout, "upstream.codex"),
+        yaml_path_mut(root, "upstream.codex"),
+    ) && original.kind == Kind::Mapping
+        && current.kind == Kind::Mapping
+    {
+        // Existing keys keep their order; newly migrated keys follow V8_PATHS.
+        let mut pairs = current.content.as_chunks::<2>().0.to_vec();
+        pairs
+            .sort_by_key(|[key, _]| find_map_key_index(original, &key.value).unwrap_or(usize::MAX));
+        current.content = pairs.into_iter().flatten().collect();
+    }
     let mut baseline: Option<Config> = None;
     for &(old, current) in V8_KEY_FAMILIES {
         let path = format!("api-keys.{current}");

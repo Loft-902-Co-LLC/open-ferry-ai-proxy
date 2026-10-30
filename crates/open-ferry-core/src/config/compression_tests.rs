@@ -102,6 +102,8 @@ fn compression_partial_response_fields_merge_on_load() {
 fn compression_partial_response_fields_survive_save() {
     for (case, raw) in [
         "# keep\nresponse-compression: {enabled: false} # legacy\n# canonical\nserver: {response-compression: {min-bytes: 64}}\n",
+        "# keep\nresponse-compression: {enabled: false} # legacy\nserver: {response-compression: {min-bytes: 64}} # canonical\n",
+        "# keep\nresponse-compression: {enabled: false} # legacy\nserver: # parent\n  {response-compression: {min-bytes: 64}} # canonical\n",
         "# keep\nresponse-compression: {min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {enabled: false}}\n",
         "# keep\nresponse-compression: {enabled: false, min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {}}\n",
     ].into_iter().enumerate() {
@@ -115,6 +117,9 @@ fn compression_partial_response_fields_survive_save() {
                 assert_eq!(loaded.response_compression.enabled, Some(false));
                 assert_eq!(loaded.response_compression.min_bytes, 64);
                 let text = std::fs::read_to_string(&path).unwrap();
+                if raw.contains("# parent") {
+                    assert!(text.contains("# parent"));
+                }
                 for comment in ["# keep", "# legacy", "# canonical"] {
                     assert!(text.contains(comment), "case={case}, migrate={migrate}: lost {comment}");
                 }
@@ -245,6 +250,35 @@ fn compression_codex_migration_uses_upstream_field_order() {
                 "upstream-request-compression-min-bytes",
                 "disable-codex-cloaking",
                 "response-steering"
+            ]
+        );
+    }
+}
+
+#[test]
+fn compression_codex_existing_keys_keep_their_order() {
+    let raw = b"codex: {disable-codex-cloaking: true, upstream-request-compression-min-bytes: 64, upstream-request-compression: true}\nupstream: {codex: {response-steering: true, websocket-compression: false}}\n";
+    for bytes in [
+        save::normalize_config_layout(raw, true).unwrap().0,
+        save::render_preserving_comments(raw, &Config::parse(raw).unwrap(), true).unwrap(),
+    ] {
+        let doc = save::unmarshal(&bytes).unwrap();
+        let codex = save::yaml_path(doc.content.first().unwrap(), "upstream.codex").unwrap();
+        let keys: Vec<&str> = codex
+            .content
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[key, _]| key.value.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "response-steering",
+                "websocket-compression",
+                "upstream-request-compression",
+                "upstream-request-compression-min-bytes",
+                "disable-codex-cloaking"
             ]
         );
     }
