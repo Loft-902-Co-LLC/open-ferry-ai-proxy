@@ -39,7 +39,7 @@ pub struct RunInfo<'a> {
     /// `git describe` of the upstream checkout, such as `v8.0.38`.
     pub version: &'a str,
     pub commit: &'a str,
-    /// `go env GOVERSION`, such as `go1.26.4`.
+    /// `go env GOVERSION`, such as `go1.26.10`.
     pub go_version: &'a str,
     pub random: usize,
     pub seed: u64,
@@ -214,7 +214,7 @@ mod tests {
         let run = RunInfo {
             version: "v8.0.38",
             commit: "0123456789abcdef0123",
-            go_version: "go1.26.4",
+            go_version: "go1.26.10",
             random: 5000,
             seed: 1,
         };
@@ -226,7 +226,7 @@ mod tests {
             ],
         );
         assert!(text.contains(
-            "CLIProxyAPI v8.0.38 (commit `0123456789ab`), built with go1.26.4, with \
+            "CLIProxyAPI v8.0.38 (commit `0123456789ab`), built with go1.26.10, with \
              `--random 5000 --seed 1`: 80 hand-written and 6,160 random cases in all."
         ));
         assert!(text.contains("| 2 | 6,240 | 6,236 | 2 | 0 | 2 |\n"));

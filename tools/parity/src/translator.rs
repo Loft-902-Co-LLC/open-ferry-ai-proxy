@@ -46,7 +46,7 @@ use open_ferry_translate::completions::{
 };
 use open_ferry_translate::gemini::claude::{
     GeminiToClaudeStream, convert_claude_request_to_gemini,
-    convert_claude_request_to_gemini_with_compat, convert_gemini_response_to_claude_non_stream,
+    convert_claude_request_to_gemini_with_compat,
 };
 use open_ferry_translate::gemini::gemini::{
     convert_gemini_request_to_gemini, passthrough_gemini_response_non_stream,
@@ -726,7 +726,16 @@ impl Translator {
                 } else {
                     convert_openai_responses_request_to_claude_with_compat
                 };
-                let (body, err) = convert(&case.model, &request, true, ModelCatalog::embedded());
+                let (body, err) = if let Some(enabled) =
+                    case.options["native_tool_search"].as_bool()
+                {
+                    open_ferry_translate::claude::openai::responses::convert_openai_responses_request_to_claude_with_tool_search(
+                        &case.model, &request, true, ModelCatalog::embedded(),
+                        self == Self::ClaudeResponsesRequestCompat, enabled,
+                    )
+                } else {
+                    convert(&case.model, &request, true, ModelCatalog::embedded())
+                };
                 // Read back, so generated IDs are masked as upstream's are.
                 Ok(self
                     .read(case, refused(body, err).to_string().as_bytes())
@@ -961,24 +970,48 @@ impl Translator {
                 };
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
                 let (body, err) = convert(&case.model, &request, stream, ModelCatalog::embedded());
-                Ok(refused(body, err))
+                if case.options["repeat_clean"] == true {
+                    if err.is_some() {
+                        return Err("schema re-clean fixture was refused".to_owned());
+                    }
+                    let schema = body
+                        .pointer("/tools/0/functionDeclarations/0/parametersJsonSchema")
+                        .ok_or("schema re-clean fixture produced no schema")?
+                        .clone();
+                    let mut repeated = request;
+                    repeated["tools"][0]["input_schema"] = schema;
+                    let (second, error) =
+                        convert(&case.model, &repeated, stream, ModelCatalog::embedded());
+                    Ok(json!({"first": body, "second": refused(second, error)}))
+                } else {
+                    Ok(refused(body, err))
+                }
             }
             Self::GeminiClaudeStream => {
-                let mut stream = GeminiToClaudeStream::new(&request.unwrap_or_default());
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
+                let mut stream = GeminiToClaudeStream::new(&request.unwrap_or_default())
+                    .with_translated_request(&translated);
                 // The output for every line, joined, as the harness collects
                 // upstream's.
-                let output: String = case
+                let chunks: Vec<String> = case
                     .events
                     .iter()
                     .map(|line| stream.translate(line.as_bytes()))
                     .collect();
+                let output = if case.options["trace_events"] == true {
+                    serde_json::to_string(&chunks).expect("strings serialize")
+                } else {
+                    chunks.concat()
+                };
                 Ok(self
                     .read(case, output.as_bytes())
                     .expect("streams always read"))
             }
             Self::GeminiClaudeNonStream => {
-                let output = convert_gemini_response_to_claude_non_stream(
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
+                let output = open_ferry_translate::gemini::claude::convert_gemini_response_to_claude_non_stream_with_translated(
                     &request.unwrap_or_default(),
+                    &translated,
                     &final_event(),
                 );
                 self.read(case, output.to_string().as_bytes())
@@ -1199,7 +1232,7 @@ impl Translator {
                     option("from"),
                     option("to"),
                     option("provider"),
-                    crate::cases::thinking::model_info(&case.options["model_info"]),
+                    crate::cases::thinking::resolved_model_info(case),
                 )
                 .err();
                 Ok(object([("body", body), ("error", json!(error))]))
@@ -1776,13 +1809,20 @@ impl Translator {
                 return Some(Value::String(text.into_owned()));
             }
             Self::GeminiClaudeStream => {
-                let mut frames = sse_frames_ended_by(&text, "\n\n\n");
-                mask_tool_use_counters(&mut frames);
+                let mut frames = if case.options["trace_events"] == true {
+                    let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
+                    Value::Array(chunks.iter().enumerate().map(|(index, chunk)| {
+                        json!({"input": index, "frames": sse_frames_ended_by(chunk, "\n\n\n")})
+                    }).collect())
+                } else {
+                    sse_frames_ended_by(&text, "\n\n\n")
+                };
+                mask_tool_use_counters(&mut frames, case);
                 return Some(frames);
             }
             Self::GeminiChatStream => {
                 let mut lines = read_lines(&text)?;
-                mask_function_call_ids(&mut lines);
+                mask_function_call_ids(&mut lines, case);
                 return Some(lines);
             }
             Self::OpenAIResponsesStream => return Some(sse_frames(&text)),
@@ -1846,9 +1886,9 @@ impl Translator {
                 let mut value: Value = exact::from_str(&text).ok()?;
                 let mut seen = Vec::new();
                 if let Some(Value::Array(blocks)) = value.get_mut("content") {
-                    blocks
-                        .iter_mut()
-                        .for_each(|block| mask_tool_use_counter(block, &mut seen));
+                    blocks.iter_mut().for_each(|block| {
+                        mask_tool_use_counter(block, &mut seen, &input_text(case))
+                    });
                 }
                 return Some(value);
             }
@@ -1859,7 +1899,7 @@ impl Translator {
             }
             Self::GeminiChatNonStream => {
                 let mut value: Value = exact::from_str(&text).ok()?;
-                mask_function_call_ids(&mut value);
+                mask_function_call_ids(&mut value, case);
                 return Some(value);
             }
             Self::ChatNonStream | Self::ClaudeChatNonStream => {
@@ -2187,11 +2227,18 @@ pub(crate) fn sse_frames_ended_by(text: &str, end: &str) -> Value {
 
 /// Masks the tool call IDs in a Gemini to Claude stream's content blocks
 /// (see [`mask_tool_use_counter`]).
-fn mask_tool_use_counters(frames: &mut Value) {
+fn mask_tool_use_counters(frames: &mut Value, case: &Case) {
+    let input = input_text(case);
     let mut seen = Vec::new();
     for frame in frames.as_array_mut().into_iter().flatten() {
-        if let Some(block) = frame.pointer_mut("/data/content_block") {
-            mask_tool_use_counter(block, &mut seen);
+        if let Some(chunks) = frame.get_mut("frames").and_then(Value::as_array_mut) {
+            for chunk in chunks {
+                if let Some(block) = chunk.pointer_mut("/data/content_block") {
+                    mask_tool_use_counter(block, &mut seen, &input);
+                }
+            }
+        } else if let Some(block) = frame.pointer_mut("/data/content_block") {
+            mask_tool_use_counter(block, &mut seen, &input);
         }
     }
 }
@@ -2201,13 +2248,16 @@ fn mask_tool_use_counters(frames: &mut Value) {
 /// for the `n`th distinct ID in `seen`, so an ID given twice still reads the
 /// same twice. The count is process-wide, upstream's and ours alike,
 /// streaming or not, so it depends on the cases run before.
-fn mask_tool_use_counter(block: &mut Value, seen: &mut Vec<String>) {
+fn mask_tool_use_counter(block: &mut Value, seen: &mut Vec<String>, input: &str) {
     if block["type"] != "tool_use" {
         return;
     }
     let Some(Value::String(id)) = block.get_mut("id") else {
         return;
     };
+    if input.contains(id.as_str()) {
+        return;
+    }
     let Some((name, count)) = id.rsplit_once('-') else {
         return;
     };
@@ -2228,22 +2278,25 @@ fn mask_tool_use_counter(block: &mut Value, seen: &mut Vec<String>) {
 /// Completions translators make up for tool calls,
 /// `<name>-<unix nanos>-<count>`, with `(generated-<n>)` for the `n`th
 /// distinct ID, wherever an item of a `tool_calls` list has one.
-fn mask_function_call_ids(value: &mut Value) {
+fn mask_function_call_ids(value: &mut Value, case: &Case) {
     fn generated(id: &str) -> Option<&str> {
         let (rest, count) = id.rsplit_once('-')?;
         let (name, nanos) = rest.rsplit_once('-')?;
         let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
         (nanos.len() >= 16 && digits(nanos) && !count.is_empty() && digits(count)).then_some(name)
     }
-    fn mask(value: &mut Value, seen: &mut Vec<String>) {
+    fn mask(value: &mut Value, seen: &mut Vec<String>, input: &str) {
         match value {
-            Value::Array(items) => items.iter_mut().for_each(|item| mask(item, seen)),
+            Value::Array(items) => items.iter_mut().for_each(|item| mask(item, seen, input)),
             Value::Object(fields) => {
                 if let Some(Value::Array(calls)) = fields.get_mut("tool_calls") {
                     for call in calls {
                         let Some(Value::String(id)) = call.get_mut("id") else {
                             continue;
                         };
+                        if input.contains(id.as_str()) {
+                            continue;
+                        }
                         let Some(name) = generated(id) else {
                             continue;
                         };
@@ -2258,12 +2311,14 @@ fn mask_function_call_ids(value: &mut Value) {
                         *id = format!("{name}-(generated-{n})");
                     }
                 }
-                fields.values_mut().for_each(|field| mask(field, seen));
+                fields
+                    .values_mut()
+                    .for_each(|field| mask(field, seen, input));
             }
             _ => {}
         }
     }
-    mask(value, &mut Vec::new());
+    mask(value, &mut Vec::new(), &input_text(case));
 }
 
 /// Replaces a response's creation time, held in `key`, if it is within an
@@ -2714,6 +2769,32 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn gemini_supplied_timestamp_call_ids_are_literal() {
+        let id = "f-1234567890123456789-1";
+        let case = Case::response(
+            "supplied",
+            "{}",
+            vec![
+                json!({
+                    "candidates": [{"content": {"parts": [{
+                        "functionCall": {"name": "f", "id": id, "args": {}}
+                    }]}}]
+                })
+                .to_string(),
+            ],
+        );
+        let mut output = json!({"tool_calls": [{"id": id}]});
+        mask_function_call_ids(&mut output, &case);
+        assert_eq!(output["tool_calls"][0]["id"], id);
+        let mut changed = json!({"tool_calls": [{"id": "f-1234567890123456788-1"}]});
+        mask_function_call_ids(&mut changed, &case);
+        assert_ne!(output, changed);
+        let mut generated = json!({"tool_calls": [{"id": "f-1234567890123456788-1"}]});
+        mask_function_call_ids(&mut generated, &Case::new("generated", "", "{}"));
+        assert_eq!(generated["tool_calls"][0]["id"], "f-(generated-1)");
+    }
 
     #[test]
     fn sse_text_becomes_frames() {

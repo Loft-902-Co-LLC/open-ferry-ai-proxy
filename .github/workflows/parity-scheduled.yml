@@ -47,10 +47,10 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      # v8.0.38's go.mod asks for Go 1.26.0; 1.26.4 is tested with the harness.
+      # v8.0.38's go.mod asks for Go 1.26.0; 1.26.10 is tested with the harness.
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: '1.26.4'
+          go-version: '1.26.10'
           cache: false
 
       # Use CI's dependency cache and its compiler/manifest/lockfile key.
@@ -66,8 +66,8 @@ jobs:
           path: |
             ~/go/pkg/mod
             target/parity/go-build
-          key: parity-go-v1-${{ runner.os }}-1.26.4-${{ hashFiles('reference/cliproxyapi/go.sum', 'tools/parity/go/**') }}
-          restore-keys: parity-go-v1-${{ runner.os }}-1.26.4-
+          key: parity-go-v1-${{ runner.os }}-1.26.10-${{ hashFiles('reference/cliproxyapi/go.sum', 'tools/parity/go/**') }}
+          restore-keys: parity-go-v1-${{ runner.os }}-1.26.10-
 
       - name: Compare offline
         env:

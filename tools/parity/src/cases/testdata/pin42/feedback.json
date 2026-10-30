@@ -1,0 +1,650 @@
+[
+  {
+    "suites": [
+      "gemini/openai-chat/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ]
+  },
+  {
+    "suites": [
+      "gemini/claude/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-non-stream",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ]
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-False-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-chat/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/openai-responses/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-False-gemini/claude/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-chat/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/openai-responses/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "openai-response"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}",
+      "data: [DONE]"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-feedback-True-[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]-True-gemini/claude/response-non-stream-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"response\":{\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"blocked fixture\"},\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}}"
+    ],
+    "options": {
+      "from": "gemini",
+      "to": "claude"
+    }
+  }
+]
