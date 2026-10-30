@@ -2800,9 +2800,13 @@ impl Service {
                         return Ok(AdoptionRead::Invalid);
                     }
                     let status = store.read_for_adoption(live).map_err(ManagerError::Store)?;
-                    // Tagged writes never publish a compatibility payload, even
-                    // for providers outside the partitioned Codex contract.
-                    let status = if tagged && matches!(status, AdoptionRead::Unsupported) {
+                    // Native files use current disk bytes even outside Codex's
+                    // partitioned contract. Legacy Gemini management payloads
+                    // retain their Unsupported compatibility path.
+                    let native_file = !go::equal_fold(live.provider.trim(), "gemini");
+                    let status = if (tagged || native_file)
+                        && matches!(status, AdoptionRead::Unsupported)
+                    {
                         store
                             .read_back(live)
                             .map_err(ManagerError::Store)?
@@ -8715,6 +8719,63 @@ self-update:
         );
         assert_eq!(service.file_auths.get(&path), Some(&id));
         assert_eq!(service.manager.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watched_non_codex_file_uses_current_bytes_after_a_persisted_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.json");
+        std::fs::write(&path, r#"{"type":"claude","access_token":"dummy-before"}"#).unwrap();
+        let mut service = service(dir.path(), "");
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let id = service.manager.list()[0].id.clone();
+        let queued = auth_file(&path);
+        let current = br#"{"type":"claude","access_token":"dummy-after","disabled":true}"#;
+        std::fs::write(&path,current).unwrap();
+        service.handle_and_drain(changed(queued), Path::new("")).await;
+        let live = service.manager.get(&id).unwrap();
+        assert!(live.disabled,"a captured observation cannot undo a newer disk disable");
+        assert_eq!(live.metadata["access_token"],"dummy-after");
+        assert_eq!(std::fs::read(&path).unwrap(),current);
+    }
+
+    #[tokio::test]
+    async fn watched_file_edit_keeps_live_nonquota_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "cooling.json", "");
+        let mut service = service(dir.path(), "");
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let id = service.manager.list()[0].id.clone();
+        let deadline = Utc::now() + chrono::TimeDelta::minutes(10);
+        service
+            .manager
+            .edit_unsaved::<std::convert::Infallible>(&id, |auth| {
+                auth.unavailable = true;
+                auth.status = open_ferry_core::auth::Status::Error;
+                auth.status_message = "temporary failure".into();
+                auth.last_error = Some(open_ferry_core::auth::AuthError {
+                    http_status: 503,
+                    message: "temporary failure".into(),
+                    ..Default::default()
+                });
+                auth.next_retry_after = Some(deadline);
+                auth.next_refresh_after = Some(deadline);
+                auth.cooldown_recorded_seq = 7;
+                Ok(true)
+            })
+            .unwrap();
+        let queued = auth_file(&path);
+        codex_file(dir.path(), "cooling.json", r#","prefix":"fresh-setting""#);
+        service
+            .handle_and_drain(changed(queued), Path::new(""))
+            .await;
+        let live = service.manager.get(&id).unwrap();
+        assert_eq!(live.prefix, "fresh-setting");
+        assert!(live.unavailable);
+        assert_eq!(live.next_retry_after, Some(deadline));
+        assert_eq!(live.next_refresh_after, Some(deadline));
+        assert_eq!(live.cooldown_recorded_seq, 7);
+        assert_eq!(live.last_error.as_ref().unwrap().http_status, 503);
     }
 
     #[tokio::test]
