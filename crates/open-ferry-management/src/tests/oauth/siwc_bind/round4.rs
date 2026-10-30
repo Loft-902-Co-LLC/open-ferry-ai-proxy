@@ -273,18 +273,8 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     )
     .await
     .unwrap();
-    let misses = Arc::new(AtomicUsize::new(0));
-    api.state.oauth_sessions().overrides().bind_file_misses = Some(misses.clone());
-    // B may briefly miss the process-wide lock registry too. Only A's held
-    // credential should enter this pause or count toward A's retry attempts.
-    api.state.oauth_sessions().overrides().bind_file_miss_target =
-        Some(dir.path().join("codex-bind.json"));
-    let (miss_release, miss_released) = std::sync::mpsc::channel();
-    let miss_pause = Arc::new((
-        tokio::sync::Notify::new(),
-        std::sync::Mutex::new(miss_released),
-    ));
-    api.state.oauth_sessions().overrides().bind_after_file_miss = Some(miss_pause.clone());
+    let missed = Arc::new(tokio::sync::Notify::new());
+    api.state.oauth_sessions().overrides().bind_lock_wait = Some(missed.clone());
     // Queue B while A owns its first reservation, before A's F miss. Once
     // A defers, B stays ahead even if this process is descheduled past backoff.
     let (before_file, release_file) = pause_write(&api, true);
@@ -297,31 +287,26 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
         .await
         .unwrap();
     api.state.oauth_sessions().overrides().bind_before_file = None;
-    // Observe B at the write fence, before its runtime synchronization. A's
-    // held file lock and paused miss make B the only worker that can get here.
-    // Session completion also waits for FakeSync, which is outside the FIFO
-    // progress being tested.
+    // Keep A retrying while its file stays locked. Parking A after its miss
+    // can strand B behind it if B also defers a transient lock-registry miss.
+    // Observe B's write admission directly, before runtime synchronization;
+    // A's held file lock makes B the only worker that can reach this fence.
     let (other_write, release_other) = pause_write(&api, false);
     release_file.send(()).unwrap();
-    entered(&miss_pause).await;
+    tokio::time::timeout(SETTLE, missed.notified())
+        .await
+        .unwrap();
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     let other_admitted = tokio::time::timeout(SETTLE, other_write.0.notified())
         .await
         .is_ok();
-    let attempts_at_admission = misses.load(Ordering::SeqCst);
-    api.state.oauth_sessions().overrides().bind_after_file_miss = None;
     api.state.oauth_sessions().overrides().bind_before_write = None;
-    // Release both workers before awaiting their completed sessions, including
-    // on timeout, so an assertion failure cannot strand either test pause.
+    // Release the write pause and held file lock before awaiting completion,
+    // including on timeout, so an assertion failure cannot strand a worker.
     let _ = release_other.send(());
-    miss_release.send(()).unwrap();
     drop(guard);
     completed(&api, &first).await;
     completed(&api, &second).await;
-    assert_eq!(
-        attempts_at_admission, 1,
-        "cross-credential progress needed more F attempts"
-    );
     assert!(
         other_admitted,
         "a busy credential retained the global FIFO head"
