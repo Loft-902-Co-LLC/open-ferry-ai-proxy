@@ -1233,6 +1233,7 @@ impl Manager {
     ) -> Result<Option<PublishedUpdate>, ManagerError> {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
+        let is_file_observation = context.revision.is_some();
         let lease_tail = match &mode {
             UpdateMode::Refresh { lease, .. } => lease.cloned().map(Box::new),
             _ => None,
@@ -1340,7 +1341,9 @@ impl Manager {
                 } else {
                     Default::default()
                 };
-                if context.metadata_unchanged {
+                if context.metadata_unchanged
+                    || (is_file_observation && !is_disabled(&existing_auth) && !is_disabled(&auth))
+                {
                     auth.codex_refresh_failure = existing_auth.codex_refresh_failure.clone();
                     auth.next_refresh_after = existing_auth.next_refresh_after;
                     existing_failures
@@ -1538,6 +1541,9 @@ impl Manager {
         if auth.index.is_empty() {
             auth.index = existing_auth.index.clone();
         }
+        if is_file_observation && auth.created_at.is_none() {
+            auth.created_at = existing_auth.created_at;
+        }
         auth.success = existing_auth.success;
         auth.failed = existing_auth.failed;
         auth.recent_requests = existing_auth.recent_requests.clone();
@@ -1553,7 +1559,28 @@ impl Manager {
         };
         auth.preserve_rejected_tokens_from(&existing_auth, is_refresh);
         if !is_disabled(&existing_auth) && !is_disabled(&auth) {
-            if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
+            if is_file_observation {
+                auth.model_states = existing_auth.model_states.clone();
+                auth.last_refreshed_at = existing_auth.last_refreshed_at;
+                auth.next_refresh_after = existing_auth.next_refresh_after;
+                if matches!(auth.status, Status::Active | Status::Unknown) {
+                    auth.status = existing_auth.status;
+                }
+                if auth.status_message.is_empty() {
+                    auth.status_message = existing_auth.status_message.clone();
+                }
+                auth.unavailable = existing_auth.unavailable;
+                auth.next_retry_after = existing_auth.next_retry_after;
+                if auth.last_error.is_none() {
+                    auth.last_error = existing_auth.last_error.clone();
+                }
+                let observation =
+                    merge_quota_observation(std::mem::take(&mut auth.quota), &existing_auth.quota);
+                auth.quota = existing_auth.quota.clone();
+                auth.quota.observed_at = observation.observed_at;
+                auth.quota.signals = observation.signals;
+                auth.cooldown_recorded_seq = existing_auth.cooldown_recorded_seq;
+            } else if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
                 auth.model_states = existing_auth.model_states.clone();
             }
             if (changed || is_refresh)
@@ -1566,6 +1593,8 @@ impl Manager {
                     .is_some_and(|err| is_unauthorized_error(ErrView::Auth(err)));
                 if has_unauthorized_auth_failure(&existing_auth) || new_unauthorized {
                     auth.unavailable = false;
+                    auth.next_retry_after = None;
+                    auth.cooldown_recorded_seq = 0;
                     auth.last_error = None;
                     auth.status_message.clear();
                     auth.status = Status::Active;
@@ -1573,6 +1602,7 @@ impl Manager {
                 clear_unauthorized_model_states(&mut auth, now);
             }
             if is_credential_quota_active(&existing_auth.quota, now) {
+                auth.cooldown_recorded_seq = existing_auth.cooldown_recorded_seq;
                 auth.unavailable = existing_auth.unavailable;
                 auth.next_retry_after = existing_auth.next_retry_after;
                 // The cooldown stays; the newest snapshot of the quota,
