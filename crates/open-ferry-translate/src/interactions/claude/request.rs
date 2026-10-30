@@ -326,7 +326,9 @@ impl Steps {
                     if !text.is_empty() {
                         self.flush_reminders_before_part(step_type, &mut step_content);
                         step_content.push(json!({"type":"text","text":text}));
-                        sendable += 1;
+                        if !text.trim().is_empty() {
+                            sendable += 1;
+                        }
                     }
                 }
                 "thinking" => {
