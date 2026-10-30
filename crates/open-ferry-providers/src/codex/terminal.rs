@@ -592,6 +592,9 @@ pub(crate) fn is_bootstrap_bufferable_event(event_type: &str, data: &[u8], event
         | "response.in_progress"
         | "codex.rate_limits"
         | "codex.response.metadata"
+        // Moderation metadata carries no generated output. Keep an early
+        // overload eligible for failover until actual output arrives.
+        | "response.metadata"
         | "keepalive" => true,
         "response.output_item.added" => is_bufferable_output_item(get(event, "item")),
         "response.content_part.added" | "response.reasoning_summary_part.added" => {
