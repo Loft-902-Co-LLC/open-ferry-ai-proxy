@@ -785,11 +785,10 @@ fn is_api_request_document(fields: &Map<String, Value>) -> bool {
 ///
 /// Unless the node declares a type other than object, its object-valued keys
 /// that aren't keywords are bare property definitions: they move into
-/// `properties`, and the node becomes an object if it has no type. A node
-/// with `properties` and no type becomes an object too. Properties
-/// are repaired (see [`repair_property_map`]), an array without `items` gets
-/// `{"type":"string"}`, a node with `items` and no type becomes an array, and
-/// every subschema is repaired in turn, `true` becoming `{}`.
+/// `properties`, and the node becomes an object if it has no type.
+/// Properties are repaired (see [`repair_property_map`]), and every subschema
+/// is repaired in turn, `true` becoming `{}`. Container type inference and
+/// missing array items wait until refs and conjunctions have been handled.
 fn repair_schema_node(mut node: Map<String, Value>) -> (Map<String, Value>, bool) {
     let mut modified = false;
     if !is_non_object_declared_type(node.get("type")) {

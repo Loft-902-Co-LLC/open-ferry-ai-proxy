@@ -2675,3 +2675,232 @@ fn set_preflights_depth_before_recursing() {
         .join()
         .unwrap();
 }
+
+// Issue 6950's seven cases use the JSON Schema carrier here, which retains
+// conjunction scopes instead of merging allOf as the legacy tool cleaner does.
+#[test]
+fn deferred_array_items_from_all_of_issue6950() {
+    let cases = [
+        (
+            "direct_allof_items",
+            json!({"type":"array","allOf":[{"items":{"type":"integer"}}]}),
+            json!({}),
+        ),
+        (
+            "ref_in_allof_items",
+            json!({"type":"array","allOf":[{"$ref":"#/$defs/Ids"}]}),
+            json!({"Ids":{"type":"array","items":{"type":"integer"}}}),
+        ),
+        (
+            "nullable_type_array_with_ref_in_allof",
+            json!({"type":["array","null"],"allOf":[{"$ref":"#/$defs/Ids"}]}),
+            json!({"Ids":{"type":"array","items":{"type":"integer"}}}),
+        ),
+        (
+            "split_allof_branches",
+            json!({"allOf":[{"type":"array","description":"ID list"},{"items":{"type":"integer"}}]}),
+            json!({}),
+        ),
+        (
+            "ref_base_array_with_allof_items",
+            json!({"$ref":"#/$defs/BaseArray","allOf":[{"items":{"type":"integer"}}]}),
+            json!({"BaseArray":{"type":"array","description":"ID list"}}),
+        ),
+        (
+            "root_array_with_allof_items",
+            json!({"type":"array","allOf":[{"items":{"type":"integer"}}]}),
+            json!({}),
+        ),
+        (
+            "allof_without_items_stays_unconstrained",
+            json!({"type":"array","allOf":[{"description":"x"}]}),
+            json!({}),
+        ),
+    ];
+    for (name, node, definitions) in cases {
+        let mut schema = if name == "root_array_with_allof_items" {
+            node.clone()
+        } else {
+            json!({"type":"object","properties":{"ids":node}})
+        };
+        schema["$defs"] = definitions;
+        let mut expected = schema.clone();
+        expected.as_object_mut().unwrap().shift_remove("$defs");
+        let expected_node = if name == "root_array_with_allof_items" {
+            &mut expected
+        } else {
+            &mut expected["properties"]["ids"]
+        };
+        if name == "ref_in_allof_items" || name == "nullable_type_array_with_ref_in_allof" {
+            expected_node["allOf"][0] = json!({"type":"array","items":{"type":"integer"}});
+        } else if name == "ref_base_array_with_allof_items" {
+            *expected_node = json!({"type":"array","description":"ID list",
+                "allOf":[{"items":{"type":"integer"}}]});
+        }
+        let out = clean_schema(&schema);
+        assert_eq!(out, expected, "{name}");
+        assert_eq!(clean_schema(&out), out, "{name}: idempotence");
+        for route in ["claude", "chat", "responses"] {
+            assert_eq!(request_schema(route, &schema), out, "{name}/{route}");
+        }
+    }
+}
+
+fn request_schema(route: &str, schema: &Value) -> Value {
+    let (out, error) = match route {
+        "claude" => crate::gemini::claude::convert_claude_request_to_gemini(
+            "gemini-2.5-pro",
+            &json!({"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"name":"T","input_schema":schema}]}),
+            false,
+            crate::models::ModelCatalog::embedded(),
+        ),
+        "chat" => crate::gemini::openai::chat_completions::convert_openai_request_to_gemini(
+            "gemini-2.5-pro",
+            &json!({"messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"T","parameters":schema}}]}),
+            false,
+        ),
+        "responses" => {
+            crate::gemini::openai::responses::convert_openai_responses_request_to_gemini(
+                "gemini-2.5-pro",
+                &json!({"input":"hi","tools":[{"type":"function","name":"T","parameters":schema}]}),
+                false,
+            )
+        }
+        _ => unreachable!(),
+    };
+    assert!(error.is_none(), "{route}");
+    out["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"].clone()
+}
+
+#[test]
+fn deferred_array_ref_siblings_unions_and_booleans() {
+    for (schema, expected) in [
+        (
+            json!({"$ref":"#/$defs/A","items":{"type":"integer"},
+                "$defs":{"A":{"type":"array"}}}),
+            json!({"type":"array","items":{"type":"integer"}}),
+        ),
+        (
+            json!({"$ref":"#/$defs/A","type":"array",
+                "$defs":{"A":{"items":{"type":"integer"}}}}),
+            json!({"type":"array","items":{"type":"integer"}}),
+        ),
+        (
+            json!({"type":"array","items":false}),
+            json!({"type":"array","items":false}),
+        ),
+        (
+            json!({"type":"array","items":true}),
+            json!({"type":"array","items":{}}),
+        ),
+        (json!(true), json!({})),
+        (json!(false), json!(false)),
+    ] {
+        assert_eq!(clean_schema(&schema), expected, "{schema}");
+        // Request builders accept object-valued parameter declarations; root
+        // booleans exercise the cleaner directly, and items booleans use both.
+        if schema.is_object() {
+            for route in ["claude", "chat", "responses"] {
+                assert_eq!(request_schema(route, &schema), expected, "{route}/{schema}");
+            }
+        }
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        let schema = json!({"type":"array",keyword:[{"$ref":"#/$defs/A"}],
+            "$defs":{"A":{"items":{"type":"integer"}}}});
+        let expected = json!({"type":"array","items":{"type":"integer"}});
+        assert_eq!(clean_schema(&schema), expected, "{keyword}");
+        for route in ["claude", "chat", "responses"] {
+            assert_eq!(
+                request_schema(route, &schema),
+                expected,
+                "{route}/{keyword}"
+            );
+        }
+        let schema = json!({keyword:[{"type":"array","items":false},
+            {"type":"array","items":{"type":"integer"}}]});
+        assert_eq!(clean_schema(&schema), schema, "{keyword}");
+    }
+}
+
+#[test]
+fn deferred_array_open_arguments_keep_user_fields() {
+    for schema in [
+        json!({}),
+        json!(true),
+        json!({"type":"object","properties":{}}),
+        json!({"type":"object","properties":{},"additionalProperties":true}),
+        json!({"type":"object","properties":{"rows":{"type":"array",
+            "allOf":[{"items":{"type":"object","properties":{}}}]}}}),
+    ] {
+        let cleaned = clean_schema(&schema);
+        let original = json!({"tools":[{"name":"T","input_schema":schema}]});
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"T",
+            "parametersJsonSchema":cleaned}]}]});
+        let args = json!({"_":true,"reason":"user data","rows":[{"_":false,"custom":7}]});
+        let response = json!({"candidates":[{"content":{"parts":[{"functionCall":{
+            "name":"T","args":args}}]},"finishReason":"STOP"}]});
+        let out =
+            crate::gemini::claude::convert_gemini_response_to_claude_non_stream_with_translated(
+                &original, &sent, &response,
+            );
+        assert_eq!(out["content"][0]["input"], args, "{schema}");
+    }
+}
+
+#[test]
+fn deferred_array_defaults_respect_copy_depth_and_padding_boundaries() {
+    let schema = json!({"$ref":"#/$defs/A","$defs":{"A":{
+        "type":"array","items":{"type":"integer"}}}});
+    let mut baseline = SchemaCopyBudget::unlimited();
+    let expected = clean_json_schema_for_gemini_json_schema(&schema, &mut baseline);
+    let cost = usize::MAX - baseline.remaining;
+    for (remaining, fits) in [(cost, true), (cost - 1, false)] {
+        let mut budget = SchemaCopyBudget {
+            remaining,
+            ..SchemaCopyBudget::default()
+        };
+        let out = clean_json_schema_for_gemini_json_schema(&schema, &mut budget);
+        assert_eq!(out == expected, fits);
+        assert_eq!(
+            out["items"]["type"],
+            if fits { "integer" } else { "string" }
+        );
+        assert_eq!(out.get("description").is_some(), !fits);
+    }
+
+    for (ancestors, fits) in [(126, true), (127, false)] {
+        let mut schema = json!({"type":"array"});
+        for _ in 0..ancestors {
+            schema = json!({"items":schema});
+        }
+        let out = clean_schema(&schema);
+        let mut leaf = &out;
+        for _ in 0..ancestors {
+            leaf = &leaf["items"];
+        }
+        assert_eq!(leaf.get("items").is_some(), fits);
+        assert!(local_refs::fits_at_depth(&out, 0));
+    }
+
+    for (index, fits) in [(MAX_PADDED_INDEX, true), (MAX_PADDED_INDEX + 1, false)] {
+        let mut doc = json!({"schemas":[]});
+        set(
+            &mut doc,
+            &format!("schemas.{index}"),
+            json!({"type":"array"}),
+        );
+        let out = clean_schema(&doc);
+        let schemas = out["schemas"].as_array().unwrap();
+        assert_eq!(schemas.len(), if fits { index + 1 } else { 0 });
+        if fits {
+            assert!(schemas[..index].iter().all(Value::is_null));
+            assert_eq!(
+                schemas[index],
+                json!({"type":"array","items":{"type":"string"}})
+            );
+        }
+    }
+}
