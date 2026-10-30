@@ -249,8 +249,7 @@ impl State {
             || self.setup.response_format == Format::OPENAI)
             && !self.saw_finish_reason
         {
-            let error = ExecError::upstream(502, "upstream stream closed before finishReason")
-                .with_usage_kept();
+            let error = ExecError::stream_truncated("upstream stream closed before finishReason");
             self.reader.report(&error);
             self.pending.push_back(Err(error));
             return;

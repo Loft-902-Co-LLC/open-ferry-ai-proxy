@@ -380,7 +380,7 @@ async fn run(provider: &str, model: &str, format: &Format, case: Case) {
     );
 }
 
-fn executor(provider: &str, mock: &Mock) -> (Box<dyn ProviderExecutor>, Arc<Auth>) {
+pub(super) fn executor(provider: &str, mock: &Mock) -> (Box<dyn ProviderExecutor>, Arc<Auth>) {
     match provider {
         "gemini" => (
             Box::new(GeminiExecutor::new("direct")),
@@ -731,6 +731,117 @@ async fn vertex_interactions_content_and_usage(native: bool, stream: bool) {
         assert_eq!(event.total_tokens, 15);
         assert!(records.try_recv().is_err());
         assert_eq!(mock.last().path.contains("/interactions"), native);
+    }
+}
+
+#[tokio::test]
+async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
+    use open_ferry_core::exec::Dispatcher;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::models::ModelInfo;
+    use open_ferry_core::registry::ModelRegistry;
+    for provider in PROVIDERS {
+        for format in [Format::OPENAI, Format::CLAUDE] {
+            let reply = Reply::sse(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
+            );
+            let mock = Mock::answering(move |seen| {
+                if seen.path == "/token" {
+                    Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+                } else {
+                    reply.clone()
+                }
+            })
+            .await;
+            let (exec, auth) = executor(provider, &mock);
+            let registry = Arc::new(ModelRegistry::new());
+            let manager = Manager::new(
+                Settings {
+                    request_retry: 2,
+                    ..Default::default()
+                },
+                registry.clone(),
+                None,
+            );
+            let provider_name = exec.id().to_owned();
+            manager.register_executor(Arc::from(exec));
+            for id in ["a", "b"] {
+                let mut candidate = (*auth).clone();
+                candidate.id = id.into();
+                candidate.metadata.insert("request_scoped_errors".into(), json!([{"status":502,"match":["terminal","finishReason"],"action":"continue-and-cooldown"}]));
+                registry.register_client(
+                    id,
+                    &provider_name,
+                    &[ModelInfo {
+                        id: "gemini-2.5-flash".into(),
+                        ..Default::default()
+                    }],
+                );
+                manager.register(candidate).unwrap();
+            }
+            let request = request(
+                "gemini-2.5-flash",
+                r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"service_tier":"priority"}"#,
+            );
+            let mut options = stream_options(&format);
+            options.source_format = Format::GEMINI;
+            options.original_request = request.payload.clone();
+            let mut config = Config::default();
+            config.usage_statistics_enabled = true;
+            let usage = Usage::new(&config);
+            open_ferry_core::observe::usage::reconfigure(&usage, None, &config, true);
+            let (records, _subscription) = usage.observe();
+            let context = Arc::new(RequestContext::new(http::Method::POST, "/test".into()));
+            let tap = usage.tap(&context, &request, &options).unwrap();
+            options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
+            let result = manager
+                .execute_stream(std::slice::from_ref(&provider_name), request, options)
+                .await;
+            let mut response = result.unwrap();
+            let mut error = None;
+            while let Some(chunk) = response.chunks.next().await {
+                if let Err(failure) = chunk {
+                    assert!(error.replace(failure).is_none());
+                }
+            }
+            drop(response);
+            let error = error.expect("missing terminal must fail");
+            assert_eq!(error.http_status(), 502);
+            assert_eq!(error.failure_code(), Some("stream_truncated"));
+            assert!(error.stops_replay() && error.keeps_usage);
+            assert_eq!(
+                mock.requests()
+                    .iter()
+                    .filter(|r| r.path != "/token")
+                    .count(),
+                1
+            );
+            for id in ["a", "b"] {
+                let live = manager.get(id).unwrap();
+                assert!(
+                    !live.unavailable && live.model_states.is_empty(),
+                    "{provider}/{format:?}: cooled credential"
+                );
+            }
+            let record = records.try_recv().unwrap();
+            assert!(record.failed);
+            assert_eq!(record.status, 502);
+            assert_eq!(record.total_tokens, 15);
+            assert_eq!(record.tokens.input.total_tokens, 11);
+            assert_eq!(record.tokens.output.total_tokens, 4);
+            let queued: Vec<serde_json::Value> = usage
+                .pop_oldest(10)
+                .iter()
+                .map(|bytes| serde_json::from_slice(bytes).unwrap())
+                .filter(|record: &serde_json::Value| record.get("fail").is_some())
+                .collect();
+            assert_eq!(queued.len(), 1);
+            let record = &queued[0];
+            assert_eq!(record["service_tier"], "priority");
+            assert_eq!(record["effective_service_tier"], "priority");
+            assert_eq!(record["fail"]["code"], "stream_truncated");
+            assert!(records.try_recv().is_err());
+        }
     }
 }
 

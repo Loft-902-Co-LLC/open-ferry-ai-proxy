@@ -54,6 +54,7 @@ pub(crate) struct Reply {
     /// Whether the connection fails after the body.
     cut_off: bool,
     hold_open: bool,
+    controlled: Option<Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Bytes>>>>>,
 }
 
 impl Reply {
@@ -64,6 +65,7 @@ impl Reply {
             body: body.to_owned(),
             cut_off: false,
             hold_open: false,
+            controlled: None,
         }
     }
 
@@ -85,6 +87,14 @@ impl Reply {
     pub(crate) fn hold_open(mut self) -> Self {
         self.hold_open = true;
         self
+    }
+
+    /// A held-open stream whose chunks the test releases individually.
+    pub(crate) fn controlled() -> (Self, tokio::sync::mpsc::UnboundedSender<Bytes>) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut reply = Self::sse("");
+        reply.controlled = Some(Arc::new(Mutex::new(Some(receiver))));
+        (reply, sender)
     }
 
     /// The reply, with the connection failing after the body.
@@ -141,6 +151,22 @@ impl Mock {
                     }
                     part
                 });
+                let body = if let Some(controlled) = reply.controlled {
+                    let receiver = controlled
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("one streaming request");
+                    futures_util::stream::unfold(receiver, |mut receiver| async move {
+                        receiver
+                            .recv()
+                            .await
+                            .map(|chunk| (Ok::<_, io::Error>(chunk), receiver))
+                    })
+                    .boxed()
+                } else {
+                    body.boxed()
+                };
                 let body = body.chain(futures_util::stream::unfold(
                     reply.hold_open,
                     |hold| async move {
