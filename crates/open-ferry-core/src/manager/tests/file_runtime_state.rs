@@ -206,3 +206,15 @@ fn explicit_runtime_replacement_keeps_its_supplied_model_states() {
             .contains_key("explicit-model")
     );
 }
+
+#[test]
+fn round2_file_observation_does_not_copy_an_unknown_runtime_status() {
+    let h = Harness::new(Default::default());
+    let mut original = auth("file", "claude");
+    original.status = crate::auth::Status::Unknown;
+    let registered = h.add(original, &[]);
+    let mut record = registered.as_ref().clone();
+    record.status = crate::auth::Status::Active;
+    observed(&h, record, || {});
+    assert_eq!(h.get("file").status, crate::auth::Status::Active);
+}
