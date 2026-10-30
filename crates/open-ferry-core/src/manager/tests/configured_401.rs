@@ -184,7 +184,7 @@ async fn unmatched_401_still_rejects_the_selected_bearer() {
                 .await
                 .is_err()
         );
-        assert!(!h.get("primary").rejected_access_token.is_empty());
+        assert!(h.get("primary").is_active_access_token_rejected());
         assert_eq!(
             !h.get("primary").rejected_siwc_access_token.is_empty(),
             siwc

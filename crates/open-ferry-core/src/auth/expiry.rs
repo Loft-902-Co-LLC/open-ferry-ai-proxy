@@ -142,9 +142,7 @@ impl Auth {
         if token.is_empty() {
             return None;
         }
-        if self.is_rejected_access_token(token)
-            || (self.use_siwc() && self.is_siwc_access_token_rejected())
-        {
+        if self.is_active_access_token_rejected() {
             return Some(DateTime::<Utc>::UNIX_EPOCH);
         }
         parse_jwt_exp(token)
@@ -253,8 +251,24 @@ impl Auth {
 
     pub(crate) fn is_siwc_access_token_rejected(&self) -> bool {
         let token = self.siwc_access_token();
-        !token.is_empty()
-            && (self.rejected_siwc_access_token == token || self.rejected_access_token == token)
+        !token.is_empty() && self.rejected_siwc_access_token == token
+    }
+
+    /// Rejection of the bearer selected by the stored mode.
+    pub(crate) fn is_active_access_token_rejected(&self) -> bool {
+        if self.use_siwc() {
+            self.is_siwc_access_token_rejected()
+        } else {
+            self.is_rejected_access_token(self.outer_access_token())
+        }
+    }
+
+    pub(crate) fn is_access_token_rejected_for_request(&self, headers: &http::HeaderMap) -> bool {
+        if self.use_siwc_for_request(headers) {
+            self.is_siwc_access_token_rejected()
+        } else {
+            self.is_rejected_access_token(self.outer_access_token())
+        }
     }
 
     /// Whether recording this bearer would change either rejection marker.
@@ -262,8 +276,7 @@ impl Auth {
         let token = token.trim();
         !token.is_empty()
             && ((token == self.siwc_access_token() && self.rejected_siwc_access_token != token)
-                || (self.matches_access_token_partition(token)
-                    && self.rejected_access_token != token))
+                || (token == self.outer_access_token() && self.rejected_access_token != token))
     }
 
     /// Called under the manager state lock, using the bearer actually sent.
@@ -275,7 +288,7 @@ impl Auth {
         if token == self.siwc_access_token() {
             self.rejected_siwc_access_token = token.to_owned();
         }
-        if self.matches_access_token_partition(token) {
+        if token == self.outer_access_token() {
             self.rejected_access_token = token.to_owned();
         }
         true
@@ -292,24 +305,12 @@ impl Auth {
             String::new()
         };
         let rejected = previous.rejected_access_token.as_str();
-        let preserve = !rejected.is_empty()
-            && if rejected == previous.siwc_access_token() {
-                self.siwc_access_token() == rejected
-            } else {
-                self.outer_access_token() == rejected
-                    && previous.outer_access_token() == rejected
-                    && (!is_refresh
-                        || self
-                            .codex_persist_intent
-                            .refresh_patch()
-                            .is_some_and(|patch| {
-                                !patch.includes_partition(super::CodexCredentialPartition::Outer)
-                            }))
-            };
-        self.rejected_access_token = if preserve {
+        self.rejected_access_token = if !rejected.is_empty()
+            && previous.outer_access_token() == rejected
+            && self.outer_access_token() == rejected
+            && (!is_refresh || super::codex_refresh::is_codex_auth(previous))
+        {
             rejected.to_owned()
-        } else if self.use_siwc() {
-            self.rejected_siwc_access_token.clone()
         } else {
             String::new()
         };
