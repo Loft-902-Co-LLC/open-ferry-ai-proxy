@@ -304,7 +304,12 @@ pub(super) fn schedule_unauthorized_refresh(
         });
     if unauthorized {
         let token = if result.access_token.is_empty() {
-            access_token(auth)
+            match result.credential_partition {
+                Some(CodexCredentialPartition::Outer) => auth.outer_access_token(),
+                Some(CodexCredentialPartition::Siwc) => auth.siwc_access_token(),
+                None => auth.access_token(),
+            }
+            .to_owned()
         } else {
             result.access_token.clone()
         };
@@ -1029,11 +1034,28 @@ impl Manager {
     /// Refreshes a credential once after a 401, so the call can try it
     /// again (upstream's `tryRefreshAfterUnauthorized`). Returns the
     /// refreshed credential, or `None` when it didn't refresh.
+    #[cfg(test)]
     pub(crate) async fn try_refresh_after_unauthorized(
         &self,
         auth: &Arc<Auth>,
         err: &ExecError,
         already_tried: bool,
+    ) -> Option<Arc<Auth>> {
+        self.try_refresh_after_unauthorized_for_request(
+            auth,
+            err,
+            already_tried,
+            &http::HeaderMap::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn try_refresh_after_unauthorized_for_request(
+        &self,
+        auth: &Arc<Auth>,
+        err: &ExecError,
+        already_tried: bool,
+        headers: &http::HeaderMap,
     ) -> Option<Arc<Auth>> {
         // A request-scoped failure is about this request, not the token.
         if is_request_scoped_error(ErrView::Exec(err)) {
@@ -1042,7 +1064,7 @@ impl Manager {
         if !is_unauthorized_error(ErrView::Exec(err)) {
             return None;
         }
-        let failed_token = access_token(auth);
+        let failed_token = auth.access_token_for_request(headers).to_owned();
         self.mark_rejected_access_token_at_epoch(&auth.id, &failed_token, auth.registration_epoch);
         if already_tried || !has_refresh_credential(auth) {
             return None;
@@ -1061,8 +1083,9 @@ impl Manager {
         {
             Ok(refreshed) => {
                 if !failed_token.is_empty()
-                    && refreshed.access_token() == failed_token
-                    && !refreshed.has_valid_access_token(self.now())
+                    && refreshed.access_token_for_request(headers) == failed_token
+                    && (refreshed.rejected_access_token == failed_token
+                        || refreshed.rejected_siwc_access_token == failed_token)
                 {
                     None
                 } else {
@@ -1072,17 +1095,18 @@ impl Manager {
             Err(ManagerError::NotActive(_)) => {
                 let manager = self.clone();
                 let failed = auth.clone();
+                let headers = headers.clone();
                 // Adoption is read-only and must not require an Open write gate.
                 if let Some(operation) = crate::gate::Operation::current() {
                     operation
-                        .run_blocking(move || manager.adopt_from_store(&failed))
+                        .run_blocking(move || manager.adopt_from_store(&failed, &headers))
                         .await
                         .ok()
                         .flatten()
                 } else {
                     // No operation exists to carry, and reads must work with a closed gate.
                     #[allow(clippy::disallowed_methods)]
-                    tokio::task::spawn_blocking(move || manager.adopt_from_store(&failed))
+                    tokio::task::spawn_blocking(move || manager.adopt_from_store(&failed, &headers))
                         .await
                         .ok()
                         .flatten()
@@ -1122,11 +1146,11 @@ impl Manager {
     /// before the save mutex. Check (vi) runs under that mutex, so no save is
     /// refused because an adoption holds the lock: a pass flushes what it
     /// refused once it lets go, and an adoption would not.
-    fn adopt_from_store(&self, failed: &Arc<Auth>) -> Option<Arc<Auth>> {
+    fn adopt_from_store(&self, failed: &Arc<Auth>, headers: &http::HeaderMap) -> Option<Arc<Auth>> {
         let store = self.shared.store.as_ref()?;
-        let failed_token = access_token(failed);
+        let failed_token = failed.access_token_for_request(headers).to_owned();
         let current = self.get(&failed.id)?;
-        if access_token(&current) != failed_token {
+        if current.access_token_for_request(headers) != failed_token {
             return Some(current);
         }
         let id_lock = lock(&self.shared.refresh_locks)
@@ -1179,7 +1203,7 @@ impl Manager {
                     return None;
                 }
                 let entry = guard.auths.get(&failed.id)?;
-                if access_token(&entry.auth) != failed_token {
+                if entry.auth.access_token_for_request(headers) != failed_token {
                     return Some(entry.auth.clone());
                 }
                 if entry.auth.registration_epoch != failed.registration_epoch {
@@ -1281,14 +1305,10 @@ impl Manager {
                 {
                     return None;
                 }
-                if access_token(&entry.auth) != failed_token {
+                if entry.auth.access_token_for_request(headers) != failed_token {
                     return Some(entry.auth.clone());
                 }
-                let failed_partition = if failed.use_siwc() {
-                    crate::auth::CodexCredentialPartition::Siwc
-                } else {
-                    crate::auth::CodexCredentialPartition::Outer
-                };
+                let failed_partition = failed.credential_partition_for_request(headers);
                 let protected = entry.protected();
                 if protected.contains(failed_partition) {
                     return None;
@@ -1300,7 +1320,7 @@ impl Manager {
                 );
                 // Rebase can retain the failed rotated token even when raw disk
                 // contains a different, consumed token. That is NOT an adoption.
-                let effective = access_token(&disk);
+                let effective = disk.access_token_for_request(headers);
                 if effective.is_empty() || effective == failed_token {
                     return None;
                 }
@@ -1514,7 +1534,9 @@ impl Manager {
         // Another call may have refreshed the credential already.
         if !failed_token.is_empty() {
             let current = access_token(&auth);
-            if !current.is_empty() && current != failed_token {
+            if !auth.matches_access_token_partition(failed_token)
+                && (!current.is_empty() || !auth.outer_access_token().is_empty())
+            {
                 return Ok(auth);
             }
         }
@@ -1885,7 +1907,9 @@ impl Manager {
                     }
                     if !failed_token.is_empty() {
                         let current = access_token(&auth);
-                        if !current.is_empty() && current != failed_token {
+                        if !auth.matches_access_token_partition(failed_token)
+                            && (!current.is_empty() || !auth.outer_access_token().is_empty())
+                        {
                             drop(token);
                             return Ok(auth);
                         }
@@ -1969,7 +1993,9 @@ impl Manager {
                     return Ok(live);
                 }
                 let current = access_token(&live);
-                if !current.is_empty() && current != failed_token {
+                if !live.matches_access_token_partition(failed_token)
+                    && (!current.is_empty() || !live.outer_access_token().is_empty())
+                {
                     return Ok(live);
                 }
                 return Err(ManagerError::Other("auth changed before refresh".into()));
@@ -2474,8 +2500,7 @@ impl Manager {
         let disabled = is_disabled(auth);
         // The provider rejected this very access token, so its expiry no
         // longer says it works.
-        let access_token_rejected =
-            !attempt.failed_token.is_empty() && access_token(auth) == attempt.failed_token;
+        let access_token_rejected = auth.matches_access_token_partition(attempt.failed_token);
         let after = if disabled && invalid_grant {
             auth.unavailable = true;
             auth.status = Status::Disabled;
