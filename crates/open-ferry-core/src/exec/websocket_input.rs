@@ -40,6 +40,10 @@ pub enum InputFrame {
 /// The credential stays in-process, for checking a connection's authorization.
 pub type AuthCheck = Arc<dyn Fn(&str) -> Option<Arc<Auth>> + Send + Sync>;
 
+/// A frontend access check. A returned error payload rejects only this turn;
+/// an execution error ends the stream. Frontend credentials stay in the callback.
+pub type TurnAuthorizer = Arc<dyn Fn(&[u8]) -> Result<Option<Bytes>, ExecError> + Send + Sync>;
+
 /// The client's frames, and the check a call makes before it sends one on
 /// (`WithWebsocketInput` and `WithWebsocketAuthCheck`). Clones share the
 /// one channel.
@@ -47,6 +51,7 @@ pub type AuthCheck = Arc<dyn Fn(&str) -> Option<Arc<Auth>> + Send + Sync>;
 pub struct WebsocketInput {
     rx: Arc<Mutex<mpsc::Receiver<InputFrame>>>,
     auth_check: Option<AuthCheck>,
+    turn_authorizer: Option<TurnAuthorizer>,
 }
 
 impl WebsocketInput {
@@ -55,6 +60,7 @@ impl WebsocketInput {
         Self {
             rx: Arc::new(Mutex::new(rx)),
             auth_check: None,
+            turn_authorizer: None,
         }
     }
 
@@ -64,6 +70,22 @@ impl WebsocketInput {
     pub fn with_auth_check(mut self, check: AuthCheck) -> Self {
         self.auth_check = Some(check);
         self
+    }
+
+    /// Installs the frontend check for each duplex create, append or steer.
+    #[must_use]
+    pub fn with_turn_authorizer(mut self, authorize: TurnAuthorizer) -> Self {
+        self.turn_authorizer = Some(authorize);
+        self
+    }
+
+    /// Authorizes a turn, with its effective model supplied in the payload.
+    /// With no callback, frontend access is unrestricted.
+    pub fn authorize_turn(&self, payload: &[u8]) -> Result<Option<Bytes>, ExecError> {
+        self.turn_authorizer
+            .as_ref()
+            .map_or(Ok(None), |authorize| authorize(payload))
+            .map(|payload| payload.filter(|payload| !payload.is_empty()))
     }
 
     /// Whether the credential `auth_id` may still send: always, with no
@@ -94,6 +116,10 @@ impl fmt::Debug for WebsocketInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebsocketInput")
             .field("auth_check", &self.auth_check.as_ref().map(|_| ".."))
+            .field(
+                "turn_authorizer",
+                &self.turn_authorizer.as_ref().map(|_| ".."),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -154,5 +180,32 @@ mod tests {
                 })
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::*;
+    use crate::exec::ErrorKind;
+
+    #[test]
+    fn turn_authorizer_defaults_clones_and_errors() {
+        let (_tx, rx) = mpsc::channel(1);
+        let input = WebsocketInput::new(rx);
+        assert!(input.authorize_turn(b"{}").unwrap().is_none());
+        let input = input.with_turn_authorizer(Arc::new(|body| match body {
+            b"allowed" => Ok(None),
+            b"empty" => Ok(Some(Bytes::new())),
+            b"denied" => Ok(Some(Bytes::from_static(b"denial payload"))),
+            _ => Err(ExecError::new(ErrorKind::Upstream, "authorization failed")),
+        }));
+        assert!(input.clone().authorize_turn(b"allowed").unwrap().is_none());
+        assert!(input.authorize_turn(b"empty").unwrap().is_none());
+        assert_eq!(
+            input.authorize_turn(b"denied").unwrap().unwrap(),
+            "denial payload"
+        );
+        assert!(input.authorize_turn(b"failed").is_err());
+        assert!(!format!("{input:?}").contains("denial payload"));
     }
 }
