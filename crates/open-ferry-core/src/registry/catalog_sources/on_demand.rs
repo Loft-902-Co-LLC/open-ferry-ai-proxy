@@ -5,19 +5,21 @@
 //! On-demand file catalog refresh and publication fencing.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
 use super::*;
 
 /// Cancels publication of a refresh, including a file read already in progress.
-/// Cancellation and publication share a lock so their ordering is explicit.
+/// The last cancellation check starts publication. Cancelling never waits for
+/// parsing already in progress, and fences subsequent catalog publications.
 #[derive(Clone, Default)]
-pub struct RefreshCancellation(Arc<Mutex<bool>>);
+pub struct RefreshCancellation(Arc<AtomicBool>);
 
 impl RefreshCancellation {
     pub fn cancel(&self) {
-        *lock(&self.0) = true;
+        self.0.store(true, Ordering::Release);
     }
 }
 
@@ -166,13 +168,12 @@ impl Updater {
         seq: u64,
         cancellation: &RefreshCancellation,
     ) -> Result<Vec<String>, String> {
-        if *lock(&cancellation.0) {
+        if cancellation.0.load(Ordering::Acquire) {
             return Err("model catalog refresh cancelled".to_owned());
         }
         let data = (self.fetch)(source)?;
         let mut state = lock(&self.state);
-        let cancelled = lock(&cancellation.0);
-        if *cancelled {
+        if cancellation.0.load(Ordering::Acquire) {
             return Err("model catalog refresh cancelled".to_owned());
         }
         if state.generation != generation {
@@ -183,7 +184,6 @@ impl Updater {
         }
         let changed = (self.publish)(&data)?;
         state.published_seq = seq;
-        drop(cancelled);
         drop(state);
         self.notifier.notify(changed.clone());
         Ok(changed)

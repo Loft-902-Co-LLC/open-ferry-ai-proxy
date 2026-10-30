@@ -182,7 +182,11 @@ fn catalog_source_switch_rejects_stale_publication() {
     lock(&u.state).generation = 1;
     let reader = {
         let u = Arc::clone(&u);
-        thread::spawn(move || u.refresh(&old, 1))
+        thread::spawn(move || {
+            let warnings = Warnings::capture();
+            u.refresh(&old, 1);
+            warnings.lines()
+        })
     };
     on_start.recv_timeout(Duration::from_secs(5)).unwrap();
     u.configure(&new);
@@ -192,7 +196,7 @@ fn catalog_source_switch_rejects_stale_publication() {
         "new source blocked behind old fetch"
     );
     release.send(()).unwrap();
-    reader.join().unwrap();
+    assert!(reader.join().unwrap().is_empty(), "stale reads are silent");
     assert_eq!(
         on_publish.try_recv(),
         Err(TryRecvError::Empty),
@@ -636,4 +640,45 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
             assert_eq!(results, [file_source("new").into_bytes()]);
         }
     }
+}
+
+#[test]
+fn cancellation_does_not_wait_for_publication_already_started() {
+    let (started, starts) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let updater = updater(
+        |_| Ok(Vec::new()),
+        move |_| {
+            started.send(()).unwrap();
+            lock(&released).recv().unwrap();
+            Ok(Vec::new())
+        },
+    );
+    let cancellation = RefreshCancellation::default();
+    let worker = Arc::clone(&updater);
+    let token = cancellation.clone();
+    let publisher = thread::spawn(move || worker.read_and_publish("", 0, 1, &token));
+    starts.recv_timeout(Duration::from_secs(10)).unwrap();
+    let token = cancellation.clone();
+    let (done, finished) = mpsc::channel();
+    let cancel = thread::spawn(move || {
+        token.cancel();
+        done.send(()).unwrap();
+    });
+    let cancelled_without_waiting = finished.recv_timeout(Duration::from_secs(10)).is_ok();
+    release.send(()).unwrap();
+    cancel.join().unwrap();
+    publisher.join().unwrap().unwrap();
+    assert!(cancelled_without_waiting);
+    assert!(updater.read_and_publish("", 0, 2, &cancellation).is_err());
+}
+
+#[test]
+fn a_current_failed_poll_still_warns() {
+    let updater = updater(|_| Err("unavailable".into()), |_| unreachable!());
+    let warnings = Warnings::capture();
+    updater.refresh("", 0);
+    assert_eq!(warnings.lines().len(), 1);
+    assert!(warnings.lines()[0].contains("refresh failed"));
 }

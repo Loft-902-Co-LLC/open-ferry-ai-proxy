@@ -331,11 +331,14 @@ impl Updater {
         if let Err(error) =
             self.read_and_publish(source, generation, seq, &RefreshCancellation::default())
         {
-            tracing::warn!(
-                setting = %format_args!("models.{}", self.setting),
-                error = %error,
-                "model catalog refresh failed; keeping last valid catalog"
-            );
+            let current = lock(&self.state).generation == generation;
+            if current {
+                tracing::warn!(
+                    setting = %format_args!("models.{}", self.setting),
+                    error = %error,
+                    "model catalog refresh failed; keeping last valid catalog"
+                );
+            }
         }
     }
 
