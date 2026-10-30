@@ -1,0 +1,816 @@
+{
+  "case_kinds": {
+    "random-39-1012": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1019": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1038": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1053": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-1065": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-1067": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1094": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1133": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-1137": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1151": [
+      "check-1-no-subset/snapshot_bytes/write"
+    ],
+    "random-39-1163": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1165": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1169": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1179": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1180": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-1183": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1192": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1223": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1230": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1247": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1282": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-1302": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-1326": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1334": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-1335": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-1350": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-1360": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1373": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-1409": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1420": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-1422": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-1427": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1476": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-1500": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-1556": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1565": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1570": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1578": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-1668": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1671": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1695": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1717": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1720": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-1732": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1733": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1756": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1764": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1770": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1771": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1804": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1819": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-1829": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-1835": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-184": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-186": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1862": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1888": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1904": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-191": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-1922": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1931": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-1935": [
+      "check-1-no-subset/snapshot_bytes/nested"
+    ],
+    "random-39-1989": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2010": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2022": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2029": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2039": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2041": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-2060": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2062": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2117": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2161": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-218": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-2198": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2210": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2291": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2292": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2300": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2301": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2303": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2311": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2318": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-233": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-2336": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2355": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2360": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2371": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2372": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2380": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2385": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-24": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2405": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2407": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2431": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2434": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2472": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2481": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2485": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2490": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-2493": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-2496": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2511": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2532": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2549": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-258": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-2606": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2607": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-2626": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-263": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2636": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2643": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2647": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-2658": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2660": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2672": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-273": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-2738": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-2750": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2756": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-2765": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2798": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2820": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2822": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2832": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2842": [
+      "check-1-no-subset/snapshot_bytes/write"
+    ],
+    "random-39-2909": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2925": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-2931": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-2934": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-294": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-2993": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3009": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3011": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-3025": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3049": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-306": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3084": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3096": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-3101": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-3110": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3125": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-314": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3158": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3162": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3347": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3348": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3350": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3360": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3371": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-3411": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3495": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3560": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-3581": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3583": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3594": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3612": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3614": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3641": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3643": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-3659": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3680": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3694": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-3700": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3704": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3749": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3763": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-379": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-38": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-383": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3835": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-3863": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3864": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3877": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3892": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-3896": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3948": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3953": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3973": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3982": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-3994": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4018": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4032": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4053": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-4068": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4073": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4083": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4152": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-4167": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4200": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4210": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4219": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-4221": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4222": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4231": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4238": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4288": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4323": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4359": [
+      "check-1-no-subset/snapshot_bytes/nested"
+    ],
+    "random-39-4363": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-4367": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4377": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4403": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4412": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-4415": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4418": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4419": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4424": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-4434": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4443": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-4455": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4461": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4469": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4514": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4521": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4523": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4591": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4592": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4607": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4636": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-39-4658": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4677": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-4719": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-472": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4722": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4747": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4767": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-4827": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4829": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4830": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-4843": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4864": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4935": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-4957": [
+      "check-3/owner_budget/write"
+    ],
+    "random-39-4986": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4988": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-4996": [
+      "check-1-no-subset/snapshot_bytes/nested"
+    ],
+    "random-39-4999": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-510": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-53": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-542": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-56": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-575": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-608": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-615": [
+      "check-3/go_budget/save"
+    ],
+    "random-39-620": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-629": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-63": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-39-639": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-648": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-672": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-687": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-758": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-762": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-771": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-772": [
+      "check-3/source_budget/write"
+    ],
+    "random-39-781": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-797": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-824": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-839": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-845": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-87": [
+      "check-3/source_budget/save"
+    ],
+    "random-39-882": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-884": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-886": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-895": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-940": [
+      "check-3/owner_budget/save"
+    ],
+    "random-39-974": [
+      "check-3/owner_budget/nested"
+    ]
+  },
+  "cases": 5109,
+  "different": 267,
+  "fingerprint": {
+    "classifier_version": "4",
+    "generator_sha256": "39a87f7383f8811c93097c072567e2a3691683c94d5e50ab7d72a8f4ec404e74",
+    "upstream_pin": "bc0643405a1d0adf77dd0f109972ac3313d66397"
+  },
+  "non_certification": 0,
+  "random": 5000,
+  "seed": 39,
+  "selected": false
+}
