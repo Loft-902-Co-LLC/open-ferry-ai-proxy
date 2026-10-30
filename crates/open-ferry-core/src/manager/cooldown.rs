@@ -92,6 +92,8 @@ pub struct CallResult {
     /// Captured bearer for result fencing; empty for Codex API-key calls.
     /// Runtime only, excluded from Debug.
     pub access_token: String,
+    /// Request-local partition, including when its bearer was missing.
+    pub credential_partition: Option<crate::auth::CodexCredentialPartition>,
     /// The [`Auth::credential_version`] of the credential the call ran with,
     /// or 0 when not known (upstream's `CredentialVersion`).
     pub credential_version: u64,
@@ -132,7 +134,11 @@ pub(crate) fn is_stale_result(result: &CallResult, current: &Auth) -> bool {
     stale_epoch
         || (stale_version
             && (result.access_token.is_empty()
-                || super::credential::result_access_token(current) != result.access_token))
+                || (super::credential::result_access_token(current) != result.access_token
+                    && (current.outer_access_token() != result.access_token
+                        || current
+                            .attribute("api_key")
+                            .is_some_and(|key| !key.is_empty())))))
 }
 
 /// `t` plus `d`, saturating at the latest time chrono can hold.
