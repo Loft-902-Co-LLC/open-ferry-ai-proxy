@@ -686,6 +686,25 @@ pub(crate) async fn settle() {
     }
 }
 
+/// All 120 linearizations of five captured/completing operations. The fixed
+/// width bounds both recursion and retained schedules for invariant families.
+pub(crate) fn five_step_orderings<T: Copy>(mut steps: [T; 5]) -> Vec<[T; 5]> {
+    fn visit<T: Copy>(steps: &mut [T; 5], at: usize, out: &mut Vec<[T; 5]>) {
+        if at == steps.len() {
+            out.push(*steps);
+            return;
+        }
+        for next in at..steps.len() {
+            steps.swap(at, next);
+            visit(steps, at + 1, out);
+            steps.swap(at, next);
+        }
+    }
+    let mut orders = Vec::with_capacity(120);
+    visit(&mut steps, 0, &mut orders);
+    orders
+}
+
 #[cfg(test)]
 mod smoke {
     use super::*;
@@ -718,23 +737,4 @@ mod smoke {
         clock.advance(Duration::from_secs(10));
         assert_eq!(clock.now() - before, TimeDelta::seconds(100));
     }
-}
-
-/// All 120 linearizations of five captured/completing operations. The fixed
-/// width bounds both recursion and retained schedules for invariant families.
-pub(crate) fn five_step_orderings<T: Copy>(mut steps: [T; 5]) -> Vec<[T; 5]> {
-    fn visit<T: Copy>(steps: &mut [T; 5], at: usize, out: &mut Vec<[T; 5]>) {
-        if at == steps.len() {
-            out.push(*steps);
-            return;
-        }
-        for next in at..steps.len() {
-            steps.swap(at, next);
-            visit(steps, at + 1, out);
-            steps.swap(at, next);
-        }
-    }
-    let mut orders = Vec::with_capacity(120);
-    visit(&mut steps, 0, &mut orders);
-    orders
 }
