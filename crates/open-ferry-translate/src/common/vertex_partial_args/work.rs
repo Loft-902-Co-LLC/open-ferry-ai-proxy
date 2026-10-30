@@ -13,11 +13,14 @@ struct Counters {
     predicate: AtomicUsize,
     #[cfg(test)]
     predicate_allowance: AtomicUsize,
+    #[cfg(test)]
+    analyses: std::sync::Mutex<std::collections::HashSet<(usize, usize, usize, usize)>>,
 }
 
 #[cfg(test)]
 thread_local! {
     static TEST_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_WORK) };
+    static AUDIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl WorkBudget {
@@ -34,6 +37,37 @@ impl WorkBudget {
     pub(crate) fn charge_predicate(&self, amount: usize) -> Result<()> {
         self.0.predicate.fetch_add(amount, Ordering::Relaxed);
         self.charge(amount)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_unbounded() -> bool {
+        TEST_LIMIT.get() == usize::MAX
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_index_audit<T>(run: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                AUDIT.set(self.0);
+            }
+        }
+        let _reset = Reset(AUDIT.replace(true));
+        run()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_analysis(&self, node: usize, scope: usize, depth: usize, active: usize) {
+        if AUDIT.get() {
+            assert!(
+                self.0
+                    .analyses
+                    .lock()
+                    .unwrap()
+                    .insert((node, scope, depth, active)),
+                "resolved schema node was re-analyzed in one guard context"
+            );
+        }
     }
 
     #[cfg(test)]

@@ -35,6 +35,33 @@ pub(super) fn charge(amount: usize) -> bool {
     })
 }
 
+pub(super) fn predicate(amount: usize) -> bool {
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .is_none_or(|work| work.charge_predicate(amount).is_ok())
+    })
+}
+
+pub(super) fn predicate_object(_amount: usize) {
+    #[cfg(test)]
+    ACTIVE.with(|active| {
+        if let Some(work) = active.borrow().as_ref() {
+            work.add_predicate_allowance(_amount);
+        }
+    });
+}
+
+pub(super) fn analyzed(_node: usize, _scope: usize, _depth: usize, _active: usize) {
+    #[cfg(test)]
+    ACTIVE.with(|active| {
+        if let Some(work) = active.borrow().as_ref() {
+            work.record_analysis(_node, _scope, _depth, _active);
+        }
+    });
+}
+
 pub(super) fn value(value: &Value) -> bool {
     copies(value, 1)
 }

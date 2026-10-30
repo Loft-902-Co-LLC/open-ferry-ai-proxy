@@ -68,15 +68,22 @@ fn round5_raw_buffer_and_emitted_output_limits_are_independent() {
     let key = "\"".repeat(2_100_000);
     let path = format!("$[{}].value", serde_json::to_string(&key).unwrap());
     assert!(path.len() > MAX_BYTES);
-    let mut escaped_path = Assembler::default();
-    escaped_path
-        .push(
-            &json!({"partialArgs":[{"jsonPath":path,"stringValue":"x"}]}),
-            Some(&clean),
-        )
-        .unwrap();
-    assert_eq!(escaped_path.buffered, key.len() + 4 + "value".len() + 4 + 1);
-    assert_eq!(escaped_path.full_arguments().unwrap(), "{}");
+    let request = json!({"tools":[{"name":"tool","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]});
+    let mut stream = crate::gemini::claude::GeminiToClaudeStream::new(&request);
+    let frame = json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool","partialArgs":[{"jsonPath":path,"stringValue":"x"}]}}]},"finishReason":"STOP"}]});
+    let mut output = stream.translate(frame.to_string().as_bytes());
+    output.push_str(&stream.translate(b"[DONE]"));
+    let events: Vec<Value> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|json| serde_json::from_str(json).ok())
+        .collect();
+    let arguments: String = events
+        .iter()
+        .filter_map(|event| event["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!(arguments, "{}");
+    assert!(events.iter().any(|event| event["type"] == "message_stop"));
 
     // Numeric coercion reserves the resulting number, not invalid source text.
     let mut number = Assembler::default();

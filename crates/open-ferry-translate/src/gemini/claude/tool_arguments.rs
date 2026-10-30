@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 mod budget;
 mod call_analysis;
 mod reclean;
+mod schema_index;
 
 use call_analysis::CallAnalysis;
 
@@ -1007,6 +1008,7 @@ pub(super) struct CallSchemas {
     original: Option<Option<Box<Value>>>,
     translated: Vec<Value>,
     analyses: Mutex<CallAnalysis>,
+    indexed: Mutex<Option<schema_index::SchemaIndex>>,
 }
 
 impl CallSchemas {
@@ -1016,14 +1018,30 @@ impl CallSchemas {
         sent: &Value,
         work: &crate::common::vertex_partial_args::WorkBudget,
     ) -> Self {
-        budget::with(work, || Self {
-            original: original_schema(original, name)
-                .map(|schema| schema.map(|schema| Box::new(budget::copy(schema)))),
-            analyses: Mutex::default(),
-            translated: translated_schemas(sent, original, name)
-                .into_iter()
-                .map(budget::copy)
-                .collect(),
+        budget::with(work, || {
+            let mut result = Self {
+                original: original_schema(original, name)
+                    .map(|schema| schema.map(|schema| Box::new(budget::copy(schema)))),
+                analyses: Mutex::default(),
+                indexed: Mutex::default(),
+                translated: translated_schemas(sent, original, name)
+                    .into_iter()
+                    .map(budget::copy)
+                    .collect(),
+            };
+            #[cfg(test)]
+            let use_index = !crate::common::vertex_partial_args::WorkBudget::test_unbounded();
+            #[cfg(not(test))]
+            let use_index = true;
+            if use_index {
+                if let Some(Some(schema)) = result.original.as_ref() {
+                    result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
+                        schema,
+                        &result.translated,
+                    )));
+                }
+            }
+            result
         })
     }
 
@@ -1031,16 +1049,56 @@ impl CallSchemas {
         &self,
         work: &crate::common::vertex_partial_args::WorkBudget,
     ) -> bool {
-        budget::with(work, || match &self.original {
-            Some(None) => true,
-            Some(Some(schema)) => self
-                .analyses
-                .lock()
-                .expect("call analysis cache")
-                .resolve(&[schema], schema)
-                .merged
-                .parameterless(),
-            None => false,
+        budget::with(work, || {
+            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+                return index.parameterless();
+            }
+            match &self.original {
+                Some(None) => true,
+                Some(Some(schema)) => self
+                    .analyses
+                    .lock()
+                    .expect("call analysis cache")
+                    .resolve(&[schema], schema)
+                    .merged
+                    .parameterless(),
+                None => false,
+            }
+        })
+    }
+
+    pub(super) fn probe(
+        &self,
+        state: usize,
+        step: crate::common::vertex_partial_args::ProbeStep<'_>,
+        work: &crate::common::vertex_partial_args::WorkBudget,
+    ) -> Option<(bool, usize)> {
+        #[cfg(test)]
+        if crate::common::vertex_partial_args::WorkBudget::test_unbounded() {
+            return None;
+        }
+        budget::with(work, || {
+            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+                return Some(index.probe(state, step));
+            }
+            use crate::common::vertex_partial_args::ProbeStep;
+            let is_index = matches!(step, ProbeStep::Index);
+            let result = match &self.original {
+                None => (false, 2),
+                Some(None) => match state {
+                    1 => (!is_index, 1),
+                    2 => (false, 2),
+                    _ => {
+                        if is_index && !self.translated.is_empty() {
+                            (false, 2)
+                        } else {
+                            (!is_index, 1)
+                        }
+                    }
+                },
+                Some(Some(_)) => return None,
+            };
+            Some(result)
         })
     }
 
@@ -1050,6 +1108,9 @@ impl CallSchemas {
         work: &crate::common::vertex_partial_args::WorkBudget,
     ) -> Value {
         budget::with(work, || {
+            if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+                return index.clean(args);
+            }
             let translated: Vec<_> = self.translated.iter().collect();
             clean_resolved(
                 args,

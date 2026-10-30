@@ -22,6 +22,13 @@ const MAX_WORK: usize = 64 * 1024 * 1024;
 mod work;
 pub(crate) use work::WorkBudget;
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProbeStep<'a> {
+    Key(&'a str),
+    Index,
+}
+type Probe<'a> = Option<&'a dyn Fn(usize, ProbeStep<'_>, &WorkBudget) -> Option<(bool, usize)>>;
+
 type Cleaner<'a> = Option<&'a dyn Fn(&Value, &WorkBudget) -> Value>;
 type Result<T> = std::result::Result<T, ArgumentError>;
 
@@ -58,6 +65,7 @@ enum Kind {
 #[derive(Default)]
 struct Node {
     kind: Kind,
+    probe_state: usize,
     held: bool,
     opened: bool,
     closed: bool,
@@ -82,10 +90,19 @@ pub(crate) struct Assembler {
 
 impl Assembler {
     pub(crate) fn push(&mut self, call: &Value, cleaner: Cleaner<'_>) -> Result<(String, bool)> {
+        self.push_indexed(call, cleaner, None)
+    }
+
+    pub(crate) fn push_indexed(
+        &mut self,
+        call: &Value,
+        cleaner: Cleaner<'_>,
+        probe: Probe<'_>,
+    ) -> Result<(String, bool)> {
         if let Some(error) = self.error {
             return Err(error);
         }
-        let result = self.push_inner(call, cleaner);
+        let result = self.push_inner(call, cleaner, probe);
         if let Err(error) = result {
             self.error = Some(error);
             // Never expose a partially valid final argument object after failure.
@@ -94,7 +111,12 @@ impl Assembler {
         result
     }
 
-    fn push_inner(&mut self, call: &Value, cleaner: Cleaner<'_>) -> Result<(String, bool)> {
+    fn push_inner(
+        &mut self,
+        call: &Value,
+        cleaner: Cleaner<'_>,
+        probe: Probe<'_>,
+    ) -> Result<(String, bool)> {
         self.work.check()?;
         if self.finished {
             return Err(ArgumentError("Vertex arguments received after completion"));
@@ -108,7 +130,7 @@ impl Assembler {
                 .as_array()
                 .ok_or(ArgumentError("Vertex partialArgs must be an array"))?;
             for part in parts {
-                self.push_part(part, cleaner)?;
+                self.push_part(part, cleaner, probe)?;
             }
         }
         if final_chunk && self.root.is_none() {
@@ -218,7 +240,7 @@ impl Assembler {
         Ok(Some(current))
     }
 
-    fn push_part(&mut self, part: &Value, cleaner: Cleaner<'_>) -> Result<()> {
+    fn push_part(&mut self, part: &Value, cleaner: Cleaner<'_>, probe: Probe<'_>) -> Result<()> {
         if !part.is_object() {
             return Err(ArgumentError(
                 "Vertex partialArgs element must be an object",
@@ -270,16 +292,31 @@ impl Assembler {
             let child = match found {
                 Some(child) => child,
                 None => {
+                    let indexed = probe.and_then(|query| {
+                        query(
+                            self.nodes[current].probe_state,
+                            match segment {
+                                Segment::Key(key) => ProbeStep::Key(key),
+                                Segment::Index(_) => ProbeStep::Index,
+                            },
+                            &self.work,
+                        )
+                    });
+                    self.work.check()?;
                     let held = match segment {
                         Segment::Key(key) => {
                             self.reserve(key.len())?;
-                            self.should_hold(&segments[..at], key, cleaner)?
+                            match indexed {
+                                Some((held, _)) => held,
+                                None => self.should_hold(&segments[..at], key, cleaner)?,
+                            }
                         }
                         Segment::Index(_) => false,
                     };
                     let kind = segments.get(at + 1).map_or(Kind::Unset, container);
                     self.reserve(4)?;
                     let child = self.alloc(kind, held)?;
+                    self.nodes[child].probe_state = indexed.map_or(0, |(_, state)| state);
                     let next = self.nodes[current].next;
                     if let Kind::Object(children) = &self.nodes[current].kind {
                         // Searching for held entries and shifting the ordered vector.

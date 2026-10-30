@@ -69,7 +69,15 @@ impl GeminiToClaudeStream {
         let clean = |args: &Value, work: &crate::common::vertex_partial_args::WorkBudget| {
             schemas.clean(args, work)
         };
-        let (delta, done) = match active.assembler.push(call, Some(&clean)) {
+        let probe = |state: usize,
+                     step: crate::common::vertex_partial_args::ProbeStep<'_>,
+                     work: &crate::common::vertex_partial_args::WorkBudget| {
+            schemas.probe(state, step, work)
+        };
+        let (delta, done) = match active
+            .assembler
+            .push_indexed(call, Some(&clean), Some(&probe))
+        {
             Ok(result) => result,
             Err(_) => {
                 if continuation {

@@ -87,6 +87,9 @@ fn run(case: &Case) -> Run {
     let schemas = CallSchemas::resolve("tool", &request, &sent, &work);
     let _ = schemas.parameterless(&work);
     let clean = |value: &Value, work: &WorkBudget| schemas.clean(value, work);
+    let probe = |state: usize,
+                 step: crate::common::vertex_partial_args::ProbeStep<'_>,
+                 work: &WorkBudget| schemas.probe(state, step, work);
     let mut complete = false;
     let mut output = String::new();
     for (index, (steps, value)) in case.paths.iter().enumerate() {
@@ -94,13 +97,19 @@ fn run(case: &Case) -> Run {
         if index > 0 && !call.can_continue(&chunk) {
             break;
         }
-        match call.assembler.push(&chunk, Some(&clean)) {
+        match call
+            .assembler
+            .push_indexed(&chunk, Some(&clean), Some(&probe))
+        {
             Ok((delta, _)) => output.push_str(&delta),
             Err(_) => break,
         }
     }
     if work.check().is_ok() {
-        if let Ok((delta, done)) = call.assembler.push(&json!({}), Some(&clean)) {
+        if let Ok((delta, done)) =
+            call.assembler
+                .push_indexed(&json!({}), Some(&clean), Some(&probe))
+        {
             output.push_str(&delta);
             complete = done;
         }
@@ -229,17 +238,25 @@ fn predicates() -> Case {
     for i in 0..128 {
         base["properties"][format!("r{i:03}")] = json!({"type":"string"});
     }
+    for i in 0..500 {
+        base["properties"][format!("k{i:03}")] =
+            json!({"type":"object","additionalProperties":false,"properties":{}});
+    }
     base["additionalProperties"] = json!(false);
     let required: Vec<_> = (0..128).map(|i| format!("r{i:03}")).collect();
     let mut branches = vec![base];
-    branches.extend((0..32).map(|_| json!({"type":"object","required":required})));
+    branches.extend((0..32).map(|i| {
+        let mut list = required.clone();
+        list.push(format!("s{i:03}"));
+        json!({"type":"object","required":list})
+    }));
     let mut paths: Vec<_> = required
         .iter()
         .map(|key| (vec![Key(key.clone())], json!("x")))
         .collect();
     paths.extend((0..500).map(|i| {
         (
-            vec![Key(format!("k{i:03}")), Key("value".into())],
+            vec![Key(format!("k{i:03}")), Key("reason".into())],
             json!("x"),
         )
     }));
@@ -303,6 +320,51 @@ fn family() -> Vec<Case> {
             cases.push(case);
         }
     }
+    for translated in [false, true] {
+        let mut composite = reference(500, 100, 0, translated);
+        composite.name = format!("ref-with-siblings-t{translated}");
+        for i in 0..500 {
+            composite.schema["properties"][format!("k{i:03}")]["properties"] =
+                json!({format!("own{i}"):{"type":"string"}});
+        }
+        cases.push(composite);
+        let mut conjunction = reference(500, 100, 0, translated);
+        let big = conjunction.schema["$defs"]["Big"].take();
+        conjunction.schema["$defs"]["Big"] = json!({"allOf":[big,{"additionalProperties":false}]});
+        conjunction.name = format!("shared-allof-t{translated}");
+        cases.push(conjunction);
+        for mutual in [false, true] {
+            let mut cycle = reference(4, 2, 0, translated);
+            cycle.schema["$defs"]["Big"]["$ref"] = json!(if mutual {
+                "#/$defs/Other"
+            } else {
+                "#/$defs/Big"
+            });
+            if mutual {
+                cycle.schema["$defs"]["Other"] = json!({"$ref":"#/$defs/Big"});
+            }
+            cycle.name = format!("cycle-mutual{mutual}-t{translated}");
+            cases.push(cycle);
+        }
+        for depth in [2, 8, 64] {
+            let mut long = long_key();
+            long.name = format!("long-key-d{depth}-t{translated}");
+            long.translated = translated;
+            long.paths[0].0 = std::iter::once(Key("\"".repeat(2_100_000)))
+                .chain((1..depth).map(|_| Key("n".into())))
+                .collect();
+            cases.push(long);
+        }
+        let mut cleanup = plain("destructive", 100, 3, false, translated);
+        for i in 0..100 {
+            cleanup.schema["properties"]["n"]["properties"][format!("k{i:03}")] =
+                json!({"type":"object","properties":{},"additionalProperties":false});
+        }
+        for (steps, _) in &mut cleanup.paths {
+            *steps.last_mut().unwrap() = Key("reason".into());
+        }
+        cases.push(cleanup);
+    }
     cases
 }
 #[test]
@@ -311,7 +373,7 @@ fn round6_whole_call_work_invariant() {
         let mut failures = Vec::new(); let mut maximum = 0f64;
         for case in family() {
             let (schema,paths,args) = input_sizes(&case); let size = schema+paths+args;
-            let actual = run(&case);
+            let actual = WorkBudget::with_index_audit(||run(&case));
             let expected = WorkBudget::with_test_limit(usize::MAX, || run(&case));
             let index_probe = actual.total.saturating_sub(actual.predicates);
             let ratio = index_probe as f64 / size.max(1) as f64; maximum = maximum.max(ratio);
