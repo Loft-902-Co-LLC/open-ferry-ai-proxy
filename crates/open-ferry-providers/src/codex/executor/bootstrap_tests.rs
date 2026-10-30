@@ -665,6 +665,7 @@ fn bootstrap_bufferable_events() {
         r#"{"type":"response.in_progress"}"#,
         r#"{"type":"codex.rate_limits"}"#,
         r#"{"type":"codex.response.metadata"}"#,
+        MODERATION_METADATA_EVENT,
         KEEPALIVE_EVENT,
         OUTPUT_ADDED_EVENT,
         r#"{"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}"#,
@@ -944,4 +945,47 @@ async fn held_lines_that_echo_the_token_hide_it() {
     assert!(shown.contains(r#""type":"response.created""#), "{shown}");
     assert!(!shown.contains(TOKEN), "{shown}");
     assert!(shown.contains("key [redacted]"), "{shown}");
+}
+
+// 9e79552f: prompt-moderation metadata is bootstrap, not accepted output.
+const MODERATION_METADATA_EVENT: &str = r#"{"type":"response.metadata","response_id":"resp_1","sequence_number":2,"metadata":{"openai_chatgpt_moderation_metadata":{"prompt":{"omnimod":{"protection_type":"omnimod"}}}}}"#;
+
+#[tokio::test]
+async fn moderation_metadata_then_overload_fails_attempt() {
+    let url = serve_events(&[
+        CREATED_EVENT,
+        IN_PROGRESS_EVENT,
+        MODERATION_METADATA_EVENT,
+        OVERLOAD_EVENT,
+    ])
+    .await;
+    let error = failed_over(start(&buffering(true), &url).await);
+    assert_eq!(error.status, 503);
+}
+
+#[tokio::test]
+async fn moderation_metadata_then_output_flushes_in_order() {
+    let url = serve_events(&[
+        CREATED_EVENT,
+        IN_PROGRESS_EVENT,
+        MODERATION_METADATA_EVENT,
+        OUTPUT_DELTA_EVENT,
+        COMPLETED_EVENT,
+    ])
+    .await;
+    let (combined, error) = drain(started(start(&buffering(true), &url).await)).await;
+    assert!(error.is_none(), "{error:?}");
+    let markers = [
+        "response.created",
+        "response.in_progress",
+        "response.metadata",
+        "response.output_text.delta",
+        "response.completed",
+    ];
+    let mut tail = combined.as_str();
+    for marker in markers {
+        assert_eq!(combined.matches(marker).count(), 2, "{combined}");
+        let offset = tail.find(marker).expect("event in upstream order");
+        tail = &tail[offset + marker.len()..];
+    }
 }
