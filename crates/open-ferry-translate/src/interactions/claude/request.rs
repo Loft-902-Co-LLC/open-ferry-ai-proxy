@@ -223,6 +223,10 @@ fn convert_messages(
         ..Steps::default()
     };
     for message in messages {
+        // These targets restore commentary before per-message replay handling.
+        if crate::signature::is_empty_codex_commentary_message(message, false) {
+            continue;
+        }
         let role = go::to_lower(str_of(message.get("role")).trim());
         let content = message.get("content");
         if role == "system" {
@@ -319,6 +323,16 @@ impl Steps {
                             sendable += 1;
                         }
                         step_content.push(json!({"type": "text", "text": text}));
+                    }
+                }
+                "thinking" if str_of(part.get("signature")).trim() == "cpa:commentary:v1" => {
+                    let text = str_of(part.get("thinking"));
+                    if !text.is_empty() {
+                        self.flush_reminders_before_part(step_type, &mut step_content);
+                        step_content.push(json!({"type":"text","text":text}));
+                        if !text.trim().is_empty() {
+                            sendable += 1;
+                        }
                     }
                 }
                 "thinking" => {

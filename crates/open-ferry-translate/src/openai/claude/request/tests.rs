@@ -1776,3 +1776,31 @@ fn array_len(value: &Value, path: &str) -> usize {
         .and_then(Value::as_array)
         .map_or(0, Vec::len)
 }
+
+#[test]
+fn r2_commentary_uses_plain_text_filtering() {
+    for convert in [
+        super::convert_claude_request_to_openai,
+        super::convert_claude_request_to_openai_with_compat,
+    ] {
+        for text in [" ", "x-anthropic-billing-header: test attribution"] {
+            for role in ["user", "assistant"] {
+                let mut request = json!({"messages":[{"role":role,"content":[
+                    {"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"}]}]});
+                if role == "user" {
+                    request["messages"][0]["content"].as_array_mut().unwrap().push(
+                        json!({"type":"document","source":{"type":"file","file_id":"file_test"}}));
+                }
+                let marked = convert("test-model", &request, false);
+                request["messages"][0]["content"][0] = json!({"type":"text","text":text});
+                let plain = convert("test-model", &request, false);
+                assert_eq!(marked, plain, "{role}: {text}");
+                if role == "user" {
+                    assert_eq!(marked.1.as_ref().unwrap().status_code(), 400);
+                } else {
+                    assert_eq!(marked.0["messages"], json!([]));
+                }
+            }
+        }
+    }
+}

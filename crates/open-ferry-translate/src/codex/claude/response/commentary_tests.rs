@@ -64,7 +64,7 @@ fn completed() -> Value {
 }
 
 #[test]
-fn commentary_streams_as_unsigned_thinking_before_final_answer() {
+fn commentary_streams_as_marked_thinking_before_final_answer() {
     let events = [
         added("commentary"),
         json!({"type":"response.content_part.added","part":{"type":"output_text"}}),
@@ -82,7 +82,7 @@ fn commentary_streams_as_unsigned_thinking_before_final_answer() {
     assert_eq!(
         blocks(&events),
         [
-            json!({"type":"thinking","thinking":"Checking the gate first."}),
+            json!({"type":"thinking","thinking":"Checking the gate first.","signature":"cpa:commentary:v1"}),
             json!({"type":"text","text":"The merge was refused."}),
         ]
     );
@@ -97,7 +97,7 @@ fn commentary_done_only_messages_and_later_fallbacks_are_each_emitted_once() {
             completed()
         ]),
         [
-            json!({"type":"thinking","thinking":"On it."}),
+            json!({"type":"thinking","thinking":"On it.","signature":"cpa:commentary:v1"}),
             json!({"type":"text","text":"Done."})
         ]
     );
@@ -114,7 +114,7 @@ fn commentary_done_only_messages_and_later_fallbacks_are_each_emitted_once() {
         assert_eq!(
             blocks(&events),
             [
-                json!({"type":"thinking","thinking":"Checking."}),
+                json!({"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"}),
                 json!({"type":"text","text":"All checks passed."})
             ]
         );
@@ -146,7 +146,7 @@ fn commentary_does_not_take_reasoning_signatures_or_leave_reasoning_open() {
             blocks(&events),
             [
                 json!({"type":"thinking","thinking":"Reasoning step","signature":if reasoning_done {"final_signature"} else {"fallback"}}),
-                json!({"type":"thinking","thinking":"Looking."}),
+                json!({"type":"thinking","thinking":"Looking.","signature":"cpa:commentary:v1"}),
                 json!({"type":"text","text":"All green."}),
             ]
         );
@@ -161,7 +161,7 @@ fn commentary_does_not_take_reasoning_signatures_or_leave_reasoning_open() {
             completed(),
         ]),
         [
-            json!({"type":"thinking","thinking":"Checking."}),
+            json!({"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"}),
             json!({"type":"thinking","thinking":"Thought.","signature":"parked"})
         ]
     );
@@ -183,7 +183,7 @@ fn commentary_tool_reasoning_and_final_answer_preserve_block_order() {
             completed(),
         ]),
         [
-            json!({"type":"thinking","thinking":"Calling a tool."}),
+            json!({"type":"thinking","thinking":"Calling a tool.","signature":"cpa:commentary:v1"}),
             json!({"type":"tool_use","id":"call_1","name":"exec","input":{},"partial_json":"{}"}),
             json!({"type":"thinking","thinking":"Tool result reasoning.","signature":"sig"}),
             json!({"type":"text","text":"Done."}),
@@ -209,7 +209,7 @@ fn commentary_and_final_messages_keep_their_non_stream_block_types() {
             assert_eq!(
                 response["content"],
                 json!([
-                    {"type":"thinking","thinking":"Checking."},
+                    {"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"},
                     {"type":"thinking","thinking":"Thought.","signature":"sig"},
                     {"type":"text","text":"Done."}
                 ])
@@ -231,4 +231,244 @@ fn commentary_final_answer_and_phaseless_text_remain_text() {
             [json!({"type":"text","text":"Hi."})]
         );
     }
+}
+
+#[test]
+fn commentary_round_trip_preserves_replay_order() {
+    let events = [
+        message("commentary", "Checking."),
+        message("final_answer", "Before tool."),
+        json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}),
+        completed(),
+    ];
+    let stream_content = blocks(&events);
+    let native_event = json!({"type":"response.completed","response":{"output":[
+        {"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]},
+        {"type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Before tool."}]},
+        {"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
+    ]}});
+    let native =
+        convert_codex_response_to_claude_non_stream(&json!({"messages":[]}), &native_event)
+            .unwrap();
+    for content in [Value::Array(stream_content), native["content"].clone()] {
+        let request = json!({"messages":[{"role":"assistant","content":content},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"result"}]}]});
+        for convert in [
+            crate::codex::claude::convert_claude_request_to_codex,
+            crate::codex::claude::convert_claude_request_to_codex_with_compat,
+        ] {
+            let (out, error) = convert("gpt-5.4", &request);
+            assert_eq!(error, None);
+            let items = out["input"].as_array().unwrap();
+            assert_eq!(items[0]["phase"], "commentary");
+            assert_eq!(items[0]["content"][0]["text"], "Checking.");
+            assert_eq!(items[1]["content"][0]["text"], "Before tool.");
+            assert_eq!(items[2]["type"], "function_call");
+            assert_eq!(items[3]["type"], "function_call_output");
+            assert!(!out.to_string().contains("cpa:commentary:v1"));
+        }
+    }
+}
+
+#[test]
+fn commentary_marker_is_plain_text_for_other_native_targets() {
+    let request = json!({"messages":[{"role":"user","content":"first"},
+        {"role":"assistant","content":[
+            {"type":"thinking","thinking":"COMMENTARY","signature":" cpa:commentary:v1 "},
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"FINAL"}]},
+        {"role":"user","content":"next"}]});
+    for compat in [false, true] {
+        let chat = if compat {
+            crate::openai::claude::convert_claude_request_to_openai_with_compat
+        } else {
+            crate::openai::claude::convert_claude_request_to_openai
+        };
+        let (out, error) = chat("test-model", &request, false);
+        assert_eq!(error, None);
+        assert!(
+            out["messages"][1]["content"]
+                .to_string()
+                .contains("COMMENTARY")
+        );
+        assert!(out["messages"][1].get("reasoning_content").is_none());
+        assert!(!out.to_string().contains("cpa:commentary:v1"));
+        let gemini = if compat {
+            crate::gemini::claude::convert_claude_request_to_gemini_with_compat
+        } else {
+            crate::gemini::claude::convert_claude_request_to_gemini
+        };
+        let (out, error) = gemini(
+            "test-model",
+            &request,
+            false,
+            crate::models::ModelCatalog::embedded(),
+        );
+        assert_eq!(error, None);
+        assert_eq!(
+            out["contents"][1]["parts"],
+            json!([{"text":"COMMENTARY"},{"text":"FINAL"}])
+        );
+        assert!(!out.to_string().contains("cpa:commentary:v1"));
+        let interactions = if compat {
+            crate::interactions::claude::convert_claude_request_to_interactions_with_compat
+        } else {
+            crate::interactions::claude::convert_claude_request_to_interactions
+        };
+        let (out, error) = interactions("test-model", &request, false);
+        assert_eq!(error, None);
+        assert!(out.to_string().contains("COMMENTARY"));
+        assert!(out.to_string().contains("FINAL"));
+        assert!(!out.to_string().contains("cpa:commentary:v1"));
+        assert!(!out.to_string().contains("\"type\":\"thought\""));
+    }
+    for convert in [
+        crate::codex::claude::convert_claude_request_to_codex,
+        crate::codex::claude::convert_claude_request_to_codex_with_compat,
+    ] {
+        let (out, error) = convert("gpt-5.4", &request);
+        assert_eq!(error, None);
+        assert_eq!(out["input"][1]["phase"], "commentary");
+        assert!(!out.to_string().contains("cpa:commentary:v1"));
+    }
+}
+
+fn check_empty_commentary_alignment(target: usize) {
+    let plain = json!({"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"call_a","name":"lookup_a","input":{}},
+            {"type":"tool_use","id":"call_b","name":"lookup_b","input":{}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"call_b","content":"b"},
+            {"type":"tool_result","tool_use_id":"call_a","content":"a"}]}]});
+    for count in [1, 2] {
+        let mut marked = plain.clone();
+        marked["messages"].as_array_mut().unwrap().insert(1, json!({"role":"assistant","content":
+            vec![json!({"type":"thinking","thinking":"","signature":" cpa:commentary:v1 "});count]}));
+        for compat in [false, true] {
+            let chat = if compat {
+                crate::openai::claude::convert_claude_request_to_openai_with_compat
+            } else {
+                crate::openai::claude::convert_claude_request_to_openai
+            };
+            if target == 0 {
+                assert_eq!(
+                    chat("test-model", &marked, false),
+                    chat("test-model", &plain, false),
+                    "Chat compat={compat}"
+                );
+            }
+            let gemini = if compat {
+                crate::gemini::claude::convert_claude_request_to_gemini_with_compat
+            } else {
+                crate::gemini::claude::convert_claude_request_to_gemini
+            };
+            let models = crate::models::ModelCatalog::embedded();
+            if target == 2 {
+                assert_eq!(
+                    gemini("test-model", &marked, false, models),
+                    gemini("test-model", &plain, false, models),
+                    "Gemini compat={compat}"
+                );
+            }
+            let interactions = if compat {
+                crate::interactions::claude::convert_claude_request_to_interactions_with_compat
+            } else {
+                crate::interactions::claude::convert_claude_request_to_interactions
+            };
+            if target == 3 {
+                assert_eq!(
+                    interactions("test-model", &marked, false),
+                    interactions("test-model", &plain, false),
+                    "Interactions compat={compat}"
+                );
+            }
+            let mut restored = marked.clone();
+            crate::signature::sanitize_claude_messages_for_claude_upstream(
+                &mut restored,
+                "test-model",
+                compat,
+            );
+            assert_eq!(restored, plain);
+        }
+    }
+}
+
+#[test]
+fn r2_empty_commentary_chat_alignment() {
+    check_empty_commentary_alignment(0);
+}
+
+#[test]
+fn r2_empty_commentary_gemini_alignment() {
+    check_empty_commentary_alignment(2);
+}
+
+#[test]
+fn r2_empty_commentary_interactions_alignment() {
+    check_empty_commentary_alignment(3);
+}
+
+fn check_codex_inline_empty_commentary(reminder: bool) {
+    let calls = json!({"role":"assistant","content":[
+        {"type":"tool_use","id":"call_a","name":"lookup_a","input":{}},
+        {"type":"tool_use","id":"call_b","name":"lookup_b","input":{}}]});
+    let results = json!({"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"call_b","content":"b"},
+        {"type":"tool_result","tool_use_id":"call_a","content":"a"}]});
+    for count in [1, 2] {
+        for convert in [
+            crate::codex::claude::convert_claude_request_to_codex,
+            crate::codex::claude::convert_claude_request_to_codex_with_compat,
+        ] {
+            let mut messages = vec![calls.clone()];
+            if reminder {
+                messages.push(json!({"role":"system","content":"held reminder"}));
+            }
+            let plain = json!({"messages":messages.iter().cloned().chain([results.clone()]).collect::<Vec<_>>()});
+            messages.push(json!({"role":"assistant","content":vec![
+                json!({"type":"thinking","thinking":"","signature":" cpa:commentary:v1 "});count]}));
+            messages.push(results.clone());
+            let (out, error) = convert("gpt-5.4", &json!({"messages":messages}));
+            assert_eq!(error, None);
+            let items = out["input"].as_array().unwrap();
+            assert_eq!(items.len(), if reminder { 5 } else { 4 });
+            assert_eq!(items[0]["type"], "function_call");
+            assert_eq!(items[1]["type"], "function_call");
+            let first_result = if reminder { 3 } else { 2 };
+            if reminder {
+                assert_eq!(items[2]["type"], "message");
+                assert_eq!(items[2]["role"], "user");
+                assert!(
+                    items[2]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("held reminder")
+                );
+            }
+            assert_eq!(items[first_result]["type"], "function_call_output");
+            assert_eq!(items[first_result]["call_id"], "call_b");
+            assert_eq!(items[first_result + 1]["type"], "function_call_output");
+            assert_eq!(items[first_result + 1]["call_id"], "call_a");
+            assert!(!out.to_string().contains("cpa:commentary:v1"));
+            // Removing the message is deliberately different for Codex.
+            let (without_marker, error) = convert("gpt-5.4", &plain);
+            assert_eq!(error, None);
+            assert_eq!(without_marker["input"][2]["call_id"], "call_a");
+            assert_eq!(without_marker["input"][3]["call_id"], "call_b");
+            if reminder {
+                assert_eq!(without_marker["input"][4]["type"], "message");
+            }
+        }
+    }
+}
+
+#[test]
+fn r3_codex_empty_commentary_keeps_result_order() {
+    check_codex_inline_empty_commentary(false);
+}
+
+#[test]
+fn r3_codex_empty_commentary_releases_held_reminder_before_results() {
+    check_codex_inline_empty_commentary(true);
 }

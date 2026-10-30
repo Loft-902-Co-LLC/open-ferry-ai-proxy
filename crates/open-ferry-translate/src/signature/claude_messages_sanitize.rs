@@ -12,6 +12,31 @@ use super::{
 };
 use crate::json::{self, str_of};
 
+/// Whether restoring internal commentary would erase this entire message.
+/// `trim_whitespace` also treats blank text as empty for Claude CLI prompts.
+/// Codex handles markers inline and must still process these messages.
+pub fn is_empty_codex_commentary_message(message: &Value, trim_whitespace: bool) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    if str_of(part.get("type")) != "thinking"
+                        || str_of(part.get("signature")).trim() != "cpa:commentary:v1"
+                    {
+                        return false;
+                    }
+                    let text = str_of(part.get("thinking"));
+                    if trim_whitespace {
+                        text.trim().is_empty()
+                    } else {
+                        text.is_empty()
+                    }
+                })
+        })
+}
+
 /// Where a `tool_use` block may carry a signature.
 const TOOL_USE_SIGNATURE_PATHS: [&str; 4] = [
     "signature",
@@ -180,6 +205,17 @@ fn sanitize_block(
         return Outcome::Unchanged;
     }
 
+    // This internal marker relays commentary, never provider reasoning.
+    if str_of(part.get("signature")).trim() == "cpa:commentary:v1" {
+        let text = str_of(part.get("thinking")).into_owned();
+        if text.is_empty() {
+            report.dropped_blocks += 1;
+            return Outcome::Dropped;
+        }
+        *part = serde_json::json!({"type":"text","text":text});
+        report.dropped_signatures += 1;
+        return Outcome::Changed;
+    }
     if opts.preserve_empty_thinking_blocks {
         report.preserved += 1;
         return Outcome::Unchanged;

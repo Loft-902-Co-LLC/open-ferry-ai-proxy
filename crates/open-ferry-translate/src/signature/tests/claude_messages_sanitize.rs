@@ -53,3 +53,76 @@ fn sanitize_claude_messages_for_claude_upstream_preserves_opaque_thinking_signat
         "compat sanitizer dropped opaque signature: {with_compat}"
     );
 }
+
+#[test]
+fn commentary_markers_restore_text_before_signature_policy() {
+    for model in [
+        "claude-sonnet-5",
+        "gpt-5.4",
+        "gemini-3.5-flash",
+        "unknown-model",
+    ] {
+        for compat in [false, true] {
+            let mut payload = json(
+                r#"{"messages":[{"role":"assistant","content":[
+                {"type":"thinking","thinking":"commentary","signature":" cpa:commentary:v1 "},
+                {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"},
+                {"type":"text","text":"final"}]},
+                {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}]}"#,
+            );
+            if compat {
+                sanitize_claude_messages_for_claude_upstream(&mut payload, model, true);
+            } else {
+                sanitize_claude_messages_signatures_for_model(&mut payload, model);
+            }
+            assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                payload["messages"][0]["content"],
+                json(r#"[{"type":"text","text":"commentary"},{"type":"text","text":"final"}]"#)
+            );
+            assert!(!payload.to_string().contains("cpa:commentary:v1"));
+        }
+    }
+}
+
+#[test]
+fn r3_empty_commentary_predicate_preserves_target_whitespace_policy() {
+    let marker =
+        serde_json::json!({"type":"thinking","thinking":"","signature":" cpa:commentary:v1 "});
+    let blank =
+        serde_json::json!({"type":"thinking","thinking":" ","signature":"cpa:commentary:v1"});
+    for (content, strict, trimmed) in [
+        (serde_json::json!([marker.clone()]), true, true),
+        (
+            serde_json::json!([marker.clone(), marker.clone()]),
+            true,
+            true,
+        ),
+        (serde_json::json!([blank]), false, true),
+        (serde_json::json!([]), false, false),
+        (serde_json::json!(""), false, false),
+        (
+            serde_json::json!([marker, {"type":"text","text":""}]),
+            false,
+            false,
+        ),
+        (
+            serde_json::json!([{"type":"thinking","thinking":"","signature":"opaque"}]),
+            false,
+            false,
+        ),
+        (
+            serde_json::json!([{"type":"thinking","thinking":"visible","signature":"cpa:commentary:v1"}]),
+            false,
+            false,
+        ),
+    ] {
+        let message = serde_json::json!({"content":content});
+        assert_eq!(is_empty_codex_commentary_message(&message, false), strict);
+        assert_eq!(is_empty_codex_commentary_message(&message, true), trimmed);
+    }
+    assert!(!is_empty_codex_commentary_message(
+        &serde_json::json!({}),
+        false
+    ));
+}

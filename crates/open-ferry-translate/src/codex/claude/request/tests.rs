@@ -1749,3 +1749,50 @@ fn standalone_claude_effort_preserves_translation_defaults_and_precedence() {
         }
     }
 }
+
+#[test]
+fn commentary_replay_stays_separate_from_real_reasoning_and_tools() {
+    let signature = valid_codex_reasoning_signature();
+    let request = json!({"messages":[{"role":"assistant","content":[
+        {"type":"text","text":"before"},
+        {"type":"thinking","thinking":"commentary","signature":"cpa:commentary:v1"},
+        {"type":"thinking","thinking":"private summary","signature":signature},
+        {"type":"tool_use","id":"call_1","name":"lookup","input":{}},
+        {"type":"text","text":"final"}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"result"}]}]});
+    for convert in [
+        convert_claude_request_to_codex,
+        convert_claude_request_to_codex_with_compat,
+    ] {
+        let out = convert("gpt-5.4", &request);
+        let items = input(&out);
+        assert_eq!(items.len(), 6);
+        assert_eq!(items[0]["content"][0]["text"], "before");
+        assert_eq!(items[1]["phase"], "commentary");
+        assert_eq!(items[1]["content"][0]["text"], "commentary");
+        assert_eq!(items[2]["type"], "reasoning");
+        assert_eq!(items[2]["encrypted_content"], signature);
+        assert_eq!(items[3]["type"], "function_call");
+        assert_eq!(items[4]["content"][0]["text"], "final");
+        assert_eq!(items[5]["type"], "function_call_output");
+        assert!(!out.to_string().contains("cpa:commentary:v1"));
+        assert!(!out.to_string().contains("private summary"));
+    }
+}
+
+#[test]
+fn r2_commentary_item_has_upstream_key_order() {
+    let request = json!({"messages":[{"role":"assistant","content":[
+        {"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"}]}]});
+    for convert in [
+        super::convert_claude_request_to_codex,
+        super::convert_claude_request_to_codex_with_compat,
+    ] {
+        let (out, error) = convert("gpt-5.4", &request);
+        assert_eq!(error, None);
+        assert_eq!(
+            out["input"][0].to_string(),
+            r#"{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]}"#
+        );
+    }
+}

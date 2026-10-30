@@ -3067,3 +3067,43 @@ async fn paused_search_continuation_restores_finished_results_without_completing
         assert_eq!(blocks[2]["input"]["query"], "paused query");
     }
 }
+
+#[test]
+fn commentary_cleanup_ignores_model_family_gate() {
+    for model in ["claude-sonnet-5", "deepseek-v4", "unknown-model"] {
+        let mut body = json!({"messages":[{"role":"assistant","content":[
+            {"type":"thinking","thinking":"commentary","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"final"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}]});
+        sanitize_for_upstream(&mut body, model);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type":"text","text":"commentary"},{"type":"text","text":"final"}])
+        );
+        assert!(!body.to_string().contains("cpa:commentary:v1"));
+    }
+    let mut body = json!({"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque"}]}]});
+    let before = body.clone();
+    sanitize_for_upstream(&mut body, "deepseek-v4");
+    assert_eq!(body, before);
+}
+
+#[test]
+fn r2_provider_empty_commentary_is_removed_before_replay() {
+    let plain = json!({"messages":[
+        {"role":"assistant","content":[{"type":"tool_use","id":"call_a","name":"lookup","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_a","content":"result"}]}]});
+    for model in ["claude-sonnet-5-5", "deepseek-v4"] {
+        let mut expected = plain.clone();
+        sanitize_for_upstream(&mut expected, model);
+        let mut marked = plain.clone();
+        marked["messages"].as_array_mut().unwrap().insert(
+            1,
+            json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}),
+        );
+        sanitize_for_upstream(&mut marked, model);
+        assert_eq!(marked, expected);
+    }
+}
