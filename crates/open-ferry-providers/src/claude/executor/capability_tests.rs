@@ -281,3 +281,19 @@ async fn auto_route_capabilities_reach_streaming_and_token_counts() {
         assert_eq!(mock.last().json()["output_config"]["effort"], "high");
     }
 }
+
+#[tokio::test]
+async fn claude_55_forced_tools_follow_the_registered_upstream_alias() {
+    for (upstream, alias, expected) in [
+        ("claude-sonnet-5-5", "fast", "auto"),
+        ("claude-sonnet-4-6", "claude-opus-5-5", "tool"),
+    ] {
+        let mock = Mock::start(Reply::sse(SSE)).await;
+        let config = Config::parse(format!("claude-api-key: [{{api-key: {API_KEY}, models: [{{name: {upstream}, alias: {alias}}}]}}]")).unwrap();
+        let manager = manager(&mock, config, false);
+        call(&manager, "configured-api", alias, json!({"model":alias,"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"tool","name":"lookup"}}), Format::CLAUDE).await;
+        let body = mock.last().json();
+        assert_eq!(body["model"], upstream);
+        assert_eq!(body["tool_choice"]["type"], expected);
+    }
+}
