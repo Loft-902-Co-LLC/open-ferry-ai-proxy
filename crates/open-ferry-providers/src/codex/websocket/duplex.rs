@@ -391,7 +391,10 @@ impl Duplex {
         }
         if let Some(steer) = self.deferred.take() {
             if self.pending.is_empty() {
-                self.send_steer(steer);
+                let payload = crate::codex::request::parse_object(steer.message.as_bytes());
+                if self.authorize(&payload, true) {
+                    self.send_steer(steer);
+                }
             } else {
                 self.deferred = Some(steer);
             }
@@ -696,7 +699,7 @@ impl Duplex {
                 false
             }
             Err(error) => {
-                self.fail(error);
+                self.fail_connection(error);
                 false
             }
         }

@@ -89,6 +89,23 @@ pub(crate) struct WebsocketAccess {
     params: Vec<(String, String)>,
 }
 
+pub(crate) struct WebsocketIdentity {
+    pub(crate) principal: Principal,
+    pub(crate) key: Option<String>,
+}
+
+pub(crate) fn safe_mode_error() -> ErrorMessage {
+    let mut error = ErrorMessage::new(403, serde_json::json!({
+        "error": "unsafe_example_api_key",
+        "message": "Proxy API endpoints are disabled because api-keys contains template values. Open /management.html?safe-mode=configure, update api-keys in Management, then retry.",
+    }).to_string());
+    error.addon.insert(
+        "x-cpa-safe-mode",
+        http::HeaderValue::from_static("example-api-key"),
+    );
+    error
+}
+
 impl WebsocketAccess {
     pub(crate) fn new(headers: &HeaderMap, uri: &http::Uri) -> Self {
         let mut credentials = HeaderMap::new();
@@ -109,13 +126,22 @@ impl WebsocketAccess {
 
     /// Rechecks the native policy against the current config, including
     /// rotations since the upgrade. Native keys have no model restrictions.
-    pub(crate) fn authorize(&self, state: &AppState) -> Result<(), ErrorMessage> {
+    pub(crate) fn authorize(&self, state: &AppState) -> Result<WebsocketIdentity, ErrorMessage> {
         let settings = state.settings();
+        if settings.safe_mode {
+            return Err(safe_mode_error());
+        }
         if settings.keys.is_empty() {
-            return Ok(());
+            return Ok(WebsocketIdentity {
+                principal: Principal::ANONYMOUS,
+                key: None,
+            });
         }
         check(&settings.keys, &self.headers, &self.params)
-            .map(|_| ())
+            .map(|key| WebsocketIdentity {
+                principal: state.principal_tags().of(key),
+                key: Some(key.to_owned()),
+            })
             .map_err(|rejection| ErrorMessage::new(401, rejection.message()))
     }
 }
