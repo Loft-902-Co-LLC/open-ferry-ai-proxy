@@ -1674,6 +1674,65 @@ mod tests {
         assert!(receiver.try_recv().is_err(), "a single reload");
     }
 
+    // A later config event restarts the quiet period, even after the first
+    // window has run out. The watcher handles one event's paths without
+    // checking its timer in between, so the slow auth read orders the second
+    // config path after `read_done` however the threads are scheduled.
+    #[test]
+    fn a_later_config_event_restarts_an_expired_quiet_period() {
+        let fixture = Fixture::new();
+        let sentinel = fixture.write_auth("sentinel.json", DEMO);
+        let (sender, messages) = std_mpsc::channel();
+        let (events, mut receiver) = mpsc::channel(8);
+        let mut state = fixture.state();
+        let read_done = Arc::new(std::sync::Mutex::new(None));
+        let done = Arc::clone(&read_done);
+        state.auth_reader = Arc::new(move |path| {
+            thread::sleep(CONFIG_RELOAD_DEBOUNCE + Duration::from_millis(50));
+            *done.lock().unwrap() = Some(Instant::now());
+            read_capped(path)
+        });
+        let config_read = Arc::new(std::sync::Mutex::new(None));
+        let read = Arc::clone(&config_read);
+        state.config_reader = Arc::new(move |path| {
+            read.lock().unwrap().get_or_insert(Instant::now());
+            fs::read(path)
+        });
+        let thread = thread::spawn(move || {
+            run(
+                state,
+                &Aliases::default(),
+                &messages,
+                &events,
+                &AtomicBool::new(false),
+            )
+        });
+        assert_eq!(
+            receiver.blocking_recv().map(unstamped),
+            Some(added(&sentinel))
+        );
+        *read_done.lock().unwrap() = None;
+        *config_read.lock().unwrap() = None;
+
+        fixture.write_config("port: 7\n");
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(fixture.config_path.clone())
+            .add_path(sentinel.clone())
+            .add_path(fixture.config_path.clone());
+        sender.send(Message::Fs(Ok(event))).expect("send");
+        assert_eq!(config_of(receiver.blocking_recv()).port, 7);
+        let read_done = read_done.lock().unwrap().expect("the auth file was read");
+        let config_read = config_read.lock().unwrap().expect("the config was read");
+        assert!(
+            config_read >= read_done + CONFIG_RELOAD_DEBOUNCE,
+            "reloaded {:?} after the second config event",
+            config_read.saturating_duration_since(read_done)
+        );
+
+        sender.send(Message::Stop).expect("send stop");
+        thread.join().expect("watcher thread");
+    }
+
     #[test]
     fn run_stops_when_the_receiver_is_dropped() {
         let fixture = Fixture::new();
