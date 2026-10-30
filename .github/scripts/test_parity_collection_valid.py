@@ -21,31 +21,65 @@ def load_script():
     return module
 
 
+def manifest_closure(root, start):
+    """Workspace crates `start` links, through workspace or direct path dependencies."""
+    root = Path(root).resolve()
+
+    def manifest(path):
+        with (root / path / "Cargo.toml").open("rb") as stream:
+            return tomllib.load(stream)
+
+    workspace = manifest(".").get("workspace", {}).get("dependencies", {})
+
+    def links(path):
+        data = manifest(path)
+        tables = [data.get("dependencies", {}), data.get("build-dependencies", {})]
+        tables += [target.get(kind, {}) for target in data.get("target", {}).values()
+                   for kind in ("dependencies", "build-dependencies")]
+        found = set()
+        for table in tables:
+            for name, spec in table.items():
+                if not isinstance(spec, dict):
+                    continue
+                base, spec = (".", workspace.get(name)) if spec.get("workspace") else (path, spec)
+                if isinstance(spec, dict) and "path" in spec:
+                    # Outside the repository, relative_to fails the test.
+                    found.add((root / base / spec["path"]).resolve().relative_to(root).as_posix())
+        return found
+
+    closure, pending = set(), list(links(start))
+    while pending:
+        path = pending.pop()
+        if path not in closure:
+            closure.add(path)
+            pending.extend(links(path))
+    return closure
+
+
 class ClosureTests(unittest.TestCase):
     def test_closure_matches_the_parity_tool_manifests(self):
-        # Every workspace crate the parity tool links, read from the real manifests.
-        def manifest(path):
-            with (REPO / path / "Cargo.toml").open("rb") as stream:
-                return tomllib.load(stream)
+        self.assertEqual(set(load_script().CLOSURE), manifest_closure(REPO, "tools/parity"))
 
-        workspace = manifest(".")["workspace"]["dependencies"]
-        paths = {name: spec["path"] for name, spec in workspace.items()
-                 if isinstance(spec, dict) and "path" in spec}
-
-        def links(path):
-            data = manifest(path)
-            tables = [data.get("dependencies", {}), data.get("build-dependencies", {})]
-            tables += [target.get(kind, {}) for target in data.get("target", {}).values()
-                       for kind in ("dependencies", "build-dependencies")]
-            return {paths[name] for table in tables for name in table if name in paths}
-
-        closure, pending = set(), list(links("tools/parity"))
-        while pending:
-            path = pending.pop()
-            if path not in closure:
-                closure.add(path)
-                pending.extend(links(path))
-        self.assertEqual(set(load_script().CLOSURE), closure)
+    def test_closure_follows_workspace_and_direct_path_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifests = {
+                ".": ['[workspace.dependencies]', 'shared = { path = "crates/shared" }', 'serde = "1"'],
+                "tools/tool": ['[dependencies]', 'shared.workspace = true', 'serde.workspace = true',
+                               'helper = { path = "../../crates/helper" }',
+                               "[target.'cfg(unix)'.build-dependencies]",
+                               'build = { path = "../../crates/build" }'],
+                "crates/shared": ['[dependencies]'],
+                "crates/helper": ['[dependencies]', 'inner = { path = "../inner" }'],
+                "crates/inner": ['[dependencies]'],
+                "crates/build": ['[dependencies]'],
+                "crates/unused": ['[dependencies]'],
+            }
+            for path, text in manifests.items():
+                (root / path).mkdir(parents=True, exist_ok=True)
+                (root / path / "Cargo.toml").write_text("\n".join(text) + "\n", encoding="utf-8")
+            self.assertEqual(manifest_closure(root, "tools/tool"),
+                             {"crates/shared", "crates/helper", "crates/inner", "crates/build"})
 
 
 class CollectionTests(unittest.TestCase):
