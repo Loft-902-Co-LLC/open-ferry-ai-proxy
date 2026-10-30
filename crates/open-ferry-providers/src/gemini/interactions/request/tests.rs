@@ -307,3 +307,20 @@ fn response_translation_keeps_tools_from_a_truncated_original_request() {
         Bytes::from_static(br#"{"tools":[{"type":"custom","name":"lookup"}]"#);
     assert_eq!(run(&options), expected);
 }
+
+#[test]
+fn native_interactions_drops_vertex_bare_tink_thoughts() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = vec![0xa5; 405];
+    bytes[..5].copy_from_slice(&[1, 0x8f, 0x3d, 0x6b, 0x5f]);
+    let bare = STANDARD.encode(bytes);
+    let wrapped = crate::gemini::testing::native_gemini_signature();
+    let mut body = serde_json::json!({"input":[
+        {"type":"thought","signature":bare,"summary":[{"text":"vertex"}]},
+        {"type":"thought","signature":wrapped,"summary":[{"text":"wrapped"}]},
+        {"type":"text","text":"answer"}
+    ]});
+    sanitize_input_ids(&mut body);
+    assert_eq!(body["input"].as_array().unwrap().len(), 2);
+    assert_eq!(body["input"][0]["signature"], wrapped);
+}

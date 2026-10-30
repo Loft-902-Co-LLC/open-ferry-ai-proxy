@@ -174,6 +174,7 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
         if json::str_at(&item, "type") == "thought" {
             use open_ferry_translate::signature::{
                 Provider, compatible_signature_for_provider, is_gemini_thought_signature_bypass,
+                is_gemini_vertex_bare_tink_signature,
             };
             let sig = ["signature", "thought_signature", "thoughtSignature"]
                 .iter()
@@ -181,7 +182,7 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
                 .find(|s| !s.trim().is_empty())
                 .unwrap_or_default();
             let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig)
-                .filter(|s| !is_gemini_thought_signature_bypass(s))
+                .filter(|s| !is_gemini_thought_signature_bypass(s) && !is_gemini_vertex_bare_tink_signature(s))
             else {
                 continue;
             };
