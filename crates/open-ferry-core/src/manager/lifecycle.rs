@@ -1062,7 +1062,7 @@ impl Manager {
             let Some(entry) = state.auths.get(&incoming.id) else {
                 return Ok(ObservedUpdate::RegistrationChanged);
             };
-            if self.observation_policy_save_pending(&state, &entry.auth) {
+            if !replace && self.observation_policy_save_pending(&state, &entry.auth) {
                 return Ok(ObservedUpdate::Retry);
             }
             entry.auth.clone()
@@ -1133,7 +1133,7 @@ impl Manager {
             && (entry.auth.policy_generation != captured.policy_generation
                 || entry.auth.credential_version != captured.credential_version
                 || !same_observation_policy(captured, &entry.auth)
-                || self.observation_policy_save_pending(&state, &entry.auth))
+                || (!replace && self.observation_policy_save_pending(&state, &entry.auth)))
         {
             return Ok(ObservedUpdate::Retry);
         }
