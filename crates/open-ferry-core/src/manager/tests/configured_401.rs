@@ -30,6 +30,15 @@ fn credential(id: &str, refreshable: bool, siwc: bool) -> Auth {
 
 #[tokio::test(start_paused = true)]
 async fn configured_401_matrix_never_rejects_or_refreshes_and_cools_only_when_requested() {
+    configured_401_matrix(None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn round2_configured_401_matrix_for_codex_clients() {
+    configured_401_matrix(Some("codex-tui/1")).await;
+}
+
+async fn configured_401_matrix(user_agent: Option<&str>) {
     for action in [
         "stop",
         "continue",
@@ -53,7 +62,25 @@ async fn configured_401_matrix_never_rejects_or_refreshes_and_cools_only_when_re
                             )]),
                             ..Default::default()
                         });
+                        let mut opts = options();
+                        if let Some(ua) = user_agent {
+                            opts.headers
+                                .insert("user-agent", http::HeaderValue::from_str(ua).unwrap());
+                        }
+                        let expected_siwc = siwc && user_agent.is_none();
                         let executor = FakeExecutor::with("codex", move |call| {
+                            assert_eq!(
+                                call.auth.use_siwc_for_request(&call.options.headers),
+                                expected_siwc
+                            );
+                            assert_eq!(
+                                call.auth.access_token_for_request(&call.options.headers),
+                                if expected_siwc {
+                                    "nested-dummy"
+                                } else {
+                                    "outer-dummy"
+                                }
+                            );
                             if call.auth_id != "primary" {
                                 return Reply::ok("backup");
                             }
@@ -74,17 +101,17 @@ async fn configured_401_matrix_never_rejects_or_refreshes_and_cools_only_when_re
                         let stopped = match phase {
                             "execute" => h
                                 .manager
-                                .execute(&providers(&["codex"]), request("m"), options())
+                                .execute(&providers(&["codex"]), request("m"), opts.clone())
                                 .await
                                 .is_err(),
                             "count" => h
                                 .manager
-                                .count_tokens(&providers(&["codex"]), request("m"), options())
+                                .count_tokens(&providers(&["codex"]), request("m"), opts.clone())
                                 .await
                                 .is_err(),
                             _ => match h
                                 .manager
-                                .execute_stream(&providers(&["codex"]), request("m"), options())
+                                .execute_stream(&providers(&["codex"]), request("m"), opts.clone())
                                 .await
                             {
                                 Err(_) => true,
@@ -116,9 +143,11 @@ async fn configured_401_matrix_never_rejects_or_refreshes_and_cools_only_when_re
                             action.ends_with("and-cooldown")
                         );
                         if !action.ends_with("and-cooldown") {
+                            let mut pinned_opts = pinned("primary");
+                            pinned_opts.headers = opts.headers.clone();
                             let _ = h
                                 .manager
-                                .execute(&providers(&["codex"]), request("m"), pinned("primary"))
+                                .execute(&providers(&["codex"]), request("m"), pinned_opts)
                                 .await;
                             assert_eq!(
                                 executor
