@@ -1403,12 +1403,14 @@ impl Service {
         let config_writer = Arc::new(FileConfigWriter::new(config_path).with_gate(gate.clone()));
         let checked_config_path = config_writer.path().to_path_buf();
         let (read_sender, read_completions) = mpsc::unbounded_channel();
+        let catalogs = CatalogRuntime::global().clone();
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
             Arc::clone(&registry),
             management_password_from_env(),
         )
+        .with_catalogs(catalogs.clone())
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
         .with_config_writer(config_writer)
@@ -1468,7 +1470,7 @@ impl Service {
             config_applies: 0,
             #[cfg(test)]
             executor_registration_events: std::sync::Mutex::default(),
-            catalogs: CatalogRuntime::global().clone(),
+            catalogs,
             catalog_sender,
             catalog_changes,
             #[cfg(test)]
