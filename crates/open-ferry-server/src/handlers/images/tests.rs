@@ -1444,3 +1444,6 @@ async fn xai_forced_prefixes_use_real_registration_and_credential_selection() {
     }
     serving.abort();
 }
+
+#[path = "finalized_tests.rs"]
+mod finalized;

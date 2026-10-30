@@ -73,7 +73,10 @@ async fn image_default_raw_then_override_then_filter_remain_the_final_barrier() 
     let raw_only = "payload:\n  default-raw:\n    - models:\n        - name: grok-imagine-*\n      params:\n        response_format: '\"url\"'\n";
     let body = execute_with_original(
         raw_only,
-        prepared,
+        &prepared.replace(
+            r#""response_format":"url""#,
+            r#""response_format":"b64_json""#,
+        ),
         r#"{"prompt":"draw"}"#,
         "/v1/images/generations",
     )

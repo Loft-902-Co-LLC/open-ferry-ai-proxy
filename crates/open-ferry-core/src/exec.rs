@@ -149,6 +149,9 @@ impl Options {
 /// Called with the ID of the credential a call was given.
 pub type SelectedAuthCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Called with the response format after all payload rules have run.
+pub type FinalizedResponseFormatCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Hints for credential selection, from upstream's metadata keys.
 #[derive(Clone, Default)]
 pub struct Metadata {
@@ -171,6 +174,8 @@ pub struct Metadata {
     pub execution_session_id: Option<String>,
     /// Called with the credential picked (`selected_auth_callback`).
     pub selected_auth: Option<SelectedAuthCallback>,
+    /// Called with the finalized image response format, once per attempt.
+    pub finalized_response_format: Option<FinalizedResponseFormatCallback>,
     /// The only provider the call may use, whatever providers it is given
     /// (upstream's `ForcedProvider`, which an Interactions `agent` request
     /// sets).
@@ -196,6 +201,10 @@ impl fmt::Debug for Metadata {
             .field("pinned_auth_id", &self.pinned_auth_id)
             .field("execution_session_id", &self.execution_session_id)
             .field("selected_auth", &self.selected_auth.is_some())
+            .field(
+                "finalized_response_format",
+                &self.finalized_response_format.is_some(),
+            )
             .field("forced_provider", &self.forced_provider)
             .field("disallow_free_auth", &self.disallow_free_auth)
             .field("caller_scope", &!self.caller_scope.is_empty())

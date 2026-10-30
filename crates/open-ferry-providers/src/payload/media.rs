@@ -150,7 +150,10 @@ pub(super) fn apply_media_rules(
     let (mut value, form) = match view {
         View::Json(value) => (value, false),
         View::Form(value) => (value, true),
-        View::Other { .. } => return Ok((body, content_type.to_owned())),
+        View::Other { .. } => {
+            super::notify_response_format(&Value::Null, options);
+            return Ok((body, content_type.to_owned()));
+        }
     };
     let before = value.clone();
     let requested = requested_model(request, options);
@@ -172,6 +175,7 @@ pub(super) fn apply_media_rules(
         Some(View::Other { empty: false }) => Some(Value::Object(Map::new())),
     };
     apply_call(rules, &call, source, &mut value);
+    super::notify_response_format(&value, options);
     if value == before {
         return Ok((body, content_type.to_owned()));
     }
