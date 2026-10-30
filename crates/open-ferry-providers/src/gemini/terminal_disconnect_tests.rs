@@ -795,11 +795,10 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             let context = Arc::new(RequestContext::new(http::Method::POST, "/test".into()));
             let tap = usage.tap(&context, &request, &options).unwrap();
             options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
-            let report = CallReport::start(&options);
             let result = manager
                 .execute_stream(std::slice::from_ref(&provider_name), request, options)
                 .await;
-            let mut response = report.stream(result).unwrap();
+            let mut response = result.unwrap();
             let mut error = None;
             while let Some(chunk) = response.chunks.next().await {
                 if let Err(failure) = chunk {
