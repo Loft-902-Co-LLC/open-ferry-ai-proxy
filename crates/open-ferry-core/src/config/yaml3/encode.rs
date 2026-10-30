@@ -1490,6 +1490,47 @@ fn is_letter(c: char) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn clip_and_strip_values_keep_their_footer_separator() {
+        for style in ["|", "|-"] {
+            let source = format!("v: {style}\n  note\n\n# footer\n");
+            let doc = crate::config::yaml3::compose::unmarshal(source.as_bytes()).unwrap();
+            let (bytes, _) = protected_node(&doc, 2).unwrap();
+            assert_eq!(bytes, source.as_bytes());
+        }
+    }
+
+    #[test]
+    fn leading_break_keep_values_supply_their_own_header_terminator() {
+        for style in ["|+", ">+"] {
+            for header in ["", " # header"] {
+                let source = format!("v: {style}{header}\n  note\n\n# footer\n");
+                let mut doc = crate::config::yaml3::compose::unmarshal(source.as_bytes()).unwrap();
+                let value = &mut doc.content[0].content[1];
+                value.value = "\n\n".into();
+                let (bytes, _) = protected_node(&doc, 2).unwrap();
+                let read = crate::config::yaml3::compose::unmarshal(&bytes).unwrap();
+                assert_eq!(read.content[0].content[1].value, "\n\n", "{style}{header}");
+                assert!(String::from_utf8_lossy(&bytes).contains("# footer"));
+            }
+        }
+    }
+
+    #[test]
+    fn root_plain_scalar_does_not_use_keep_chomping_state() {
+        let mut node = Node::scalar(STR_TAG, "note");
+        node.foot_comment = "# footer".into();
+        let doc = Node {
+            kind: Kind::Document,
+            content: vec![node],
+            ..Node::default()
+        };
+        assert_eq!(
+            protected_node(&doc, 2).unwrap().0,
+            faithful_node(&doc, 2).unwrap()
+        );
+    }
+
     // Not upstream's: Go's strconv.FormatFloat(f, 'g', -1, 64) answers,
     // recorded with Go.
     #[test]

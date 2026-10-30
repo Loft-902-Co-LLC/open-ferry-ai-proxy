@@ -1226,13 +1226,7 @@ mod tests {
             scalar(&root(&bytes), "management.panel-github-repository"),
             Some("https://panel.example/fictional\n\n\n")
         );
-        assert_eq!(
-            Config::load_bytes(&bytes)
-                .unwrap()
-                .remote_management
-                .panel_github_repository,
-            "https://panel.example/fictional"
-        );
+        assert_eq!(bytes, b"config-version: 8\nmanagement:\n    panel-github-repository: >+\n        https://panel.example/fictional\n\n\n# fictional footer\n");
     }
 
     #[test]
