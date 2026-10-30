@@ -14,12 +14,12 @@ When we move the pin, we update this table, bring every ported file's header to 
 
 ### What moving from v8.0.38 to v8.0.42 left out
 
-The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42. Differential regression cases and CI use Go 1.26.10; config-save recalibration, a full comparison at the combined head and README totals are still pending.
+The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42. Differential regression cases and CI use Go 1.26.10. The config-save baseline has been fully refreshed, and the full and PR-profile comparisons passed with that baseline. The measured totals are in [README.md](README.md#parity-with-cliproxyapi).
 
 | Upstream commit | Status | What isn’t ported | Ported behavior / reason |
 |---|---|---|---|
 | b9bb031d | Partly ported | Plugin denial adapters, plugin ABI/API and provider-chain machinery | Native Responses WebSocket create, append and steer reauthorize against current access and the bound model. Immutable per-turn identity updates usage and cache ownership; denials keep the socket usable, safe mode applies after reload, and checker infrastructure failures are request scoped. Own-work interrupts remain available after access loss. |
-| 633a294f | Skipped | Go dependency and toolchain updates | No Cargo/product behavior to port. Go >=1.26.10 is required for the v8.0.42 oracle; provisioning it in CI is deferred with parity work. |
+| 633a294f | Skipped | Go dependency and toolchain updates | No Cargo/product behavior to port. Go >=1.26.10 is required for the v8.0.42 oracle; parity CI is pinned to Go 1.26.10. |
 | d5816d5e | Partly ported | Go snapshot/digest maps | File changes preserve live cooldowns, refresh backoff and request ordering. Open Ferry rereads bounded current bytes under save serialization. An ordinary failed setting save is logged and still returns success, as upstream does; the change stays in memory only, and a later genuine file read restores the disk contents. Runtime-only updates cannot cover a real file event or a waiting save. Recovery provenance and independent refusal marks survive. |
 | ac3cd66f | Covered | No new implementation | Gemini response initialization already uses map-only identity planning without building declarations or cleaning schemas; reverse-map equivalence and oversized-schema tests cover this |
 | 9e79552f | Ported | Nothing in the native SSE/WebSocket executors | Moderation response.metadata stays in bounded bootstrap buffering so an early overload can fail over before output; metadata followed by output flushes once in order. Duplex retains upstream v8.0.42's lack of bootstrap buffering. |
@@ -34,7 +34,7 @@ The 43 upstream commits in this range are accounted for below, including covered
 | 57a12996 | Covered | Go incomplete-path tracking table | Non-destructive scans and positive absence checks already preserve credentials on failed or partial enumeration. Remove/rename check failures preserve registration and retry without another event, with capped backoff. Ordinary saves cannot recreate a file until presence is proven; portable injected-error tests cover retry and recreation. |
 | 8bd17955 | Skipped | Go pointer-lock implementation | Rust management handlers already snapshot Arc<Config> through RwLock; no equivalent unsynchronized pointer read exists. |
 | 07b5a7a1 | Partly ported | Plugin SDK/adapters, RESP/Redis transport, Kimi and Antigravity slices; duplex tier refresh | These subsystems are not ported, and duplex taps announce only the first request. Native usage records carry the final outbound effective_service_tier separately from requested and response tiers; see [Usage statistics](#usage-statistics) |
-| ceb045a1 | Skipped | Go release-pipeline toolchain bump | Open Ferry uses Cargo; Go 1.26.10 for the parity oracle/CI remains separately scheduled. |
+| ceb045a1 | Skipped | Go release-pipeline toolchain bump | Open Ferry uses Cargo; parity CI uses Go 1.26.10 for the oracle. |
 | b90190db | Ported | Nothing | Claude whole-response and stream usage read usage.speed as the reply's service tier, independently of the requested and effective tiers |
 | a014ba0e | Skipped | Plugin unload and plugin-handler race-test synchronization | No plugin host or native production change. |
 | 13874f1f | Skipped | Decoded frontend-plugin body/slots and recursion guard | No frontend plugin host/API. Native per-turn access is handled by b9bb031d. |
@@ -1665,7 +1665,7 @@ cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 
 `--go` picks the Go toolchain. Use Go 1.26.10 with `GOTOOLCHAIN=local`: install `golang.org/dl/go1.26.10` with `go install golang.org/dl/go1.26.10@latest`, run `go1.26.10 download`, check `go1.26.10 version`, then pass `--go go1.26.10`. An absolute path to that toolchain's `go` binary also works.
 
-The v8.0.42 regression cases and Go 1.26.10 CI toolchain are included. Config-save recalibration, the full comparison at the combined head and README totals remain pending; older measured results keep their original labels.
+The v8.0.42 regression cases and Go 1.26.10 CI toolchain are included. The config-save baseline has been fully refreshed, and the full and PR-profile comparisons passed with that baseline. README totals come from the full run; older benchmark results keep their original labels.
 
 With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 
