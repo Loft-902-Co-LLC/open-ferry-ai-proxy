@@ -1265,6 +1265,7 @@ fn apply_model_prefixes(models: Vec<ModelInfo>, prefix: &str, force: bool) -> Ve
         }
         let mut prefixed = model.clone();
         prefixed.id = format!("{prefix}/{base}");
+        prefixed.name = rewrite_model_info_name(&prefixed.name, &base, &prefixed.id);
         if prefixed.metadata_model_id.is_empty() {
             prefixed.metadata_model_id.clone_from(&base);
         }
