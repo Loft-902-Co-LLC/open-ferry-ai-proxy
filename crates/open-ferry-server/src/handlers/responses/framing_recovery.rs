@@ -9,7 +9,11 @@ const FIELDS: &[&[u8]] = &[b"event:", b"data:", b"id:", b"retry:"];
 impl Framer {
     /// Disambiguates a new frame after an empty data field, retaining split
     /// field names until enough of them has arrived to make the decision.
-    pub(super) fn prepare_chunk<'a>(&mut self, out: &mut BytesMut, chunk: &'a [u8]) -> Option<Cow<'a, [u8]>> {
+    pub(super) fn prepare_chunk<'a>(
+        &mut self,
+        out: &mut BytesMut,
+        chunk: &'a [u8],
+    ) -> Option<Cow<'a, [u8]>> {
         let mut chunk = Cow::Borrowed(chunk);
         if !self.next_field_suffix.is_empty() {
             let (_, complete, _) = chunk_field(trim_start(&chunk));
@@ -27,8 +31,9 @@ impl Framer {
         }
         if !self.next_frame_prefix.is_empty() {
             let payload = data_payload(&self.next_frame_prefix);
-            if payload.as_ref().is_some_and(|payload| go::json_valid(payload) && json::str_at(payload, "type").is_empty())
-                && !has_field(&self.next_frame_prefix, b"event:")
+            if payload.as_ref().is_some_and(|payload| {
+                go::json_valid(payload) && json::str_at(payload, "type").is_empty()
+            }) && !has_field(&self.next_frame_prefix, b"event:")
                 && frame_end(&self.next_frame_prefix, 0, &mut Work::default()).is_none()
             {
                 let trimmed = trim_start(&chunk);
@@ -38,12 +43,17 @@ impl Framer {
                 if complete && last_partial {
                     let joined = [last, trimmed].concat();
                     let (joined_field, joined_complete, _) = chunk_field(&joined);
-                    if joined_complete && (standard_field(joined_field) || (!field.is_empty() && !standard_field(field))) {
+                    if joined_complete
+                        && (standard_field(joined_field)
+                            || (!field.is_empty() && !standard_field(field)))
+                    {
                         complete = false;
                     }
                 }
                 let new_field_prefix = last.starts_with(b"data:")
-                    || FIELDS.iter().any(|prefix| trimmed.len() < prefix.len() && prefix.starts_with(trimmed));
+                    || FIELDS
+                        .iter()
+                        .any(|prefix| trimmed.len() < prefix.len() && prefix.starts_with(trimmed));
                 if partial && new_field_prefix {
                     self.next_field_suffix.extend_from_slice(&chunk);
                     return None;
@@ -64,7 +74,8 @@ impl Framer {
             }
             // A bare word terminated by a real newline is data, not a new
             // colon-bearing field (upstream mistakes malformed string data here).
-            let mut new_frame = complete && field != b"data" && trimmed.get(field.len()) == Some(&b':');
+            let mut new_frame =
+                complete && field != b"data" && trimmed.get(field.len()) == Some(&b':');
             if complete && field == b"data" {
                 let payload = data_payload(trimmed).unwrap_or_default();
                 let valid = go::json_valid(&payload);
@@ -78,7 +89,8 @@ impl Framer {
                     self.next_frame_prefix.extend_from_slice(&chunk);
                     return None;
                 }
-                new_frame = payload == b"[DONE]" || (valid && (!json::str_at(&payload, "type").is_empty() || has_event));
+                new_frame = payload == b"[DONE]"
+                    || (valid && (!json::str_at(&payload, "type").is_empty() || has_event));
                 if valid && !new_frame && !delimited {
                     self.next_frame_prefix.extend_from_slice(&chunk);
                     return None;
@@ -120,7 +132,10 @@ impl Framer {
 }
 
 fn trim_start(bytes: &[u8]) -> &[u8] {
-    let start = bytes.iter().position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n')).unwrap_or(bytes.len());
+    let start = bytes
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(bytes.len());
     &bytes[start..]
 }
 
@@ -148,17 +163,26 @@ pub(super) fn chunk_field(chunk: &[u8]) -> (&[u8], bool, bool) {
 }
 
 fn has_field(frame: &[u8], prefix: &[u8]) -> bool {
-    frame.split(|&b| b == b'\n').any(|line| go::trim_space(line).starts_with(prefix))
+    frame
+        .split(|&b| b == b'\n')
+        .any(|line| go::trim_space(line).starts_with(prefix))
 }
 
 pub(super) fn has_empty_event_data(frame: &[u8], scan: &EventScan) -> bool {
-    scan.has_event() && scan.has_data() && scan.data_valid()
+    scan.has_event()
+        && scan.has_data()
+        && scan.data_valid()
         && data_payload(frame).is_some_and(|payload| go::trim_space(&payload).is_empty())
 }
 
 pub(super) fn consume_breaks(breaks: &mut Vec<usize>, consumed: usize) {
     breaks.retain_mut(|pos| {
-        if *pos < consumed { false } else { *pos -= consumed; true }
+        if *pos < consumed {
+            false
+        } else {
+            *pos -= consumed;
+            true
+        }
     });
 }
 
@@ -168,7 +192,11 @@ pub(super) fn recover_json_frame<'a>(frame: &'a [u8], breaks: &[usize]) -> Cow<'
     if breaks.is_empty() || data_payload(frame).is_some_and(|payload| go::json_valid(&payload)) {
         return Cow::Borrowed(frame);
     }
-    let positions: Vec<_> = breaks.iter().copied().filter(|&pos| frame.get(pos) == Some(&b'\n')).collect();
+    let positions: Vec<_> = breaks
+        .iter()
+        .copied()
+        .filter(|&pos| frame.get(pos) == Some(&b'\n'))
+        .collect();
     let recover = |candidate: &[u8]| {
         let payload = data_payload(candidate)?;
         go::json_valid(&payload).then(|| frame_with_data(candidate, &payload))
@@ -179,7 +207,7 @@ pub(super) fn recover_json_frame<'a>(frame: &'a [u8], breaks: &[usize]) -> Cow<'
             return Cow::Owned(frame);
         }
     }
-    if positions.len() > 1 {
+    if !positions.is_empty() {
         let mut candidate = Vec::with_capacity(frame.len() - positions.len());
         let mut start = 0;
         for pos in positions {
@@ -189,6 +217,20 @@ pub(super) fn recover_json_frame<'a>(frame: &'a [u8], breaks: &[usize]) -> Cow<'
         candidate.extend_from_slice(&frame[start..]);
         if let Some(frame) = recover(&candidate) {
             return Cow::Owned(frame);
+        }
+        // Keep malformed private events classifiable across splits before JSON
+        // colons. Only remove recorded synthetic newlines, never real comments.
+        // Upstream recovers valid JSON only; its malformed type can be hidden
+        // behind an inserted SSE comment and escape the public-client filter.
+        if let Some(payload) = data_payload(&candidate) {
+            let kind = json::str_at(&payload, "type");
+            if kind == "response.metadata"
+                || kind == "response.subscription_usage"
+                || kind.starts_with("codex.")
+                || kind.starts_with("responsesapi.")
+            {
+                return Cow::Owned(frame_with_data(&candidate, &payload));
+            }
         }
     }
     Cow::Borrowed(frame)
@@ -207,15 +249,25 @@ pub(super) fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
         return false;
     }
     let trimmed = chunk.strip_prefix(b" ").unwrap_or(chunk);
-    let start = trimmed.iter().position(|b| !matches!(b, b' ' | b'\t')).unwrap_or(trimmed.len());
+    let start = trimmed
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t'))
+        .unwrap_or(trimmed.len());
     let trimmed = &trimmed[start..];
-    if !FIELDS.iter().chain([&b":"[..]].iter()).any(|prefix| trimmed.starts_with(prefix)) {
+    if !FIELDS
+        .iter()
+        .chain([&b":"[..]].iter())
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
         return false;
     }
     // Unlike upstream, do not split a fragmented standard SSE field name.
     // Otherwise `data` + `: {}` becomes `data\n: {}` and loses the payload.
     let last = last_line(pending);
-    if FIELDS.iter().any(|prefix| last.len() < prefix.len() && prefix.starts_with(last)) {
+    if FIELDS
+        .iter()
+        .any(|prefix| last.len() < prefix.len() && prefix.starts_with(last))
+    {
         let joined = [last, trimmed].concat();
         if FIELDS.iter().any(|prefix| joined.starts_with(prefix)) {
             return false;
@@ -225,7 +277,9 @@ pub(super) fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
 }
 
 fn data_ends_inside_json_string(frame: &[u8]) -> bool {
-    let Some(payload) = data_payload(frame) else { return false; };
+    let Some(payload) = data_payload(frame) else {
+        return false;
+    };
     let payload = go::trim_space(&payload);
     if !matches!(payload.first(), Some(b'{' | b'[' | b'"')) {
         return false;

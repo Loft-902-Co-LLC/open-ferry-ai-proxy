@@ -98,7 +98,10 @@ impl ErrorMessage {
         if let Some(value) = retry_after {
             headers.append(header::RETRY_AFTER, value);
         }
-        let trusted = self.source.as_ref().is_some_and(ExecError::has_retry_after_override);
+        let trusted = self
+            .source
+            .as_ref()
+            .is_some_and(ExecError::has_retry_after_override);
         if passthrough {
             for name in self.addon.keys() {
                 if is_reserved_response_header(name) || (trusted && name == header::RETRY_AFTER) {
@@ -545,15 +548,29 @@ mod tests {
     fn retry_headers_recompute_the_trusted_deadline_and_reject_addons() {
         let mut error = ExecError::transient_capacity("busy", Some(Duration::from_secs(90)))
             .with_trusted_retry_after(Duration::from_secs(5));
-        error.headers.insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+        error
+            .headers
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
         let mut message = ErrorMessage::from_exec(error);
         // A cached safe value and an independent add-on must not restart the clock.
         message.retry_after = Some(HeaderValue::from_static("90"));
-        message.addon.insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
+        message
+            .addon
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
         for passthrough in [false, true] {
-            for response in [openai_error_response(&message, passthrough), claude_error_response(&message, passthrough)] {
+            for response in [
+                openai_error_response(&message, passthrough),
+                claude_error_response(&message, passthrough),
+            ] {
                 assert_eq!(response.headers()[header::RETRY_AFTER], "5");
-                assert_eq!(response.headers().get_all(header::RETRY_AFTER).iter().count(), 1);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get_all(header::RETRY_AFTER)
+                        .iter()
+                        .count(),
+                    1
+                );
             }
         }
     }
@@ -561,17 +578,31 @@ mod tests {
     #[test]
     fn retry_headers_trust_positive_executor_hints_including_503() {
         for status in [429, 503] {
-            let mut error = ExecError::upstream(status, "busy")
-                .with_trusted_retry_after(Duration::from_millis(1500));
-            error.retry_after = Some(Duration::from_millis(1500));
-            error.headers.insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+            let mut error =
+                ExecError::transient_capacity("busy", Some(Duration::from_millis(1500)))
+                    .with_status(status);
+            error
+                .headers
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
             let mut message = ErrorMessage::from_exec(error);
-            message.addon.insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
+            message
+                .addon
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
             for passthrough in [false, true] {
-                for response in [openai_error_response(&message, passthrough), claude_error_response(&message, passthrough)] {
+                for response in [
+                    openai_error_response(&message, passthrough),
+                    claude_error_response(&message, passthrough),
+                ] {
                     assert_eq!(response.status(), status);
                     assert_eq!(response.headers()[header::RETRY_AFTER], "2");
-                    assert_eq!(response.headers().get_all(header::RETRY_AFTER).iter().count(), 1);
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get_all(header::RETRY_AFTER)
+                            .iter()
+                            .count(),
+                        1
+                    );
                 }
             }
         }
@@ -581,9 +612,14 @@ mod tests {
     fn retry_headers_without_source_keep_addon_replacement() {
         let mut message = ErrorMessage::new(503, "busy");
         message.retry_after = Some(HeaderValue::from_static("5"));
-        message.addon.insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
+        message
+            .addon
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
         for (passthrough, expected) in [(false, "5"), (true, "888")] {
-            for response in [openai_error_response(&message, passthrough), claude_error_response(&message, passthrough)] {
+            for response in [
+                openai_error_response(&message, passthrough),
+                claude_error_response(&message, passthrough),
+            ] {
                 assert_eq!(response.headers()[header::RETRY_AFTER], expected);
             }
         }
@@ -593,13 +629,20 @@ mod tests {
     fn retry_headers_do_not_resurrect_an_expired_deadline() {
         let mut error = ExecError::transient_capacity("busy", Some(Duration::from_secs(90)))
             .with_trusted_retry_after(Duration::from_secs(5));
-        error.headers.insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+        error
+            .headers
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
         let mut message = ErrorMessage::from_exec(error);
         message.source.as_mut().unwrap().trusted_retry_deadline = Some(
-            std::time::Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+            std::time::Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap(),
         );
         for passthrough in [false, true] {
-            for response in [openai_error_response(&message, passthrough), claude_error_response(&message, passthrough)] {
+            for response in [
+                openai_error_response(&message, passthrough),
+                claude_error_response(&message, passthrough),
+            ] {
                 assert!(!response.headers().contains_key(header::RETRY_AFTER));
             }
         }
@@ -610,15 +653,56 @@ mod tests {
         for hint in [None, Some(Duration::ZERO)] {
             let mut error = ExecError::transient_capacity("busy", hint)
                 .with_trusted_retry_after(Duration::ZERO);
-            error.headers.append(header::RETRY_AFTER, HeaderValue::from_static("999"));
-            error.headers.append(header::RETRY_AFTER, HeaderValue::from_static("998"));
+            error
+                .headers
+                .append(header::RETRY_AFTER, HeaderValue::from_static("999"));
+            error
+                .headers
+                .append(header::RETRY_AFTER, HeaderValue::from_static("998"));
             let message = ErrorMessage::from_exec(error);
-            for response in [openai_error_response(&message, false), claude_error_response(&message, false)] {
+            for response in [
+                openai_error_response(&message, false),
+                claude_error_response(&message, false),
+            ] {
                 assert!(!response.headers().contains_key(header::RETRY_AFTER));
             }
-            for response in [openai_error_response(&message, true), claude_error_response(&message, true)] {
-                assert_eq!(response.headers().get_all(header::RETRY_AFTER).iter().collect::<Vec<_>>(), ["999", "998"]);
+            for response in [
+                openai_error_response(&message, true),
+                claude_error_response(&message, true),
+            ] {
+                assert_eq!(
+                    response
+                        .headers()
+                        .get_all(header::RETRY_AFTER)
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    ["999", "998"]
+                );
             }
+        }
+    }
+
+    // Group A owns the pinned core's zero-wait override bug. This direct-error
+    // contract test must be enabled after their next round; no manager path is used.
+    #[test]
+    #[ignore = "requires group A's positive-only has_retry_after_override contract"]
+    fn retry_headers_zero_unavailable_wait_allows_raw_passthrough() {
+        let mut error = ExecError::auth_unavailable(Duration::ZERO);
+        error
+            .headers
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("999"));
+        let message = ErrorMessage::from_exec(error);
+        for response in [
+            openai_error_response(&message, false),
+            claude_error_response(&message, false),
+        ] {
+            assert!(!response.headers().contains_key(header::RETRY_AFTER));
+        }
+        for response in [
+            openai_error_response(&message, true),
+            claude_error_response(&message, true),
+        ] {
+            assert_eq!(response.headers()[header::RETRY_AFTER], "999");
         }
     }
 

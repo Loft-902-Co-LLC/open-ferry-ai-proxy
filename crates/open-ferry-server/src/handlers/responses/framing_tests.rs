@@ -22,15 +22,25 @@ fn run(codex: bool, chunks: &[&[u8]]) -> (String, Framer) {
 fn public_completion(chunks: &[&str]) {
     let bytes: Vec<_> = chunks.iter().map(|chunk| chunk.as_bytes()).collect();
     let (got, framer) = run(false, &bytes);
-    assert!(!got.contains("response.metadata") && !got.contains("private"), "{chunks:?}: {got}");
+    assert!(
+        !got.contains("response.metadata") && !got.contains("private"),
+        "{chunks:?}: {got}"
+    );
     assert!(!got.contains("event: error"), "{chunks:?}: {got}");
     assert!(got.contains("response.completed"), "{chunks:?}: {got}");
-    assert_eq!(framer.terminal_event, "response.completed", "{chunks:?}: {got}");
+    assert_eq!(
+        framer.terminal_event, "response.completed",
+        "{chunks:?}: {got}"
+    );
 }
 
 #[test]
 fn metadata_filter_checks_event_and_payload_even_when_malformed() {
-    for private in ["response.metadata", "codex.response.metadata", "codex.rate_limits"] {
+    for private in [
+        "response.metadata",
+        "codex.response.metadata",
+        "codex.rate_limits",
+    ] {
         for frame in [
             format!("event: {private}\ndata: not-json\n\n"),
             format!("event: {private}\n\n"),
@@ -52,8 +62,19 @@ fn fragmented_metadata_data_field_preserves_codex_and_filters_public() {
         let frame = format!("{prefix} {payload}{ending}{ending}");
         for split in [prefix.len(), prefix.len() + 1] {
             for codex in [false, true] {
-                let (got, _) = run(codex, &[&frame.as_bytes()[..split], &frame.as_bytes()[split..], COMPLETED.as_bytes()]);
-                assert_eq!(got.contains(payload), codex, "split={split} codex={codex}: {got}");
+                let (got, _) = run(
+                    codex,
+                    &[
+                        &frame.as_bytes()[..split],
+                        &frame.as_bytes()[split..],
+                        COMPLETED.as_bytes(),
+                    ],
+                );
+                assert_eq!(
+                    got.contains(payload),
+                    codex,
+                    "split={split} codex={codex}: {got}"
+                );
                 assert!(got.contains(COMPLETED));
             }
         }
@@ -62,13 +83,26 @@ fn fragmented_metadata_data_field_preserves_codex_and_filters_public() {
 
 #[test]
 fn empty_metadata_before_fragmented_fields_and_data_only_completion() {
-    for field in ["event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n", "data: {\"type\":\"response.completed\"}\n\n", "id: event-42\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n", "retry: 1000\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n", "x-extra: value\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"] {
+    for field in [
+        "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        "data: {\"type\":\"response.completed\"}\n\n",
+        "id: event-42\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        "retry: 1000\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        "x-extra: value\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+    ] {
         let colon = field.find(':').unwrap();
         for split in 1..=colon + 1 {
             public_completion(&[EMPTY_METADATA, &field[..split], &field[split..]]);
         }
     }
-    for prefix in ["\n", "\r\n", ": keepalive\n", "id: event-42\n", "retry: 1000\n", "x-extra: value\n"] {
+    for prefix in [
+        "\n",
+        "\r\n",
+        ": keepalive\n",
+        "id: event-42\n",
+        "retry: 1000\n",
+        "x-extra: value\n",
+    ] {
         public_completion(&[EMPTY_METADATA, &format!("{prefix}{COMPLETED}")]);
     }
 }
@@ -80,15 +114,36 @@ fn empty_metadata_before_data_then_fragmented_event() {
         public_completion(&[EMPTY_METADATA, DATA_FIRST, &event[..split], &event[split..]]);
     }
     public_completion(&[EMPTY_METADATA, &format!("{DATA_FIRST}\n{event}")]);
-    for field in ["id: event-42", "retry: 1000", ": keepalive", "x-extra: value"] {
+    for field in [
+        "id: event-42",
+        "retry: 1000",
+        ": keepalive",
+        "x-extra: value",
+    ] {
         for split in 1..=field.len() {
-            public_completion(&[EMPTY_METADATA, DATA_FIRST, &field[..split], &field[split..], event]);
+            public_completion(&[
+                EMPTY_METADATA,
+                DATA_FIRST,
+                &field[..split],
+                &field[split..],
+                event,
+            ]);
         }
     }
     for field in ["", "id: event-42\n", ": keepalive\n"] {
         for split in 1..6 {
-            public_completion(&[EMPTY_METADATA, &format!("{DATA_FIRST}\n"), field, &event[..split], &event[split..]]);
-            public_completion(&[EMPTY_METADATA, &format!("{DATA_FIRST}\n{field}{}", &event[..split]), &event[split..]]);
+            public_completion(&[
+                EMPTY_METADATA,
+                &format!("{DATA_FIRST}\n"),
+                field,
+                &event[..split],
+                &event[split..],
+            ]);
+            public_completion(&[
+                EMPTY_METADATA,
+                &format!("{DATA_FIRST}\n{field}{}", &event[..split]),
+                &event[split..],
+            ]);
         }
     }
 }
@@ -97,7 +152,9 @@ fn empty_metadata_before_data_then_fragmented_event() {
 fn preserves_empty_custom_event_until_its_delimiter() {
     let mut framer = Framer::new(false);
     let mut out = BytesMut::new();
-    framer.write_chunk(&mut out, b"event: custom\ndata:").unwrap();
+    framer
+        .write_chunk(&mut out, b"event: custom\ndata:")
+        .unwrap();
     assert!(out.is_empty());
     framer.write_chunk(&mut out, b"\n\n").unwrap();
     assert_eq!(&out[..], b"event: custom\ndata:\n\n");
@@ -105,30 +162,118 @@ fn preserves_empty_custom_event_until_its_delimiter() {
 
 #[test]
 fn field_prefixes_in_json_strings_are_not_sse_fields() {
-    for marker in ["data: private", "event: private", "id: private", "retry: private", ": private", "escaped \" data: private", "escaped \\ event: private"] {
+    for marker in [
+        "data: private",
+        "event: private",
+        "id: private",
+        "retry: private",
+        ": private",
+        "escaped \" data: private",
+        "escaped \\ event: private",
+    ] {
         let payload = json!({"type":"response.metadata","metadata":{"marker":marker}}).to_string();
         let frame = format!("data: {payload}\n\n");
         // Try every split, including escaped quote/backslash boundaries.
         for split in 1..frame.len() {
             for codex in [false, true] {
-                let (got, _) = run(codex, &[&frame.as_bytes()[..split], &frame.as_bytes()[split..], COMPLETED.as_bytes()]);
-                assert_eq!(got.contains(&payload), codex, "marker={marker:?} split={split} codex={codex}: {got}");
+                let (got, _) = run(
+                    codex,
+                    &[
+                        &frame.as_bytes()[..split],
+                        &frame.as_bytes()[split..],
+                        COMPLETED.as_bytes(),
+                    ],
+                );
+                assert_eq!(
+                    got.contains(&payload),
+                    codex,
+                    "marker={marker:?} split={split} codex={codex}: {got}"
+                );
                 assert!(got.contains(COMPLETED));
             }
         }
     }
 }
 
+#[test]
+fn fragmented_standard_data_field_preserves_malformed_payload() {
+    for codex in [false, true] {
+        let (got, _) = run(codex, &[b"data", b": not-json\n\n"]);
+        assert_eq!(got, "data: not-json\n\n");
+    }
+}
+
+#[test]
+fn data_first_completion_waits_for_fragmented_event_name() {
+    for codex in [false, true] {
+        let (got, framer) = run(
+            codex,
+            &[DATA_FIRST.as_bytes(), b"event: respon", b"se.completed\n\n"],
+        );
+        assert_eq!(got, format!("{DATA_FIRST}\nevent: response.completed\n\n"));
+        assert_eq!(framer.terminal_event, "response.completed");
+    }
+}
+
+#[test]
+fn malformed_public_json_string_does_not_become_an_sse_field() {
+    let first = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"";
+    for marker in [
+        "data: text",
+        "event: text",
+        "id: text",
+        "retry: text",
+        ": text",
+    ] {
+        let last = format!("{marker}\", BAD}}\n\n");
+        let expected = [first.as_slice(), last.as_bytes()].concat();
+        for codex in [false, true] {
+            let (got, _) = run(codex, &[first, last.as_bytes()]);
+            assert_eq!(got.as_bytes(), expected, "marker={marker:?} codex={codex}");
+        }
+    }
+}
+
 fn recovery_fixtures() -> Vec<Vec<&'static str>> {
     vec![
-        vec![r#"data: {"type""#, ":\"response.metadata\",\ndata: \"metadata\":{\"marker\":\"private\"}}\n\n"],
-        vec![r#"data: {"type""#, r#":"response.metadata","metadata""#, ":{\"marker\":\"private\"}}\n\n"],
-        vec![r#"data: {"type""#, ":\"response.metadata\",\n: keepalive\ndata: \"metadata\":{\"marker\":\"private\"}}\n\n"],
-        vec!["data", ": {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n"],
-        vec![r#"data: {"type""#, ":\"response.metadata\",\n: keepalive\ndata: \"metadata\"", ":{\"marker\":\"private\"}}\n\n"],
-        vec![r#"data: {"type""#, ": keepalive", r#"data: :"response.metadata","metadata""#, ":{\"marker\":\"private\"}}\n\n"],
-        vec![r#"data: {"type":"response.metadata","metadata":{"marker""#, ":\"", "data: private\"}}\n\n"],
-        vec![r#"data: {"type""#, ":", "data: :\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n"],
+        vec![
+            r#"data: {"type""#,
+            ":\"response.metadata\",\ndata: \"metadata\":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type""#,
+            r#":"response.metadata","metadata""#,
+            ":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type""#,
+            ":\"response.metadata\",\n: keepalive\ndata: \"metadata\":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            "data",
+            ": {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type""#,
+            ":\"response.metadata\",\n: keepalive\ndata: \"metadata\"",
+            ":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type""#,
+            ": keepalive",
+            r#"data: :"response.metadata","metadata""#,
+            ":{\"marker\":\"private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type":"response.metadata","metadata":{"marker""#,
+            ":\"",
+            "data: private\"}}\n\n",
+        ],
+        vec![
+            r#"data: {"type""#,
+            ":",
+            "data: :\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n",
+        ],
     ]
 }
 
@@ -142,17 +287,92 @@ fn recovers_fragmented_json_without_removing_real_comments_or_string_data() {
             if codex {
                 let frame = got.split("\n\n").next().unwrap();
                 let payload = data_payload(frame.as_bytes()).unwrap();
-                let value: Value = serde_json::from_slice(&payload).unwrap_or_else(|error| panic!("fixture={i}: {error}: {got}"));
+                let value: Value = serde_json::from_slice(&payload)
+                    .unwrap_or_else(|error| panic!("fixture={i}: {error}: {got}"));
                 assert_eq!(value["type"], "response.metadata", "fixture={i}: {got}");
-                assert_eq!(value["metadata"]["marker"], if i == 6 { "data: private" } else { "private" });
+                assert_eq!(
+                    value["metadata"]["marker"],
+                    if i == 6 { "data: private" } else { "private" }
+                );
                 if fixture.iter().any(|chunk| chunk.contains(": keepalive")) {
                     assert!(got.contains(": keepalive"), "fixture={i}: {got}");
                 }
             } else {
-                assert!(!got.contains("response.metadata") && !got.contains("private"), "fixture={i}: {got}");
+                assert!(
+                    !got.contains("response.metadata") && !got.contains("private"),
+                    "fixture={i}: {got}"
+                );
             }
             assert!(got.contains(COMPLETED), "fixture={i}: {got}");
         }
+    }
+}
+
+#[test]
+fn recovery_prefix_buffers_obey_the_event_limit() {
+    for suffix in [false, true] {
+        let mut framer = Framer::new(false).with_limit(64);
+        let mut out = BytesMut::new();
+        framer
+            .write_chunk(&mut out, EMPTY_METADATA.as_bytes())
+            .unwrap();
+        framer
+            .write_chunk(
+                &mut out,
+                if suffix {
+                    b"data: {}"
+                } else {
+                    b"data: {\"a\":\""
+                },
+            )
+            .unwrap();
+        let mut error = None;
+        for _ in 0..65 {
+            if let Err(found) = framer.write_chunk(&mut out, b"x") {
+                error = Some(found);
+                break;
+            }
+            assert!(framer.held() <= 64);
+        }
+        assert_eq!(error.unwrap().status, 502);
+        assert_eq!(framer.held(), 0);
+        framer.flush(&mut out);
+        assert!(out.is_empty());
+    }
+}
+
+#[test]
+fn recovered_terminal_output_is_rebuilt_exactly_once() {
+    let item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"once\"}}\n\n";
+    let first = "data: {\"type\"";
+    let last = ":\"response.completed\",\"response\":{\"output\":[]}}\n\n";
+    for codex in [false, true] {
+        let (got, framer) = run(
+            codex,
+            &[
+                item.as_bytes(),
+                first.as_bytes(),
+                last.as_bytes(),
+                COMPLETED.as_bytes(),
+                item.as_bytes(),
+            ],
+        );
+        let payloads: Vec<Value> = got
+            .split("\n\n")
+            .filter_map(|frame| data_payload(frame.as_bytes()))
+            .map(|data| serde_json::from_slice(&data).unwrap())
+            .collect();
+        let completed: Vec<_> = payloads
+            .iter()
+            .filter(|value| value["type"] == "response.completed")
+            .collect();
+        assert_eq!(completed.len(), 1, "{got}");
+        assert_eq!(
+            completed[0]["response"]["output"],
+            json!([{"type":"message","id":"once"}])
+        );
+        assert_eq!(framer.terminal_event, "response.completed");
+        assert_eq!(framer.data_frames, 2);
     }
 }
 
@@ -175,16 +395,24 @@ fn every_byte_partition_preserves_client_events() {
         format!("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"id\":\"once\"}}}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"output\":[]}}}}\n\n{COMPLETED}").into_bytes(),
         b"data: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"data: private\"}}\r\n\r\n".to_vec(),
         b"data: {\"response\":{\"id\":\"r\"}}\nevent: response.completed\n\n".to_vec(),
+        "event: response.output_text.delta\ndata: {\"delta\":\"雪🌉\"}\n\n".as_bytes().to_vec(),
+        b": keepalive\nid: seven\nretry: 500\ndata: {}\r\n\r\n".to_vec(),
+        b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"failed\"}}}\n\n".to_vec(),
+        b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n".to_vec(),
+        b"data: {\"type\":\"response.metadata\",\"bad\":\n\n".to_vec(),
     ];
     for fixture in recovery_fixtures() {
         let bytes: Vec<_> = fixture.iter().map(|chunk| chunk.as_bytes()).collect();
         streams.push(run(true, &bytes).0.into_bytes());
     }
     fn events(out: &str) -> Vec<(String, Vec<u8>)> {
-        out.replace("\r\n", "\n").split("\n\n").filter_map(|frame| {
-            let data = data_payload(frame.as_bytes())?;
-            Some((event_name(frame.as_bytes()), data))
-        }).collect()
+        out.replace("\r\n", "\n")
+            .split("\n\n")
+            .filter_map(|frame| {
+                let data = data_payload(frame.as_bytes())?;
+                Some((event_name(frame.as_bytes()), data))
+            })
+            .collect()
     }
     let mut splits = 0;
     for (i, wire) in streams.iter().enumerate() {
@@ -204,5 +432,9 @@ fn every_byte_partition_preserves_client_events() {
             }
         }
     }
-    eprintln!("partition invariant: {} streams, {splits} partitions, {:?}", streams.len(), started.elapsed());
+    eprintln!(
+        "partition invariant: {} streams, {splits} partitions, {:?}",
+        streams.len(),
+        started.elapsed()
+    );
 }

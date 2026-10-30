@@ -1,5 +1,5 @@
 // Ported from responsesSSEFramer and its helpers in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.42, MIT).
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.47, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Puts a Responses event stream back into whole events as it passes, drops
@@ -9,11 +9,17 @@
 //! Deviations from upstream:
 //! - The held-back event is read on from where the last chunk left it, by
 //!   an [`EventScan`], and whole events are written from where they lie, so
-//!   a stream costs time in step with its size. Upstream reads the held-back
-//!   event again, and copies what is left, for each chunk.
+//!   delimiter/validation scanning costs time in step with the stream's size.
+//!   String-aware boundary repair may still inspect a held event again. Upstream
+//!   also rescans delimiter/validation state and copies the tail for each chunk.
 //! - The held-back event may grow to at most [`MAX_EVENT_BYTES`]. Past it,
 //!   [`Framer::write_chunk`] drops it and fails with a 502, which ends the
 //!   stream. Upstream holds it back without limit.
+//! - Fragmented standard fields and trailing event names remain pending; a bare
+//!   malformed data word is not treated as a colon-bearing field. This avoids
+//!   upstream's transport-boundary-dependent event loss.
+//! - Malformed private types can also be recovered across synthetic newlines,
+//!   so a split before a JSON colon cannot bypass public-client filtering.
 //!
 //! [`MAX_EVENT_BYTES`]: crate::sse_check::MAX_EVENT_BYTES
 
@@ -98,7 +104,7 @@ impl Framer {
     /// How many bytes are held back.
     #[cfg(test)]
     pub(super) fn held(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.next_frame_prefix.len() + self.next_field_suffix.len()
     }
 
     /// Adds a chunk of the stream, writing the events it completes
@@ -114,14 +120,17 @@ impl Framer {
         }
         let chunk = self.prepare_chunk(out, chunk);
         if self.pending.len() + self.next_frame_prefix.len() + self.next_field_suffix.len()
-            > self.limit.0 && chunk.is_none()
+            > self.limit.0
+            && chunk.is_none()
         {
             self.reset();
             self.next_frame_prefix.clear();
             self.next_field_suffix.clear();
             return Err(ErrorMessage::new(502, too_large(self.limit)));
         }
-        let Some(chunk) = chunk else { return Ok(()); };
+        let Some(chunk) = chunk else {
+            return Ok(());
+        };
         let chunk = chunk.as_ref();
         if starts_new_data_frame(&self.scan, chunk) {
             let frame = self.take_pending();
@@ -764,8 +773,9 @@ mod tests {
         assert_eq!(frame_len(b"a\n"), None);
     }
 
-    /// Upstream's `WriteChunk` and `Flush`, as this read them before it read
-    /// on from where it left off, to check against.
+    /// A rescanning `WriteChunk`/`Flush` oracle for the incremental scanner.
+    /// v8.0.47 recovery and the documented field-boundary fixes are shared;
+    /// delimiter searches, data checks and pending-buffer movement are not.
     mod upstream {
         use crate::sse_check::data_lines_valid;
 
@@ -787,7 +797,9 @@ mod tests {
                 if chunk.is_empty() || !framer.terminal_event.is_empty() {
                     return;
                 }
-                let Some(chunk) = framer.prepare_chunk(out, chunk) else { return; };
+                let Some(chunk) = framer.prepare_chunk(out, chunk) else {
+                    return;
+                };
                 let chunk = chunk.as_ref();
                 if starts_new_data_frame(&framer.pending, chunk) {
                     let frame = framer.take_pending();

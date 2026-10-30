@@ -33,6 +33,138 @@ use crate::sse_check::MAX_EVENT_BYTES;
 use crate::stream::{StreamWriter, forward};
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
 
+#[tokio::test]
+async fn http_metadata_visibility_follows_official_client_classification() {
+    const METADATA: &str = "event: response.metadata\ndata: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n";
+    for (agent, originator, codex) in [
+        (None, None, false),
+        (Some("other-client/1"), None, false),
+        (Some("codex_vscode/1"), None, false),
+        (Some(CODEX_DESKTOP), None, true),
+        (Some("codex-tui/1"), None, true),
+        (Some("codex_cli_rs/1"), None, true),
+        (Some("codex_exec/1"), None, true),
+        (None, Some("codex_cli_rs"), true),
+    ] {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::chunks(&[METADATA, COMPLETED])],
+        );
+        let mut request = post("/v1/responses", STREAM, agent);
+        if let Some(originator) = originator {
+            request
+                .headers_mut()
+                .insert("originator", originator.parse().unwrap());
+        }
+        let (status, _, body) = send(&app, request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body.contains("private"),
+            codex,
+            "agent={agent:?} originator={originator:?}: {body}"
+        );
+        assert_eq!(
+            body.matches("event: response.completed").count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+// Blocked by exec.rs/SseCheck, outside group D's owned paths. Enable when the
+// shared validation layer preserves fragmented JSON strings before this handler.
+#[tokio::test]
+#[ignore = "requires the shared exec/SseCheck framing integration"]
+async fn http_fragmented_metadata_reaches_framer() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"",
+            "data: private\"}}\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, Some(CODEX_DESKTOP))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("data: private"), "{body}");
+}
+
+// Rust cancellation drops the owning future/stream; it is not a second ready
+// channel competing with EOF as in Go's select. Verify both HTTP ownership points.
+#[tokio::test]
+async fn dropping_http_bootstrap_releases_the_provider_before_first_payload() {
+    for _ in 0..200 {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Hang(HeaderMap::new(), vec![])],
+        );
+        let mut request = Box::pin(app.oneshot(post("/v1/responses", STREAM, None)));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        assert_eq!(dispatcher.live_streams(), 1);
+        drop(request);
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+#[tokio::test]
+async fn dropping_http_body_releases_the_provider_after_first_payload() {
+    for _ in 0..200 {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Hang(
+                HeaderMap::new(),
+                vec![Ok(Bytes::from_static(CREATED.as_bytes()))],
+            )],
+        );
+        let response = app
+            .oneshot(post("/v1/responses", STREAM, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        assert!(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .starts_with(b"event: response.created")
+        );
+        assert_eq!(dispatcher.live_streams(), 1);
+        drop(body);
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+#[tokio::test]
+async fn canceled_error_followed_by_eof_does_not_become_success() {
+    for before_first in [true, false] {
+        let mut chunks = Vec::new();
+        if !before_first {
+            chunks.push(Ok(Bytes::from_static(CREATED.as_bytes())));
+        }
+        chunks.push(Err(ExecError::new(ErrorKind::Canceled, "context canceled")));
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Stream(HeaderMap::new(), chunks)],
+        );
+        let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+        assert_eq!(
+            status.as_u16(),
+            if before_first { 499 } else { 200 },
+            "{body}"
+        );
+        assert!(body.contains("context canceled"), "{body}");
+        assert!(
+            !body.contains("response.completed") && !body.contains("[DONE]"),
+            "{body}"
+        );
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
 const CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n";
 const DELTA: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n";
