@@ -714,6 +714,8 @@ fn clean_claude_tool_arguments() {
             parse(want),
             "{name}"
         );
+        let indexed = CallSchemas::resolve(tool, original, sent);
+        assert_eq!(indexed.clean(&args), parse(want), "indexed {name}");
     }
 }
 

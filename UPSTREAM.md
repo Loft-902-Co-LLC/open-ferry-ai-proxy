@@ -12,6 +12,16 @@ open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/
 
 When we move the pin, we update this table, bring every ported file's header to the new version, and note behaviour changes in the commit or PR. Every upstream commit between the old and the new pin is ported, unless it is listed under the move below with the reason.
 
+### Ports prepared through v8.0.47 ahead of the pin
+
+Differences retained in these ports:
+
+| Upstream commits | What differs | Why |
+|---|---|---|
+| 64316127 | Non-finite numeric fallbacks are rejected; upstream can write invalid JSON such as {"x":NaN} or +Inf | Keep emitted arguments valid JSON; valid JSON number spellings, including large exponents, remain exact |
+
+The Gemini tool-argument cleaner and partialArgs assembler have no work allowance of their own, matching upstream. Neither has an argument-node cap. Assembly retains upstream's depth 64, array index 1024, and separate 4 MiB buffered-raw and emitted-output limits; both ports exclude probe paths from those byte counts. The existing cleaner limits remain: argument cleaning stops after 128 levels and preserves deeper data; re-clean projection stops past 64 levels or after 100,000 copied nodes, preserving arguments when projection cannot finish. Its existing bounded schema-copy policy remains unchanged. These main-era cleaner differences are described below. For fallback `args`, Open Ferry counts compact parsed or cleaned JSON rather than the original raw text; this only counts fewer bytes, so it never ends a call incomplete where upstream completes it.
+
 ### What moving from v8.0.38 to v8.0.42 left out
 
 The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42. Differential regression cases and CI use Go 1.26.10. The config-save baseline has been fully refreshed, and the full and PR-profile comparisons passed with that baseline. The measured totals are in [README.md](README.md#parity-with-cliproxyapi).
