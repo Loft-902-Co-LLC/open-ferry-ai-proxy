@@ -50,7 +50,13 @@ fn models_overrides_and_normalization() {
 fn urls_and_official_hosts() {
     assert_eq!(location(&Auth::default(), ""), "global");
     for region in ["us", "eu", "europe-west4"] {
-        assert_eq!(base_url("", "p", region), format!("{}/v1/projects/p/locations/{region}/endpoints/openapi", vertex_base_url(region)));
+        assert_eq!(
+            base_url("", "p", region),
+            format!(
+                "{}/v1/projects/p/locations/{region}/endpoints/openapi",
+                vertex_base_url(region)
+            )
+        );
     }
     for (base, project, expected) in [
         (

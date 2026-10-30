@@ -65,8 +65,8 @@ pub use gemini_validation::{
     GEMINI_CONTEXT_ENGINEERING_BYPASS, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, GeminiEnvelope,
     GeminiThoughtSignatureInfo, GeminiValidationOptions, MAX_GEMINI_THOUGHT_SIGNATURE_LEN,
     inspect_gemini_thought_signature, is_gemini_thought_signature_bypass,
-    is_valid_gemini_thought_signature, is_gemini_vertex_bare_tink_signature, validate_gemini_function_call_pairing,
-    validate_gemini_thought_signatures,
+    is_gemini_vertex_bare_tink_signature, is_valid_gemini_thought_signature,
+    validate_gemini_function_call_pairing, validate_gemini_thought_signatures,
 };
 pub use gpt_validation::{
     GptReasoningSignatureInfo, MAX_GPT_REASONING_SIGNATURE_LEN, inspect_gpt_reasoning_signature,

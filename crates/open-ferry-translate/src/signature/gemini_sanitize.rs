@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::{
     Action, BlockKind, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, Provider,
     decide_signature_compatibility, is_gemini_thought_signature_bypass,
-    signature_payload_without_provider_prefix, is_gemini_vertex_bare_tink_signature,
+    is_gemini_vertex_bare_tink_signature, signature_payload_without_provider_prefix,
 };
 use crate::json::{self, bool_of, str_of};
 
@@ -55,14 +55,18 @@ fn sanitize_decision(raw: &str, block_kind: BlockKind, reject_bare_tink: bool) -
         decision.normalized_signature.clear();
         decision.action = Action::ReplaceWithGeminiBypass;
         decision.replacement_signature = GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_owned();
-        decision.reason = "Vertex bare-Tink signature is not accepted by this Gemini endpoint".to_owned();
+        decision.reason =
+            "Vertex bare-Tink signature is not accepted by this Gemini endpoint".to_owned();
     }
     decision
 }
 
 /// Applies Gemini replay policy at an endpoint other than Vertex. Bare-Tink
 /// signatures are replaced on first calls and dropped on other model parts.
-pub fn sanitize_non_vertex_gemini_request_thought_signatures(payload: &mut Value, contents_path: &str) -> bool {
+pub fn sanitize_non_vertex_gemini_request_thought_signatures(
+    payload: &mut Value,
+    contents_path: &str,
+) -> bool {
     sanitize_request(payload, contents_path, true)
 }
 
@@ -102,7 +106,12 @@ fn sanitize_request(payload: &mut Value, contents_path: &str, reject_bare_tink: 
         };
         let mut first_function_call_seen = false;
         for part in parts {
-            changed |= sanitize_part(part, is_model_turn, &mut first_function_call_seen, reject_bare_tink);
+            changed |= sanitize_part(
+                part,
+                is_model_turn,
+                &mut first_function_call_seen,
+                reject_bare_tink,
+            );
         }
     }
     changed

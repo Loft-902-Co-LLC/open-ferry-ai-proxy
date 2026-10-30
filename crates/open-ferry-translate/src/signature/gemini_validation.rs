@@ -461,6 +461,10 @@ fn gemini_contents(payload: &Value) -> (Option<&Value>, &'static str) {
 pub fn is_gemini_vertex_bare_tink_signature(raw: &str) -> bool {
     inspect_gemini_thought_signature(
         super::signature_payload_without_provider_prefix(raw),
-        GeminiValidationOptions { require_known_envelope: true, ..Default::default() },
-    ).is_ok_and(|info| info.envelope == Some(GeminiEnvelope::BareTink))
+        GeminiValidationOptions {
+            require_known_envelope: true,
+            ..Default::default()
+        },
+    )
+    .is_ok_and(|info| info.envelope == Some(GeminiEnvelope::BareTink))
 }

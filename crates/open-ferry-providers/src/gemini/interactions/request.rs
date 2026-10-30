@@ -181,9 +181,9 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
                 .map(|k| json::str_of(item.get(*k)))
                 .find(|s| !s.trim().is_empty())
                 .unwrap_or_default();
-            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig)
-                .filter(|s| !is_gemini_thought_signature_bypass(s) && !is_gemini_vertex_bare_tink_signature(s))
-            else {
+            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig).filter(|s| {
+                !is_gemini_thought_signature_bypass(s) && !is_gemini_vertex_bare_tink_signature(s)
+            }) else {
                 continue;
             };
             item["signature"] = sig.into();

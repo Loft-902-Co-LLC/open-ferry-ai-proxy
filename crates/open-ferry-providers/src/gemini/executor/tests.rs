@@ -837,17 +837,33 @@ async fn bare_tink_is_scoped_to_vertex_on_outbound_requests() {
             {"functionCall":{"name":"time","args":{}},"thoughtSignature":sig}
         ]},
         {"role":"user","parts":[{"text":"next"}]}
-    ]}).to_string();
+    ]})
+    .to_string();
     for vertex in [false, true] {
         let mock = Mock::start(Reply::json(OK_ANSWER)).await;
         let provider = if vertex { "vertex" } else { "gemini" };
         let exec: Box<dyn open_ferry_core::executor::ProviderExecutor> = if vertex {
             Box::new(crate::gemini::VertexExecutor::new("direct"))
-        } else { Box::new(executor()) };
-        exec.execute(key_auth(provider, "local-key", &mock.url), request("gemini-2.5-pro", &payload), options(&Format::GEMINI)).await.unwrap();
+        } else {
+            Box::new(executor())
+        };
+        exec.execute(
+            key_auth(provider, "local-key", &mock.url),
+            request("gemini-2.5-pro", &payload),
+            options(&Format::GEMINI),
+        )
+        .await
+        .unwrap();
         let body = mock.last().json();
         let parts = &body["contents"][1]["parts"];
-        assert_eq!(parts[1]["thoughtSignature"], if vertex { sig.as_str() } else { GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR });
+        assert_eq!(
+            parts[1]["thoughtSignature"],
+            if vertex {
+                sig.as_str()
+            } else {
+                GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+            }
+        );
         assert_eq!(parts[0].get("thoughtSignature").is_some(), vertex);
         assert_eq!(parts[2].get("thoughtSignature").is_some(), vertex);
     }

@@ -281,10 +281,7 @@ fn location_endpoints() {
     ] {
         assert_eq!(vertex_base_url(location), format!("https://{host}"));
     }
-    assert_eq!(
-        vertex_base_url(""),
-        "https://aiplatform.googleapis.com"
-    );
+    assert_eq!(vertex_base_url(""), "https://aiplatform.googleapis.com");
     assert_eq!(
         vertex_base_url(" global "),
         "https://aiplatform.googleapis.com"
@@ -361,10 +358,7 @@ fn reads_the_credential() {
     else {
         panic!("no service account");
     };
-    assert_eq!(
-        (project.as_str(), location.as_str()),
-        ("other", "global")
-    );
+    assert_eq!((project.as_str(), location.as_str()), ("other", "global"));
 }
 
 #[test]

@@ -276,7 +276,10 @@ fn antigravity_caqs_is_not_claude_native() {
 fn caqs_rotated_channels_keep_schema_and_native_replay_fences() {
     let inner = STANDARD.decode(antigravity_caqs()).unwrap();
     let raw = STANDARD.decode(inner).unwrap();
-    let index = raw.windows(6).position(|w| w == [8, 18, 16, 2, 24, 2]).unwrap();
+    let index = raw
+        .windows(6)
+        .position(|w| w == [8, 18, 16, 2, 24, 2])
+        .unwrap();
     for channel in [1, 16, 18, 19, 20, 127] {
         let mut rotated = raw.clone();
         rotated[index + 1] = channel;
@@ -285,7 +288,9 @@ fn caqs_rotated_channels_keep_schema_and_native_replay_fences() {
         assert_eq!(info.channel_id, u64::from(channel));
         assert_eq!(detect_signature_provider(&sig), Provider::Claude);
         for target in [Provider::Claude, Provider::Gemini, Provider::Gpt] {
-            assert!(!decide_signature_compatibility(target, &sig, BlockKind::ClaudeThinking).compatible);
+            assert!(
+                !decide_signature_compatibility(target, &sig, BlockKind::ClaudeThinking).compatible
+            );
         }
     }
 }
