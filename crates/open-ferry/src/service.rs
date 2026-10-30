@@ -1150,6 +1150,8 @@ struct ReadCompletion {
     unsupported_empty: bool,
     unsupported_sourceless: bool,
     command_consumed: bool,
+    /// Registry-only sync did not read a credential file.
+    runtime_only: bool,
 }
 
 fn identity_hint(identity: &ReadIdentity, ctx: &SynthesisContext) -> Auth {
@@ -2755,14 +2757,21 @@ impl Service {
                 let mut unsupported_sourceless = false;
                 let has_source = source.is_some();
                 let tagged = command.is_some();
+                // Revision zero is an explicit current-origin recovery read.
                 let runtime_edit = !tagged
-                    && matches!(&source,
-                    Some(SyncChange::Upsert(auth)) if auth.generation > 0
-                        && auth.metadata_str("type").is_some_and(|kind| {
-                            !go::equal_fold(kind.trim(), "codex")
-                                && !go::equal_fold(kind.trim(), "gemini")
-                                && go::equal_fold(kind.trim(), auth.provider.trim())
-                        }));
+                    && trigger_revision > 0
+                    && matches!(&source, Some(SyncChange::Upsert(auth)) if auth.generation > 0
+                    && manager.get(&auth.id).is_some_and(|live| {
+                        live.registration_epoch == auth.registration_epoch
+                            && go::equal_fold(live.provider.trim(), auth.provider.trim())
+                            && live.file_name == auth.file_name
+                            && live.metadata == auth.metadata
+                            && live.disabled == auth.disabled
+                            && live.prefix == auth.prefix
+                            && live.proxy_url == auth.proxy_url
+                            && live.label == auth.label
+                            && live.attributes == auth.attributes
+                    }));
                 let mut hint = match source {
                     Some(SyncChange::Upsert(auth)) => *auth,
                     Some(SyncChange::FileWritten(file)) => {
@@ -2806,11 +2815,6 @@ impl Service {
                                 })))
                     {
                         return Ok(AdoptionRead::Invalid);
-                    }
-                    // A management edit already published this live record.
-                    // Its save may have failed; old disk bytes cannot undo it.
-                    if runtime_edit {
-                        return Ok(AdoptionRead::Record(live.clone()));
                     }
                     let status = store.read_for_adoption(live).map_err(ManagerError::Store)?;
                     // Native files use current disk bytes even outside Codex's
@@ -2869,7 +2873,15 @@ impl Service {
                 };
                 let validate = || config_generation.load(Ordering::SeqCst) == generation;
                 let mut command_consumed = false;
-                let result = if let Some(slot) = command {
+                #[cfg(test)]
+                if runtime_edit && let Some(hook) = &hook {
+                    hook(&identity);
+                }
+                let result = if runtime_edit {
+                    // The manager already published this edit. No disk read,
+                    // adoption generation, or observation revision is earned.
+                    Ok(AdoptionResult::Unchanged)
+                } else if let Some(slot) = command {
                     // I3: command slot -> refresh mutex (when used) -> ReloadGuard
                     // -> per-id save mutex -> short state/store I/O. Blocking only;
                     // the loop never takes this mutex and no guard crosses await.
@@ -2920,6 +2932,7 @@ impl Service {
                     unsupported_empty,
                     unsupported_sourceless,
                     command_consumed,
+                    runtime_only: runtime_edit,
                 }
             };
             let completion = match operation {
@@ -2934,6 +2947,7 @@ impl Service {
                 unsupported_empty: false,
                 unsupported_sourceless: false,
                 command_consumed: false,
+                runtime_only: false,
             });
             let _ = sender.send(completion);
         });
@@ -2990,6 +3004,27 @@ impl Service {
                 id = completion.identity.id.as_deref().unwrap_or_default(),
                 "credential observation read failed"
             );
+        }
+        if completion.runtime_only
+            && self.identity_is_current(&completion.identity)
+            && let Some(current) = completion
+                .identity
+                .id
+                .as_ref()
+                .and_then(|id| self.manager.get(id))
+        {
+            self.ensure_executor(&current);
+            if let Some(path) = completion.identity.path.clone()
+                && let Some(previous) = self.file_auths.insert(path, current.id.clone())
+                && previous != current.id
+            {
+                self.remove(&previous);
+            }
+            self.registry
+                .register_auth_with(&current, &self.rules(), &self.catalogs.general());
+            self.manager.reconcile_registry_model_states(&current.id);
+            // Do not claim either disk watermark: parked FileWritten events
+            // still need a real read, even when their revision is older.
         }
         if completion.unsupported_empty && self.identity_is_current(&completion.identity) {
             if let Some(SyncChange::FileWritten(file)) = &job.source {
@@ -8738,6 +8773,61 @@ self-update:
     }
 
     #[tokio::test]
+    async fn round3_runtime_upsert_does_not_cover_a_parked_file_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-event.json");
+        std::fs::write(&path, br#"{"type":"claude","access_token":"dummy-before"}"#).unwrap();
+        let mut service = service(dir.path(), "");
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let live = service.manager.list()[0].clone();
+        let before = service.revisions.clone();
+        let mut held = hold_read(&mut service);
+        let (applied, runtime_done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(live.as_ref().clone())),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        held.entered().await;
+        std::fs::write(
+            &path,
+            br#"{"type":"claude","access_token":"dummy-external","label":"outside"}"#,
+        )
+        .unwrap();
+        let revision = next_revision();
+        let (applied, mut file_done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::FileWritten(auth_file(&path)),
+            revision,
+            applied,
+            operation: None,
+        });
+        held.release();
+        let completion =
+            tokio::time::timeout(Duration::from_secs(5), service.read_completions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        service.complete_read(completion);
+        assert_eq!(
+            service.revisions, before,
+            "runtime publication earned no disk watermark"
+        );
+        assert_eq!(
+            file_done.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        drain_reads(&mut service).await;
+        runtime_done.await.unwrap();
+        file_done.await.unwrap();
+        let current = service.manager.get(&live.id).unwrap();
+        assert_eq!(current.metadata["access_token"], "dummy-external");
+        assert_eq!(current.metadata["label"], "outside");
+        assert!(service.revisions[&live.id] > revision);
+    }
+
+    #[tokio::test]
     async fn round2_failed_disable_save_is_not_undone_by_runtime_upsert() {
         struct RefuseDisable(Arc<FileStore>);
         impl open_ferry_core::auth::AuthStore for RefuseDisable {
@@ -8761,51 +8851,68 @@ self-update:
                 self.0.same_record(left, right)
             }
         }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("failed-disable.json");
-        std::fs::write(
-            &path,
-            br#"{"type":"claude","access_token":"dummy","disabled":false}"#,
-        )
-        .unwrap();
-        let mut service = service(dir.path(), "");
-        service.manager = Manager::new(
-            Settings::from(&*service.config),
-            service.registry.clone(),
-            Some(Arc::new(RefuseDisable(service.store.clone()))),
-        );
-        service.handle_and_drain(added(&path), Path::new("")).await;
-        let initial = service.manager.list()[0].clone();
-        let edited = service
-            .manager
-            .edit_at_epoch(&initial.id, initial.registration_epoch, |auth| {
-                auth.disabled = true;
-                auth.status = open_ferry_core::auth::Status::Disabled;
-                auth.metadata
-                    .insert("disabled".into(), serde_json::json!(true));
-                Ok::<_, ()>(true)
-            })
-            .unwrap()
-            .unwrap();
-        assert!(edited.disabled);
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["disabled"],
-            false
-        );
-        let (applied, done) = oneshot::channel();
-        service.apply_sync(SyncRequest {
-            change: SyncChange::Upsert(Box::new(edited.as_ref().clone())),
-            revision: next_revision(),
-            applied,
-            operation: None,
-        });
-        drain_reads(&mut service).await;
-        done.await.unwrap();
-        assert!(service.manager.get(&initial.id).unwrap().disabled);
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["disabled"],
-            false
-        );
+        for (provider, typed) in [
+            ("claude", true),
+            ("codex", true),
+            ("gemini", true),
+            ("claude", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("failed-disable.json");
+            let mut metadata = serde_json::json!({"access_token":"dummy", "disabled":false});
+            if typed {
+                metadata["type"] = serde_json::json!(provider);
+            }
+            std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+            let mut service = service(dir.path(), "");
+            service.manager = Manager::new(
+                Settings::from(&*service.config),
+                service.registry.clone(),
+                Some(Arc::new(RefuseDisable(service.store.clone()))),
+            );
+            let candidate = Auth {
+                id: "failed-disable.json".into(),
+                provider: provider.into(),
+                file_name: "failed-disable.json".into(),
+                attributes: [("path".into(), path.to_string_lossy().into_owned())].into(),
+                metadata: metadata.as_object().unwrap().clone(),
+                ..Default::default()
+            };
+            let initial = service.manager.register_unsaved(candidate).unwrap();
+            service.file_auths.insert(path.clone(), initial.id.clone());
+            let edited = service
+                .manager
+                .edit_at_epoch(&initial.id, initial.registration_epoch, |auth| {
+                    auth.disabled = true;
+                    auth.status = open_ferry_core::auth::Status::Disabled;
+                    auth.metadata
+                        .insert("disabled".into(), serde_json::json!(true));
+                    Ok::<_, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+            assert!(edited.disabled);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                    .unwrap()["disabled"],
+                false
+            );
+            let (applied, done) = oneshot::channel();
+            service.apply_sync(SyncRequest {
+                change: SyncChange::Upsert(Box::new(edited.as_ref().clone())),
+                revision: next_revision(),
+                applied,
+                operation: None,
+            });
+            drain_reads(&mut service).await;
+            done.await.unwrap();
+            assert!(service.manager.get(&initial.id).unwrap().disabled);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                    .unwrap()["disabled"],
+                false
+            );
+        }
     }
 
     #[tokio::test]

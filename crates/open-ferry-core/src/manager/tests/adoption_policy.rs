@@ -27,8 +27,9 @@ fn round2_observation_racing_disable_preserves_memory_and_disk() {
     let (published_tx, published_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
+    let once = std::sync::atomic::AtomicBool::new(true);
     *lock(&manager.shared.persist_hook) = Some(Arc::new(move |auth| {
-        if auth.disabled {
+        if auth.disabled && once.swap(false, std::sync::atomic::Ordering::SeqCst) {
             published_tx.send(()).unwrap();
             release_rx
                 .lock()
@@ -83,8 +84,11 @@ fn round2_observation_racing_disable_preserves_memory_and_disk() {
         "the disable and its save must win"
     );
     assert!(matches!(result, AdoptionResult::Retry));
-    assert!(matches!(retry, AdoptionResult::Retry));
-    assert!(!reread, "a pending policy save must defer the next read");
+    assert!(matches!(retry, AdoptionResult::Published { .. }));
+    assert!(
+        reread,
+        "pending policy must merge around a real file read, not defer it"
+    );
 }
 
 #[test]

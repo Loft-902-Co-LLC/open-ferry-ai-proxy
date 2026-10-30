@@ -652,6 +652,7 @@ type BindCheck<'a> = dyn Fn(&Map<String, Value>, FileId) -> io::Result<()> + 'a;
 pub struct FileStore {
     base_dir: RwLock<PathBuf>,
     file_guard: Option<super::file_guard::FileGuard>,
+    probe_state: super::file_guard::ProbeState,
     /// Counts the binds of `base_dir`; see `binding_generation`.
     binding_generation: AtomicU64,
     save_lock: Mutex<()>,
@@ -952,7 +953,15 @@ impl FileStore {
 
     /// The credential check and warning history shared with other readers.
     pub fn file_guard(&self) -> Option<super::file_guard::FileGuard> {
-        self.file_guard.clone()
+        Some(match &self.file_guard {
+            Some(guard) => guard.clone().with_probe_state(self.probe_state.clone()),
+            None => super::file_guard::FileGuard::presence_only(self.probe_state.clone()),
+        })
+    }
+
+    /// Presence uncertainty shared with the watcher for this store binding.
+    pub fn probe_state(&self) -> super::file_guard::ProbeState {
+        self.probe_state.clone()
     }
 
     fn check_file(&self, path: &Path) -> io::Result<()> {
@@ -1284,6 +1293,7 @@ impl FileStore {
             .unwrap_or_else(PoisonError::into_inner);
 
         self.check_file(&path)?;
+        let _presence = self.probe_state.write_permit(&path, creation_intent)?;
         // Recheck after both locks: deletion while acquisition waited must not
         // be undone by a runtime save of a disabled credential.
         if auth.disabled
