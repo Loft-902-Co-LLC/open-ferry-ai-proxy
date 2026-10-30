@@ -969,7 +969,7 @@ fn web_search_index_empty_client_exclusion_and_published_views() {
     for client in ["", "a"] {
         let registry = ModelRegistry::new();
         registry.register_client(client, "gemini", &[search_model("m", true)]);
-        registry.register_client("b", "gemini", &[search_model("m", false)]);
+        registry.register_client("0", "gemini", &[search_model("m", false)]);
         assert_search_index(&registry);
         assert!(
             registry
@@ -977,7 +977,11 @@ fn web_search_index_empty_client_exclusion_and_published_views() {
                 .unwrap()
                 .supports_web_search
         );
-        assert!(registry.available_models_by_provider("gemini")[0].supports_web_search);
+        assert_eq!(
+            registry.available_models_by_provider("gemini")[0].supports_web_search,
+            client.is_empty(),
+            "the provider view keeps its lowest-ID client's own flag"
+        );
         registry.unregister_client(client);
         assert_search_index(&registry);
         assert!(

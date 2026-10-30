@@ -682,13 +682,9 @@ impl ModelRegistry {
             }
             if tally.available(entry.count) {
                 if let Some(info) = entry.info {
-                    let mut info = info.clone();
-                    info.supports_web_search = state.has_web_search(id, &provider, None);
-                    result.push(info);
+                    result.push(info.clone());
                 } else if let Some(registration) = registration {
-                    let mut info = registration.info.clone();
-                    info.supports_web_search = state.has_web_search(id, &provider, None);
-                    result.push(info);
+                    result.push(registration.info.clone());
                 }
             }
         }
