@@ -82,8 +82,172 @@ fn compression_partial_layout_presence_wins() {
     assert_eq!(cfg.codex.request_compression_min_bytes(), 1024);
     let empty =
         parse("response-compression: {enabled: false}\nserver: {response-compression: {}}\n");
-    assert_eq!(empty.response_compression.enabled, None);
-    assert!(empty.response_compression.is_enabled());
+    assert_eq!(empty.response_compression.enabled, Some(false));
+    assert!(!empty.response_compression.is_enabled());
+}
+
+#[test]
+fn compression_partial_response_fields_merge_on_load() {
+    for raw in [
+        "response-compression: {enabled: false}\nserver: {response-compression: {min-bytes: 64}}\n",
+        "response-compression: {min-bytes: 64}\nserver: {response-compression: {enabled: false}}\n",
+    ] {
+        let cfg = parse(raw);
+        assert_eq!(cfg.response_compression.enabled, Some(false));
+        assert_eq!(cfg.response_compression.min_bytes, 64);
+    }
+}
+
+#[test]
+fn compression_partial_response_fields_survive_save() {
+    for (case, raw) in [
+        "# keep\nresponse-compression: {enabled: false} # legacy\n# canonical\nserver: {response-compression: {min-bytes: 64}}\n",
+        "# keep\nresponse-compression: {min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {enabled: false}}\n",
+        "# keep\nresponse-compression: {enabled: false, min-bytes: 64} # legacy\n# canonical\nserver: {response-compression: {}}\n",
+    ].into_iter().enumerate() {
+        for migrate in [false, true] {
+            let dir = TempDir::new();
+            let path = dir.write("config.yaml", raw);
+            for _ in 0..2 {
+                let cfg = Config::load(&path).unwrap();
+                save::save_preserving_comments(&path, &cfg, migrate).unwrap();
+                let loaded = Config::load(&path).unwrap();
+                assert_eq!(loaded.response_compression.enabled, Some(false));
+                assert_eq!(loaded.response_compression.min_bytes, 64);
+                let text = std::fs::read_to_string(&path).unwrap();
+                for comment in ["# keep", "# legacy", "# canonical"] {
+                    assert!(text.contains(comment), "case={case}, migrate={migrate}: lost {comment}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn compression_canonical_null_section_is_rejected() {
+    let raw = b"server: {response-compression: null}\n";
+    let error = Config::parse(raw).expect_err("canonical section must be a mapping");
+    assert_eq!(
+        error.message,
+        "server.response-compression must be a mapping"
+    );
+    assert!(V8Document::migrate(raw).is_err());
+    assert!(save::normalize_config_layout(raw, true).is_err());
+}
+
+#[test]
+fn compression_legacy_null_migrates_to_empty_mapping() {
+    let raw = b"# keep\nresponse-compression: null # defaults\n";
+    let document = V8Document::migrate(raw).unwrap();
+    assert_eq!(
+        document
+            .value(&["server", "response-compression"])
+            .transpose()
+            .unwrap(),
+        Some(AnyValue::Map(Default::default()))
+    );
+    let (bytes, changed) = save::normalize_config_layout(raw, true).unwrap();
+    assert!(changed);
+    let doc = save::unmarshal(&bytes).unwrap();
+    let root = doc.content.first().unwrap();
+    let section = save::yaml_path(root, "server.response-compression").unwrap();
+    assert!(section.content.is_empty());
+    assert_eq!(section.kind, yaml3::Kind::Mapping);
+    assert_eq!(
+        parse(std::str::from_utf8(&bytes).unwrap())
+            .response_compression
+            .enabled,
+        None
+    );
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("# keep"));
+    assert!(text.contains("# defaults"));
+    let dir = TempDir::new();
+    let path = dir.write("config.yaml", raw);
+    for _ in 0..2 {
+        let cfg = Config::load(&path).unwrap();
+        save::save_preserving_comments(&path, &cfg, true).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let doc = save::unmarshal(&bytes).unwrap();
+        let root = doc.content.first().unwrap();
+        let section = save::yaml_path(root, "server.response-compression").unwrap();
+        assert_eq!(section.kind, yaml3::Kind::Mapping);
+        assert_eq!(
+            Config::load(&path).unwrap().response_compression,
+            cfg.response_compression
+        );
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("# keep"));
+        assert!(text.contains("# defaults"));
+    }
+}
+
+#[test]
+fn compression_unknown_response_children_are_archived_on_migration() {
+    for raw in [
+        "# keep\nresponse-compression: {enabled: false, junk: 1} # legacy\n",
+        "# keep\nserver: {response-compression: {enabled: false, junk: 1}} # canonical\n",
+    ] {
+        let document = V8Document::migrate(raw.as_bytes()).unwrap();
+        assert!(
+            document
+                .value(&["server", "response-compression", "junk"])
+                .is_none()
+        );
+        let dir = TempDir::new();
+        let path = dir.write("config.yaml", raw);
+        for _ in 0..2 {
+            let cfg = Config::load(&path).unwrap();
+            save::save_preserving_comments(&path, &cfg, true).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let doc = save::unmarshal(&bytes).unwrap();
+            let root = doc.content.first().unwrap();
+            assert!(save::yaml_path(root, "response-compression").is_none());
+            assert!(save::yaml_path(root, "server.response-compression.junk").is_none());
+            assert_eq!(
+                Config::load(&path).unwrap().response_compression.enabled,
+                Some(false)
+            );
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("# keep"));
+            assert!(text.contains("# legacy") || text.contains("# canonical"));
+            assert!(
+                text.lines().any(|line| line.starts_with('#')
+                    && line.contains("junk")
+                    && line.contains('1'))
+            );
+        }
+    }
+}
+
+#[test]
+fn compression_codex_migration_uses_upstream_field_order() {
+    let raw = b"codex: {response-steering: true, disable-codex-cloaking: true, upstream-request-compression-min-bytes: 64, upstream-request-compression: true, websocket-compression: false}\n";
+    for bytes in [
+        save::normalize_config_layout(raw, true).unwrap().0,
+        save::render_preserving_comments(raw, &Config::parse(raw).unwrap(), true).unwrap(),
+    ] {
+        let doc = save::unmarshal(&bytes).unwrap();
+        let root = doc.content.first().unwrap();
+        let codex = save::yaml_path(root, "upstream.codex").unwrap();
+        let keys: Vec<&str> = codex
+            .content
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[key, _]| key.value.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "websocket-compression",
+                "upstream-request-compression",
+                "upstream-request-compression-min-bytes",
+                "disable-codex-cloaking",
+                "response-steering"
+            ]
+        );
+    }
 }
 
 #[test]
