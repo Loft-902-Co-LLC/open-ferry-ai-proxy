@@ -67,9 +67,9 @@ Total: **861** meaningful real provider/credential capability cells. Scripted di
 | unsupported | 0 |
 | unknown | 57 |
 
-## Translation parity with CLIProxyAPI v8.0.38
+## Translation parity with CLIProxyAPI v8.0.42
 
-Pinned reference: **v8.0.38**, commit `0db19025571684b198a2ef508f99b41c717337e8` (2026-10-21); [pin](../UPSTREAM.md#pinned-reference). Catalog reviewed **2026-10-28**.
+Pinned reference: **v8.0.42**, commit `bc0643405a1d0adf77dd0f109972ac3313d66397` (2026-10-24); [pin](../UPSTREAM.md#pinned-reference). Catalog reviewed **2026-10-28**.
 The parity section reads the current pin from UPSTREAM.md because parity CI compares against that pin; fixture tests below exercise Open Ferry code instead.
 
 **parity-tested** describes maintained suite coverage, not a newly recorded Go comparison for this checkout. A passing translator run compares the same inputs against the pinned Go implementation and permits only identical outputs, equivalence under recorded rules, or cases with recorded known differences; an unaccepted Different result fails the job. Build/setup errors also fail it.

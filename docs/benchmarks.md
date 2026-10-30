@@ -89,16 +89,18 @@ curl -fsSLO https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-prox
 bash run-ubuntu.sh --note "Azure Standard_D8s_v6, East US" --ref main --tag v8.0.38
 ```
 
+The cloud helper retains its Go 1.26.4/v8.0.38 setup for the recorded benchmark. Use the by-hand instructions below with Go >=1.26.10 for the v8.0.42 reference; the cloud helper’s toolchain update is separate work.
+
 Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. Options after `--` go to the benchmark, such as `-- --duration 2 --starts 1 --long-requests 2` for a quick check that everything works. `bash run-ubuntu.sh --help` lists the script's options.
 
 ### By hand
 
-You need Git, Go 1.26 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) says how to get Go 1.26.4) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
+You need Git, Go >=1.26.10 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) describes the required Go toolchain) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
 
 ```sh
-git clone --branch v8.0.38 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+git clone --branch v8.0.42 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo build --release --locked -p open-ferry
-cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.4 --machine-note "<what the machine is>" --out docs/benchmarks.md
+cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.10 --machine-note "<what the machine is>" --out docs/benchmarks.md
 ```
 
 It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout, and using the build from before when it was of the same clean commit, with the same Go and flags), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about 12 minutes, and longer when a level has to wait for ports to be freed. The options:
