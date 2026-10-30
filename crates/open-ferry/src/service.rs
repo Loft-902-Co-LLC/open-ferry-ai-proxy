@@ -8828,7 +8828,7 @@ self-update:
     }
 
     #[tokio::test]
-    async fn round2_failed_disable_save_is_not_undone_by_runtime_upsert() {
+    async fn round5_failed_save_keeps_own_upsert_then_file_observation_wins() {
         struct RefuseDisable(Arc<FileStore>);
         impl open_ferry_core::auth::AuthStore for RefuseDisable {
             fn list(&self) -> std::io::Result<Vec<Auth>> {
@@ -8912,6 +8912,15 @@ self-update:
                     .unwrap()["disabled"],
                 false
             );
+            if typed && provider != "gemini" {
+                service
+                    .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+                    .await;
+                assert!(
+                    !service.manager.get(&initial.id).unwrap().disabled,
+                    "a later genuine file event adopts the unchanged file for {provider}"
+                );
+            }
         }
     }
 
@@ -11873,6 +11882,320 @@ port: {port}
         fn config(dir: &Path, extra: &str) -> WatchEvent {
             let text = format!("auth-dir: '{}'\n{extra}", dir.display());
             WatchEvent::ConfigChanged(Arc::new(Config::parse(text).unwrap()), String::new())
+        }
+
+        struct RefuseCredentialSave(Arc<open_ferry_core::auth::FileStore>);
+
+        impl open_ferry_core::auth::AuthStore for RefuseCredentialSave {
+            fn list(&self) -> std::io::Result<Vec<open_ferry_core::auth::Auth>> {
+                self.0.list()
+            }
+            fn delete(&self, id: &str) -> std::io::Result<()> {
+                self.0.delete(id)
+            }
+            fn read_back(
+                &self,
+                auth: &open_ferry_core::auth::Auth,
+            ) -> std::io::Result<Option<open_ferry_core::auth::Auth>> {
+                self.0.read_back(auth)
+            }
+            fn same_record(
+                &self,
+                left: &open_ferry_core::auth::Auth,
+                right: &open_ferry_core::auth::Auth,
+            ) -> std::io::Result<bool> {
+                self.0.same_record(left, right)
+            }
+            fn save(&self, _: &open_ferry_core::auth::Auth) -> std::io::Result<String> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+
+        fn edit_fixture(
+            service: &mut Service,
+            path: &Path,
+            metadata: &serde_json::Value,
+            fail: bool,
+        ) -> String {
+            use open_ferry_core::auth::{Auth, AuthStore};
+            use open_ferry_core::manager::{Manager, Settings};
+            let store: Arc<dyn AuthStore> = if fail {
+                Arc::new(RefuseCredentialSave(service.store.clone()))
+            } else {
+                service.store.clone()
+            };
+            let manager = Manager::new(
+                Settings::from(&*service.config),
+                service.registry.clone(),
+                Some(store),
+            );
+            manager.set_gate(service.gate.clone());
+            let id = path.file_name().unwrap().to_str().unwrap().to_owned();
+            manager
+                .register_unsaved(Auth {
+                    id: id.clone(),
+                    file_name: id.clone(),
+                    provider: metadata["type"].as_str().unwrap().into(),
+                    attributes: [("path".into(), path.to_string_lossy().into_owned())].into(),
+                    metadata: metadata.as_object().unwrap().clone(),
+                    status: open_ferry_core::auth::Status::Active,
+                    ..Default::default()
+                })
+                .unwrap();
+            let (requests, received) = mpsc::channel(4);
+            service.sync_requests = received;
+            service.management = open_ferry_management::ManagementState::new(
+                service.config.clone(),
+                manager.clone(),
+                service.registry.clone(),
+                None,
+            )
+            .with_store(service.store.clone())
+            .with_sync(Arc::new(super::super::SyncSender { requests }))
+            .with_gate(service.gate.clone());
+            service.manager = manager;
+            service.file_auths.insert(path.to_path_buf(), id.clone());
+            id
+        }
+
+        async fn patch_and_sync(
+            service: &mut Service,
+            addr: SocketAddr,
+            route: &str,
+            body: serde_json::Value,
+        ) -> Answer {
+            let route = route.to_owned();
+            let body = body.to_string();
+            let response = tokio::spawn(async move {
+                send(
+                    addr,
+                    "PATCH",
+                    &route,
+                    &[("Authorization", "Bearer test-secret")],
+                    &body,
+                )
+                .await
+            });
+            let request =
+                tokio::time::timeout(Duration::from_secs(5), service.sync_requests.recv())
+                    .await
+                    .unwrap()
+                    .expect("the published edit has its own sync upsert");
+            service.apply_sync(request);
+            super::drain_reads(service).await;
+            tokio::time::timeout(Duration::from_secs(5), response)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn round5_failed_status_and_fields_edits_return_200_until_a_real_file_observation() {
+            for fields in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("failed.json");
+                let original = serde_json::json!({
+                    "type":"claude", "access_token":"dummy-file", "disabled":false, "note":"before"
+                });
+                std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+                let mut service = service(dir.path(), KEYED);
+                let id = edit_fixture(&mut service, &path, &original, true);
+                let before = service.revisions.clone();
+                let (addr, _stop) = start(&service).await;
+                let route = if fields {
+                    "/v0/management/auth-files/fields"
+                } else {
+                    "/v0/management/auth-files/status"
+                };
+                let mut body = serde_json::json!({"name":id, "disabled":true});
+                if fields {
+                    body["note"] = serde_json::json!("api-edit");
+                }
+                let answer = patch_and_sync(&mut service, addr, route, body).await;
+                assert_eq!(answer.status, 200, "{}", answer.body);
+                let expected = if fields {
+                    serde_json::json!({"status":"ok"})
+                } else {
+                    serde_json::json!({"status":"ok", "disabled":true})
+                };
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&answer.body).unwrap(),
+                    expected
+                );
+                let edited = service.manager.get(&id).unwrap();
+                assert!(edited.disabled, "its own upsert kept the published edit");
+                if fields {
+                    assert_eq!(edited.metadata["note"], "api-edit");
+                }
+                assert_eq!(
+                    service.revisions, before,
+                    "own upsert earned no disk watermark"
+                );
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                        .unwrap(),
+                    original
+                );
+                service
+                    .handle_and_drain(super::changed(super::auth_file(&path)), Path::new(""))
+                    .await;
+                let observed = service.manager.get(&id).unwrap();
+                assert!(
+                    !observed.disabled,
+                    "the next file observation wins, as upstream"
+                );
+                assert_eq!(observed.metadata["note"], "before");
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                        .unwrap(),
+                    original
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn round5_a_first_fields_edit_writes_over_an_unobserved_hand_edit() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("first.json");
+            let mut file =
+                serde_json::json!({"type":"claude", "access_token":"dummy", "note":"before"});
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+            let mut service = service(dir.path(), KEYED);
+            let id = edit_fixture(&mut service, &path, &file, false);
+            file["note"] = serde_json::json!("unobserved-hand-edit");
+            std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+            let (addr, _stop) = start(&service).await;
+            let answer = patch_and_sync(
+                &mut service,
+                addr,
+                "/v0/management/auth-files/fields",
+                serde_json::json!({"name":id, "note":"api-edit"}),
+            )
+            .await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert_eq!(
+                service.manager.get(&id).unwrap().metadata["note"],
+                "api-edit"
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                    .unwrap()["note"],
+                "api-edit"
+            );
+        }
+
+        #[tokio::test]
+        async fn round5_codex_fields_follow_upstream_save_protection_and_failure_behavior() {
+            for fail in [false, true] {
+                for case in [
+                    "oauth-outer",
+                    "plain-outer",
+                    "siwc-fields",
+                    "null-siwc",
+                    "null-switch",
+                    "toggle-switch",
+                    "setting",
+                ] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("fields.json");
+                    let mut original = serde_json::json!({
+                        "type":"codex", "access_token":"dummy-file", "refresh_token":"dummy-file-refresh",
+                        "siwc":{"access_token":"dummy-nested", "refresh_token":"dummy-nested-refresh", "note":"file-note"},
+                        "use_siwc":true, "disabled":false, "note":"before"
+                    });
+                    if case == "plain-outer" {
+                        original.as_object_mut().unwrap().remove("refresh_token");
+                    }
+                    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+                    let mut service = service(dir.path(), KEYED);
+                    let id = edit_fixture(&mut service, &path, &original, fail);
+                    let mut wanted = original.clone();
+                    let mut saved = original.clone();
+                    let fields = match case {
+                        "oauth-outer" => {
+                            wanted["access_token"] = serde_json::json!("dummy-api");
+                            wanted["refresh_token"] = serde_json::json!("dummy-api-refresh");
+                            serde_json::json!({"access_token":"dummy-api", "refresh_token":"dummy-api-refresh"})
+                        }
+                        "plain-outer" => {
+                            wanted["access_token"] = serde_json::json!("dummy-api");
+                            saved["access_token"] = wanted["access_token"].clone();
+                            serde_json::json!({"access_token":"dummy-api"})
+                        }
+                        "siwc-fields" => {
+                            wanted["siwc"]["access_token"] = serde_json::json!("dummy-api-nested");
+                            wanted["siwc"]["note"] = serde_json::json!("api-note");
+                            serde_json::json!({"siwc.access_token":"dummy-api-nested", "siwc.note":"api-note"})
+                        }
+                        "null-siwc" => {
+                            wanted["siwc"] = serde_json::Value::Null;
+                            serde_json::json!({"siwc":null})
+                        }
+                        "null-switch" => {
+                            wanted["use_siwc"] = serde_json::Value::Null;
+                            saved["use_siwc"] = serde_json::Value::Null;
+                            serde_json::json!({"use_siwc":null})
+                        }
+                        "toggle-switch" => {
+                            wanted["use_siwc"] = serde_json::json!(false);
+                            saved["use_siwc"] = serde_json::json!(false);
+                            serde_json::json!({"use_siwc":false})
+                        }
+                        _ => {
+                            wanted["note"] = serde_json::json!("api-note");
+                            saved["note"] = serde_json::json!("api-note");
+                            serde_json::json!({"note":"api-note"})
+                        }
+                    };
+                    let mut body = fields;
+                    body["name"] = serde_json::json!(id);
+                    let (addr, _stop) = start(&service).await;
+                    let answer = patch_and_sync(
+                        &mut service,
+                        addr,
+                        "/v0/management/auth-files/fields",
+                        body,
+                    )
+                    .await;
+                    assert_eq!(answer.status, 200, "{case}, fail={fail}: {}", answer.body);
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&answer.body).unwrap(),
+                        serde_json::json!({"status":"ok"})
+                    );
+                    let expected_file = if fail { &original } else { &saved };
+                    let expected_memory = if fail { &wanted } else { &saved };
+                    assert_eq!(
+                        &serde_json::Value::Object(
+                            service.manager.get(&id).unwrap().metadata.clone()
+                        ),
+                        expected_memory,
+                        "memory after {case}, fail={fail}"
+                    );
+                    assert_eq!(
+                        &serde_json::from_slice::<serde_json::Value>(
+                            &std::fs::read(&path).unwrap()
+                        )
+                        .unwrap(),
+                        expected_file,
+                        "file after {case}, fail={fail}"
+                    );
+                    if fail {
+                        service
+                            .handle_and_drain(
+                                super::changed(super::auth_file(&path)),
+                                Path::new(""),
+                            )
+                            .await;
+                        assert_eq!(
+                            serde_json::Value::Object(
+                                service.manager.get(&id).unwrap().metadata.clone()
+                            ),
+                            original,
+                            "a genuine file read replaces the unsaved token fields"
+                        );
+                    }
+                }
+            }
         }
 
         // Not upstream's: the TUI's readiness check passes with the local
