@@ -1940,3 +1940,46 @@ async fn a_401_adopts_nothing_when_the_store_was_rebound_after_the_read() {
     assert!(d3.await.expect("task").is_none(), "adopted");
     assert_eq!(env.token(), "access-0");
 }
+
+#[tokio::test(start_paused = true)]
+async fn round2_codex_client_standby_adopts_outer_without_refresh_or_siwc_changes() {
+    let env = Env::new();
+    let mut seed = env.on_disk();
+    seed["use_siwc"] = json!(true);
+    seed["siwc"] = json!({"access_token":"dummy-standby-siwc", "refresh_token":"dummy-siwc-refresh",
+        "client_id":"dummy", "expired":"2099-01-01T00:00:00Z"});
+    std::fs::write(env.dir.path().join(ID), serde_json::to_vec(&seed).unwrap()).unwrap();
+    let initial = env.manager.get(ID).unwrap();
+    env.manager
+        .adopt_observed(&initial, None, |live| {
+            env.files
+                .read_for_adoption(live)
+                .map_err(ManagerError::Store)
+        })
+        .unwrap();
+    env.close().await.unwrap().unwrap();
+    rotate_on_disk(&env);
+    let disk_before = std::fs::read(env.dir.path().join(ID)).unwrap();
+    let failed = env.manager.get(ID).unwrap();
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "user-agent",
+        http::HeaderValue::from_static("codex_cli_rs/1"),
+    );
+    let adopted = env
+        .manager
+        .try_refresh_after_unauthorized_for_request(
+            &failed,
+            &ExecError::upstream(401, "outer unauthorized"),
+            false,
+            &headers,
+        )
+        .await
+        .unwrap();
+    assert_eq!(adopted.access_token_for_request(&headers), "access-9");
+    assert_eq!(adopted.siwc_access_token(), "dummy-standby-siwc");
+    assert!(adopted.use_siwc());
+    assert!(adopted.rejected_siwc_access_token.is_empty());
+    assert_eq!(env.provider.calls(), 0);
+    assert_eq!(std::fs::read(env.dir.path().join(ID)).unwrap(), disk_before);
+}
