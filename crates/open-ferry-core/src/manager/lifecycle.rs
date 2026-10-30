@@ -1672,10 +1672,8 @@ impl Manager {
                     is_unauthorized_error(ErrView::Auth(err))
                         || super::classify::is_invalid_grant_result_error(err)
                 });
-                let stale_unavailable = auth.unavailable
-                    && auth.next_retry_after.is_none_or(|time| time <= now)
-                    && !(auth.quota.exceeded
-                        && auth.quota.next_recover_at.is_none_or(|time| time > now));
+                let stale_unavailable =
+                    auth.unavailable && auth.next_retry_after.is_none_or(|time| time <= now);
                 let auth_failure =
                     has_unauthorized_auth_failure(&existing_auth) || new_unauthorized;
                 let live_quota = auth.quota.next_recover_at.is_some_and(|time| time > now);

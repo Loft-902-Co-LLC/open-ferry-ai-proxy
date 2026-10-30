@@ -559,8 +559,6 @@ struct PartialFailure {
     /// The failed partition's tokens as the refresh left them: the failure
     /// only counts while the live credential still holds those.
     baseline: Option<crate::auth::codex_refresh::CredentialRefreshPatch>,
-    /// Publishing the other partition is not a successful refresh of this one.
-    failures: u32,
     secrets: crate::observe::redact::Secrets,
 }
 
@@ -2041,28 +2039,6 @@ impl Manager {
                 failure.partition == crate::auth::CodexCredentialPartition::Siwc,
             )
         });
-        let partial_failures =
-            partial_failure
-                .as_ref()
-                .and_then(|failure| {
-                    self.locked(|state| {
-                        state
-                            .auths
-                            .get(id)
-                            .filter(|entry| {
-                                entry.auth.registration_epoch == base_epoch
-                                    && failure.partition.is_active(&entry.auth)
-                                    && entry.auth.codex_refresh_failure.as_ref().is_some_and(
-                                        |previous| previous.partition == failure.partition,
-                                    )
-                                    && partial_baseline.as_ref().is_some_and(|baseline| {
-                                        baseline.can_apply_to(&entry.auth.metadata)
-                                    })
-                            })
-                            .map(|entry| entry.refresh_failures)
-                    })
-                })
-                .unwrap_or_default();
         let mut partial_secrets = crate::observe::redact::Secrets::new();
         if partial_failure.is_some() {
             partial_secrets.add_auth(&auth);
@@ -2229,7 +2205,6 @@ impl Manager {
             let partial = PartialFailure {
                 failure,
                 baseline: partial_baseline,
-                failures: partial_failures,
                 secrets,
             };
             #[cfg(test)]
@@ -2356,7 +2331,6 @@ impl Manager {
         let PartialFailure {
             failure,
             baseline,
-            failures,
             secrets,
         } = partial;
         let mut error = failure.error;
@@ -2379,16 +2353,6 @@ impl Manager {
             return Ok(entry.auth.clone());
         }
         if failure.partition.is_active(&entry.auth) {
-            if !has_unauthorized_auth_failure(&entry.auth)
-                && entry
-                    .auth
-                    .codex_refresh_failure
-                    .as_ref()
-                    .is_some_and(|current| current.partition == failure.partition)
-                && let Some(entry) = state.auths.get_mut(id)
-            {
-                entry.refresh_failures = entry.refresh_failures.max(failures);
-            }
             let after = self.record_refresh_failure_locked(&mut state, id, attempt, &error, now);
             drop(state);
             self.apply_after_failure(id, after);

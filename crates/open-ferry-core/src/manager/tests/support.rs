@@ -686,10 +686,10 @@ pub(crate) async fn settle() {
     }
 }
 
-/// All 120 linearizations of five captured/completing operations. The fixed
-/// width bounds both recursion and retained schedules for invariant families.
-pub(crate) fn five_step_orderings<T: Copy>(mut steps: [T; 5]) -> Vec<[T; 5]> {
-    fn visit<T: Copy>(steps: &mut [T; 5], at: usize, out: &mut Vec<[T; 5]>) {
+/// Seven bounded operations, with rejection, refresh failure and recovery in
+/// order. Other operations can observe each intermediate recovery state.
+pub(crate) fn recovery_step_orderings(steps: [&str; 7]) -> Vec<[&str; 7]> {
+    fn visit<'a>(steps: &mut [&'a str; 7], at: usize, out: &mut Vec<[&'a str; 7]>) {
         if at == steps.len() {
             out.push(*steps);
             return;
@@ -700,8 +700,14 @@ pub(crate) fn five_step_orderings<T: Copy>(mut steps: [T; 5]) -> Vec<[T; 5]> {
             steps.swap(at, next);
         }
     }
-    let mut orders = Vec::with_capacity(120);
+    let mut steps = steps;
+    let mut orders = Vec::with_capacity(5040);
     visit(&mut steps, 0, &mut orders);
+    orders.retain(|order| {
+        let at = |step| order.iter().position(|value| *value == step).unwrap();
+        at("401") < at("invalid_grant") && at("invalid_grant") < at("relogin")
+    });
+    assert_eq!(orders.len(), 840);
     orders
 }
 

@@ -638,8 +638,16 @@ fn round7_repeated_edit_published_during_read_retries_the_observation() {
 #[tokio::test(start_paused = true)]
 async fn p47_adoption_ordering_family_preserves_a_later_disable() {
     const INVARIANT: &str = "a later persisted disable is never undone by captured scan/persist/relogin notifications or an older refresh";
-    let orders = five_step_orderings(["scan", "persist", "disable", "relogin", "refresh"]);
-    assert_eq!(orders.len(), 120);
+    let orders = recovery_step_orderings([
+        "scan",
+        "persist",
+        "disable",
+        "relogin",
+        "refresh",
+        "401",
+        "invalid_grant",
+    ]);
+    assert_eq!(orders.len(), 840);
     for order in orders {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(FileStore::new(dir.path()));
@@ -652,8 +660,19 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
         );
         let partition_deadline = partition_hold(&manager);
         let executor = FakeExecutor::new("claude");
-        executor.set_refresh(|_| Err(crate::exec::ExecError::upstream(400, "invalid_grant")));
-        manager.register_executor(executor);
+        executor.set_lead(Some(Duration::from_secs(60)));
+        executor.set_refresh(|before| {
+            let mut after = before.clone();
+            after
+                .metadata
+                .insert("access_token".into(), serde_json::json!("dummy-still-due"));
+            after.metadata.insert(
+                "expires_at".into(),
+                serde_json::json!("2000-01-01T00:00:00Z"),
+            );
+            Ok(after)
+        });
+        manager.register_executor(executor.clone());
         let mut auth = auth_with_metadata(
             "ordering.json",
             "claude",
@@ -680,7 +699,6 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
             .metadata
             .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
         let mut disabled = false;
-        let mut refresh_deadline = None;
         for step in order {
             match step {
                 "disable" => {
@@ -758,43 +776,11 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                         assert!(merged.disabled, "{INVARIANT}: {order:?}, refresh merge");
                     }
                     if !disabled {
-                        manager.mark_result(&crate::manager::CallResult {
-                            auth_id: base.id.clone(),
-                            provider: "claude".into(),
-                            credential_version: live.credential_version,
-                            registration_epoch: live.registration_epoch,
-                            error: Some(crate::auth::AuthError {
-                                http_status: 401,
-                                message: "dummy unauthorized".into(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        });
-                        assert_eq!(manager.get(&base.id).unwrap().status, Status::Error);
-                        assert!(manager.force_refresh(&base.id).await.is_err());
-                        assert!(
-                            manager
-                                .get(&base.id)
-                                .unwrap()
-                                .last_error
-                                .as_ref()
-                                .is_some_and(|error| error.message.contains("invalid_grant"))
+                        manager.force_refresh(&base.id).await.unwrap();
+                        assert_eq!(
+                            manager.get(&base.id).unwrap().next_refresh_after,
+                            Some(manager.now() + chrono::TimeDelta::seconds(30))
                         );
-                        let current = manager.get(&base.id).unwrap();
-                        let mut due = current.as_ref().clone();
-                        due.metadata
-                            .insert("access_token".into(), serde_json::json!("dummy-still-due"));
-                        due.metadata.insert(
-                            "expires_at".into(),
-                            serde_json::json!("2000-01-01T00:00:00Z"),
-                        );
-                        due.status = Status::Active;
-                        due.last_error = None;
-                        refresh_deadline = Some(manager.now() + chrono::TimeDelta::seconds(30));
-                        due.next_refresh_after = refresh_deadline;
-                        manager
-                            .update_refreshed(&current, current.registration_epoch, due)
-                            .unwrap();
                     } else {
                         manager
                             .update_refreshed(&base, base.registration_epoch, refresh.clone())
@@ -802,6 +788,48 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                     }
                     rotate_outer_with_partition_hold(&manager);
                 }
+                "401" if !disabled => {
+                    let live = manager.get(&base.id).unwrap();
+                    manager.mark_result(&crate::manager::CallResult {
+                        auth_id: base.id.clone(),
+                        provider: "claude".into(),
+                        credential_version: live.credential_version,
+                        registration_epoch: live.registration_epoch,
+                        error: Some(crate::auth::AuthError {
+                            http_status: 401,
+                            message: "dummy unauthorized".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    assert_eq!(manager.get(&base.id).unwrap().status, Status::Error);
+                }
+                "invalid_grant" if !disabled => {
+                    executor.set_refresh(|_| {
+                        Err(crate::exec::ExecError::upstream(400, "invalid_grant"))
+                    });
+                    assert!(manager.force_refresh(&base.id).await.is_err());
+                    assert!(
+                        manager
+                            .get(&base.id)
+                            .unwrap()
+                            .last_error
+                            .as_ref()
+                            .is_some_and(|error| error.message.contains("invalid_grant"))
+                    );
+                    executor.set_refresh(|before| {
+                        let mut after = before.clone();
+                        after
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-still-due"));
+                        after.metadata.insert(
+                            "expires_at".into(),
+                            serde_json::json!("2000-01-01T00:00:00Z"),
+                        );
+                        Ok(after)
+                    });
+                }
+                "401" | "invalid_grant" => {}
                 _ => {
                     let hint = match step {
                         "scan" => &scan,
@@ -818,21 +846,6 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                 }
             }
             let live = manager.get(&base.id).unwrap();
-            if !disabled {
-                assert_eq!(
-                    live.next_refresh_after, refresh_deadline,
-                    "refresh hold: {order:?}, {step}"
-                );
-            }
-            assert_eq!(
-                live.status,
-                if disabled {
-                    Status::Disabled
-                } else {
-                    Status::Active
-                },
-                "status: {order:?}, {step}"
-            );
             assert_partition_hold(&manager, partition_deadline);
             if disabled {
                 assert!(

@@ -218,10 +218,6 @@ impl ExecError {
     /// hint owns delivery only when positive; zero leaves raw headers alone.
     pub fn has_retry_after_override(&self) -> bool {
         self.has_trusted_retry_deadline()
-            || matches!(
-                self.kind,
-                ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
-            ) && self.retry_after.is_some()
             || self.failure_code() == Some("transient_rate_limit")
                 && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }

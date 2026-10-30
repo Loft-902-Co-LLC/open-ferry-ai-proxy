@@ -436,6 +436,29 @@ async fn p47r2_token_edit_keeps_its_explicit_refresh_delay() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn p47r3_token_edit_clears_stale_unavailable_with_unknown_quota_end() {
+    let h = Harness::new(Settings::default());
+    let mut initial = auth_with_metadata("a", "claude", json!({"access_token":"dummy-old"}));
+    initial.status = Status::Error;
+    initial.unavailable = true;
+    initial.next_retry_after = Some(h.now() - TimeDelta::seconds(1));
+    initial.quota.exceeded = true;
+    initial.quota.reason = "quota".into();
+    h.add(initial, &[]);
+    h.manager
+        .edit_unsaved("a", |auth| {
+            auth.metadata
+                .insert("access_token".into(), json!("dummy-login"));
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+    let live = h.get("a");
+    assert_eq!(live.status, Status::Active);
+    assert!(!live.unavailable);
+    assert!(live.next_retry_after.is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn p47r2_relogin_retains_aggregated_quota_status_without_auth_error() {
     for status in [400, 401] {
         let h = Harness::new(Settings::default());

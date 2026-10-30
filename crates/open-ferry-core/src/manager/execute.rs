@@ -1070,20 +1070,21 @@ impl Manager {
                 let settings = self.settings();
                 let action = match_request_scoped_error_action(&auth, &err, &settings);
                 let view = ErrView::Exec(&err);
-                let credential_scope = match kind {
+                let (credential_scope, marked) = match kind {
                     CallKind::Execute => {
                         let result = failure_result(&attempt, &auth, &err, action, true);
-                        if is_responses_compact_availability_neutral_error(
+                        let neutral = is_responses_compact_availability_neutral_error(
                             &exec_opts,
                             view,
                             result.error.as_ref(),
-                        ) {
+                        );
+                        if neutral {
                             self.record_availability_neutral_result_async(&result).await;
                         } else {
                             self.mark_call_result_async(&result, attempt.session())
                                 .await;
                         }
-                        result.credential_scope
+                        (result.credential_scope, !neutral)
                     }
                     CallKind::CountTokens => {
                         // A count_tokens route the upstream lacks is recorded
@@ -1091,22 +1092,27 @@ impl Manager {
                         // messages.
                         let mut result = failure_result(&attempt, &auth, &err, action, false);
                         result.skip_quota_observation = true;
-                        if is_count_tokens_endpoint_not_found_error(view, &exec_req.model)
-                            && result
-                                .error
-                                .as_ref()
-                                .is_none_or(|e| e.code != CODE_FORCE_COOLDOWN)
-                        {
+                        let neutral =
+                            is_count_tokens_endpoint_not_found_error(view, &exec_req.model)
+                                && result
+                                    .error
+                                    .as_ref()
+                                    .is_none_or(|e| e.code != CODE_FORCE_COOLDOWN);
+                        if neutral {
                             self.record_availability_neutral_result_async(&result).await;
                         } else {
                             result.credential_scope = is_credential_scoped_error(view);
                             self.mark_call_result_async(&result, attempt.session())
                                 .await;
                         }
-                        result.credential_scope
+                        (result.credential_scope, !neutral)
                     }
                 };
-                let err = self.annotate_retry_deadline(err);
+                let err = if marked {
+                    self.annotate_retry_deadline(err)
+                } else {
+                    err
+                };
                 if let Some(previous) = &mut upstream {
                     previous.err = err.clone();
                 }
@@ -1658,7 +1664,6 @@ impl Forwarder {
                         .mark_call_result_async(&result, attempt.session())
                         .await;
                 }
-                let err = self.manager.annotate_retry_deadline(err);
                 return self.tx.send(Err(err)).await.is_ok();
             }
             Ok(payload) => payload,

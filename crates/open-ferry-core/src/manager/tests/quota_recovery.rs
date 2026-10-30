@@ -4462,7 +4462,15 @@ async fn p47_capacity_hold_and_merge_fence_an_inflight_quota_recovery() {
 #[tokio::test(start_paused = true)]
 async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
     const INVARIANT: &str = "live quota and unrelated cooldowns cannot be shortened by stale results, relogin, or refresh/recovery merges";
-    let orders = five_step_orderings(["stale", "relogin", "refresh", "merge", "recovery"]);
+    let orders = recovery_step_orderings([
+        "stale",
+        "relogin",
+        "refresh",
+        "merge",
+        "recovery",
+        "401",
+        "invalid_grant",
+    ]);
     let orders: Vec<_> = orders
         .into_iter()
         .filter(|order| {
@@ -4470,16 +4478,18 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                 < order.iter().position(|step| *step == "recovery")
         })
         .collect();
-    assert_eq!(orders.len(), 60);
+    assert_eq!(orders.len(), 420);
     for quota in [false, true] {
         for order in &orders {
             let h = Harness::new(Settings::default());
             let partition_deadline = partition_hold(&h.manager);
             let executor = FakeExecutor::new("claude");
             executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
-            h.manager.register_executor(executor);
+            executor.set_lead(Some(Duration::from_secs(60)));
+            h.manager.register_executor(executor.clone());
             let mut refresh_deadline = None;
             let mut expected_status = crate::auth::Status::Error;
+            let mut auth_failed = false;
             let mut initial = auth_with_metadata(
                 ID,
                 "claude",
@@ -4497,6 +4507,7 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                 );
             }
             initial.status = crate::auth::Status::Active;
+            let pre_hold_models = initial.model_states.clone();
             h.add(initial, &[OPUS, ROUTE]);
             let old_seq = h.manager.next_execution_seq();
             let end = h.now() + TimeDelta::from_std(FIVE_DAYS).unwrap();
@@ -4527,13 +4538,18 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                         stale.registration_epoch = current.registration_epoch;
                         h.manager.mark_result(&stale);
                     }
-                    "relogin" => {
+                    "401" => {
                         let current = h.get(ID);
                         let mut unauthorized = other_failure("", 401, Duration::ZERO);
                         unauthorized.credential_version = current.credential_version;
                         unauthorized.registration_epoch = current.registration_epoch;
                         h.manager.mark_result(&unauthorized);
                         assert_eq!(h.get(ID).status, crate::auth::Status::Error);
+                        expected_status = crate::auth::Status::Error;
+                        auth_failed = true;
+                    }
+                    "invalid_grant" => {
+                        executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
                         assert!(h.manager.force_refresh(ID).await.is_err());
                         assert!(
                             h.get(ID)
@@ -4541,6 +4557,11 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                                 .as_ref()
                                 .is_some_and(|error| error.message.contains("invalid_grant"))
                         );
+                        refresh_deadline = Some(h.now() + TimeDelta::seconds(60));
+                        expected_status = crate::auth::Status::Error;
+                        auth_failed = true;
+                    }
+                    "relogin" => {
                         let mut fresh = h.get(ID).as_ref().clone();
                         fresh
                             .metadata
@@ -4551,6 +4572,7 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                             })
                             .unwrap();
                         refresh_deadline = None;
+                        auth_failed = false;
                         expected_status = if quota {
                             crate::auth::Status::Error
                         } else {
@@ -4560,8 +4582,9 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                     "refresh" => {
                         // Use the current version so a preceding relogin cannot
                         // make this test pass through the older-version fence.
-                        let base = h.get(ID);
-                        let mut refreshed = base.as_ref().clone();
+                        let mut base = h.get(ID).as_ref().clone();
+                        base.model_states = pre_hold_models.clone();
+                        let mut refreshed = base.clone();
                         refreshed
                             .metadata
                             .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
@@ -4569,11 +4592,28 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                             "expires_at".into(),
                             serde_json::json!("2000-01-01T00:00:00Z"),
                         );
-                        refresh_deadline = Some(h.now() + TimeDelta::seconds(30));
-                        refreshed.next_refresh_after = refresh_deadline;
+                        refreshed.next_refresh_after = None;
                         h.manager
                             .update_refreshed(&base, base.registration_epoch, refreshed)
                             .unwrap();
+                        executor.set_refresh(|before| {
+                            let mut after = before.clone();
+                            after.metadata.insert(
+                                "access_token".into(),
+                                serde_json::json!("dummy-still-due"),
+                            );
+                            Ok(after)
+                        });
+                        h.manager.force_refresh(ID).await.unwrap();
+                        refresh_deadline = Some(h.now() + TimeDelta::seconds(30));
+                        if auth_failed {
+                            expected_status = if quota {
+                                crate::auth::Status::Error
+                            } else {
+                                crate::auth::Status::Active
+                            };
+                        }
+                        auth_failed = false;
                         rotate_outer_with_partition_hold(&h.manager);
                     }
                     "merge" => merge_the_alias(&h),

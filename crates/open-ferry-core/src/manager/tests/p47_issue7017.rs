@@ -458,7 +458,7 @@ async fn p47_issue7017_disabled_transient_default_preserves_quota() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn p47r2_retry_deadline_uses_only_the_errors_own_positive_hint() {
+async fn p47r3_retry_deadline_uses_only_marked_pre_output_positive_hints() {
     for path in 0..5 {
         for cooling_disabled in [false, true] {
             for (status, hint) in [
@@ -516,10 +516,10 @@ async fn p47r2_retry_deadline_uses_only_the_errors_own_positive_hint() {
                 assert_eq!(error.http_status(), status);
                 assert_eq!(
                     error.has_trusted_retry_deadline(),
-                    hint.is_some(),
+                    path != 4 && hint.is_some(),
                     "path={path}, status={status}, cooling_disabled={cooling_disabled}"
                 );
-                if hint.is_some() {
+                if path != 4 && hint.is_some() {
                     assert_eq!(
                         error.retry_after_header().unwrap(),
                         "3",
@@ -530,6 +530,106 @@ async fn p47r2_retry_deadline_uses_only_the_errors_own_positive_hint() {
                 assert_eq!(executor.calls().len(), 1);
             }
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r3_stale_capacity_can_extend_a_live_nonquota_cooldown() {
+    for model in ["", "m"] {
+        for hint in [None, Some(Duration::from_secs(60))] {
+            let h = Harness::new(Settings {
+                transient_error_cooldown_seconds: 60,
+                ..Default::default()
+            });
+            h.add(auth("a", "codex"), &["m"]);
+            let older = h.manager.next_execution_seq();
+            let newer = h.manager.next_execution_seq();
+            let mut outage = result(model, Some(Duration::from_secs(30)));
+            outage.error = Some(result_error_from_error(ErrView::Exec(
+                &ExecError::upstream(503, "dummy outage"),
+            )));
+            outage.execution_seq = newer;
+            h.manager.mark_result(&outage);
+            h.clock.advance(Duration::from_secs(1));
+            let mut capacity = result(model, hint);
+            capacity.execution_seq = older;
+            h.manager.mark_result(&capacity);
+            let live = h.get("a");
+            let next = if model.is_empty() {
+                live.next_retry_after
+            } else {
+                live.model_states[model].next_retry_after
+            };
+            assert_eq!(
+                next,
+                Some(h.now() + TimeDelta::seconds(60)),
+                "model={model}, hint={hint:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r3_availability_neutral_errors_keep_the_executor_error_unwrapped() {
+    for compact in [false, true] {
+        let h = Harness::new(Settings::default());
+        let executor = FakeExecutor::with("codex", |_| {
+            let mut error = ExecError::upstream(404, "dummy missing endpoint");
+            error.retry_after = Some(Duration::from_secs(3));
+            Reply::Err(error)
+        });
+        h.executor(&executor);
+        h.add(auth("a", "codex"), &["m"]);
+        let mut opts = options();
+        opts.alt = if compact { "responses/compact" } else { "" }.into();
+        let providers = providers(&["codex"]);
+        let error = if compact {
+            h.manager
+                .execute(&providers, request("m"), opts)
+                .await
+                .unwrap_err()
+        } else {
+            h.manager
+                .count_tokens(&providers, request("m"), opts)
+                .await
+                .unwrap_err()
+        };
+        assert!(!error.has_trusted_retry_deadline(), "compact={compact}");
+        assert!(!h.get("a").unavailable);
+        assert!(h.get("a").model_states.is_empty());
+    }
+}
+
+#[test]
+fn p47r3_retry_override_contract_for_header_writers() {
+    for wait in [Duration::ZERO, Duration::from_secs(3)] {
+        for error in [
+            ExecError::auth_unavailable(wait),
+            ExecError::model_cooldown("m", None, wait, None),
+            ExecError::transient_capacity("capacity", Some(wait)),
+        ] {
+            assert_eq!(error.has_retry_after_override(), !wait.is_zero());
+            if error.kind == crate::exec::ErrorKind::ModelCooldown && wait.is_zero() {
+                assert_eq!(error.retry_after_header().unwrap(), "0");
+            } else {
+                assert_eq!(error.retry_after_header().is_some(), !wait.is_zero());
+            }
+        }
+    }
+    for status in [429, 503] {
+        let mut error = ExecError::upstream(status, "dummy executor hint");
+        error.retry_after = Some(Duration::from_secs(3));
+        assert!(!error.has_retry_after_override(), "unmarked executor error");
+        let mut error = error.with_trusted_retry_after(Duration::from_secs(3));
+        error.headers.insert("retry-after", "9999".parse().unwrap());
+        assert!(error.has_retry_after_override());
+        assert_eq!(error.retry_after_header().unwrap(), "3");
+        error.trusted_retry_deadline = Some(Instant::now() - Duration::from_secs(1));
+        assert!(
+            error.has_retry_after_override(),
+            "expiry must still suppress raw/add-on headers"
+        );
+        assert!(error.retry_after_header().is_none());
     }
 }
 
