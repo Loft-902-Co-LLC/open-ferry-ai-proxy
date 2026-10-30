@@ -15,9 +15,13 @@ use crate::common::tool_names::canonical_tool_name;
 use crate::json::{path, str_of};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 mod budget;
+mod call_analysis;
 mod reclean;
+
+use call_analysis::CallAnalysis;
 
 fn tool_name(tool: &Value) -> String {
     if !budget::value(tool.get("name").unwrap_or(&Value::Null))
@@ -98,9 +102,11 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
         .then_some(first)
 }
 
+type Info<'a> = SchemaInfo<Schemas<'a>>;
+
 #[derive(Default)]
-struct Info<'a> {
-    properties: BTreeMap<String, Schemas<'a>>,
+struct SchemaInfo<S> {
+    properties: BTreeMap<String, S>,
     required: BTreeSet<String>,
     allows: bool,
     forbids: bool,
@@ -108,7 +114,7 @@ struct Info<'a> {
     complex: bool,
     unsafe_complex: bool,
     object: bool,
-    branches: Vec<Info<'a>>,
+    branches: Vec<SchemaInfo<S>>,
 }
 impl Clone for Info<'_> {
     fn clone(&self) -> Self {
@@ -151,12 +157,10 @@ impl<'a> Info<'a> {
     }
 
     fn merge(&mut self, other: Self) {
-        if !other.charge_copy() {
-            return;
-        }
         for (key, values) in other.properties {
+            let entry = self.properties.entry(key).or_default();
             for value in values.values {
-                unique(self.properties.entry(key.clone()).or_default(), value);
+                unique(entry, value);
             }
         }
         self.required.extend(other.required);
@@ -168,6 +172,9 @@ impl<'a> Info<'a> {
         self.unsafe_complex |= other.unsafe_complex;
         self.object |= other.object;
     }
+}
+
+impl<S> SchemaInfo<S> {
     fn dynamic(&self) -> bool {
         budget::charge(1)
             && (self.pattern
@@ -739,7 +746,7 @@ fn items_memo<'a>(
     Some(result.values)
 }
 
-fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> bool {
+fn candidate_accepts<S>(infos: &[Arc<SchemaInfo<S>>], key: Option<&str>, current: &Value) -> bool {
     infos.len() > 1
         && infos.iter().any(|info| {
             if info.complex {
@@ -755,8 +762,9 @@ fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> 
         })
 }
 
-fn injected(schema: &Value, key: &str, top: bool) -> bool {
-    let info = analyze(schema, schema);
+fn injected(schema: &Value, key: &str, top: bool, analyses: &mut CallAnalysis) -> bool {
+    let analysis = analyses.resolve(&[schema], schema);
+    let info = &analysis.merged;
     if let Some(properties) = info.properties.get(key) {
         if gjson_array(schema.get("required")).any(|v| v == key) {
             return true;
@@ -780,7 +788,11 @@ fn injected(schema: &Value, key: &str, top: bool) -> bool {
     }
     ["anyOf", "oneOf"].iter().any(|k| {
         array(schema, k).any(|branch| {
-            analyze(branch, branch).properties.contains_key(key)
+            analyses
+                .resolve(&[branch], branch)
+                .merged
+                .properties
+                .contains_key(key)
                 && gjson_array(branch.get("required")).any(|v| v == key)
         })
     })
@@ -872,15 +884,14 @@ fn clean_value(
     root: &Value,
     top: bool,
     depth: usize,
+    analyses: &mut CallAnalysis,
 ) {
     if !budget::value(value) || depth > 128 || originals.is_empty() {
         return;
     }
-    let infos: Vec<_> = originals.iter().map(|s| analyze(s, root)).collect();
-    let mut info = Info::default();
-    for item in &infos {
-        info.merge(item.clone());
-    }
+    let analysis = analyses.resolve(originals, root);
+    let infos = &analysis.infos;
+    let info = &analysis.merged;
     if info.unsafe_complex {
         return;
     }
@@ -917,6 +928,7 @@ fn clean_value(
                 root,
                 false,
                 depth + 1,
+                analyses,
             );
         }
         return;
@@ -938,15 +950,24 @@ fn clean_value(
     }
     let translated_infos: Vec<_> = translated
         .iter()
-        .map(|schema| analyze(schema, schema))
+        .map(|schema| analyses.resolve(&[schema], schema))
         .collect();
-    for (key, children) in &info.properties {
-        if info.parent_accepts(key, value) || candidate_accepts(&infos, Some(key), value) {
+    // A probe contains only its path. Do not copy/check every unrelated schema
+    // child on every probe, even when the analyses themselves are cached.
+    let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    for key in keys {
+        if !budget::charge(key.len().saturating_add(32).saturating_mul(16)) {
+            return;
+        }
+        let Some(children) = info.properties.get(&key) else {
+            continue;
+        };
+        if info.parent_accepts(&key, value) || candidate_accepts(infos, Some(&key), value) {
             continue;
         }
         let mut translated_children = Schemas::default();
         for translated_info in &translated_infos {
-            if let Some(children) = translated_info.properties.get(key) {
+            if let Some(children) = translated_info.merged.properties.get(&key) {
                 for child in children {
                     unique(&mut translated_children, child);
                 }
@@ -955,25 +976,25 @@ fn clean_value(
         if !translated.is_empty() && translated_children.is_empty() {
             continue;
         }
-        if let Some(child) = value.get_mut(key) {
-            clean_value(
-                child,
-                children,
-                &translated_children,
-                root,
-                false,
-                depth + 1,
-            );
-        }
+        let children: Vec<_> = children.iter().collect();
+        clean_value(
+            value.get_mut(&key).unwrap(),
+            &children,
+            &translated_children,
+            root,
+            false,
+            depth + 1,
+            analyses,
+        );
     }
-    let dynamic = info.dynamic() || infos.iter().any(Info::dynamic);
+    let dynamic = info.dynamic() || infos.iter().any(|info| info.dynamic());
     for key in ["reason", "_"] {
         if value.get(key).is_none()
             || info.properties.contains_key(key)
             || info.required.contains(key)
             || dynamic
             || info.parent_accepts(key, value)
-            || candidate_accepts(&infos, None, value)
+            || candidate_accepts(infos, None, value)
             || (!translated.is_empty()
                 && originals
                     .iter()
@@ -983,7 +1004,7 @@ fn clean_value(
         }
         if translated.is_empty()
             || translated.iter().any(|schema| {
-                injected(schema, key, top)
+                injected(schema, key, top, analyses)
                     || (top && info.forbids && reclean::requires(schema, key))
             })
         {
@@ -996,18 +1017,19 @@ fn clean_value(
         && info.required.is_empty()
         && info.properties.is_empty()
         && !dynamic
-        && !candidate_accepts(&infos, None, value)
+        && !candidate_accepts(infos, None, value)
     {
         *value = json!({});
     }
 }
 
-// Owned once per streaming call: probes must not resolve or copy request-wide
-// tools again. The unbounded whole-response path still borrows its schemas.
+// Owned once per streaming call: probes reuse both schemas and their analyses.
+// The unbounded whole-response path uses a fresh cache for its borrowed schemas.
 #[derive(Default)]
 pub(super) struct CallSchemas {
-    original: Option<Option<Value>>,
+    original: Option<Option<Box<Value>>>,
     translated: Vec<Value>,
+    analyses: Mutex<CallAnalysis>,
 }
 
 impl CallSchemas {
@@ -1018,7 +1040,9 @@ impl CallSchemas {
         work: &crate::common::vertex_partial_args::WorkBudget,
     ) -> Self {
         budget::with(work, || Self {
-            original: original_schema(original, name).map(|schema| schema.map(budget::copy)),
+            original: original_schema(original, name)
+                .map(|schema| schema.map(|schema| Box::new(budget::copy(schema)))),
+            analyses: Mutex::default(),
             translated: translated_schemas(sent, original, name)
                 .into_iter()
                 .map(budget::copy)
@@ -1032,7 +1056,13 @@ impl CallSchemas {
     ) -> bool {
         budget::with(work, || match &self.original {
             Some(None) => true,
-            Some(Some(schema)) => analyze(schema, schema).parameterless(),
+            Some(Some(schema)) => self
+                .analyses
+                .lock()
+                .expect("call analysis cache")
+                .resolve(&[schema], schema)
+                .merged
+                .parameterless(),
             None => false,
         })
     }
@@ -1046,8 +1076,9 @@ impl CallSchemas {
             let translated: Vec<_> = self.translated.iter().collect();
             clean_resolved(
                 args,
-                self.original.as_ref().map(|schema| schema.as_ref()),
+                self.original.as_ref().map(|schema| schema.as_deref()),
                 &translated,
+                &mut self.analyses.lock().expect("call analysis cache"),
             )
         })
     }
@@ -1055,10 +1086,20 @@ impl CallSchemas {
 
 pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: &Value) -> Value {
     let translated = translated_schemas(sent, original, name);
-    clean_resolved(args, original_schema(original, name), &translated)
+    clean_resolved(
+        args,
+        original_schema(original, name),
+        &translated,
+        &mut CallAnalysis::default(),
+    )
 }
 
-fn clean_resolved(args: &Value, original: Option<Option<&Value>>, translated: &[&Value]) -> Value {
+fn clean_resolved(
+    args: &Value,
+    original: Option<Option<&Value>>,
+    translated: &[&Value],
+    analyses: &mut CallAnalysis,
+) -> Value {
     if !budget::value(args) {
         return Value::Null;
     }
@@ -1075,7 +1116,7 @@ fn clean_resolved(args: &Value, original: Option<Option<&Value>>, translated: &[
         return budget::copy(args);
     }
     let mut args = budget::copy(args);
-    clean_value(&mut args, &[schema], translated, schema, true, 0);
+    clean_value(&mut args, &[schema], translated, schema, true, 0, analyses);
     args
 }
 

@@ -266,7 +266,7 @@ fn responses_finalize_after_finish_does_not_fail_or_complete_unfinished_argument
 }
 
 #[test]
-fn round3_root_paths_do_not_open_an_extra_responses_item() {
+fn round4_missing_empty_and_root_paths_continue_the_existing_responses_call() {
     for path in [None, Some(""), Some("$"), Some("  $  ")] {
         let mut stream =
             GeminiToOpenAIResponsesStream::new("gemini-test", &json!({}), &Value::Null);
@@ -281,12 +281,19 @@ fn round3_root_paths_do_not_open_an_extra_responses_item() {
         if let Some(path) = path {
             part["jsonPath"] = json!(path);
         }
+        let continuation = json!({"name":"weather","partialArgs":[part]});
+        assert!(
+            stream
+                .active_call
+                .as_ref()
+                .unwrap()
+                .call
+                .can_continue(&continuation),
+            "{path:?} must stay attached to the existing Responses call"
+        );
         all.extend(feed(
             &mut stream,
-            &frame(
-                json!([{"functionCall":{"name":"weather","partialArgs":[part]}}]),
-                true,
-            ),
+            &frame(json!([{"functionCall":continuation}]), true),
         ));
         all.extend(parse(&stream.translate_line(b"data: [DONE]")));
         assert_eq!(

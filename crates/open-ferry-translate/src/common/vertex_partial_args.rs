@@ -384,7 +384,8 @@ impl Assembler {
         if let Some(held) = self.probes.get(&cache_key) {
             return Ok(*held);
         }
-        self.reserve(key_bytes)?;
+        // Probe paths are work/cache overhead, not buffered argument bytes.
+        // Their copies and traversal remain covered by the shared work budget.
         let mut probe = serde_json::json!({probe_key:1});
         for segment in path.iter().rev() {
             probe = match segment {

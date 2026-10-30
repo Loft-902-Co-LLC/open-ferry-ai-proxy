@@ -682,6 +682,10 @@ mod round3_tests {
             work.check().is_ok(),
             "a truncated projection must leave room for call completion"
         );
-        assert!(work.used() > 0);
+        assert!(
+            work.used() >= (8 << 20) + 100_000 * 32,
+            "truncation must charge the projection's entire private allowance: {}",
+            work.used()
+        );
     }
 }

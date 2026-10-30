@@ -49,51 +49,93 @@ fn claude_partial_args_preserve_exponent_and_large_number_spelling() {
 }
 
 #[test]
-fn round3_large_tools_and_nested_probes_complete() {
-    let mut tools: Vec<_> = (0..128)
-        .map(|index| {
-            json!({
-                "name":format!("unused_{index}"),
-                "input_schema":{"type":"object","description":"x".repeat(8192)}
+fn round4_two_hundred_nested_probes_complete() {
+    for translated in [false, true] {
+        let mut tools: Vec<_> = (0..128)
+            .map(|index| {
+                json!({
+                    "name":format!("unused_{index}"),
+                    "input_schema":{"type":"object","description":"x".repeat(8192)}
+                })
             })
-        })
-        .collect();
-    let properties: serde_json::Map<_, _> = (0..64)
-        .map(|index| {
-            (
-                format!("k{index}"),
-                json!({"type":"object","properties":{"value":{"type":"string"}}}),
-            )
-        })
-        .collect();
-    tools.push(json!({"name":"wide","input_schema":{"type":"object","properties":properties}}));
-    let mut stream = GeminiToClaudeStream::new(&json!({"tools":tools}));
-    let mut all = Vec::new();
-    for index in 0..64 {
+            .collect();
+        let properties: serde_json::Map<_, _> = (0..200)
+            .map(|index| {
+                (
+                    format!("k{index}"),
+                    json!({"type":"object","properties":{"value":{"type":"string"}}}),
+                )
+            })
+            .collect();
+        tools.push(json!({"name":"wide","input_schema":{"type":"object","properties":properties}}));
+        let sent = json!({"tools":[{"functionDeclarations":[{"name":"wide","parametersJsonSchema":tools.last().unwrap()["input_schema"]}]}]});
+        let mut stream = GeminiToClaudeStream::new(&json!({"tools":tools}));
+        if translated {
+            stream = stream.with_translated_request(&sent);
+        }
+        let mut all = Vec::new();
+        for index in 0..200 {
+            let before = stream
+                .active_call
+                .as_ref()
+                .map_or(0, |call| call.assembler.work_used());
+            all.extend(events(
+                &mut stream,
+                &frame(
+                    json!([{"functionCall":{
+                        "name":"wide","willContinue":true,"partialArgs":[{
+                            "jsonPath":format!("$.k{index}.value"),"stringValue":"x"
+                        }]
+                    }}]),
+                    false,
+                ),
+            ));
+            if index > 0 {
+                let work = stream.active_call.as_ref().unwrap().assembler.work_used() - before;
+                assert!(
+                    work < 32 * 1024,
+                    "probe {index} re-walked the wide schema: {work} bytes (translated={translated})"
+                );
+            }
+        }
         all.extend(events(
             &mut stream,
-            &frame(
-                json!([{"functionCall":{
-                    "name":"wide","willContinue":true,"partialArgs":[{
-                        "jsonPath":format!("$.k{index}.value"),"stringValue":"x"
-                    }]
-                }}]),
-                false,
-            ),
+            &frame(json!([{"functionCall":{}}]), true),
         ));
+        all.extend(parse(&stream.translate(b"[DONE]")));
+        assert!(!stream.incomplete_call);
+        assert!(all.iter().any(|event| event["type"] == "message_stop"));
+        let args: Value = serde_json::from_str(&arguments(&all)).unwrap();
+        assert_eq!(args.as_object().unwrap().len(), 200);
+        for index in 0..200 {
+            assert_eq!(args[format!("k{index}")]["value"], "x");
+        }
     }
-    all.extend(events(
+}
+
+#[test]
+fn round4_long_probe_paths_do_not_consume_argument_bytes() {
+    let key = "k".repeat(8192);
+    let path = format!("${}", format!(".{key}").repeat(40));
+    let mut stream = GeminiToClaudeStream::new(&json!({}));
+    let mut all = events(
         &mut stream,
-        &frame(json!([{"functionCall":{}}]), true),
-    ));
+        &frame(
+            json!([{"functionCall":{"name":"deep","partialArgs":[{"jsonPath":path,"stringValue":"x"}]}}]),
+            true,
+        ),
+    );
     all.extend(parse(&stream.translate(b"[DONE]")));
     assert!(!stream.incomplete_call);
     assert!(all.iter().any(|event| event["type"] == "message_stop"));
     let args: Value = serde_json::from_str(&arguments(&all)).unwrap();
-    assert_eq!(args.as_object().unwrap().len(), 64);
-    for index in 0..64 {
-        assert_eq!(args[format!("k{index}")]["value"], "x");
+    let mut leaf = &args;
+    for _ in 0..40 {
+        let object = leaf.as_object().unwrap();
+        assert_eq!(object.len(), 1);
+        leaf = &object[&key];
     }
+    assert_eq!(leaf, "x");
 }
 
 #[test]
@@ -151,7 +193,7 @@ fn round3_thousand_tools_complete() {
 }
 
 #[test]
-fn round3_missing_empty_and_root_paths_keep_one_failed_call() {
+fn round4_missing_empty_and_root_paths_continue_the_existing_claude_call() {
     for path in [None, Some(""), Some("$"), Some("  $  ")] {
         let mut stream = GeminiToClaudeStream::new(&json!({}));
         let mut all = events(
@@ -165,12 +207,18 @@ fn round3_missing_empty_and_root_paths_keep_one_failed_call() {
         if let Some(path) = path {
             part["jsonPath"] = json!(path);
         }
+        let continuation = json!({"name":"weather","partialArgs":[part]});
+        assert!(
+            stream
+                .active_call
+                .as_ref()
+                .unwrap()
+                .can_continue(&continuation),
+            "{path:?} must stay attached to the existing call before failing assembly"
+        );
         all.extend(events(
             &mut stream,
-            &frame(
-                json!([{"functionCall":{"name":"weather","partialArgs":[part]}}]),
-                true,
-            ),
+            &frame(json!([{"functionCall":continuation}]), true),
         ));
         all.extend(parse(&stream.translate(b"[DONE]")));
         assert_eq!(
