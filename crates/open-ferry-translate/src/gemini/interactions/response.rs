@@ -126,8 +126,14 @@ impl GeminiToInteractionsStream {
     pub fn translate(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         // Vertex passes raw SSE lines; AI Studio passes the JSON payload.
+        let chunk = go::trim_space(chunk);
         let chunk = go::trim_space(chunk.strip_prefix(b"data:").unwrap_or(chunk));
-        if chunk.is_empty() || chunk.starts_with(b"event:") {
+        if chunk.is_empty()
+            || chunk.starts_with(b":")
+            || chunk.starts_with(b"event:")
+            || chunk.starts_with(b"id:")
+            || chunk.starts_with(b"retry:")
+        {
             return out;
         }
         if chunk == b"[DONE]" {

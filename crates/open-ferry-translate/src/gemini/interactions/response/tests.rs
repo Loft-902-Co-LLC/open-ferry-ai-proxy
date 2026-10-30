@@ -1113,3 +1113,74 @@ fn filtered_usage_matches_native_usage_with_spelling_precedence() {
         );
     }
 }
+
+#[test]
+fn stream_sse_payload_lines() {
+    let body = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15}}"#;
+    for line in [
+        body.to_owned(),
+        format!("data: {body}"),
+        format!("data:{body}"),
+        format!(" \t data: {body}  \r\n"),
+    ] {
+        let mut stream = GeminiToInteractionsStream::new(MODEL);
+        let out = stream.translate(line.as_bytes());
+        assert_eq!(
+            event_types(&out),
+            "interaction.created,interaction.status_update,step.start,step.delta,step.stop,interaction.completed,done",
+            "{line:?}"
+        );
+        assert_eq!(text(&nth_event(&out, "step.delta", 0), "delta.text"), "OK");
+        assert_eq!(
+            int(
+                &find_event(&out, "interaction.completed"),
+                "interaction.usage.total_tokens"
+            ),
+            15
+        );
+        assert!(stream.translate(b"data: [DONE]").is_empty());
+    }
+}
+
+#[test]
+fn stream_ignores_sse_control_lines() {
+    for line in [
+        "",
+        "  ",
+        "data:",
+        "data:  ",
+        ": keepalive",
+        "event: message",
+        "id: 1",
+        "retry: 1000",
+        "  : keepalive \r\n",
+        " data: : keepalive ",
+        "  event: message  ",
+        "  id: 1  ",
+        "  retry: 1000  ",
+    ] {
+        let mut stream = GeminiToInteractionsStream::new(MODEL);
+        assert!(stream.translate(line.as_bytes()).is_empty(), "{line:?}");
+        assert!(!stream.started, "{line:?}");
+        assert!(!stream.finished, "{line:?}");
+        assert!(!stream.completed, "{line:?}");
+        assert!(stream.pending_usage.is_none(), "{line:?}");
+    }
+}
+
+#[test]
+fn stream_prefixed_done_completes_once() {
+    let mut stream = GeminiToInteractionsStream::new(MODEL);
+    let mut out = stream.translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#);
+    out.extend(stream.translate(b" \tdata: [DONE] \r\n"));
+    assert_eq!(
+        event_types(&out),
+        "interaction.created,interaction.status_update,interaction.completed,done"
+    );
+    assert_eq!(
+        find_event(&out, "interaction.completed")["interaction"]["usage"],
+        json!({})
+    );
+    assert!(stream.translate(b"[DONE]").is_empty());
+    assert!(stream.translate(b"data: [DONE]").is_empty());
+}
