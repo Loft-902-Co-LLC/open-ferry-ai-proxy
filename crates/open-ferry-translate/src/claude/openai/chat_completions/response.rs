@@ -381,6 +381,7 @@ struct Usage {
     output: i64,
     cache_creation: i64,
     cache_read: i64,
+    thinking: Option<i64>,
     /// Whether Claude reported any usage at all.
     reported: bool,
 }
@@ -391,6 +392,9 @@ impl Usage {
             return;
         };
         self.reported = true;
+        if let Some(value) = path(usage, "output_tokens_details.thinking_tokens") {
+            self.thinking = Some(int_of(value));
+        }
         for (key, count) in [
             ("input_tokens", &mut self.input),
             ("output_tokens", &mut self.output),
@@ -411,7 +415,7 @@ impl Usage {
             .input
             .wrapping_add(self.cache_creation)
             .wrapping_add(self.cache_read);
-        json!({
+        let mut usage = json!({
             "prompt_tokens": prompt,
             "completion_tokens": self.output,
             "total_tokens": prompt.wrapping_add(self.output),
@@ -420,7 +424,11 @@ impl Usage {
                 "cached_creation_tokens": self.cache_creation,
                 "cache_write_tokens": self.cache_creation,
             },
-        })
+        });
+        if let Some(thinking) = self.thinking {
+            usage["completion_tokens_details"] = json!({"reasoning_tokens": thinking});
+        }
+        usage
     }
 }
 

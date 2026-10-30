@@ -677,3 +677,70 @@ fn truncated_tool_call_keeps_length_arguments_and_usage() {
         assert_eq!(chunks.last().unwrap()["usage"]["completion_tokens"], 4);
     }
 }
+
+#[test]
+fn thinking_usage_preserves_presence_and_merges_without_double_counting() {
+    for thinking in [None, Some(0), Some(23)] {
+        let mut usage = json!({"input_tokens":10,"output_tokens":1,
+            "cache_creation_input_tokens":20,"cache_read_input_tokens":50});
+        if let Some(count) = thinking {
+            usage["output_tokens_details"] = json!({"thinking_tokens":count});
+        }
+        let events = [
+            json!({"type":"message_start","message":{"id":"msg_test","model":MODEL,"usage":usage}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":38}}),
+            json!({"type":"message_stop"}),
+            json!({"type":"message_stop"}),
+        ];
+        let chunks = run_stream(&events);
+        assert_eq!(chunks.len(), 3);
+        for out in [chunks[1].clone(), chunks[2].clone(), non_stream(&events)] {
+            assert_eq!(out["usage"]["prompt_tokens"], 80);
+            assert_eq!(out["usage"]["completion_tokens"], 38);
+            assert_eq!(out["usage"]["total_tokens"], 118);
+            match thinking {
+                Some(count) => assert_eq!(
+                    out["usage"]["completion_tokens_details"]["reasoning_tokens"],
+                    count
+                ),
+                None => assert!(out["usage"].get("completion_tokens_details").is_none()),
+            }
+        }
+    }
+}
+
+#[test]
+fn thinking_usage_delta_and_native_response() {
+    for count in [0, 32] {
+        let usage = json!({"input_tokens":10,"output_tokens":52,"output_tokens_details":{"thinking_tokens":count}});
+        let event =
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":usage});
+        let out = run_stream(&[event]).remove(0);
+        assert_eq!(
+            out["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            count
+        );
+        let native = json!({"id":"msg_test","type":"message","role":"assistant","model":MODEL,
+            "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":usage});
+        let out = convert_claude_response_to_openai_chat_completions_non_stream(
+            native.to_string().as_bytes(),
+        );
+        assert_eq!(
+            out["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            count
+        );
+        assert_eq!(out["usage"]["completion_tokens"], 52);
+        assert_eq!(out["usage"]["total_tokens"], 62);
+    }
+    let mut usage = Usage::default();
+    usage.merge(Some(
+        &json!({"output_tokens_details":{"thinking_tokens":23}}),
+    ));
+    usage.merge(Some(
+        &json!({"output_tokens_details":{"thinking_tokens":0}}),
+    ));
+    assert_eq!(
+        usage.to_openai()["completion_tokens_details"]["reasoning_tokens"],
+        0
+    );
+}
