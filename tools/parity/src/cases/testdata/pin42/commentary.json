@@ -1,0 +1,1308 @@
+[
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-False-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-False-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-False-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-False-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-True-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-True-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-True-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-commentary-True-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-commentary-string-False",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-commentary-string-True",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\",\"phase\":\"commentary\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-final_answer-string-False",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-final_answer-string-True",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\",\"phase\":\"final_answer\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-False-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-False-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-False-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-False-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-True-False-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-True-False-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-True-True-False",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-None-True-True-True",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-None-string-False",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "codex/claude/response-non-stream"
+    ],
+    "name": "pin42-commentary-None-string-True",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-False-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-False-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-False-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-False-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-True-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-True-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-True-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-commentary-True-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"commentary\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-commentary-string-False-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"commentary\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-commentary-string-True-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\",\"phase\":\"commentary\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-False-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-final_answer-True-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-final_answer-string-False-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}],\"phase\":\"final_answer\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-final_answer-string-True-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\",\"phase\":\"final_answer\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-False-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-False-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-False-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-False-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-True-False-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-True-False-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-True-True-False-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-None-True-True-True-registry",
+    "model": "",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\",\"created_at\":1700000000}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"parked-signature\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"Reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_p42\",\"encrypted_content\":\"final-signature\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_first\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"message\",\"id\":\"msg_next\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Next\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":4,\"item\":{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-None-string-False-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "registry/response-non-stream"
+    ],
+    "name": "pin42-commentary-None-string-True-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Reasoning\"}],\"encrypted_content\":\"final-signature\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":\"Checking\"},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"message\",\"id\":\"msg_p42\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}],\"phase\":\"final_answer\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-tool-then-reasoning-false",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"\"}}",
+      "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{}\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"parked-after-tool\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":2,\"delta\":\"Tool result reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"message\",\"id\":\"msg_final\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-tool-then-reasoning-false-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"\"}}",
+      "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{}\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"parked-after-tool\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":2,\"delta\":\"Tool result reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"message\",\"id\":\"msg_final\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  },
+  {
+    "suites": [
+      "codex/claude/response"
+    ],
+    "name": "pin42-commentary-tool-then-reasoning-true",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"\"}}",
+      "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{}\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"parked-after-tool\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":2,\"delta\":\"Tool result reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"final-after-tool\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Tool result reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"message\",\"id\":\"msg_final\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ]
+  },
+  {
+    "suites": [
+      "registry/response"
+    ],
+    "name": "pin42-commentary-tool-then-reasoning-true-registry",
+    "model": "",
+    "request": "{}",
+    "events": [
+      "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_pin42\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[]}}",
+      "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Checking\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_commentary\",\"phase\":\"commentary\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking\"}]}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"\"}}",
+      "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{}\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_pin42\",\"call_id\":\"call_pin42\",\"name\":\"f\",\"arguments\":\"{}\"}}",
+      "data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"parked-after-tool\"}}",
+      "data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":2,\"delta\":\"Tool result reasoning\"}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_after_tool\",\"encrypted_content\":\"final-after-tool\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Tool result reasoning\"}]}}",
+      "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":{\"type\":\"message\",\"id\":\"msg_final\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}}",
+      "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_pin42\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}"
+    ],
+    "options": {
+      "from": "codex",
+      "to": "claude"
+    }
+  }
+]

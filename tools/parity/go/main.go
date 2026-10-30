@@ -203,10 +203,10 @@ var translators = map[string]func(in input) []byte{
 		return claudechat.ConvertClaudeResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"claude/openai-responses/request": func(in input) []byte {
-		return refused(clauderesponses.ConvertOpenAIResponsesRequestToClaude(in.Model, []byte(in.Request), true))
+		return claudeSearchRequest(in, false)
 	},
 	"claude/openai-responses/request-compat": func(in input) []byte {
-		return refused(clauderesponses.ConvertOpenAIResponsesRequestToClaudeWithCompat(in.Model, []byte(in.Request), true))
+		return claudeSearchRequest(in, true)
 	},
 	"claude/openai-responses/response": func(in input) []byte {
 		var param any
@@ -351,18 +351,29 @@ var translators = map[string]func(in input) []byte{
 		return geminigemini.PassthroughGeminiResponseNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"gemini/claude/request": func(in input) []byte {
-		return refused(geminiclaude.ConvertClaudeRequestToGemini(in.Model, []byte(in.Request), streamOption(in)))
+		return repeatGeminiSchema(in, geminiclaude.ConvertClaudeRequestToGemini)
 	},
 	"gemini/claude/request-compat": func(in input) []byte {
-		return refused(geminiclaude.ConvertClaudeRequestToGeminiWithCompat(in.Model, []byte(in.Request), streamOption(in)))
+		return repeatGeminiSchema(in, geminiclaude.ConvertClaudeRequestToGeminiWithCompat)
 	},
 	"gemini/claude/response": func(in input) []byte {
+		var options struct {
+			TraceEvents bool `json:"trace_events"`
+		}
+		decodeOptions(in, &options)
 		var param any
 		var out []byte
+		chunks := make([]string, 0, len(in.Events))
 		for _, event := range in.Events {
+			var step []byte
 			for _, chunk := range geminiclaude.ConvertGeminiResponseToClaude(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
-				out = append(out, chunk...)
+				step = append(step, chunk...)
 			}
+			out = append(out, step...)
+			chunks = append(chunks, string(step))
+		}
+		if options.TraceEvents {
+			return marshal(chunks)
 		}
 		return out
 	},
@@ -730,18 +741,25 @@ func sanitizeClaudeMessages(in input) []byte {
 // GeminiThoughtSignatureValidationOptions}.
 func sanitizeGemini(in input) []byte {
 	var options struct {
-		ContentsPath string                                            `json:"contents_path"`
-		Validation   signature.GeminiThoughtSignatureValidationOptions `json:"validation"`
+		RepeatSanitize bool                                              `json:"repeat_sanitize"`
+		ContentsPath   string                                            `json:"contents_path"`
+		Validation     signature.GeminiThoughtSignatureValidationOptions `json:"validation"`
 	}
 	decodeOptions(in, &options)
 	clean := signature.SanitizeGeminiRequestThoughtSignatures([]byte(in.Request), options.ContentsPath)
 
+	var twice json.RawMessage
+	if options.RepeatSanitize {
+		twice = signature.SanitizeGeminiRequestThoughtSignatures(clean, options.ContentsPath)
+	}
 	return marshal(struct {
 		Sanitized         json.RawMessage `json:"sanitized"`
 		Validate          any             `json:"validate"`
 		ValidateSanitized any             `json:"validate_sanitized"`
 		Pairing           any             `json:"pairing"`
+		SanitizedTwice    json.RawMessage `json:"sanitized_twice,omitempty"`
 	}{
+		SanitizedTwice:    twice,
 		Sanitized:         clean,
 		Validate:          errorText(signature.ValidateGeminiThoughtSignatures([]byte(in.Request), options.Validation)),
 		ValidateSanitized: errorText(signature.ValidateGeminiThoughtSignatures(clean, options.Validation)),

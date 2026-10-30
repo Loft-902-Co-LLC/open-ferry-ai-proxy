@@ -1,0 +1,562 @@
+[
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-text-signed-False-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-text-signed-False-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-text-signed-False-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-text-signed-True-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-text-signed-True-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-text-signed-True-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-empty-text-signed-False-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-empty-text-signed-False-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-empty-text-signed-False-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-empty-text-signed-True-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-empty-text-signed-True-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-empty-text-signed-True-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-carrier-signed-False-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-carrier-signed-False-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-carrier-signed-False-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-carrier-signed-True-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-carrier-signed-True-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-carrier-signed-True-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-thought-signed-False-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-thought-signed-False-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-thought-signed-False-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-thought-signed-True-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-thought-signed-True-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-thought-signed-True-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-parallel-signed-False-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-parallel-signed-False-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-parallel-signed-False-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-parallel-signed-True-bypass-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-parallel-signed-True-bypass-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true,
+        "RequireKnownEnvelope": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-signatures-parallel-signed-True-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}"
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-sentinel-False",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"},\"thoughtSignature\":\"skip_thought_signature_validator\"}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": false
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "signature/gemini"
+    ],
+    "name": "pin42-signatures-sentinel-True",
+    "model": "",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"},\"thoughtSignature\":\"skip_thought_signature_validator\"}]}]}",
+    "options": {
+      "contents_path": "contents",
+      "validation": {
+        "AllowBypassSentinel": true
+      },
+      "repeat_sanitize": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-text-signed-False-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-text-signed-True-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"between\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-empty-text-signed-False-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-empty-text-signed-True-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-carrier-signed-False-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-carrier-signed-True-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"\",\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-thought-signed-False-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-thought-signed-True-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"text\":\"thought\",\"thought\":true,\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-parallel-signed-False-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"}},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-signatures-parallel-signed-True-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"first\"},\"thoughtSignature\":\"EiwKKgEMAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJw==\"},{\"functionCall\":{\"name\":\"f\",\"args\":{},\"id\":\"second\"}}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  }
+]
