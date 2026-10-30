@@ -6,8 +6,8 @@ open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/
 
 | | |
 |---|---|
-| Version | `v8.0.38` |
-| Commit | `0db19025571684b198a2ef508f99b41c717337e8` (2026-10-21) |
+| Version | `v8.0.42` |
+| Commit | `bc0643405a1d0adf77dd0f109972ac3313d66397` (2026-10-24) |
 | Location | `reference/cliproxyapi` (git submodule) |
 
 When we move the pin, we update this table, bring every ported file's header to the new version, and note behaviour changes in the commit or PR. Every upstream commit between the old and the new pin is ported, unless it is listed under the move below with the reason.
