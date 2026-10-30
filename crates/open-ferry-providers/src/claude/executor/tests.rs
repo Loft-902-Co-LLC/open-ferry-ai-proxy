@@ -3254,13 +3254,14 @@ async fn claude_55_forced_tools_normalize_openai_translations() {
 }
 
 #[test]
-fn claude_55_forced_tools_leave_other_provider_translations_unchanged() {
+fn claude_55_forced_tools_leave_claude_cli_translation_unchanged() {
     let payload = json!({"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"tool","name":"lookup"}});
     let request = Request {
         model: "claude-opus-5-5".into(),
         payload: Bytes::from(payload.to_string()),
     };
-    for provider in ["claude-cli", "gemini", "openai", "xai"] {
+    {
+        let provider = "claude-cli";
         let auth = Auth {
             provider: provider.into(),
             ..Auth::default()
