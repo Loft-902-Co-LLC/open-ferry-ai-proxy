@@ -612,8 +612,8 @@ impl ModelRegistry {
 
     /// The models available through `provider`'s clients, counting only those
     /// clients' quota marks and suspensions (upstream's
-    /// `GetAvailableModelsByProvider`). Each model has its details as the
-    /// first client registered them. Sorted by model ID.
+    /// `GetAvailableModelsByProvider`). Each model has the details registered
+    /// by its lowest-ID client. Sorted by model ID.
     pub fn available_models_by_provider(&self, provider: &str) -> Vec<ModelInfo> {
         self.available_models_by_provider_at(provider, Instant::now())
     }

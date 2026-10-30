@@ -967,6 +967,13 @@ async fn gemini_prefixed_names_resolve_through_the_http_detail_route() {
             list["models"].as_array().unwrap().len(),
             if force { 1 } else { 2 }
         );
+        assert!(
+            list["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| { model["name"] == "models/gcp/gemini-4-argon" })
+        );
         let detail: Value =
             serde_json::from_str(&get(&state, "/v1beta/models/gcp/gemini-4-argon", None).await)
                 .unwrap();

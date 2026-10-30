@@ -890,6 +890,7 @@ fn assert_search_index(registry: &ModelRegistry) {
                 Some(""),
                 Some("a"),
                 Some("b"),
+                Some("0"),
                 Some("ghost"),
                 Some("missing"),
             ] {
