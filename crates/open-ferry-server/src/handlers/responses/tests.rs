@@ -72,6 +72,42 @@ async fn http_metadata_visibility_follows_official_client_classification() {
     }
 }
 
+// Upstream also validates JSON before framing. Its validator inserts a newline
+// before data:/event: even inside an open JSON string, rejecting this stream.
+#[tokio::test]
+async fn http_fragmented_metadata_string_is_rejected_before_framing() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"",
+            "data: private\"}}\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, Some(CODEX_DESKTOP))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("data: private"), "{body}");
+}
+
+#[tokio::test]
+async fn http_fragmented_metadata_json_colon_is_joined_then_filtered() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data: {\"type\"",
+            ":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains("response.metadata") && !body.contains("private"),
+        "{body}"
+    );
+    assert!(body.contains("response.completed"), "{body}");
+}
+
 const CREATED: &str = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n";
 const DELTA: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n";
@@ -1738,4 +1774,37 @@ async fn prompt_overflow_as_stream_chunk_after_created_keeps_http_200_and_error_
         assert!(!body.contains("[DONE]"));
         assert_eq!(dispatcher.calls().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn r3_http_split_data_field_keeps_completion() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data",
+            ": {\"response\":{\"id\":\"r\"}}\nevent:",
+            " response.completed\n\n",
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+    assert!(!body.contains("event: error"), "{body}");
+}
+
+#[tokio::test]
+async fn r3_http_split_data_field_filters_private_event() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data",
+            ": {\"marker\":\"private\"}\nevent: response.",
+            "metadata\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("private"), "{body}");
+    assert!(body.contains("response.completed"), "{body}");
 }
