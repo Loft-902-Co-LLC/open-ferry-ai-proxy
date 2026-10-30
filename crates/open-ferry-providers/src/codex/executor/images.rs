@@ -806,7 +806,7 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        if !auth.use_siwc()
+        if !auth.use_siwc_for_request(&options.headers)
             && let Some((model, path)) = direct(request, options)
         {
             let (response, secrets) = self
@@ -888,7 +888,7 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
-        if !auth.use_siwc()
+        if !auth.use_siwc_for_request(&options.headers)
             && let Some((model, path)) = direct(request, options)
         {
             let (response, secrets) = self
@@ -960,15 +960,17 @@ impl CodexExecutor {
         .map_err(|error| failure(error.to_string()))?;
         // `applyCodexDirectImageHeaders`: the client's headers without its
         // `User-Agent`.
-        let mut client = options.headers.clone();
-        client.remove(header::USER_AGENT);
-        let mut headers = build_headers(auth, &client, stream)?;
+        let mut headers = build_headers(auth, &options.headers, stream)?;
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static(crate::codex::client::USER_AGENT),
+        );
         if !content_type.is_empty()
             && let Ok(value) = HeaderValue::from_bytes(content_type.as_bytes())
         {
             headers.insert(header::CONTENT_TYPE, value);
         }
-        let (_, base) = credentials(auth);
+        let (_, base) = credentials(auth, &options.headers);
         let base = if base.is_empty() {
             self.base_url.as_str()
         } else {
@@ -1023,7 +1025,7 @@ impl CodexExecutor {
         ] {
             delete(&mut body, field);
         }
-        if auth.use_siwc() {
+        if auth.use_siwc_for_request(&options.headers) {
             crate::codex::siwc_request::apply_body(&mut body, false, false, false);
         } else {
             normalize_instructions(&mut body, false);
@@ -1051,7 +1053,7 @@ impl CodexExecutor {
             &mut body,
         );
         let headers = build_headers(auth, &options.headers, true)?;
-        let url = endpoint(auth, &self.base_url, false);
+        let url = endpoint(auth, &options.headers, &self.base_url, false);
         self.send(
             auth,
             &url,

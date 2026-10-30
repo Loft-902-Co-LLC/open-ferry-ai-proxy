@@ -99,7 +99,8 @@ impl CodexExecutor {
             }
             token
         } else {
-            credentials(auth).0
+            crate::codex::siwc_request::ensure_credentials(auth, &client_headers)?;
+            credentials(auth, &client_headers).0
         };
         if token.trim().is_empty() {
             headers.remove(header::AUTHORIZATION);
