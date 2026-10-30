@@ -112,6 +112,41 @@ pub(super) struct Request {
     seq: u64,
 }
 
+#[derive(Debug)]
+pub(super) enum RefreshError {
+    Fetch(String),
+    Rejected(String),
+    SourceChanged,
+    Cancelled,
+}
+
+impl RefreshError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Fetch(_) => "no valid model catalog source",
+            Self::Rejected(error) => error,
+            Self::SourceChanged => "model catalog source changed during refresh",
+            Self::Cancelled => "context canceled",
+        }
+    }
+
+    pub(super) fn warn(&self, setting: &str) {
+        match self {
+            Self::Fetch(error) => tracing::warn!(
+                setting = %format_args!("models.{setting}"),
+                error = %error,
+                "model catalog refresh failed; keeping last valid catalog"
+            ),
+            Self::Rejected(error) => tracing::warn!(
+                setting = %format_args!("models.{setting}"),
+                error = %error,
+                "model catalog rejected; keeping last valid catalog"
+            ),
+            Self::SourceChanged | Self::Cancelled => {}
+        }
+    }
+}
+
 impl Updater {
     pub(super) fn next_sequence(&self) -> u64 {
         let mut state = lock(&self.state);
@@ -156,7 +191,10 @@ impl Updater {
                 status.refreshed = true;
                 status.changed_providers = changed;
             }
-            Err(error) => status.error = Some(error),
+            Err(error) => {
+                error.warn(self.setting);
+                status.error = Some(error.message().to_owned());
+            }
         }
         status
     }
@@ -167,22 +205,28 @@ impl Updater {
         generation: u64,
         seq: u64,
         cancellation: &RefreshCancellation,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, RefreshError> {
         if cancellation.0.load(Ordering::Acquire) {
-            return Err("model catalog refresh cancelled".to_owned());
+            return Err(RefreshError::Cancelled);
         }
-        let data = (self.fetch)(source)?;
+        let data = (self.fetch)(source).map_err(|error| {
+            if cancellation.0.load(Ordering::Acquire) {
+                RefreshError::Cancelled
+            } else {
+                RefreshError::Fetch(error)
+            }
+        })?;
         let mut state = lock(&self.state);
-        if cancellation.0.load(Ordering::Acquire) {
-            return Err("model catalog refresh cancelled".to_owned());
-        }
         if state.generation != generation {
-            return Err("model catalog source changed during refresh".to_owned());
+            return Err(RefreshError::SourceChanged);
+        }
+        if cancellation.0.load(Ordering::Acquire) {
+            return Err(RefreshError::Cancelled);
         }
         if seq <= state.published_seq {
             return Ok(Vec::new());
         }
-        let changed = (self.publish)(&data)?;
+        let changed = (self.publish)(&data).map_err(RefreshError::Rejected)?;
         state.published_seq = seq;
         drop(state);
         self.notifier.notify(changed.clone());

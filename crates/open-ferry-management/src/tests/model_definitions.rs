@@ -555,8 +555,17 @@ async fn refresh_joins_each_failed_catalog_error() {
         "/v8/management/routing/model-definitions/refresh",
     ] {
         let body = api.post(path, "").await.expect(StatusCode::BAD_GATEWAY);
-        let general = body["catalogs"]["catalog"]["error"].as_str().unwrap();
-        let codex = body["catalogs"]["codex-catalog"]["error"].as_str().unwrap();
-        assert_eq!(body["error"], format!("{general}\n{codex}"));
+        assert_eq!(
+            body["error"],
+            "no valid model catalog source\nno valid model catalog source"
+        );
+        assert_eq!(
+            body["catalogs"]["catalog"]["error"],
+            "no valid model catalog source"
+        );
+        assert_eq!(
+            body["catalogs"]["codex-catalog"]["error"],
+            "no valid model catalog source"
+        );
     }
 }

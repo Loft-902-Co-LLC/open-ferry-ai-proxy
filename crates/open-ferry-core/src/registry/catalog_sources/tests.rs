@@ -580,6 +580,73 @@ fn manual_refresh_uses_active_sources_and_keeps_last_valid_codex_catalog() {
 }
 
 #[test]
+fn manual_refresh_errors_keep_upstream_text_and_warn_with_the_cause() {
+    for rejected in [false, true] {
+        let updater = updater(
+            move |_| {
+                if rejected {
+                    Ok(Vec::new())
+                } else {
+                    Err("specific read failure".into())
+                }
+            },
+            |_| Err("specific publish failure".into()),
+        );
+        let warnings = Warnings::capture();
+        let status =
+            updater.on_demand(updater.request(&file_source("failed")), &Default::default());
+        let (error, message, cause) = if rejected {
+            (
+                "specific publish failure",
+                "model catalog rejected; keeping last valid catalog",
+                "specific publish failure",
+            )
+        } else {
+            (
+                "no valid model catalog source",
+                "model catalog refresh failed; keeping last valid catalog",
+                "specific read failure",
+            )
+        };
+        assert_eq!(status.error.as_deref(), Some(error));
+        assert!(!status.refreshed);
+        let lines = warnings.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("message={message}")),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains(&format!("error={cause}")), "{lines:?}");
+    }
+}
+
+#[test]
+fn a_cancelled_manual_fetch_returns_the_context_error_without_warning() {
+    for fail_fetch in [false, true] {
+        let cancellation = RefreshCancellation::default();
+        let token = cancellation.clone();
+        let updater = updater(
+            move |_| {
+                token.cancel();
+                if fail_fetch {
+                    Err("specific read failure".into())
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            |_| unreachable!("a cancelled fetch must not publish"),
+        );
+        let warnings = Warnings::capture();
+        for _ in 0..2 {
+            let status =
+                updater.on_demand(updater.request(&file_source("cancelled")), &cancellation);
+            assert_eq!(status.error.as_deref(), Some("context canceled"));
+        }
+        assert!(warnings.lines().is_empty());
+    }
+}
+
+#[test]
 fn manual_refresh_fences_cancelled_stale_and_older_completions() {
     for mode in [
         "cancel",
@@ -609,8 +676,11 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
         let worker = Arc::clone(&updater);
         let cancelled = cancellation.clone();
         let task = thread::spawn(move || {
+            let warnings = Warnings::capture();
             let request = worker.request(&file_source("old"));
-            worker.on_demand(request, &cancelled)
+            let status = worker.on_demand(request, &cancelled);
+            assert!(warnings.lines().is_empty());
+            status
         });
         starts.recv_timeout(Duration::from_secs(10)).unwrap();
         match mode {
@@ -629,7 +699,15 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
         if mode.starts_with("newer") {
             assert!(status.refreshed);
         } else {
-            assert!(status.error.is_some(), "{mode}");
+            assert_eq!(
+                status.error.as_deref(),
+                Some(if mode == "cancel" {
+                    "context canceled"
+                } else {
+                    "model catalog source changed during refresh"
+                }),
+                "{mode}"
+            );
         }
         let results: Vec<_> = publications.try_iter().collect();
         assert!(
