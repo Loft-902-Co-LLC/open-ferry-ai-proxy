@@ -836,20 +836,6 @@ fn apply_outcome(
         }
         return OwnDeadline::Derived;
     }
-    if result.error.as_ref().is_some_and(is_transient_capacity)
-        && result.execution_seq > 0
-        && result.retry_after == Some(Duration::ZERO)
-    {
-        let newer = (is_auth_active_cooldown(auth, now)
-            && auth.cooldown_recorded_seq >= result.execution_seq)
-            || auth.model_states.get(model_key).is_some_and(|state| {
-                is_model_state_active_cooldown(state, now)
-                    && state.cooldown_recorded_seq >= result.execution_seq
-            });
-        if newer {
-            return OwnDeadline::Set(None);
-        }
-    }
     let force_cooldown = is_forced_cooldown(result.error.as_ref());
     if model_key.is_empty() {
         if was_terminal_unauthorized {

@@ -4461,7 +4461,7 @@ async fn p47_capacity_hold_and_merge_fence_an_inflight_quota_recovery() {
 
 #[tokio::test(start_paused = true)]
 async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
-    const INVARIANT: &str = "live quota and unrelated cooldowns cannot be shortened by stale results, relogin, or refresh/recovery merges";
+    const INVARIANT: &str = "live quota survives zero-hint capacity; non-quota cooldowns survive extend-only capacity; both survive relogin and refresh/recovery merges";
     let orders = recovery_step_orderings([
         "stale",
         "relogin",
@@ -4522,11 +4522,9 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
             for step in order {
                 match *step {
                     "stale" => {
-                        let error = ExecError::transient_capacity(
-                            "transient capacity",
-                            Some(Duration::ZERO),
-                        );
-                        let mut stale = other_failure(OPUS, 429, Duration::ZERO);
+                        let hint = if quota { Duration::ZERO } else { FIVE_DAYS };
+                        let error = ExecError::transient_capacity("transient capacity", Some(hint));
+                        let mut stale = other_failure(OPUS, 429, hint);
                         stale.error = Some(crate::manager::classify::result_error_from_error(
                             crate::manager::classify::ErrView::Exec(&error),
                         ));
@@ -4558,6 +4556,7 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                     }
                     "relogin" => {
                         let mut fresh = h.get(ID).as_ref().clone();
+                        fresh.model_states.clear();
                         fresh
                             .metadata
                             .insert("access_token".into(), serde_json::json!("dummy-login"));
@@ -4567,14 +4566,6 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                             })
                             .unwrap();
                         refresh_deadline = None;
-                        assert_eq!(
-                            h.get(ID).status,
-                            if quota {
-                                crate::auth::Status::Error
-                            } else {
-                                crate::auth::Status::Active
-                            }
-                        );
                     }
                     "refresh" => {
                         // Use the current version so a preceding relogin cannot

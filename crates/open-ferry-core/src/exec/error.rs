@@ -214,18 +214,19 @@ impl ExecError {
             ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
-    /// Trusted deadlines suppress raw passthrough even after expiry. Native
-    /// waits and capacity hints own delivery only when positive; zero leaves
-    /// raw headers alone.
+    /// Trusted deadlines suppress raw passthrough even after expiry. Model
+    /// cooldowns always own delivery; other native waits and capacity hints
+    /// own delivery only when positive.
     pub fn has_retry_after_override(&self) -> bool {
         self.has_trusted_retry_deadline()
+            || self.kind == ErrorKind::ModelCooldown
             || self.failure_code() == Some("transient_rate_limit")
                 && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
     /// A live trusted deadline wins over the provider hint. After natural
     /// expiry scheduling can consult that hint again, as upstream does;
-    /// header writers must still consult `has_trusted_retry_deadline`.
+    /// header writers must still consult `has_retry_after_override`.
     pub fn effective_retry_after(&self) -> Option<Duration> {
         self.trusted_retry_deadline
             .and_then(|deadline| deadline.checked_duration_since(Instant::now()))

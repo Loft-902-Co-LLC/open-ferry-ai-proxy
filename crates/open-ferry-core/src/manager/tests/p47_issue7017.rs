@@ -399,30 +399,70 @@ async fn p47_issue7017_credential_scope_restores_quota_classification() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn p47_issue7017_stale_capacity_cannot_undo_newer_state_or_refresh_merge() {
+async fn p47r4_stale_zero_capacity_clears_a_newer_nonquota_hold() {
     let h = Harness::new(Settings::default());
     h.add(auth("a", "codex"), &["m"]);
-    let base = h.get("a");
     let older_seq = h.manager.next_execution_seq();
     let newer_seq = h.manager.next_execution_seq();
     let mut newer = result("m", Some(Duration::from_secs(256)));
     newer.execution_seq = newer_seq;
     h.manager.mark_result(&newer);
-    let before = h.get("a");
     let mut stale = result("m", Some(Duration::ZERO));
     stale.execution_seq = older_seq;
     h.manager.mark_result(&stale);
     let live = h.get("a");
-    assert_eq!(
-        live.model_states["m"].next_retry_after,
-        before.model_states["m"].next_retry_after
-    );
-    assert_eq!(live.model_states["m"].cooldown_recorded_seq, newer_seq);
-    let merged = crate::manager::merge::merge_refreshed_auth(&base, &live, &base, h.now());
-    assert_eq!(
-        merged.model_states["m"].next_retry_after,
-        live.model_states["m"].next_retry_after
-    );
+    assert!(live.model_states["m"].next_retry_after.is_none());
+    assert!(!live.model_states["m"].unavailable);
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r4_zero_capacity_clears_the_independent_hold_under_newer_quota() {
+    let h = Harness::new(Settings::default());
+    h.add(auth("a", "codex"), &["m"]);
+    let now = h.now();
+    for _ in 0..3 {
+        h.manager.next_execution_seq();
+    }
+    let mut outage = result("m", Some(Duration::from_secs(60)));
+    outage.error = Some(result_error_from_error(ErrView::Exec(
+        &ExecError::upstream(503, "dummy outage"),
+    )));
+    outage.execution_seq = h.manager.next_execution_seq();
+    h.manager.mark_result(&outage);
+    let stale_seq = h.manager.next_execution_seq();
+    let mut quota = result("m", Some(Duration::from_secs(30)));
+    quota.error = Some(result_error_from_error(ErrView::Exec(
+        &ExecError::upstream(429, "dummy credential quota"),
+    )));
+    quota.credential_scope = true;
+    quota.execution_seq = h.manager.next_execution_seq();
+    h.manager.mark_result(&quota);
+    let wrapped = h.get("a");
+    let shadow = wrapped.model_states["m"]
+        .credential_quota_shadow
+        .as_ref()
+        .unwrap();
+    assert_eq!(shadow.cooldown_recorded_seq, 4);
+    assert_eq!(shadow.next_retry_after, Some(now + TimeDelta::seconds(60)));
+    assert_eq!(wrapped.cooldown_recorded_seq, 6);
+    let quota_end = Some(now + TimeDelta::seconds(30));
+    assert_eq!(wrapped.quota.next_recover_at, quota_end);
+
+    let mut stale = result("m", Some(Duration::ZERO));
+    assert_eq!(stale_seq, 5);
+    stale.execution_seq = stale_seq;
+    h.manager.mark_result(&stale);
+    let live = h.get("a");
+    assert_eq!(live.quota.next_recover_at, quota_end);
+    assert!(live.quota.exceeded);
+    assert_eq!(live.cooldown_recorded_seq, 6);
+    assert!(live.model_states["m"].credential_quota_shadow.is_none());
+    assert_eq!(live.model_states["m"].quota.next_recover_at, quota_end);
+    h.clock.advance(Duration::from_secs(31));
+    let mut unwrapped = live.model_states["m"].clone();
+    crate::manager::cooldown::unwrap_expired_quota(&mut unwrapped, h.now());
+    assert!(unwrapped.next_retry_after.is_none());
+    assert!(!unwrapped.unavailable);
 }
 
 #[tokio::test(start_paused = true)]
@@ -602,16 +642,26 @@ async fn p47r3_availability_neutral_errors_keep_the_executor_error_unwrapped() {
 }
 
 #[test]
-fn p47r3_retry_override_contract_for_header_writers() {
+fn p47r4_retry_override_contract_for_header_writers() {
     for wait in [Duration::ZERO, Duration::from_secs(3)] {
         for error in [
             ExecError::auth_unavailable(wait),
             ExecError::model_cooldown("m", None, wait, None),
             ExecError::transient_capacity("capacity", Some(wait)),
         ] {
-            assert_eq!(error.has_retry_after_override(), !wait.is_zero());
+            assert_eq!(
+                error.has_retry_after_override(),
+                !wait.is_zero() || error.kind == crate::exec::ErrorKind::ModelCooldown
+            );
             if error.kind == crate::exec::ErrorKind::ModelCooldown && wait.is_zero() {
                 assert_eq!(error.retry_after_header().unwrap(), "0");
+                let addon = "30".parse::<http::HeaderValue>().unwrap();
+                let delivered = if error.has_retry_after_override() {
+                    error.retry_after_header().unwrap()
+                } else {
+                    addon
+                };
+                assert_eq!(delivered, "0");
             } else {
                 assert_eq!(error.retry_after_header().is_some(), !wait.is_zero());
             }
@@ -660,7 +710,7 @@ async fn p47r2_cooling_followup_has_a_deadline_without_another_attempt() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn p47r2_capacity_after_an_expired_newer_cooldown_is_recorded() {
+async fn p47_capacity_records_after_an_expired_cooldown() {
     for model in ["", "m"] {
         let h = Harness::new(Settings::default());
         h.add(auth("a", "codex"), &["m"]);
@@ -685,7 +735,7 @@ async fn p47r2_capacity_after_an_expired_newer_cooldown_is_recorded() {
         assert_eq!(
             next,
             Some(deadline),
-            "an expired watermark must not discard capacity"
+            "capacity is recorded normally after the previous cooldown expires"
         );
     }
 }
