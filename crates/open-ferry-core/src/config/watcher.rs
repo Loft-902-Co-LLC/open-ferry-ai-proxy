@@ -1392,6 +1392,45 @@ mod tests {
         }
     }
 
+    // Upstream 57a12996 is already covered by non-destructive scans.
+    #[test]
+    fn failed_full_scan_preserves_known_credentials_and_recovers() {
+        let fixture = Fixture::new();
+        let path = fixture.write_auth("known.json", DEMO);
+        let mut state = fixture.state();
+        assert_eq!(state.initial_scan().len(), 1);
+        let original = known(&state, &path);
+        let parked = fixture.dir.join("parked-auth");
+        fs::rename(&fixture.auth_dir, &parked).unwrap();
+        // A missing directory is never itself a credential removal.
+        assert!(state.initial_scan().is_empty());
+        assert_eq!(known(&state, &path), original);
+        // A directory that cannot be listed follows the same error branch
+        // as PermissionDenied, without depending on the process's ACL rights.
+        fs::write(&fixture.auth_dir, b"not a directory").unwrap();
+        assert!(state.initial_scan().is_empty());
+        assert_eq!(known(&state, &path), original);
+        fs::remove_file(&fixture.auth_dir).unwrap();
+        fs::rename(&parked, &fixture.auth_dir).unwrap();
+        state.auth_reader =
+            Arc::new(|_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert!(state.initial_scan().is_empty());
+        assert_eq!(known(&state, &path), original);
+        state.auth_reader = Arc::new(read_capped);
+        assert_eq!(
+            state.initial_scan().len(),
+            1,
+            "a later full scan retries identical bytes"
+        );
+        assert_eq!(known(&state, &path), original);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            sent(state.handle_event(&path, Op::Remove, Instant::now())),
+            Step::Send(WatchEvent::AuthRemoved(path.clone(), 0))
+        );
+        assert_eq!(known(&state, &path), None);
+    }
+
     #[test]
     fn initial_scan_of_a_missing_dir_finds_nothing() {
         let fixture = Fixture::new();
