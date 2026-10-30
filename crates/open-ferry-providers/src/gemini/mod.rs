@@ -69,6 +69,8 @@ pub mod interactions;
 #[cfg(test)]
 mod malformed_tests;
 #[cfg(test)]
+mod missing_terminal_tests;
+#[cfg(test)]
 mod prompt_block_tests;
 mod sse;
 mod stream;
