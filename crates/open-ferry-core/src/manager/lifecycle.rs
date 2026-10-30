@@ -530,6 +530,7 @@ impl Manager {
             None => {}
         }
         auth.generation = 1;
+        auth.policy_generation = 1;
         // open-ferry's capped quota rests go with the state replaced.
         state.quota_checks.forget(&auth.id);
         state.quota_recovery.forget(&auth.id);
@@ -1056,8 +1057,15 @@ impl Manager {
         read: impl FnOnce(&Auth) -> Result<AdoptionRead, ManagerError>,
     ) -> Result<ObservedUpdate, ManagerError> {
         let (replace, validate) = publication;
-        let Some(captured) = self.get(&incoming.id) else {
-            return Ok(ObservedUpdate::RegistrationChanged);
+        let captured = {
+            let state = self.lock();
+            let Some(entry) = state.auths.get(&incoming.id) else {
+                return Ok(ObservedUpdate::RegistrationChanged);
+            };
+            if self.observation_policy_save_pending(&state, &entry.auth) {
+                return Ok(ObservedUpdate::Retry);
+            }
+            entry.auth.clone()
         };
         let binding = self
             .shared
@@ -1119,6 +1127,16 @@ impl Manager {
         if !validate() {
             return Ok(ObservedUpdate::Retry);
         }
+        if let Some((captured, _)) = &context.origin
+            && let Some(entry) = state.auths.get(&incoming.id)
+            && entry.auth.registration_epoch == captured.registration_epoch
+            && (entry.auth.policy_generation != captured.policy_generation
+                || entry.auth.credential_version != captured.credential_version
+                || !same_observation_policy(captured, &entry.auth)
+                || self.observation_policy_save_pending(&state, &entry.auth))
+        {
+            return Ok(ObservedUpdate::Retry);
+        }
         let context = PublishContext {
             command: command.take(),
             ..context
@@ -1133,6 +1151,17 @@ impl Manager {
             Some(published) => Ok(ObservedUpdate::Published(published)),
             None => Ok(ObservedUpdate::RegistrationChanged),
         }
+    }
+
+    /// A policy save published before this read must land before disk can
+    /// supersede it. Ordinary result saves carry an already durable policy.
+    fn observation_policy_save_pending(&self, state: &State, auth: &Auth) -> bool {
+        if !state.pending_saves.contains_key(&auth.id) {
+            return false;
+        }
+        let watermark = lock(&self.shared.persist_locks).get(&auth.id).cloned();
+        let saved = watermark.map_or((0, 0), |mark| *lock(&mark));
+        saved < (auth.registration_epoch, auth.policy_generation)
     }
 
     /// Upstream's `updateInternal`, for the replace and refresh modes.
@@ -1639,6 +1668,11 @@ impl Manager {
             let carried = super::quota_recovery::cooldown_scopes(&auth);
             state.quota_recovery.restored(&auth.id, &carried);
         }
+        auth.policy_generation = if same_observation_policy(&existing_auth, &auth) {
+            existing_auth.policy_generation
+        } else {
+            generation
+        };
         auth.ensure_index();
         auth.registration_epoch = live_epoch;
         auth.generation = generation;
@@ -3783,6 +3817,17 @@ fn copy_observed_credentials(target: &mut Auth, record: &Auth) {
     } else {
         target.metadata.remove("siwc");
     }
+}
+
+/// Fields a credential or operator edit owns; runtime health is excluded.
+fn same_observation_policy(left: &Auth, right: &Auth) -> bool {
+    left.disabled == right.disabled
+        && (left.status == Status::Disabled) == (right.status == Status::Disabled)
+        && left.metadata == right.metadata
+        && left.attributes == right.attributes
+        && left.prefix == right.prefix
+        && left.label == right.label
+        && left.proxy_url == right.proxy_url
 }
 
 /// Compares registration and lexical record identity without filesystem I/O.

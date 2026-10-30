@@ -199,6 +199,9 @@ pub struct Auth {
     /// bumps it with each change it makes, token refreshes included
     /// (upstream's `Generation`). Zero on a record the manager didn't store.
     pub generation: u64,
+    /// The generation of the last credential or operator-policy change.
+    /// Runtime only; counters and cooldowns do not move it.
+    pub policy_generation: u64,
     /// Which version of the credential's tokens or API key this is: the
     /// credential manager starts it at 1 and bumps it each time they are
     /// replaced, by a refresh too, so the outcome of a call made with
