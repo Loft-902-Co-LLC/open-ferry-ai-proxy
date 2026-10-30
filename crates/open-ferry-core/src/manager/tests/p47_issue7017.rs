@@ -244,7 +244,7 @@ async fn p47_issue7017_wait_floor_uses_own_live_quota_only() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers() {
+async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_capacity_headers() {
     for path in [0, 1, 2, 3, 4] {
         for credentials in [1, 2] {
             let h = Harness::new(Settings {
@@ -295,7 +295,8 @@ async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers()
             };
             assert_eq!(e.http_status(), 429);
             assert_eq!(e.failure_code(), Some("transient_rate_limit"));
-            assert!(e.has_trusted_retry_deadline());
+            assert_eq!(e.has_trusted_retry_deadline(), path != 4);
+            assert!(e.has_retry_after_override());
             assert_eq!(e.retry_after_header().unwrap(), "256");
             assert_eq!(e.headers["x-request-id"], "dummy");
             assert_eq!(
