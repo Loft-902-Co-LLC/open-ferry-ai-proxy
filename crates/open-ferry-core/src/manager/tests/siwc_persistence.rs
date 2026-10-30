@@ -1255,15 +1255,25 @@ async fn unsaved_adoption_returns_promptly_during_save_and_keeps_watermark() {
     let adopted = manager.get("codex.json").unwrap();
     drop(held);
     store.wait_saved(stale.generation).await;
-    tokio::time::timeout(Duration::from_secs(5), gate.close(gate.epoch()))
-        .await
-        .unwrap()
-        .unwrap();
     crate::auth::credential_lock::set_test_hook(&path, None);
     let watermark = lock(&manager.shared.persist_locks)
         .get("codex.json")
         .unwrap()
         .clone();
+    assert_eq!(
+        *lock(&watermark),
+        (stale.registration_epoch, stale.generation),
+        "the unsaved edit did not earn disk coverage"
+    );
+    manager
+        .persist(
+            &adopted,
+            adopted.registration_epoch,
+            adopted.generation,
+            0,
+            crate::manager::lifecycle::Save::Yes,
+        )
+        .unwrap();
     assert_eq!(
         *lock(&watermark),
         (adopted.registration_epoch, adopted.generation)
@@ -1281,8 +1291,12 @@ async fn unsaved_adoption_returns_promptly_during_save_and_keeps_watermark() {
     assert_eq!(
         lock(&store.writes).len(),
         writes,
-        "stale save after adoption must be skipped"
+        "stale save after a covering actual save must be skipped"
     );
+    tokio::time::timeout(Duration::from_secs(5), gate.close(gate.epoch()))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -1725,7 +1739,7 @@ pub(super) fn rotation_executor(partial_failure: bool) -> Arc<FakeExecutor> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn skipped_pending_save_keeps_rotation_and_unsaved_edit() {
+async fn inflight_pending_save_keeps_rotation_and_unsaved_edit() {
     let (dir, store, manager, _gate) = disk_manager();
     // The fault or hook is on the unleased refresh save, so the store gives no lease.
     store.lease_unsupported.store(true, Ordering::SeqCst);
@@ -1746,9 +1760,10 @@ async fn skipped_pending_save_keeps_rotation_and_unsaved_edit() {
     wait_pending_saves(&manager).await;
     let live = manager.get("codex.json").unwrap();
     assert_eq!(live.metadata["access_token"], "outer-rotated");
-    assert_eq!(live.codex_pending_refresh, pending);
+    assert!(pending.iter().all(|operation| operation.is_written()));
+    assert!(live.codex_pending_refresh.is_empty());
     assert_eq!(live.metadata["note"], "unsaved-edit");
-    assert_eq!(disk(&dir)["access_token"], "outer-old");
+    assert_eq!(disk(&dir)["access_token"], "outer-rotated");
     manager.mark_result(&success(&manager));
     wait_pending_saves(&manager).await;
     assert_eq!(disk(&dir)["access_token"], "outer-rotated");
@@ -2677,7 +2692,7 @@ async fn written_edit_snapshot_keeps_rotation_attached_after_its_save() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_generation_refresh_folds_into_pending_for_later_save() {
+async fn unsaved_generation_does_not_suppress_an_inflight_refresh() {
     let (dir, store, manager, _gate) = disk_manager();
     // The fault or hook is on the unleased refresh save, so the store gives no lease.
     store.lease_unsupported.store(true, Ordering::SeqCst);
@@ -2688,8 +2703,8 @@ async fn stale_generation_refresh_folds_into_pending_for_later_save() {
     let refreshing = manager.clone();
     let task = tokio::spawn(async move { refreshing.force_refresh("codex.json").await.unwrap() });
     held.wait_entered().await;
-    // A counter-only generation advances without changing the live operation,
-    // and unsaved adoption records that newer generation in the watermark.
+    // A counter-only generation changes no operation and earns no disk mark.
+    // The in-flight rotation can therefore land without an artificial skip.
     let adopted = {
         let mut state = manager.lock();
         let entry = state.auths.get_mut("codex.json").unwrap();
@@ -2717,8 +2732,8 @@ async fn stale_generation_refresh_folds_into_pending_for_later_save() {
         live.codex_persist_intent,
         CodexPersistIntent::Configuration
     ));
-    assert_eq!(live.codex_pending_refresh.len(), 1);
-    assert_eq!(disk(&dir)["refresh_token"], "outer-refresh-old");
+    assert!(live.codex_pending_refresh.is_empty());
+    assert_eq!(disk(&dir)["refresh_token"], "skipped-refresh");
     manager.mark_result(&success(&manager));
     wait_pending_saves(&manager).await;
     assert_eq!(disk(&dir)["refresh_token"], "skipped-refresh");
@@ -3914,6 +3929,12 @@ fn adoption_excludes_detached_save_for_tokens_and_expiry() {
 
 #[test]
 fn adoption_load_and_save_complete_with_owned_threads() {
+    for policy in [false, true] {
+        adoption_load_and_save_with_owned_threads(policy);
+    }
+}
+
+fn adoption_load_and_save_with_owned_threads(policy: bool) {
     let (_dir, store, manager, _gate) = disk_manager();
     let (save_entered_tx, save_entered_rx) = mpsc::channel();
     let (save_release_tx, save_release_rx) = mpsc::channel();
@@ -3931,10 +3952,19 @@ fn adoption_load_and_save_complete_with_owned_threads() {
     let saving = manager.clone();
     let done = done_tx.clone();
     let save = std::thread::spawn(move || {
-        // Policy saves defer file observations; a counter save still admits
-        // this read and exercises the nested reload-admission ordering.
-        saving.mark_result(&success(&saving));
-        done.send(true).unwrap();
+        let ok = if policy {
+            saving
+                .edit("codex.json", |auth| {
+                    auth.metadata.insert("note".into(), json!("saved"));
+                    Ok::<_, ()>(true)
+                })
+                .is_ok_and(|auth| auth.is_some_and(|auth| auth.metadata["note"] == "saved"))
+        } else {
+            let before = saving.get("codex.json").unwrap().success;
+            saving.mark_result(&success(&saving));
+            saving.get("codex.json").unwrap().success == before + 1
+        };
+        done.send(ok).unwrap();
     });
     save_entered_rx
         .recv_timeout(Duration::from_secs(5))
@@ -3953,7 +3983,11 @@ fn adoption_load_and_save_complete_with_owned_threads() {
                 .expect("read released");
             Ok(read)
         });
-        done.send(result.is_ok()).unwrap();
+        done.send(
+            matches!(result, Ok(crate::manager::AdoptionResult::Published { .. }))
+                && (!policy || adopting.get("codex.json").unwrap().metadata["note"] == "saved"),
+        )
+        .unwrap();
     });
     read_rx
         .recv_timeout(Duration::from_secs(5))
@@ -3992,6 +4026,13 @@ fn adoption_load_and_save_complete_with_owned_threads() {
         }
         assert!(thread.is_finished(), "owned thread exited before join");
         thread.join().unwrap();
+    }
+    if policy {
+        assert_eq!(manager.get("codex.json").unwrap().metadata["note"], "saved");
+        assert_eq!(
+            store.files.read_back(&fixture()).unwrap().unwrap().metadata["note"],
+            "saved"
+        );
     }
 }
 

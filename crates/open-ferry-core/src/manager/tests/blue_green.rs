@@ -1977,6 +1977,10 @@ async fn round2_codex_client_standby_adopts_outer_without_refresh_or_siwc_change
         .await
         .unwrap();
     assert_eq!(adopted.access_token_for_request(&headers), "access-9");
+    assert!(
+        adopted.policy_generation > failed.policy_generation,
+        "standby metadata adoption fences policy reads"
+    );
     assert_eq!(adopted.siwc_access_token(), "dummy-standby-siwc");
     assert!(adopted.use_siwc());
     assert!(adopted.rejected_siwc_access_token.is_empty());
