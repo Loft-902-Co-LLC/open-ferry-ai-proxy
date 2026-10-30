@@ -183,3 +183,26 @@ fn credential_quota_carry_keeps_its_cooldown_watermark() {
     });
     assert!(h.get("file").quota.exceeded);
 }
+
+#[test]
+fn explicit_runtime_replacement_keeps_its_supplied_model_states() {
+    let (_dir, _files, manager) = super::siwc::disk_manager_unleased();
+    let mut replacement = manager.get("codex.json").unwrap().as_ref().clone();
+    replacement.model_states.insert(
+        "explicit-model".into(),
+        ModelState {
+            status: crate::auth::Status::Error,
+            unavailable: true,
+            next_retry_after: Some(chrono::Utc::now() + TimeDelta::hours(1)),
+            ..Default::default()
+        },
+    );
+    manager.update_unsaved(replacement).unwrap();
+    assert!(
+        manager
+            .get("codex.json")
+            .unwrap()
+            .model_states
+            .contains_key("explicit-model")
+    );
+}
