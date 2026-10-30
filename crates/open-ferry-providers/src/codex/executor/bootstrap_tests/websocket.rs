@@ -266,6 +266,21 @@ async fn bootstrap_usage_limit_fails_attempt_before_output() {
     assert_eq!(error.retry_after.unwrap().as_secs(), 120);
 }
 
+// 86a1aabf: an expired time budget still delivers the quota in-stream.
+#[tokio::test]
+async fn bootstrap_usage_limit_after_time_budget_stays_in_stream() {
+    let clock = MockClock::new();
+    let server = serve_after_timeout(
+        &clock,
+        r#"{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"type":"usage_limit_reached","message":"quota exhausted","resets_in_seconds":120}}}"#,
+    ).await;
+    let response = started(start_ws(&timed("10s", &clock), &server).await);
+    let (_, error) = drain(response).await;
+    let error = error.expect("the quota after the time budget must come in-stream");
+    assert_eq!(error.status, 429);
+    assert_eq!(error.retry_after.unwrap().as_secs(), 120);
+}
+
 // TestCodexWebsocketsExecutor_BootstrapBuffering_CapacityFailsAttempt
 #[tokio::test]
 async fn capacity_fails_attempt() {

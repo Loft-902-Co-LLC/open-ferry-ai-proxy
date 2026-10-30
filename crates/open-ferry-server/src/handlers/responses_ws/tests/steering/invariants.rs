@@ -1,9 +1,12 @@
 // Round 1: bounded, real-router interleavings against local Codex mocks.
-// Coverage currently includes early 429 versus accepted output, a terminal
-// event, queued next input and downstream disconnect, with steering on/off.
-// Transport-loss epochs and interrupt/terminal races are NOT covered yet.
+// Green coverage includes early 429 versus accepted output, a terminal event,
+// queued next input and downstream disconnect, with steering on/off.
+// The ignored loss module stages known-failing acceptance cases for the next port.
+// Transport-loss epochs and interrupt/terminal races have NO green coverage yet.
 
 use super::*;
+
+mod loss;
 
 const ROUND1_INVARIANT: &str = "no accepted output replayed, each loss reported at most once, no interrupt applied after a terminal event, and the downstream socket open exactly when upstream keeps it open";
 
