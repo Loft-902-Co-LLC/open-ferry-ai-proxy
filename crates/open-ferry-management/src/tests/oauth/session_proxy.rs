@@ -10,10 +10,10 @@ use tower::ServiceExt as _;
 
 const START: &str = "/v8/management/oauth/auth-url";
 
-/// Exercise the production handler with the POST wiring held for integration.
+/// Exercise the start handler directly, independently of route registration.
 async fn start_request(api: &Api, method: Method, query: &str, body: &str) -> Answer {
     use http_body_util::BodyExt as _;
-    let response = crate::oauth::test_auth_url(
+    let response = crate::oauth::start_handler(
         State(api.state.clone()),
         RawQuery((!query.is_empty()).then(|| query.to_owned())),
         method,
@@ -796,14 +796,14 @@ async fn session_proxy_dedicated_siwc_bind_keeps_ignoring_proxy_url() {
 }
 
 #[tokio::test]
-async fn session_proxy_post_handler_accepts_proposed_integration_wiring() {
+async fn session_proxy_post_handler_and_existing_get_route_work_independently() {
     let api = Api::new();
     // The unchanged GET registration still works with the new handler signature.
     let state = start_login(&api, &format!("{START}?provider=codex")).await;
     assert!(api.state.oauth_sessions().store().cancel(&state));
-    // The exact proposed POST wiring accepts the same handler.
+    // An isolated POST router accepts the same handler independently.
     let router = axum::Router::new()
-        .route(START, axum::routing::post(crate::oauth::test_auth_url))
+        .route(START, axum::routing::post(crate::oauth::start_handler))
         .with_state(api.state.clone());
     let response = router
         .oneshot(keyed(Method::POST, START, r#"{"provider":"codex"}"#))

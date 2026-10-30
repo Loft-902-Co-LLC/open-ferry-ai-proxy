@@ -53,7 +53,7 @@ use forwarder::Forwarders;
 use sessions::Store;
 
 #[cfg(test)]
-pub(crate) use flows::auth_url as test_auth_url;
+pub(crate) use flows::auth_url as start_handler;
 
 #[cfg(feature = "test-support")]
 pub mod test_support;
