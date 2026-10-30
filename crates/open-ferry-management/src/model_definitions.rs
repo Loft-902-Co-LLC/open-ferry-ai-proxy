@@ -208,6 +208,8 @@ async fn refresh(State(state): State<ManagementState>) -> Response {
     let runtime = state.catalogs().clone();
     let cancel = CancelRefresh(Default::default());
     let cancellation = cancel.0.clone();
+    // Keep this future request-scoped so dropping it cancels later publication.
+    // The helper inherits an operation if present; it does not admit one.
     let result = run_blocking(move || runtime.refresh(&sources, &cancellation)).await;
     let result = match result {
         Ok(result) => result,
@@ -218,11 +220,16 @@ async fn refresh(State(state): State<ManagementState>) -> Response {
             );
         }
     };
+    let errors = ["catalog", "codex-catalog", "devin-catalog"]
+        .into_iter()
+        .filter_map(|name| result.catalogs[name].error.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
     let failed = result.has_errors();
     let mut body = serde_json::to_value(result).expect("catalog refresh result is serializable");
     body["ok"] = (!failed).into();
     if failed {
-        body["error"] = "model catalog refresh failed; keeping last valid catalog".into();
+        body["error"] = errors.into();
     } else {
         body["status"] = "ok".into();
     }

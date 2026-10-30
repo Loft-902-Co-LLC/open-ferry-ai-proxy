@@ -502,3 +502,61 @@ async fn manual_refresh_post_does_not_shadow_provider_definitions_get() {
     assert_eq!(body["channel"], "refresh");
     assert_eq!(ids(&body), ["refresh-model"]);
 }
+
+#[tokio::test]
+async fn provider_definitions_keep_the_first_clients_search_flag() {
+    let api = Api::new();
+    for (client, supports_web_search) in [("b", true), ("a", false)] {
+        api.registry.register_client(
+            client,
+            "x",
+            &[ModelInfo {
+                id: "shared".into(),
+                supports_web_search,
+                ..ModelInfo::default()
+            }],
+        );
+    }
+    assert!(
+        api.registry
+            .model_info("shared", "x")
+            .unwrap()
+            .supports_web_search
+    );
+    let body = api
+        .get("/v8/management/routing/model-definitions/X")
+        .await
+        .expect(StatusCode::OK);
+    assert_eq!(ids(&body), ["shared"]);
+    assert!(body["models"][0].get("supports_web_search").is_none());
+}
+
+#[tokio::test]
+async fn refresh_joins_each_failed_catalog_error() {
+    use open_ferry_core::registry::{CatalogRuntime, CatalogStore};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = super::scratch_dir();
+    let general = dir.path().join("models.json");
+    let codex = dir.path().join("codex.json");
+    std::fs::write(&general, b"invalid").unwrap();
+    std::fs::write(&codex, br#"{"models":[]}"#).unwrap();
+    let mut config = super::keyed_config();
+    config.models.catalog = general.to_string_lossy().into_owned();
+    config.models.codex_catalog = codex.to_string_lossy().into_owned();
+    let mut api = Api::with(config, None);
+    api.state = api.state.clone().with_catalogs(CatalogRuntime::new(
+        Arc::new(CatalogStore::new()),
+        Duration::from_secs(3600),
+    ));
+    api.router = crate::router(api.state.clone());
+    for path in [
+        "/v8/management/models/refresh",
+        "/v8/management/routing/model-definitions/refresh",
+    ] {
+        let body = api.post(path, "").await.expect(StatusCode::BAD_GATEWAY);
+        let general = body["catalogs"]["catalog"]["error"].as_str().unwrap();
+        let codex = body["catalogs"]["codex-catalog"]["error"].as_str().unwrap();
+        assert_eq!(body["error"], format!("{general}\n{codex}"));
+    }
+}
