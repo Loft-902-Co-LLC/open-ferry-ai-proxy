@@ -448,6 +448,7 @@ enum Step {
 
 type Hash = [u8; 32];
 type ConfigReader = dyn Fn(&Path) -> std::io::Result<Vec<u8>> + Send + Sync;
+type AuthProbe = dyn Fn(&Path) -> std::io::Result<()> + Send + Sync;
 
 fn sha256(data: &[u8]) -> Hash {
     Sha256::digest(data).into()
@@ -472,6 +473,7 @@ struct WatchState {
     config_reader: Arc<ConfigReader>,
     file_guard: Option<crate::auth::file_guard::FileGuard>,
     auth_reader: Arc<ConfigReader>,
+    auth_probe: Arc<AuthProbe>,
 }
 
 impl WatchState {
@@ -488,6 +490,7 @@ impl WatchState {
             config_reader: Arc::new(|path| fs::read(path)),
             file_guard: None,
             auth_reader: Arc::new(read_capped),
+            auth_probe: Arc::new(|path| fs::metadata(path).map(|_| ())),
         }
     }
 
@@ -519,11 +522,16 @@ impl WatchState {
         }
         thread::sleep(REPLACE_CHECK_DELAY);
         let revision = next_revision();
-        let mut exists = fs::metadata(path).is_ok();
+        let Some(mut exists) = self.auth_file_exists(path) else {
+            return Step::Nothing;
+        };
         if !exists && self.auth_hashes.contains_key(&key) {
             for _ in 0..REPLACE_RETRIES {
                 thread::sleep(REPLACE_RETRY_DELAY);
-                if fs::metadata(path).is_ok() {
+                let Some(found) = self.auth_file_exists(path) else {
+                    return Step::Nothing;
+                };
+                if found {
                     exists = true;
                     break;
                 }
@@ -538,6 +546,17 @@ impl WatchState {
         }
         info!(file = %file_name(path), "auth file removed");
         Step::Send(WatchEvent::AuthRemoved(path.to_path_buf(), revision))
+    }
+
+    fn auth_file_exists(&self, path: &Path) -> Option<bool> {
+        match (self.auth_probe)(path) {
+            Ok(()) => Some(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+            Err(error) => {
+                warn!(file = %file_name(path), error_kind = ?error.kind(), "cannot confirm auth file removal");
+                None
+            }
+        }
     }
 
     /// Upstream's `addOrUpdateClient`, with its `authFileUnchanged` check
@@ -1429,6 +1448,51 @@ mod tests {
             Step::Send(WatchEvent::AuthRemoved(path.clone(), 0))
         );
         assert_eq!(known(&state, &path), None);
+    }
+
+    #[test]
+    fn round2_remove_probe_errors_preserve_tracking_until_proven_missing() {
+        use std::sync::atomic::AtomicUsize;
+        for op in [Op::Remove, Op::Rename] {
+            for kind in [
+                std::io::ErrorKind::PermissionDenied,
+                std::io::ErrorKind::Other,
+            ] {
+                for during_retry in [false, true] {
+                    let fixture = Fixture::new();
+                    let path = fixture.write_auth("tracked.json", DEMO);
+                    let mut state = fixture.state();
+                    state.initial_scan();
+                    let original = known(&state, &path);
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let count = calls.clone();
+                    state.auth_probe = Arc::new(move |_| {
+                        let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+                        Err(std::io::Error::from(if during_retry && first {
+                            std::io::ErrorKind::NotFound
+                        } else {
+                            kind
+                        }))
+                    });
+                    let now = Instant::now();
+                    assert_eq!(state.handle_event(&path, op, now), Step::Nothing);
+                    assert_eq!(known(&state, &path), original);
+                    assert_eq!(
+                        calls.load(Ordering::SeqCst),
+                        if during_retry { 2 } else { 1 }
+                    );
+                    state.auth_probe =
+                        Arc::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+                    fs::remove_file(&path).unwrap();
+                    let later = now + AUTH_REMOVE_DEBOUNCE_WINDOW + Duration::from_secs(1);
+                    assert_eq!(
+                        sent(state.handle_event(&path, op, later)),
+                        Step::Send(WatchEvent::AuthRemoved(path.clone(), 0))
+                    );
+                    assert_eq!(known(&state, &path), None);
+                }
+            }
+        }
     }
 
     #[test]
