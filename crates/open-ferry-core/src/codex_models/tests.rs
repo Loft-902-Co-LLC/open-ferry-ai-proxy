@@ -324,15 +324,21 @@ fn applies_max_context_length_override() {
         false,
         "",
     ));
-    for (slug, want) in [
-        ("deepseek-v4-flash", 1_048_576),
-        ("deepseek-v4-pro", 272_000),
-        ("gpt-5.5", 1_048_576),
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let default = templates.default_template();
+    for (slug, want, max) in [
+        ("deepseek-v4-flash", 1_048_576, 1_048_576),
+        (
+            "deepseek-v4-pro",
+            int_value(default, "context_window"),
+            int_value(default, "max_context_window"),
+        ),
+        ("gpt-5.5", 1_048_576, 1_048_576),
     ] {
         assert_eq!(int_value(&entries[slug], "context_window"), want, "{slug}");
         assert_eq!(
             int_value(&entries[slug], "max_context_window"),
-            want,
+            max,
             "{slug}"
         );
     }
@@ -585,7 +591,11 @@ fn unrelated_custom_provider_retains_fallback() {
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry["slug"], "my-unrelated-custom-model");
-    assert_eq!(entry["comp_hash"], "2911", "from the gpt-5.5 template");
+    let templates = CodexClientCatalog::embedded().unwrap();
+    assert_eq!(
+        entry["comp_hash"],
+        templates.default_template()["comp_hash"]
+    );
     assert_eq!(entry["supports_search_tool"], false);
     assert_eq!(entry["input_modalities"], json!(["text", "image"]));
     assert_eq!(entry["supports_image_detail_original"], true);
@@ -1160,4 +1170,14 @@ fn non_codex_and_synthesized_models_disable_codex_only_modes() {
             assert_eq!(entry["supports_reasoning_effort_updates"], false);
         }
     }
+}
+
+#[test]
+fn synthesized_model_inherits_current_template_version_when_opt_in_is_disabled() {
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let entries = by_slug(build_plain(&[model("custom-template-version")], false, ""));
+    assert_eq!(
+        entries["custom-template-version"]["multi_agent_version"],
+        templates.default_template()["multi_agent_version"]
+    );
 }

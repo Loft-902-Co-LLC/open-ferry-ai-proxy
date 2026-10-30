@@ -474,7 +474,7 @@ async fn multi_agent_follows_config_reloads() {
         );
         let body = get(&state, "/v1/models?client_version=cpa", None).await;
         let entries = entries(&body);
-        let want = if want { json!("v2") } else { Value::Null };
+        let want = json!("v2");
         assert_eq!(
             field(entry(&entries, MODEL_ID), "multi_agent_version"),
             &want,
@@ -492,7 +492,7 @@ fn multi_agent_v2_follows_config() {
         "openai-compatibility",
         &[model(MODEL_ID)],
     );
-    for (enabled, want) in [(false, Value::Null), (true, json!("v2"))] {
+    for (enabled, want) in [(false, json!("v2")), (true, json!("v2"))] {
         let state = state(&registry, codex_config(false, enabled));
         let entries = entries(&response(&state, ""));
         assert_eq!(
