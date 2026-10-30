@@ -1,0 +1,765 @@
+{
+  "case_kinds": {
+    "random-38-1007": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1009": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1037": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-105": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1050": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-106": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1116": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1129": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1131": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1136": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1173": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1207": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1212": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1235": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1241": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1243": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1257": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1264": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-1271": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1337": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1340": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1346": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-138": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1383": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1387": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1394": [
+      "check-1-no-subset/snapshot_bytes/nested"
+    ],
+    "random-38-1425": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-1433": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1441": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1444": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1453": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1454": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1466": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-148": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1498": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1500": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1501": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1538": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-154": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-1553": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1564": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1583": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1588": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1605": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1609": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1620": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1648": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-1663": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-1668": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1679": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1708": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1720": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1721": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1732": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1788": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1793": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1832": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-38-1844": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1892": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-190": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1903": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-1914": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-1936": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-1937": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2014": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-202": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2051": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2085": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-2113": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-2129": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2135": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2186": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-2192": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2199": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2201": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2204": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2209": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2217": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-2266": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2273": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2306": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2338": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-2346": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2354": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-2414": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2419": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2423": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-2435": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-2458": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-2478": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-2525": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-2544": [
+      "check-1-no-subset/snapshot_bytes/write"
+    ],
+    "random-38-2549": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-2557": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-2579": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2605": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2632": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2642": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-2671": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-268": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2696": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2723": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-2726": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-277": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2771": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2809": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2816": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-282": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2851": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2867": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2887": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-2893": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-38-292": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2922": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2948": [
+      "check-1-no-subset/snapshot_bytes/save"
+    ],
+    "random-38-2950": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-2957": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-2984": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3005": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-3050": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3065": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-3086": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3095": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-3126": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3143": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-3147": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-3156": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3165": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-3187": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-322": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3220": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3236": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-3244": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3248": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-327": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3279": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-3347": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-3367": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-3404": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3412": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3442": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-3443": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3463": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-3499": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-3515": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3537": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3553": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3563": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3569": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3632": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3640": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-3647": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3655": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3670": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-37": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-370": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3755": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3782": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-379": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-3798": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3804": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-3820": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-383": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3843": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3876": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3891": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-3893": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-3900": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3910": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-3916": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3958": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3982": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-3994": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-403": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4060": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-4065": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4068": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4089": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-410": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4173": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-4200": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4208": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4209": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4219": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-4226": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-4283": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4289": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4295": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4346": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-4347": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4369": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-4372": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-4434": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4443": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4471": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4473": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4481": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-4483": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4486": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-45": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4523": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-4555": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4576": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-4590": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4593": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4612": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4625": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4636": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-4663": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4697": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4753": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4757": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4783": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4786": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-4791": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-48": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-4808": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-482": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4826": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4860": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4870": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4883": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-4889": [
+      "check-3/source_budget/write"
+    ],
+    "random-38-4915": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-4981": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-4989": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-517": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-52": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-526": [
+      "check-3/source_budget/save"
+    ],
+    "random-38-541": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-56": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-566": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-602": [
+      "check-3/go_budget/save"
+    ],
+    "random-38-605": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-642": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-644": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-649": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-65": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-701": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-736": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-766": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-796": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-821": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-832": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-871": [
+      "check-3/owner_budget/write"
+    ],
+    "random-38-904": [
+      "check-3/owner_budget/nested"
+    ],
+    "random-38-92": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-981": [
+      "check-3/owner_budget/save"
+    ],
+    "random-38-99": [
+      "check-3/owner_budget/save"
+    ]
+  },
+  "cases": 5109,
+  "different": 250,
+  "fingerprint": {
+    "classifier_version": "4",
+    "generator_sha256": "39a87f7383f8811c93097c072567e2a3691683c94d5e50ab7d72a8f4ec404e74",
+    "upstream_pin": "bc0643405a1d0adf77dd0f109972ac3313d66397"
+  },
+  "non_certification": 0,
+  "random": 5000,
+  "seed": 38,
+  "selected": false
+}
