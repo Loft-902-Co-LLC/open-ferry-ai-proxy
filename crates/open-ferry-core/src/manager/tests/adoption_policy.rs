@@ -634,3 +634,97 @@ fn round7_repeated_edit_published_during_read_retries_the_observation() {
     assert_eq!(after_save.metadata["note"], "operator");
     assert_eq!(final_disk.metadata["note"], "operator");
 }
+
+#[test]
+fn p47_adoption_ordering_family_preserves_a_later_disable() {
+    const INVARIANT: &str = "a later persisted disable is never undone by captured scan/persist/relogin notifications or an older refresh";
+    let orders = five_step_orderings(["scan", "persist", "disable", "relogin", "refresh"]);
+    assert_eq!(orders.len(), 120);
+    for order in orders {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileStore::new(dir.path()));
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(store.clone()),
+        );
+        let mut auth = auth_with_metadata(
+            "ordering.json",
+            "claude",
+            serde_json::json!({"type":"claude", "access_token":"dummy-before", "refresh_token":"dummy-before-refresh", "disabled":false}),
+        );
+        auth.file_name = auth.id.clone();
+        let base = manager.register(auth).unwrap();
+        let scan = store.read_back(&base).unwrap().unwrap();
+        let persisted = base.as_ref().clone();
+        let mut login = persisted.clone();
+        login
+            .metadata
+            .insert("access_token".into(), serde_json::json!("dummy-login"));
+        // The login write precedes the later disable; its notification can lag.
+        store
+            .write_file(
+                &login.file_name,
+                &serde_json::to_vec(&login.metadata).unwrap(),
+            )
+            .unwrap();
+        let mut refresh = persisted.clone();
+        refresh
+            .metadata
+            .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
+        let mut disabled = false;
+        for step in order {
+            match step {
+                "disable" => {
+                    manager
+                        .edit_at_epoch(&base.id, base.registration_epoch, |auth| {
+                            auth.disabled = true;
+                            auth.status = Status::Disabled;
+                            auth.metadata
+                                .insert("disabled".into(), serde_json::json!(true));
+                            Ok::<_, ()>(true)
+                        })
+                        .unwrap()
+                        .unwrap();
+                    disabled = true;
+                }
+                "refresh" => {
+                    let live = manager.get(&base.id).unwrap();
+                    let merged = crate::manager::merge::merge_refreshed_auth(
+                        &base,
+                        &live,
+                        &refresh,
+                        manager.now(),
+                    );
+                    if disabled {
+                        assert!(merged.disabled, "{INVARIANT}: {order:?}, refresh merge");
+                    }
+                    manager
+                        .update_refreshed(&base, base.registration_epoch, refresh.clone())
+                        .unwrap();
+                }
+                _ => {
+                    let hint = match step {
+                        "scan" => &scan,
+                        "persist" => &persisted,
+                        _ => &login,
+                    };
+                    manager
+                        .adopt_observed(hint, None, |live| {
+                            Ok(AdoptionRead::Record(
+                                store.read_back(live).unwrap().unwrap(),
+                            ))
+                        })
+                        .unwrap();
+                }
+            }
+            if disabled {
+                assert!(
+                    manager.get(&base.id).unwrap().disabled
+                        && store.read_back(&base).unwrap().unwrap().disabled,
+                    "{INVARIANT}: {order:?}, after {step}"
+                );
+            }
+        }
+    }
+}

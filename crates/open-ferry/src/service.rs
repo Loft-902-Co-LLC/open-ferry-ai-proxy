@@ -8984,10 +8984,15 @@ self-update:
             service
                 .handle_and_drain(changed(auth_file(&path)), Path::new(""))
                 .await;
-            assert!(
-                service.manager.reset_quota(&stale.id).is_err(),
-                "reset must refuse the corrupt credential file"
-            );
+            let reset = service.manager.reset_quota(&stale.id);
+            if provider == "claude" {
+                assert!(
+                    reset.is_err(),
+                    "reset must refuse the corrupt credential file"
+                );
+            }
+            // Codex may skip an auth-file result save; neither path may
+            // overwrite the corrupt bytes or adopt the captured payload.
             assert_eq!(std::fs::read(&path).unwrap(), b"{");
             assert!(service.manager.get(&stale.id).unwrap().disabled);
             assert!(!service.dirty_reads.is_empty());

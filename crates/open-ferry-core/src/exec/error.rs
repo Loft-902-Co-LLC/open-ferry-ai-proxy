@@ -214,10 +214,15 @@ impl ExecError {
             ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
-    /// A deadline or explicit provider hint owns Retry-After delivery. Header
+    /// A trusted deadline or explicit capacity hint owns Retry-After delivery. Header
     /// writers must remove raw passthrough even for zero or expired overrides.
     pub fn has_retry_after_override(&self) -> bool {
-        self.has_trusted_retry_deadline() || self.retry_after.is_some()
+        self.has_trusted_retry_deadline()
+            || (matches!(
+                self.kind,
+                ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
+            ) || self.failure_code() == Some("transient_rate_limit"))
+                && self.retry_after.is_some()
     }
 
     /// A live trusted deadline wins over the provider hint. After natural
@@ -566,5 +571,6 @@ mod tests {
             .headers
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         assert!(upstream.retry_after_header().is_none());
+        assert!(!upstream.has_retry_after_override());
     }
 }

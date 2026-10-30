@@ -4458,3 +4458,116 @@ async fn p47_capacity_hold_and_merge_fence_an_inflight_quota_recovery() {
     assert!(!recover(&h, &healthy));
     assert!(blocked(&h, OPUS));
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
+    const INVARIANT: &str = "live quota and unrelated cooldowns cannot be shortened by stale results, relogin, or refresh/recovery merges";
+    let orders = five_step_orderings(["stale", "relogin", "refresh", "merge", "recovery"]);
+    let orders: Vec<_> = orders
+        .into_iter()
+        .filter(|order| {
+            order.iter().position(|step| *step == "merge")
+                < order.iter().position(|step| *step == "recovery")
+        })
+        .collect();
+    assert_eq!(orders.len(), 60);
+    for quota in [false, true] {
+        for order in &orders {
+            let h = Harness::new(Settings::default());
+            let mut initial = auth_with_metadata(
+                ID,
+                "claude",
+                serde_json::json!({"type":"claude", "access_token":"dummy-before", "refresh_token":"dummy-refresh"}),
+            );
+            // A refresh can carry explicit older healthy values, not just an
+            // empty map (which has an independent compatibility fallback).
+            for model in [OPUS, ROUTE] {
+                initial.model_states.insert(
+                    model.into(),
+                    crate::auth::ModelState {
+                        status: crate::auth::Status::Active,
+                        ..Default::default()
+                    },
+                );
+            }
+            let base = h.add(initial, &[OPUS, ROUTE]);
+            let old_seq = h.manager.next_execution_seq();
+            let end = h.now() + TimeDelta::from_std(FIVE_DAYS).unwrap();
+            let mut held = if quota {
+                quota_429(OPUS, opus_headers(), FIVE_DAYS)
+            } else {
+                other_failure(OPUS, 503, FIVE_DAYS)
+            };
+            held.execution_seq = h.manager.next_execution_seq();
+            h.manager.mark_result(&held);
+            let mut alias_hold = other_failure(ROUTE, 503, 2 * HOUR);
+            alias_hold.execution_seq = h.manager.next_execution_seq();
+            h.manager.mark_result(&alias_hold);
+            for step in order {
+                match *step {
+                    "stale" => {
+                        let error = ExecError::transient_capacity(
+                            "transient capacity",
+                            Some(Duration::ZERO),
+                        );
+                        let mut stale = other_failure(OPUS, 429, Duration::ZERO);
+                        stale.error = Some(crate::manager::classify::result_error_from_error(
+                            crate::manager::classify::ErrView::Exec(&error),
+                        ));
+                        stale.execution_seq = old_seq;
+                        h.manager.mark_result(&stale);
+                    }
+                    "relogin" => {
+                        let mut fresh = h.get(ID).as_ref().clone();
+                        fresh
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-login"));
+                        h.manager
+                            .adopt_observed(&fresh, None, |_| {
+                                Ok(crate::auth::AdoptionRead::Record(fresh.clone()))
+                            })
+                            .unwrap();
+                    }
+                    "refresh" => {
+                        let mut refreshed = base.as_ref().clone();
+                        refreshed
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
+                        h.manager
+                            .update_refreshed(&base, base.registration_epoch, refreshed)
+                            .unwrap();
+                    }
+                    "merge" => merge_the_alias(&h),
+                    "recovery" => {
+                        // A fresh recognized quota claim after the merge must
+                        // still respect the foreign hold and standing refusal.
+                        h.manager
+                            .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+                        assert!(
+                            !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+                            "{INVARIANT}: quota={quota}, {order:?}, recovery"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                let live = h.get(ID);
+                assert!(
+                    blocked(&h, OPUS)
+                        && live
+                            .model_states
+                            .get(OPUS)
+                            .and_then(|state| state.next_retry_after)
+                            .is_some_and(|next| next >= end),
+                    "{INVARIANT}: quota={quota}, {order:?}, after {step}"
+                );
+                if quota {
+                    assert!(
+                        live.model_states[OPUS].quota.exceeded,
+                        "{INVARIANT}: {order:?}"
+                    );
+                }
+                h.clock.advance(Duration::from_secs(1));
+            }
+        }
+    }
+}
