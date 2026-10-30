@@ -1595,7 +1595,9 @@ impl Manager {
                 auth.model_states = existing_auth.model_states.clone();
                 auth.last_refreshed_at = existing_auth.last_refreshed_at;
                 auth.next_refresh_after = existing_auth.next_refresh_after;
-                if matches!(auth.status, Status::Active | Status::Unknown) {
+                if matches!(auth.status, Status::Active | Status::Unknown)
+                    && existing_auth.status != Status::Unknown
+                {
                     auth.status = existing_auth.status;
                 }
                 if auth.status_message.is_empty() {
