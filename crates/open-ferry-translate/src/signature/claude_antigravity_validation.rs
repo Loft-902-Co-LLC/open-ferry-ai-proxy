@@ -6,7 +6,7 @@
 //! Antigravity's Claude 5.5 returns a CAQS signature inside a second base64
 //! layer. The outer layer decodes to base64 text starting with `C`, which
 //! encodes to a leading `Q`. That text decodes to an envelope version 4
-//! protobuf whose channel block names channel 18, Google infrastructure
+//! protobuf whose channel block names a rotating channel ID, Google infrastructure
 //! (field 2 set to 2) and a `thinking` block, with the signature bytes in
 //! container field 5.
 //!
