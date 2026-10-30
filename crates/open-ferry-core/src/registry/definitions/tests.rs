@@ -295,6 +295,7 @@ fn xai_and_meta_models_come_from_their_sections() {
     assert_eq!(
         imagine,
         [
+            "grok-imagine-video-1.5-lite",
             "grok-imagine-image",
             "grok-imagine-image-quality",
             "grok-imagine-image-2.0",

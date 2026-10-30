@@ -1018,19 +1018,18 @@ fn non_template_models_follow_the_catalog_by_display_name() {
     let templates = CodexClientCatalog::embedded().unwrap();
     let base = templates.templates().map(model_priority).max().unwrap();
     // Non-template priorities follow the catalog's maximum, 100 apart.
-    assert_eq!(
-        order,
-        [
-            (
-                "gpt-6-astra",
-                model_priority(templates.template("gpt-6-astra").unwrap())
-            ),
-            ("gpt-5.5", model_priority(templates.default_template())),
-            ("Alpha", base + 100),
-            ("alpha-model", base + 200),
-            ("zeta-model", base + 300),
-        ]
-    );
+    let mut expected = vec![
+        (
+            "gpt-6-astra",
+            model_priority(templates.template("gpt-6-astra").unwrap()),
+        ),
+        ("gpt-5.5", model_priority(templates.default_template())),
+        ("Alpha", base + 100),
+        ("alpha-model", base + 200),
+        ("zeta-model", base + 300),
+    ];
+    expected.sort_by_key(|(_, priority)| *priority);
+    assert_eq!(order, expected);
 }
 
 #[test]
