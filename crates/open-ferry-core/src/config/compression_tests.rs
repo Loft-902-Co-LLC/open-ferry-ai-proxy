@@ -232,3 +232,54 @@ fn compression_diff_reports_all_stored_settings() {
         );
     }
 }
+
+#[test]
+fn discovery_advertise_management_remains_opaque_on_load_and_save() {
+    for advertise in ["true", "false", "opaque-value"] {
+        for (prefix, indent) in [("discovery:\n", "  "), ("server:\n  discovery:\n", "    ")] {
+            let raw = format!(
+                "# discovery head\n{prefix}{indent}advertise-management: {advertise} # discovery line\n{indent}service-name: 'Local gateway'\nplugins:\n  configs:\n    example:\n      # plugin head\n      custom: {{retained: [one, two]}}\n"
+            );
+            let dir = TempDir::new();
+            let path = dir.write("config.yaml", &raw);
+            // An intentionally untyped discovery value must never break a load.
+            let cfg = Config::load(&path).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+            let before = V8Document::migrate(raw.as_bytes()).unwrap();
+            let discovery = before
+                .value(&["server", "discovery", "advertise-management"])
+                .unwrap()
+                .unwrap();
+            let plugin = before
+                .value(&["plugins", "configs", "example"])
+                .unwrap()
+                .unwrap();
+            for migrate in [false, true, false] {
+                save::save_preserving_comments(&path, &cfg, migrate).unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                let after = V8Document::migrate(&bytes).unwrap();
+                assert_eq!(
+                    after
+                        .value(&["server", "discovery", "advertise-management"])
+                        .unwrap()
+                        .unwrap(),
+                    discovery
+                );
+                assert_eq!(
+                    after
+                        .value(&["plugins", "configs", "example"])
+                        .unwrap()
+                        .unwrap(),
+                    plugin
+                );
+                let text = String::from_utf8(bytes).unwrap();
+                for comment in ["# discovery head", "# discovery line", "# plugin head"] {
+                    assert!(
+                        text.contains(comment),
+                        "missing {comment}; prefix={prefix}, migrate={migrate}, advertise={advertise}"
+                    );
+                }
+            }
+        }
+    }
+}
