@@ -963,3 +963,39 @@ fn web_search_index_matches_scan_across_registration_changes() {
     assert!(registry.read().web_search_counts.is_empty());
     assert!(registry.read().web_search_provider_counts.is_empty());
 }
+
+#[test]
+fn web_search_index_empty_client_exclusion_and_published_views() {
+    for client in ["", "a"] {
+        let registry = ModelRegistry::new();
+        registry.register_client(client, "gemini", &[search_model("m", true)]);
+        registry.register_client("b", "gemini", &[search_model("m", false)]);
+        assert_search_index(&registry);
+        assert!(registry.model_info("m", "gemini").unwrap().supports_web_search);
+        assert!(registry.available_models_by_provider("gemini")[0].supports_web_search);
+        registry.unregister_client(client);
+        assert_search_index(&registry);
+        assert!(!registry.model_info("m", "gemini").unwrap().supports_web_search);
+    }
+}
+
+#[test]
+fn web_search_index_cleans_orphan_metadata_on_addition_and_removal() {
+    for real_support in [false, true] {
+        for action in ["replace", "remove", "empty"] {
+            let registry = ModelRegistry::new();
+            registry.register_client("a", "codex", &[search_model("m", real_support)]);
+            registry.register_client("ghost", "codex", &[search_model("m", true)]);
+            registry.write().client_models.remove("ghost");
+            match action {
+                "replace" => registry.register_client("ghost", "gemini", &[search_model("n", false)]),
+                "remove" => registry.unregister_client("ghost"),
+                "empty" => registry.register_client("ghost", "gemini", &[]),
+                _ => unreachable!(),
+            }
+            assert_search_index(&registry);
+            assert_eq!(registry.model_info("m", "codex").unwrap().supports_web_search, real_support);
+            assert!(!registry.read().client_model_infos.get("ghost").is_some_and(|infos| infos.contains_key("m")));
+        }
+    }
+}
