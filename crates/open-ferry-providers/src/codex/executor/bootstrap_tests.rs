@@ -989,3 +989,63 @@ async fn moderation_metadata_then_output_flushes_in_order() {
         tail = &tail[offset + marker.len()..];
     }
 }
+
+#[tokio::test]
+async fn r2_moderation_metadata_overload_fails_over_through_manager_to_second_credential() {
+    use open_ferry_core::auth::Status;
+    use open_ferry_core::exec::Dispatcher;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::models::ModelInfo;
+    use open_ferry_core::registry::ModelRegistry;
+    let overloaded = serve_events(&[
+        CREATED_EVENT,
+        IN_PROGRESS_EVENT,
+        MODERATION_METADATA_EVENT,
+        OVERLOAD_EVENT,
+    ])
+    .await;
+    let completed = COMPLETED_EVENT.replace("resp_1", "resp_second");
+    let ready = serve_events(&[OUTPUT_DELTA_EVENT, &completed]).await;
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Manager::new(Settings::default(), registry.clone(), None);
+    manager.register_executor(Arc::new(buffering(true)));
+    let model = "gpt-5.6-terra";
+    for (id, url, priority) in [("overloaded", overloaded, "2"), ("ready", ready, "1")] {
+        let mut auth = Arc::unwrap_or_clone(auth(&url));
+        auth.id = id.into();
+        auth.status = Status::Active;
+        auth.attributes.insert("priority".into(), priority.into());
+        registry.register_client(
+            id,
+            "codex",
+            &[ModelInfo {
+                id: model.into(),
+                ..ModelInfo::default()
+            }],
+        );
+        manager.register(auth).unwrap();
+    }
+    let selected = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = selected.clone();
+    let mut options = Options::new(Format::OPENAI_RESPONSE);
+    options.stream = true;
+    options.metadata.selected_auth = Some(Arc::new(move |id| {
+        record.lock().unwrap().push(id.to_owned())
+    }));
+    let response = manager
+        .execute_stream(
+            &["codex".into()],
+            Request {
+                model: model.into(),
+                payload: Bytes::from_static(br#"{"input":[]}"#),
+            },
+            options,
+        )
+        .await
+        .unwrap();
+    let (shown, error) = drain(response).await;
+    assert!(error.is_none(), "{error:?}");
+    assert!(shown.contains("resp_second"));
+    assert!(!shown.contains("response.metadata"));
+    assert_eq!(*selected.lock().unwrap(), ["overloaded", "ready"]);
+}
