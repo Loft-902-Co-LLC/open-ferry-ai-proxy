@@ -14,7 +14,7 @@ When we move the pin, we update this table, bring every ported file's header to 
 
 ### What moving from v8.0.38 to v8.0.42 left out
 
-The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42; the updated differential parity cases, config-save recalibration and Go 1.26.10 CI toolchain remain separate work.
+The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42. Differential regression cases and CI use Go 1.26.10; config-save recalibration, a full comparison at the combined head and README totals are still pending.
 
 | Upstream commit | Status | What isn’t ported | Ported behavior / reason |
 |---|---|---|---|
@@ -1657,7 +1657,9 @@ The TUI's screens are what upstream's Charm libraries make of its views, so `ope
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 ```
 
-`--go` picks the Go toolchain. To build upstream as its releases are built, use Go >=1.26.10 (`go install golang.org/dl/go1.26.10@latest`, then `go1.26.10 download`) and pass `--go go1.26.10`. The v8.0.42 parity fixture update, config-save recalibration and CI toolchain move are pending; older measured results below are not relabeled by changing the reference.
+`--go` picks the Go toolchain. Use Go 1.26.10 with `GOTOOLCHAIN=local`: install `golang.org/dl/go1.26.10` with `go install golang.org/dl/go1.26.10@latest`, run `go1.26.10 download`, check `go1.26.10 version`, then pass `--go go1.26.10`. An absolute path to that toolchain's `go` binary also works.
+
+The v8.0.42 regression cases and Go 1.26.10 CI toolchain are included. Config-save recalibration, the full comparison at the combined head and README totals remain pending; older measured results keep their original labels.
 
 With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 
