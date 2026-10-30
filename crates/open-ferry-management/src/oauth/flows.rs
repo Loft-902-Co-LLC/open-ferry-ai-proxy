@@ -11,18 +11,20 @@
 //! A login started here answers `{"state":...,"status":"ok","url":...}`
 //! at once, and then waits up to 5 minutes for its callback, which a
 //! callback route hands it. It then exchanges the code for tokens with the
-//! provider's official OAuth endpoints, through the config's `proxy-url`,
-//! within 60 seconds, and saves the credential in the auth directory,
+//! provider's official OAuth endpoints, through its explicit session proxy
+//! or the existing client defaults when none was supplied, within 60 seconds,
+//! and saves the credential in the auth directory,
 //! where the running service takes it up; the session then completes. A
 //! login that fails sets the session's status to say why.
 //!
 //! Cancelling the session stops its login at once, wherever it is, except
 //! while it saves: a login cancelled before its exchange sends no token
 //! request, and one cancelled during it drops the request and saves
-//! nothing. Shutdown stops logins after a bounded grace for saving binds.
-//! A post-fence bind collector can outlive that grace. However a
-//! login ends, its forwarder stops, and its session is dropped unless the
-//! login completed or failed it.
+//! nothing. Shutdown stops login owners after a bounded grace for saving
+//! binds. Claimed saves and their finalizers remain gate-owned until they
+//! record their durable outcome, while the process stays alive. However a
+//! login owner ends, its forwarder stops; only an unclaimed pending session
+//! is dropped.
 //!
 //! No log or answer holds a login's code, PKCE verifier or tokens. A
 //! failed exchange is logged with a fixed message and the token endpoint's
@@ -389,7 +391,7 @@ impl StartOptions {
 
     fn parse(method: &Method, query: &Query, body: &[u8]) -> Result<Self, &'static str> {
         let mut options = Self::from_query(query);
-        if body.iter().all(u8::is_ascii_whitespace) {
+        if trim_space(body).is_empty() {
             return Ok(options);
         }
         if method != Method::POST {
@@ -423,6 +425,13 @@ impl StartOptions {
         let proxy = if snake.is_empty() { kebab } else { snake };
         validate_session_proxy(proxy)?;
         proxy.clone_into(&mut options.proxy_url);
+        // These aliases are unused by native providers, but their types are
+        // checked before dispatch, with domain taking precedence upstream.
+        if object.get("domain").is_some_and(|value| !value.is_null()) {
+            string("domain", "invalid domain")?;
+        } else {
+            string("channel", "invalid channel")?;
+        }
         let body_webui = match object.get("is_webui") {
             None | Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::Bool(value)) => Some(*value),
@@ -723,37 +732,38 @@ async fn run(
         store.set_error(&login.state, crate::config_write::SWITCHING);
         return;
     };
-    let bind =
-        matches!(login.client, Client::Siwc(_)).then(|| (state.clone(), login.state.clone()));
+    let session = login.state.clone();
     let work = complete(state.clone(), login, callback, lifeline);
     let Ok(task) = gate.spawn(&operation, work) else {
         return;
     };
     drop(operation);
-    // A login stopped here (shut down, or its session replaced) stops its
-    // task, as when the exchange and the save ran in this one.
-    let mut task = StopOnDrop { task, bind };
+    // Stop unclaimed work with its owner, but keep a claimed save and its
+    // finalizer gate-owned after shutdown aborts that owner.
+    let mut task = StopOnDrop {
+        task,
+        management: state.clone(),
+        session,
+    };
     if let Err(error) = (&mut task.task).await {
         tracing::error!("The {provider} login's task failed: {error}");
     }
 }
 
-/// Abort with the login owner, except a post-fence bind during shutdown.
+/// Abort with the login owner, except a claimed save during shutdown.
 struct StopOnDrop {
     task: tokio::task::JoinHandle<()>,
-    bind: Option<(ManagementState, String)>,
+    management: ManagementState,
+    session: String,
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        // After the bounded shutdown grace, a committed bind's collector
-        // remains gate-owned. If the process stays alive, it can still finish.
-        // The shutdown cutoff and admit_bind use the same login mutex, so no
-        // new final fence can pass after this check during shutdown.
-        if self.bind.as_ref().is_some_and(|(state, session)| {
-            state.oauth_sessions().is_shut_down()
-                && state.oauth_sessions().store().is_committing(session)
-        }) {
+        // Claimed saves and their finalizers remain gate-owned while the
+        // process stays alive. The shutdown cutoff, claim_login_commit and
+        // admit_bind share the login mutex: no new claim can follow this check.
+        let sessions = self.management.oauth_sessions();
+        if sessions.is_shut_down() && sessions.store().is_committing(&self.session) {
             return;
         }
         self.task.abort();
@@ -831,8 +841,12 @@ async fn complete(
         (Credential::Login(mut record), Client::Claude(_) | Client::Codex(_)) => {
             use crate::token_record::SaveError;
             apply_session_proxy(&mut record, &login.proxy_url);
-            if !store.claim_commit(&login.state, provider.name(), login._lease.id) {
+            if !sessions.claim_login_commit(&login.state, provider.name(), login._lease.id) {
                 return;
+            }
+            #[cfg(test)]
+            if let Some(claimed) = sessions.overrides().login_commit_claimed.clone() {
+                claimed.notify_one();
             }
             match save_token_record(&state, *record).await {
                 Ok(path) => Ok((path, true)),

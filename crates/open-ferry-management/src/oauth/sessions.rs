@@ -533,15 +533,15 @@ impl Store {
         pending
     }
 
-    /// Drops the session for `state` if it is the pending session of
-    /// registration `id`: its login ended without completing or failing,
-    /// so nothing will.
+    /// Drops the unclaimed pending session of registration `id` when its
+    /// login ends. A claimed save retains its session until its gate-owned
+    /// finalizer records the durable outcome.
     pub(crate) fn release(&self, state: &str, id: u64) {
         let mut inner = self.lock();
         let ours = inner
             .sessions
             .get(state)
-            .is_some_and(|entry| entry.id == id && entry.session.is_pending());
+            .is_some_and(|entry| entry.id == id && entry.session.is_pending() && !entry.committing);
         if ours {
             inner.sessions.remove(state);
         }
@@ -638,38 +638,61 @@ fn redact_session_proxy(text: &str, proxy_url: &str) -> String {
     if proxy_url.is_empty() {
         return text.to_owned();
     }
-    let mut secrets = vec![proxy_url.to_owned()];
+    let Some(url) = crate::go_url::parse(proxy_url.as_bytes()) else {
+        return text.to_owned();
+    };
+    let Some((user, password)) = url.user else {
+        return text.to_owned();
+    };
+    let sanitized = format!(
+        "{}://[redacted]@{}",
+        url.scheme,
+        String::from_utf8_lossy(&url.host)
+    );
+    let mut secrets = Vec::new();
     if let Some((_, authority)) = proxy_url.split_once("://")
         && let Some((userinfo, _)) = authority.split('/').next().unwrap_or("").rsplit_once('@')
+        && let Some((_, password)) = userinfo.split_once(':')
     {
         secrets.push(userinfo.to_owned());
-        for part in userinfo
-            .split_once(':')
-            .map_or_else(|| vec![userinfo], |(user, password)| vec![user, password])
-        {
-            secrets.push(part.to_owned());
-        }
+        secrets.push(password.to_owned());
     }
-    if let Some(url) = crate::go_url::parse(proxy_url.as_bytes())
-        && let Some((user, password)) = url.user
-    {
-        let user = String::from_utf8_lossy(&user).into_owned();
-        if let Some(password) = password {
-            let password = String::from_utf8_lossy(&password).into_owned();
-            secrets.push(STANDARD.encode(format!("{user}:{password}")));
-            secrets.push(format!("{user}:{password}"));
-            secrets.push(password);
-        }
-        secrets.push(user);
+    if let Some(password) = password {
+        let user = String::from_utf8_lossy(&user);
+        let password = String::from_utf8_lossy(&password).into_owned();
+        secrets.push(STANDARD.encode(format!("{user}:{password}")));
+        secrets.push(format!("{user}:{password}"));
+        secrets.push(password);
     }
     secrets.retain(|secret| !secret.is_empty());
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets.dedup();
-    let mut text = text.to_owned();
-    for secret in secrets {
-        text = text.replace(&secret, "[redacted]");
+    // Match only the original text, longest first at each position. In
+    // particular a password must never match inside an inserted marker or
+    // the sanitized URL, whose host remains useful for diagnosing failures.
+    let mut redacted = String::with_capacity(text.len());
+    let mut from = 0;
+    for (index, _) in text.char_indices() {
+        if index < from {
+            continue;
+        }
+        let rest = &text[index..];
+        let (length, replacement) = if rest.starts_with(proxy_url) {
+            (proxy_url.len(), sanitized.as_str())
+        } else if let Some(secret) = secrets
+            .iter()
+            .find(|secret| rest.starts_with(secret.as_str()))
+        {
+            (secret.len(), "[redacted]")
+        } else {
+            continue;
+        };
+        redacted.push_str(&text[from..index]);
+        redacted.push_str(replacement);
+        from = index + length;
     }
-    text
+    redacted.push_str(&text[from..]);
+    redacted
 }
 
 /// Whether `session` is pending, for `provider` unless it is empty after
@@ -773,6 +796,51 @@ mod bind_tests {
     }
 
     #[test]
+    fn session_proxy_release_retains_claimed_saves_until_their_real_outcome() {
+        for failed in [false, true] {
+            let store = Store::default();
+            let registration = store.register("save-test", "codex").unwrap();
+            assert!(store.claim_commit("save-test", "codex", registration.id));
+            store.release("save-test", registration.id);
+            assert!(store.is_committing("save-test"));
+            assert!(store.get("save-test").unwrap().is_pending());
+            if failed {
+                store.fail_commit("save-test", "save failed");
+            } else {
+                store.complete("save-test");
+            }
+            store.release("save-test", registration.id);
+            let session = store.get("save-test").unwrap();
+            assert_eq!(session.completed, !failed);
+            assert_eq!(session.status, if failed { "save failed" } else { "" });
+            assert!(!store.is_committing("save-test"));
+        }
+        let store = Store::default();
+        let registration = store.register("unsaved-test", "codex").unwrap();
+        store.release("unsaved-test", registration.id);
+        assert!(store.get("unsaved-test").is_none());
+    }
+
+    #[test]
+    fn session_proxy_native_commit_claim_is_fenced_by_shutdown() {
+        let sessions = super::super::Sessions::default();
+        let before = sessions.store.register("before-shutdown", "codex").unwrap();
+        let during = sessions.store.register("during-grace", "codex").unwrap();
+        let after = sessions.store.register("after-shutdown", "codex").unwrap();
+        assert!(sessions.claim_login_commit("before-shutdown", "codex", before.id));
+        sessions.logins().shut_down = true;
+        assert!(sessions.claim_login_commit("during-grace", "codex", during.id));
+        sessions.logins().aborting = true;
+        assert!(!sessions.claim_login_commit("after-shutdown", "codex", after.id));
+        assert!(!sessions.store.is_committing("after-shutdown"));
+        sessions.store.release("after-shutdown", after.id);
+        assert!(sessions.store.get("after-shutdown").is_none());
+        assert!(sessions.store.is_committing("before-shutdown"));
+        sessions.store.complete("before-shutdown");
+        assert!(sessions.store.get("before-shutdown").unwrap().completed);
+    }
+
+    #[test]
     fn session_proxy_terminal_state_redacts_and_releases_transient_proxy() {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD;
@@ -802,21 +870,63 @@ mod bind_tests {
                 }
             }
             let session = store.get("state-test").unwrap();
-            for secret in [
-                proxy,
-                user,
-                password,
-                &basic,
-                "proxy%20user-test",
-                "proxy%40password-test",
-            ] {
+            for secret in [proxy, password, &basic, "proxy%40password-test"] {
                 assert!(!session.status.contains(secret));
                 assert!(!format!("{session:?} {store:?}").contains(secret));
+            }
+            if terminal != "complete" {
+                assert!(session.status.contains("http://[redacted]@127.0.0.1:12345"));
+                assert!(session.status.contains(user));
+                assert!(session.status.contains("proxy%20user-test"));
             }
             assert!(store.lock().sessions["state-test"].proxy_url.is_empty());
             assert!(!store.is_committing("state-test"));
             assert!(!store.set_pending_error("state-test", "late poll"));
         }
+    }
+
+    #[test]
+    fn session_proxy_redaction_is_single_pass_for_short_and_overlapping_credentials() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        for (proxy, user, password, host) in [
+            ("http://u:d@bridge.test:8080", "u", "d", "bridge.test:8080"),
+            (
+                "http://redacted:acted@redacted.test:8080",
+                "redacted",
+                "acted",
+                "redacted.test:8080",
+            ),
+        ] {
+            let basic = STANDARD.encode(format!("{user}:{password}"));
+            let text =
+                format!("unable to connect {proxy} {user}:{password} {password} Basic {basic}");
+            let expected = format!(
+                "unable to connect http://[redacted]@{host} [redacted] [redacted] Basic [redacted]"
+            );
+            assert!(redact_session_proxy(&text, proxy) == expected);
+        }
+        assert!(
+            redact_session_proxy("unable to connect u", "http://u:d@bridge.test:8080")
+                == "unable to connect u"
+        );
+        assert!(
+            redact_session_proxy("http://user@proxy.test user", "http://user@proxy.test")
+                == "http://[redacted]@proxy.test user"
+        );
+        assert!(
+            redact_session_proxy("http://proxy.test", "http://proxy.test") == "http://proxy.test"
+        );
+    }
+
+    #[test]
+    fn session_proxy_redacts_encoded_and_decoded_userinfo_and_passwords() {
+        let proxy = "http://proxy%20user-test:proxy%40password-test@127.0.0.1:12345";
+        let text = "failed proxy%20user-test:proxy%40password-test proxy user-test:proxy@password-test proxy%40password-test proxy@password-test";
+        assert!(
+            redact_session_proxy(text, proxy)
+                == "failed [redacted] [redacted] [redacted] [redacted]"
+        );
     }
 
     #[test]

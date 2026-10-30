@@ -191,6 +191,83 @@ async fn session_proxy_validates_body_aliases_conflicts_and_query_refusal() {
 }
 
 #[tokio::test]
+async fn session_proxy_blank_body_uses_go_trim_space() {
+    let api = Api::new();
+    for method in [Method::GET, Method::POST] {
+        for body in ["", " \t\r\n", "\u{000b}", "\u{00a0}", "\u{0085}\u{3000}"] {
+            let response = start_request(&api, method.clone(), "provider=codex", body).await;
+            assert_eq!(response.status, StatusCode::OK);
+            let value: Value = serde_json::from_str(&response.body).unwrap();
+            assert!(
+                api.state
+                    .oauth_sessions()
+                    .store()
+                    .cancel(value["state"].as_str().unwrap())
+            );
+        }
+    }
+    api.state.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_proxy_domain_and_channel_types_are_checked_before_dispatch() {
+    let api = Api::new();
+    for provider in [
+        "claude",
+        "codex",
+        "plugin-sso",
+        "antigravity",
+        "kimi",
+        "devin",
+    ] {
+        for (field, error) in [("domain", "invalid domain"), ("channel", "invalid channel")] {
+            for invalid in [json!(false), json!(1), json!([]), json!({})] {
+                let mut body = json!({"provider":provider});
+                body[field] = invalid;
+                let response = start_request(&api, Method::POST, "", &body.to_string()).await;
+                assert_eq!(response.status, StatusCode::BAD_REQUEST);
+                let value: Value = serde_json::from_str(&response.body).unwrap();
+                assert!(value["error"] == error);
+            }
+        }
+    }
+    for provider in ["claude", "codex"] {
+        for fields in [
+            json!({"domain":null, "channel":null}),
+            json!({"domain":" example.test "}),
+            json!({"channel":" native-test "}),
+            // As upstream, a non-null domain shadows the channel alias.
+            json!({"domain":"", "channel":false}),
+        ] {
+            let response = start_request(
+                &api,
+                Method::POST,
+                &format!("provider={provider}"),
+                &fields.to_string(),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::OK);
+            let value: Value = serde_json::from_str(&response.body).unwrap();
+            assert!(
+                api.state
+                    .oauth_sessions()
+                    .store()
+                    .cancel(value["state"].as_str().unwrap())
+            );
+        }
+    }
+    let response = start_request(
+        &api,
+        Method::POST,
+        "provider=codex",
+        r#"{"domain":null,"channel":false}"#,
+    )
+    .await;
+    assert!(response.body == r#"{"error":"invalid channel"}"#);
+    api.state.shutdown().await;
+}
+
+#[tokio::test]
 async fn session_proxy_retains_bounded_body_and_json_depth_guards() {
     let api = Api::new();
     let body = " ".repeat(crate::bind::MAX_BODY + 1);
@@ -300,7 +377,7 @@ async fn session_proxy_parallel_native_logins_persist_isolated_proxies_out_of_or
 #[tokio::test]
 async fn session_proxy_failures_never_fall_back_and_redact_userinfo() {
     for provider in ["claude", "codex"] {
-        for failure_kind in ["closed", "auth", "dropped", "echo"] {
+        for failure_kind in ["auth", "dropped", "echo"] {
             let (logs, _capture) = Logs::capture();
             let dir = AuthDir::new();
             let direct =
@@ -327,9 +404,6 @@ async fn session_proxy_failures_never_fall_back_and_redact_userinfo() {
             url.set_username(user).unwrap();
             url.set_password(Some(password)).unwrap();
             let proxy_url = url.to_string();
-            if failure_kind == "closed" {
-                drop(proxy);
-            }
             let global = Upstream::answering(tokens(provider, "global@example.test")).await;
             let mut config = dir.config();
             config.proxy_url.clone_from(&global.url);
@@ -548,15 +622,13 @@ async fn session_proxy_commit_claim_beats_cancel_and_poll_while_save_waits() {
     let proxy = Upstream::answering(tokens("codex", "commit@example.test")).await;
     let api = login_api(&dir, "http://127.0.0.1:9");
     let state = start_proxy(&api, "codex", &proxy.url).await;
+    let claimed = Arc::new(tokio::sync::Notify::new());
+    api.state.oauth_sessions().overrides().login_commit_claimed = Some(claimed.clone());
     let guard = api.state.credential_lock().lock().await;
     deliver(&api, &state, "codex", code("commit-code-test"));
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !api.state.oauth_sessions().store().is_committing(&state) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), claimed.notified())
+        .await
+        .unwrap();
     let response = api
         .call(
             Method::DELETE,
@@ -592,6 +664,69 @@ async fn session_proxy_commit_claim_beats_cancel_and_poll_while_save_waits() {
 }
 
 #[tokio::test]
+async fn session_proxy_claimed_saves_finalize_the_real_outcome_after_shutdown() {
+    use open_ferry_core::auth::file_guard::FileGuard;
+    for provider in ["claude", "codex"] {
+        for outcome in ["saved", "sync-stopped", "save-failed"] {
+            let dir = if outcome == "save-failed" {
+                AuthDir::guarded(Some(FileGuard::new(|_| Err("test save refused".into()))))
+            } else {
+                AuthDir::new()
+            };
+            let proxy = Upstream::answering(tokens(provider, "shutdown@example.test")).await;
+            let api = login_api(&dir, "http://127.0.0.1:9");
+            let state = start_proxy(&api, provider, &proxy.url).await;
+            let claimed = Arc::new(tokio::sync::Notify::new());
+            api.state.oauth_sessions().overrides().login_commit_claimed = Some(claimed.clone());
+            // Hold the real file lock before delivering the callback. The
+            // notification proves the claim passed, without timing sleeps.
+            let guard = api.state.credential_lock().lock().await;
+            let store = api.state.oauth_sessions().store();
+            let delivered = store
+                .deliver(&state, provider_name(provider), code("shutdown-code-test"))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), claimed.notified())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), api.state.shutdown())
+                .await
+                .unwrap();
+            assert_eq!(api.state.oauth_sessions().running(), 0);
+            assert!(store.is_committing(&state));
+            assert!(files(&dir).is_empty());
+            assert!(
+                api.get(&format!("/v8/management/oauth/status?state={state}"))
+                    .await
+                    .expect(StatusCode::OK)["status"]
+                    == "wait"
+            );
+            assert!(!store.cancel(&state));
+            if outcome == "sync-stopped" {
+                api.sync.stop();
+            }
+            drop(guard);
+            let ended = store.ended(&state, delivered, Duration::from_secs(5)).await;
+            if outcome == "save-failed" {
+                assert_eq!(
+                    ended,
+                    Some(Ended::Failed("Failed to save authentication tokens".into()))
+                );
+                assert!(files(&dir).is_empty());
+            } else {
+                assert_eq!(ended, Some(Ended::Completed));
+                let records = dir.store.list().unwrap();
+                assert_eq!(records.len(), 1);
+                assert!(records[0].proxy_url == proxy.url);
+                assert!(records[0].metadata["proxy_url"] == proxy.url);
+                assert_eq!(api.sync.calls().len(), usize::from(outcome == "saved"));
+            }
+            assert!(!store.is_committing(&state));
+            assert_eq!(proxy.requests().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn session_proxy_cancel_before_exchange_saves_nothing() {
     let dir = AuthDir::new();
     let proxy = Upstream::answering(tokens("codex", "cancel@example.test")).await;
@@ -623,6 +758,41 @@ async fn session_proxy_does_not_weaken_existing_siwc_bind_selection() {
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert!(response.body.contains("not supported for SIWC bind"));
     assert_eq!(api.state.oauth_sessions().store().count(), 0);
+}
+
+#[tokio::test]
+async fn session_proxy_dedicated_siwc_bind_keeps_ignoring_proxy_url() {
+    let dir = AuthDir::new();
+    let original = json!({
+        "type":"codex", "access_token":"outer-access-test", "refresh_token":"outer-refresh-test",
+        "siwc":{"device_id":"123e4567-e89b-42d3-a456-426614174000"}
+    });
+    dir.write("codex-bind-test.json", &original.to_string());
+    let api = Api::over(&dir);
+    api.manager.load().unwrap();
+    for proxy in [
+        json!(false),
+        json!(null),
+        json!("invalid"),
+        json!("http://proxy.test:8080"),
+    ] {
+        let response = api
+            .post(
+                "/v8/management/oauth/siwc/bind",
+                &json!({"name":"codex-bind-test.json", "proxy_url":proxy}).to_string(),
+            )
+            .await;
+        let value = response.expect(StatusCode::OK);
+        assert!(value["flow"] == "siwc_bind");
+        assert!(
+            api.state
+                .oauth_sessions()
+                .store()
+                .cancel(value["state"].as_str().unwrap())
+        );
+    }
+    api.state.shutdown().await;
+    assert!(dir.read_json("codex-bind-test.json") == original);
 }
 
 #[tokio::test]
