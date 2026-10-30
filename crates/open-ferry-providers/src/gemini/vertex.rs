@@ -520,7 +520,7 @@ fn service_account_target(metadata: &Map<String, Value>) -> Result<Target<'stati
 /// one for `global`.
 fn vertex_base_url(location: &str) -> String {
     match location.trim() {
-        "" => format!("https://{DEFAULT_LOCATION}-aiplatform.googleapis.com"),
+        "" => GLOBAL_BASE_URL.to_owned(),
         location if location.eq_ignore_ascii_case("global") => GLOBAL_BASE_URL.to_owned(),
         location if location.eq_ignore_ascii_case("us") || location.eq_ignore_ascii_case("eu") => {
             format!(

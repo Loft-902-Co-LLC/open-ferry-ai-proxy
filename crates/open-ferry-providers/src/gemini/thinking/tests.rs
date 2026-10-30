@@ -426,16 +426,8 @@ fn looks_models_up_by_provider() {
 // the exact output when no snake-case aliases or opposite-format fields exist.
 #[test]
 fn absent_thinking_fields_preserve_provider_output() {
-    let level = Config {
-        mode: Mode::Level,
-        level: "high".into(),
-        ..Default::default()
-    };
-    let budget = Config {
-        mode: Mode::Budget,
-        budget: 1024,
-        ..Default::default()
-    };
+    let level = Config::level("high");
+    let budget = Config::budget(1024);
     for (config, expected) in [
         (level, json!({"thinkingLevel":"high"})),
         (budget, json!({"thinkingBudget":1024})),

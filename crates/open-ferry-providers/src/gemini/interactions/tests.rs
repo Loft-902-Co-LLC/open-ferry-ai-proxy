@@ -589,7 +589,7 @@ fn a_function_call_takes_its_call_id() {
         {"type": "model_output", "id": "out_1", "content": [{"type": "text", "id": "p", "text": "x"}]},
         "not an object"
     ]});
-    sanitize_input_ids(&mut body);
+    sanitize_input_ids(&mut body, false);
     assert_eq!(
         body,
         json!({"input": [
@@ -600,7 +600,7 @@ fn a_function_call_takes_its_call_id() {
         ]})
     );
     let mut text = json!({"input": "hi"});
-    sanitize_input_ids(&mut text);
+    sanitize_input_ids(&mut text, false);
     assert_eq!(text, json!({"input": "hi"}));
 }
 

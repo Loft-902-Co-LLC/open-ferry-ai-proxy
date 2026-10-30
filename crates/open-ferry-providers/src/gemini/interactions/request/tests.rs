@@ -320,7 +320,11 @@ fn native_interactions_drops_vertex_bare_tink_thoughts() {
         {"type":"thought","signature":wrapped,"summary":[{"text":"wrapped"}]},
         {"type":"text","text":"answer"}
     ]});
-    sanitize_input_ids(&mut body);
+    let mut vertex = body.clone();
+    sanitize_input_ids(&mut vertex, true);
+    assert_eq!(vertex["input"].as_array().unwrap().len(), 3);
+    assert_eq!(vertex["input"][0]["signature"], bare);
+    sanitize_input_ids(&mut body, false);
     assert_eq!(body["input"].as_array().unwrap().len(), 2);
     assert_eq!(body["input"][0]["signature"], wrapped);
 }

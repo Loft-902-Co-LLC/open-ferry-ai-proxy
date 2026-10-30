@@ -972,3 +972,46 @@ async fn vertex_generate_content_interactions_sse_framing() {
         }
     }
 }
+
+#[tokio::test]
+async fn native_interactions_endpoint_scopes_vertex_signatures() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = vec![0xa5; 405];
+    bytes[..5].copy_from_slice(&[1, 0x8f, 0x3d, 0x6b, 0x5f]);
+    let signature = STANDARD.encode(bytes);
+    for provider in PROVIDERS {
+        let mock = Mock::answering(|seen| {
+            if seen.path == "/token" {
+                Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+            } else {
+                Reply::json(r#"{"id":"native","status":"completed","output":[]}"#)
+            }
+        })
+        .await;
+        let (mut exec, auth) = executor(provider, &mock);
+        if provider == "gemini" {
+            exec = Box::new(super::InteractionsExecutor::new("direct"));
+        }
+        let mut auth = (*auth).clone();
+        auth.metadata.insert("interactions".into(), true.into());
+        let body = json!({"input":[
+            {"type":"thought","signature":signature,"summary":[{"type":"text","text":"reason"}]},
+            {"type":"text","text":"next"}
+        ]});
+        exec.execute(
+            Arc::new(auth),
+            request("gemini-2.5-flash", &body.to_string()),
+            stream_options(&Format::INTERACTIONS),
+        )
+        .await
+        .unwrap();
+        let sent = mock.last().json();
+        let parts = sent["input"].as_array().unwrap();
+        if provider == "gemini" {
+            assert_eq!(parts.len(), 1);
+        } else {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0]["signature"], signature);
+        }
+    }
+}
