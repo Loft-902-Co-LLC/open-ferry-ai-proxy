@@ -15,9 +15,10 @@
 //! - The held-back event may grow to at most [`MAX_EVENT_BYTES`]. Past it,
 //!   [`Framer::write_chunk`] drops it and fails with a 502, which ends the
 //!   stream. Upstream holds it back without limit.
-//! - Fragmented standard fields and trailing event names remain pending; a bare
-//!   malformed data word is not treated as a colon-bearing field. This avoids
-//!   upstream's transport-boundary-dependent event loss.
+//! - A synthetic newline does not split a standard field name; a bare malformed
+//!   data word is not treated as a colon-bearing field after empty event data.
+//!   Both avoid concrete upstream event corruption (see the oracle fixtures).
+//!   Event names themselves are emitted immediately, as upstream does.
 //! - Malformed private types can also be recovered across synthetic newlines,
 //!   so a split before a JSON colon cannot bypass public-client filtering.
 //!

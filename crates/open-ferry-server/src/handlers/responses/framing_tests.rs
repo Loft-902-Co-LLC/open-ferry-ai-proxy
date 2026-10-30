@@ -19,6 +19,16 @@ fn run(codex: bool, chunks: &[&[u8]]) -> (String, Framer) {
     (String::from_utf8(out.to_vec()).unwrap(), framer)
 }
 
+fn assert_upstream_frames(codex: bool, chunks: &[&[u8]], framer: &Framer) {
+    let mut oracle = upstream::Upstream::new(codex);
+    for chunk in chunks {
+        oracle.write_chunk(chunk);
+    }
+    oracle.flush();
+    assert_eq!(framer.frames, oracle.frames);
+    assert_eq!(framer.terminal_event, oracle.terminal_event);
+}
+
 fn public_completion(chunks: &[&str]) {
     let bytes: Vec<_> = chunks.iter().map(|chunk| chunk.as_bytes()).collect();
     let (got, framer) = run(false, &bytes);
@@ -282,6 +292,7 @@ fn data_first_events_without_delimiters_do_not_merge() {
     ];
     for codex in [false, true] {
         let (got, framer) = run(codex, chunks);
+        assert_upstream_frames(codex, chunks, &framer);
         assert_eq!(framer.data_frames, 2, "{got}");
         assert_eq!(framer.terminal_event, "response.completed", "{got}");
         assert_eq!(got.matches("\n\n").count(), 2, "{got}");
@@ -334,6 +345,43 @@ fn data_first_fragmented_event_name_matches_upstream_early_emit() {
             format!("{DATA_FIRST}\nevent: respon\n\nse.completed\n\n")
         );
         assert_eq!(framer.terminal_event, "");
+    }
+}
+
+#[test]
+fn terminal_trailing_id_retry_split_matches_upstream_field_loss() {
+    let first = b"event: response.completed\ndata: {\"type\":\"response.completed\"}";
+    let tail = b"\nid: terminal\nretry: 1000\n\n";
+    let wire = [first.as_slice(), tail].concat();
+    for codex in [false, true] {
+        let (whole, whole_framer) = run(codex, &[&wire]);
+        let (split, split_framer) = run(codex, &[first, tail]);
+        assert_eq!(whole.as_bytes(), wire);
+        assert_eq!(split, format!("{}\n\n", String::from_utf8_lossy(first)));
+        assert!(whole.contains("id: terminal\nretry: 1000"));
+        assert!(!split.contains("id:") && !split.contains("retry:"));
+        assert_upstream_frames(codex, &[&wire], &whole_framer);
+        assert_upstream_frames(codex, &[first, tail], &split_framer);
+    }
+}
+
+#[test]
+fn data_first_empty_event_name_split_matches_upstream_no_data_frame() {
+    let first = b"data: {\"response\":{\"id\":\"r\"}}\nevent:";
+    let tail = b" response.completed\n\n";
+    for codex in [false, true] {
+        let (out, framer) = run(codex, &[first, tail]);
+        assert_eq!(
+            out,
+            format!(
+                "{}\n\n{}",
+                String::from_utf8_lossy(first),
+                String::from_utf8_lossy(tail)
+            )
+        );
+        assert_eq!(framer.frames.len(), 2);
+        assert!(data_payload(&framer.frames[1]).is_none());
+        assert_upstream_frames(codex, &[first, tail], &framer);
     }
 }
 

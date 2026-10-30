@@ -255,12 +255,12 @@ impl Upstream {
 }
 
 fn error_event(name: &str) -> bool {
-    matches!(name.trim(), "error" | "response.failed" | "response.error")
+    matches!(name, "error" | "response.failed" | "response.error")
 }
 
 fn terminal(name: &str) -> bool {
     matches!(
-        name.trim(),
+        name,
         "response.completed"
             | "response.incomplete"
             | "response.failed"
@@ -311,10 +311,11 @@ fn data_payload(frame: &[u8]) -> Option<Vec<u8>> {
     let mut payload = Vec::new();
     let mut found = false;
     for line in frame.split(|&b| b == b'\n') {
-        let line = line
-            .trim_ascii_end()
-            .strip_suffix(b"\r")
-            .unwrap_or(line.trim_ascii_end());
+        let end = line
+            .iter()
+            .rposition(|&byte| byte != b'\r')
+            .map_or(0, |i| i + 1);
+        let line = &line[..end];
         let trimmed = go::trim_space(line);
         if let Some(data) = trimmed.strip_prefix(b"data:") {
             if found {
