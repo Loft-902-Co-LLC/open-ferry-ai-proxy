@@ -394,6 +394,7 @@ async fn r3_missing_native_outer_does_not_reject_or_cool_the_usable_siwc_credent
     auth.status = Status::Active;
     auth.metadata.remove("access_token");
     auth.metadata.insert("disable_cooling".into(), json!(false));
+    let stored_metadata = auth.metadata.clone();
     registry.register_client(
         &auth.id,
         "codex",
@@ -445,6 +446,154 @@ async fn r3_missing_native_outer_does_not_reject_or_cool_the_usable_siwc_credent
         mock.last().header("authorization"),
         Some("Bearer nested-transport-dummy")
     );
+    let recovered = manager.get("missing-native-outer").unwrap();
+    assert_eq!(recovered.metadata, stored_metadata);
+    assert!(!recovered.unavailable);
+    assert!(recovered.rejected_access_token.is_empty());
+    assert!(recovered.rejected_siwc_access_token.is_empty());
+    assert!(recovered.model_states.values().all(|state| {
+        !state.unavailable && state.next_retry_after.is_none() && state.last_error.is_none()
+    }));
+}
+
+#[tokio::test]
+async fn pin_non_ascii_codex_agents_select_outer_across_http_and_stream() {
+    for agent in AGENTS {
+        for streaming in [false, true] {
+            let mock = Mock::start(Reply::sse(COMPLETED)).await;
+            let auth = Arc::new(dual(&mock.url));
+            let metadata = auth.metadata.clone();
+            let mut options = opts("execute", "ordinary-client/1");
+            let mut bytes = b"\xff client(\xc3\xa9 ".to_vec();
+            bytes.extend_from_slice(agent.as_bytes());
+            bytes.extend_from_slice(b")");
+            options
+                .headers
+                .insert("user-agent", HeaderValue::from_bytes(&bytes).unwrap());
+            let req = request("gpt-5", r#"{"input":[]}"#);
+            if streaming {
+                let mut response = executor()
+                    .execute_stream(auth.clone(), req, options)
+                    .await
+                    .unwrap();
+                while let Some(chunk) = response.chunks.next().await {
+                    chunk.unwrap();
+                }
+            } else {
+                executor()
+                    .execute(auth.clone(), req, options)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                mock.last().header("authorization"),
+                Some("Bearer outer-transport-dummy")
+            );
+            assert_eq!(auth.metadata, metadata);
+        }
+    }
+}
+
+#[tokio::test]
+async fn pin_configured_401_keeps_bearers_and_cools_only_when_requested() {
+    use open_ferry_core::manager::RequestScopedErrorRule;
+    use std::collections::BTreeMap;
+
+    for action in [
+        "stop",
+        "continue",
+        "stop-and-cooldown",
+        "continue-and-cooldown",
+    ] {
+        for native in [false, true] {
+            for streaming in [false, true] {
+                let mock = Mock::start(Reply::error(
+                    401,
+                    r#"{"error":{"message":"scoped-marker"}}"#,
+                ))
+                .await;
+                let registry = Arc::new(ModelRegistry::new());
+                let manager = Manager::new(
+                    Settings {
+                        disable_cooling: false,
+                        oauth_request_scoped_errors: BTreeMap::from([(
+                            "codex".into(),
+                            vec![RequestScopedErrorRule {
+                                status: 401,
+                                matches: vec!["scoped-marker".into()],
+                                action: action.into(),
+                                ..Default::default()
+                            }],
+                        )]),
+                        ..Settings::default()
+                    },
+                    registry.clone(),
+                    None,
+                );
+                manager.register_executor(Arc::new(executor()));
+                let mut auth = dual(&mock.url);
+                auth.id = "configured-transport".into();
+                auth.status = Status::Active;
+                auth.metadata.insert("disable_cooling".into(), json!(false));
+                let metadata = auth.metadata.clone();
+                registry.register_client(
+                    &auth.id,
+                    "codex",
+                    &[ModelInfo {
+                        id: "gpt-5".into(),
+                        ..ModelInfo::default()
+                    }],
+                );
+                manager.register(auth).unwrap();
+                let options = opts(
+                    "execute",
+                    if native {
+                        "codex-rs/1"
+                    } else {
+                        "ordinary-client/1"
+                    },
+                );
+                let req = request("gpt-5", r#"{"input":[]}"#);
+                if streaming {
+                    assert!(
+                        manager
+                            .execute_stream(&["codex".into()], req, options)
+                            .await
+                            .is_err()
+                    );
+                } else {
+                    assert!(
+                        manager
+                            .execute(&["codex".into()], req, options)
+                            .await
+                            .is_err()
+                    );
+                }
+                assert_eq!(mock.requests().len(), 1);
+                assert_eq!(
+                    mock.last().header("authorization"),
+                    Some(if native {
+                        "Bearer outer-transport-dummy"
+                    } else {
+                        "Bearer nested-transport-dummy"
+                    })
+                );
+                let live = manager.get("configured-transport").unwrap();
+                assert_eq!(live.metadata, metadata);
+                assert!(
+                    live.rejected_access_token.is_empty(),
+                    "{action}, native={native}, streaming={streaming}"
+                );
+                assert!(live.rejected_siwc_access_token.is_empty());
+                assert_eq!(
+                    live.model_states
+                        .values()
+                        .any(|state| state.unavailable && state.next_retry_after.is_some()),
+                    action.ends_with("-cooldown")
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
