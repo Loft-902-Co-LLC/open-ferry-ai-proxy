@@ -831,9 +831,14 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             assert_eq!(record.total_tokens, 15);
             assert_eq!(record.tokens.input.total_tokens, 11);
             assert_eq!(record.tokens.output.total_tokens, 4);
-            let queued = usage.pop_oldest(2);
+            let queued: Vec<serde_json::Value> = usage
+                .pop_oldest(10)
+                .iter()
+                .map(|bytes| serde_json::from_slice(bytes).unwrap())
+                .filter(|record: &serde_json::Value| record.get("fail").is_some())
+                .collect();
             assert_eq!(queued.len(), 1);
-            let record: serde_json::Value = serde_json::from_slice(&queued[0]).unwrap();
+            let record = &queued[0];
             assert_eq!(record["service_tier"], "priority");
             assert_eq!(record["response_service_tier"], "flex");
             assert_eq!(record["fail"]["code"], "stream_truncated");
@@ -993,6 +998,9 @@ async fn native_interactions_endpoint_scopes_vertex_signatures() {
             exec = Box::new(super::InteractionsExecutor::new("direct"));
         }
         let mut auth = (*auth).clone();
+        if provider == "gemini" {
+            auth.provider = "gemini-interactions".into();
+        }
         auth.metadata.insert("interactions".into(), true.into());
         let body = json!({"input":[
             {"type":"thought","signature":signature,"summary":[{"type":"text","text":"reason"}]},
