@@ -421,3 +421,28 @@ fn looks_models_up_by_provider() {
     assert!(lookup(Some(&registry), "  ", "gemini").is_none());
     assert!(lookup(None, "no-such-model", "gemini").is_none());
 }
+
+// 6b56ce6c: deleting absent fields already mutates Value in place. Preserve
+// the exact output when no snake-case aliases or opposite-format fields exist.
+#[test]
+fn absent_thinking_fields_preserve_provider_output() {
+    let level = Config { mode:Mode::Level, level:"high".into(), ..Default::default() };
+    let budget = Config { mode:Mode::Budget, budget:1024, ..Default::default() };
+    for (config, expected) in [
+        (level, json!({"thinkingLevel":"high"})),
+        (budget, json!({"thinkingBudget":1024})),
+    ] {
+        for existing in [false, true] {
+            let mut body = json!({"contents":[{"parts":[{"text":"hello"}]}],"generationConfig":{"temperature":0.5}});
+            if existing { body["generationConfig"]["thinkingConfig"] = expected.clone(); }
+            let mut want = body.clone();
+            want["generationConfig"]["thinkingConfig"] = expected.clone();
+            if config.mode == Mode::Level { apply_level(&mut body, &config); }
+            else { apply_budget(&mut body, &config); }
+            assert_eq!(body, want);
+            let before = body.clone();
+            delete_fields(&mut body, &["thinking_budget", "thinking_level", "include_thoughts"]);
+            assert_eq!(body, before);
+        }
+    }
+}
