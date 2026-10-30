@@ -691,11 +691,11 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
             if stream == 12 {
                 endings.push(broken.replace("\r\n", "\n").into_bytes());
             }
-            for upstream in endings {
+            for (ending, upstream) in endings.into_iter().enumerate() {
                 add(
                     &[SPLIT_FIELD],
                     stream,
-                    format!("family-{stream}/field-mask-{mask}"),
+                    format!("family-{stream}/field-mask-{mask}/ending-{ending}"),
                     vec![upstream],
                     vec![streams[stream].clone()],
                 );
@@ -718,11 +718,11 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
             vec![wire[..wire.len() - 2 + ending].to_vec()],
         );
     }
-    for upstream in [broken, wire.clone()] {
+    for (recovery, upstream) in [broken, wire.clone()].into_iter().enumerate() {
         add(
             &[SPLIT_FIELD],
             4,
-            "codex-event/early-plus-blank".into(),
+            format!("codex-event/early-plus-blank/recovery-{recovery}"),
             vec![upstream],
             vec![wire[..wire.len() - 2].to_vec(), b"\n\n".to_vec()],
         );
@@ -769,11 +769,11 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
     );
     let broken_both =
         b"event\n: response.completed\ndata: {\"response\":{\"id\":\"r\"}}\n\n".to_vec();
-    for retained in [wire.clone(), recovered_data] {
+    for (order, retained) in [wire.clone(), recovered_data].into_iter().enumerate() {
         add(
             &[SPLIT_FIELD],
             10,
-            "data-first/split-both-fields".into(),
+            format!("data-first/split-both-fields/order-{order}"),
             vec![broken_both.clone()],
             vec![retained],
         );
@@ -1008,6 +1008,17 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
     let started = std::time::Instant::now();
     let streams = partition_streams();
     let differences = partition_differences(&streams);
+    let mut fixture_names = std::collections::HashSet::new();
+    for difference in &differences {
+        assert!(fixture_names.insert(&difference.fixture));
+        assert!(!difference.names.is_empty());
+        assert!(
+            difference
+                .names
+                .iter()
+                .all(|name| { [SPLIT_FIELD, BARE_WORD, PRIVATE_RECOVERY].contains(name) })
+        );
+    }
     let mut hits = vec![0; differences.len()];
     let mut partitions = 0;
     let mut mismatches = Vec::new();
@@ -1033,14 +1044,6 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
                                 == framer.terminal_event
                     });
                     if let Some(index) = expected {
-                        assert!(
-                            differences[index].names.iter().all(|name| [
-                                SPLIT_FIELD,
-                                BARE_WORD,
-                                PRIVATE_RECOVERY
-                            ]
-                            .contains(name))
-                        );
                         hits[index] += 1;
                     } else {
                         mismatches.push((wire.len(), format!(
