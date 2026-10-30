@@ -500,6 +500,9 @@ impl Duplex {
     /// `configuration_update` items are removed first, without promoting
     /// their effort, and the rules see what is left.
     fn on_steer(&mut self, text: &str, mut body: Value) {
+        if !self.authorize(&body, true) {
+            return;
+        }
         let original = body.clone();
         let steer_request = Request {
             model: self.request.model.clone(),
@@ -566,6 +569,9 @@ impl Duplex {
     /// An explicit create or append, prepared as the first request was
     /// (`processCreatePayload`).
     fn process_create(&mut self, mut payload: Value) {
+        if !self.authorize(&payload, false) {
+            return;
+        }
         let auth = match self.live_check() {
             Ok(auth) => auth,
             Err(error) => {
@@ -663,6 +669,34 @@ impl Duplex {
             return;
         }
         self.start_send(prepared.message);
+    }
+
+    /// Authorize the frontend turn using the initial client's model when
+    /// this is a continuation of the bound request. Only the access check
+    /// sees the adjusted copy; steering keeps its own payload defaults.
+    fn authorize(&mut self, payload: &Value, force_bound_model: bool) -> bool {
+        let bound = match self.initial_model.trim() {
+            "" => self.request.model.as_str(),
+            model => model,
+        };
+        let model = str_at(payload, "model");
+        let mut body = payload.clone();
+        if !bound.is_empty()
+            && (force_bound_model || model.trim().is_empty() || model.trim() == self.request.model)
+        {
+            json::set(&mut body, "model", Value::from(bound));
+        }
+        match self.input.authorize_turn(body.to_string().as_bytes()) {
+            Ok(None) => true,
+            Ok(Some(error_payload)) => {
+                self.out.push_back(Ok(error_payload));
+                false
+            }
+            Err(error) => {
+                self.fail(error);
+                false
+            }
+        }
     }
 
     /// One of Codex's messages (the reader's loop).
