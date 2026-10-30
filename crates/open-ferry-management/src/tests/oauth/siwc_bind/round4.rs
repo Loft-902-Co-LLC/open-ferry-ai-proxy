@@ -297,27 +297,23 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
         .await
         .unwrap();
     api.state.oauth_sessions().overrides().bind_before_file = None;
+    // Observe B at the write fence, before its runtime synchronization. A's
+    // held file lock and paused miss make B the only worker that can get here.
+    // Session completion also waits for FakeSync, which is outside the FIFO
+    // progress being tested.
+    let (other_write, release_other) = pause_write(&api, false);
     release_file.send(()).unwrap();
     entered(&miss_pause).await;
     assert_eq!(starts.load(Ordering::SeqCst), 2);
-    let other_bound = tokio::time::timeout(SETTLE, async {
-        loop {
-            if api
-                .state
-                .oauth_sessions()
-                .store()
-                .get(&second)
-                .is_some_and(|s| s.completed)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .is_ok();
+    let other_bound = tokio::time::timeout(SETTLE, other_write.0.notified())
+        .await
+        .is_ok();
     let attempts_at_completion = misses.load(Ordering::SeqCst);
     api.state.oauth_sessions().overrides().bind_after_file_miss = None;
+    api.state.oauth_sessions().overrides().bind_before_write = None;
+    // Release both workers before awaiting their completed sessions, including
+    // on timeout, so an assertion failure cannot strand either test pause.
+    let _ = release_other.send(());
     miss_release.send(()).unwrap();
     drop(guard);
     completed(&api, &first).await;
