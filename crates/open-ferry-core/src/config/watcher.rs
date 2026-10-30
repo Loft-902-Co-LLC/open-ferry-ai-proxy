@@ -1653,16 +1653,20 @@ mod tests {
 
         fixture.write_config("port: 7\n");
         let write = EventKind::Modify(ModifyKind::Any);
+        // Taken before the first event, so the watcher schedules every
+        // reload after it. Wall time between the two events isn't asserted:
+        // a runner that stalls past the quiet period fires the first window
+        // before the second event arrives, as upstream's timer would.
+        let first = Instant::now();
         sender
             .send(fs_event(write, &fixture.config_path))
             .expect("send");
         thread::sleep(Duration::from_millis(50));
-        let last = Instant::now();
         sender
             .send(fs_event(write, &fixture.config_path))
             .expect("send");
         let config = config_of(receiver.blocking_recv());
-        assert!(last.elapsed() >= CONFIG_RELOAD_DEBOUNCE);
+        assert!(first.elapsed() >= CONFIG_RELOAD_DEBOUNCE);
         assert_eq!(config.port, 7);
 
         sender.send(Message::Stop).expect("send stop");
