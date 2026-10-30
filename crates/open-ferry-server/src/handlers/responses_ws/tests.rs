@@ -3464,3 +3464,73 @@ async fn refuses_requests_nested_too_deeply() {
     let forwarded = payload_of(&dispatcher, 1);
     assert_eq!(item_ids(&forwarded["input"]), ["msg-1", "out-1", "msg-2"]);
 }
+
+// b9bb031d: access is checked after upgrade, before the first turn as well
+// as follow-ups. Denied turns neither dispatch nor replace the transcript.
+#[tokio::test]
+async fn rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
+    for (header, query) in [
+        (Some("authorization"), ""),
+        (Some("x-api-key"), ""),
+        (Some("x-goog-api-key"), ""),
+        (None, "?key=sk-test"),
+        (None, "?auth_token=sk-test"),
+    ] {
+        let (url, dispatcher, state) = serve_keys(
+            test_catalog(),
+            vec![completes("r1", "[]"), completes("r2", "[]")],
+            &["sk-test"],
+        )
+        .await;
+        let url = format!("{url}{query}");
+        let headers: Vec<_> = header
+            .map(|name| {
+                (
+                    name,
+                    if name == "authorization" {
+                        "Bearer sk-test"
+                    } else {
+                        "sk-test"
+                    },
+                )
+            })
+            .into_iter()
+            .collect();
+        let (mut ws, _) = connect_key(&url, None, &headers).await;
+        let create = r#"{"type":"response.create","model":"test-model","input":[]}"#;
+        let mut config = state.settings().config.clone();
+        config.api_keys = vec!["rotated-frontend-key".into()];
+        state.set_config(config.clone());
+        send(&mut ws, create).await;
+        let denied = recv(&mut ws).await;
+        assert_eq!(denied["status"], 401);
+        assert!(dispatcher.calls().is_empty());
+        config.api_keys = vec!["sk-test".into()];
+        state.set_config(config.clone());
+        send(&mut ws, create).await;
+        assert_eq!(recv(&mut ws).await["type"], "response.completed");
+        config.api_keys = vec!["rotated-again".into()];
+        state.set_config(config.clone());
+        send(&mut ws, r#"{"type":"response.append","input":[]}"#).await;
+        assert_eq!(recv(&mut ws).await["status"], 401);
+        assert_eq!(dispatcher.calls().len(), 1);
+        config.api_keys = vec!["sk-test".into()];
+        state.set_config(config);
+        send(&mut ws, create).await;
+        assert_eq!(recv(&mut ws).await["type"], "response.completed");
+        assert_eq!(dispatcher.calls().len(), 2);
+        for call in dispatcher.calls() {
+            assert!(!call.options.headers.contains_key("authorization"));
+            assert!(!call.options.headers.contains_key("x-api-key"));
+            assert!(!call.options.headers.contains_key("x-goog-api-key"));
+            assert!(
+                !call
+                    .options
+                    .query
+                    .iter()
+                    .any(|(k, _)| k == "key" || k == "auth_token")
+            );
+        }
+        ws.close(None).await.unwrap();
+    }
+}

@@ -26,7 +26,7 @@ use http::{HeaderMap, HeaderName, header};
 use open_ferry_translate::go;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
-use crate::errors::{JSON_UTF8, error_response};
+use crate::errors::{ErrorMessage, JSON_UTF8, error_response};
 use crate::state::AppState;
 use crate::{query, request_context};
 
@@ -79,6 +79,44 @@ impl Rejection {
             Self::Missing => "Missing API key",
             Self::Invalid => "Invalid API key",
         }
+    }
+}
+
+/// The upgrade's frontend credentials, kept only by the socket's access
+/// check. They never enter a provider call or its headers.
+pub(crate) struct WebsocketAccess {
+    headers: HeaderMap,
+    params: Vec<(String, String)>,
+}
+
+impl WebsocketAccess {
+    pub(crate) fn new(headers: &HeaderMap, uri: &http::Uri) -> Self {
+        let mut credentials = HeaderMap::new();
+        for name in &KEY_HEADERS {
+            if let Some(value) = headers.get(name) {
+                credentials.insert(name.clone(), value.clone());
+            }
+        }
+        let params = query::parse(uri.query().unwrap_or(""))
+            .into_iter()
+            .filter(|(name, _)| KEY_PARAMS.contains(&name.as_str()))
+            .collect();
+        Self {
+            headers: credentials,
+            params,
+        }
+    }
+
+    /// Rechecks the native policy against the current config, including
+    /// rotations since the upgrade. Native keys have no model restrictions.
+    pub(crate) fn authorize(&self, state: &AppState) -> Result<(), ErrorMessage> {
+        let settings = state.settings();
+        if settings.keys.is_empty() {
+            return Ok(());
+        }
+        check(&settings.keys, &self.headers, &self.params)
+            .map(|_| ())
+            .map_err(|rejection| ErrorMessage::new(401, rejection.message()))
     }
 }
 
