@@ -934,3 +934,73 @@ async fn revoked_client_key_rejects_duplex_turns_and_recovers() {
     ws.close(None).await.unwrap();
     upstream.finished().await;
 }
+
+#[tokio::test]
+async fn r3_interrupt_reaches_own_upstream_after_revocation_or_safe_mode_without_other_frames() {
+    for safe_mode in [false, true] {
+        let (seen, mut received) = mpsc::unbounded_channel();
+        let mut upstream = Upstream::start(move |mut peer| {
+            let seen = seen.clone();
+            async move {
+                peer.read().await.unwrap();
+                peer.write(r#"{"type":"response.created","response":{"id":"own-running"}}"#).await;
+                while let Some(frame) = peer.read().await {
+                    seen.send(frame.clone()).unwrap();
+                    if at(&frame, "/type") == "response.interrupt" {
+                        peer.write(r#"{"type":"response.incomplete","response":{"id":"own-running","status":"incomplete","output":[]}}"#).await;
+                    }
+                }
+            }
+        }).await;
+        let model = "interrupt-after-access-loss";
+        let (url, _, state) = proxy_state(
+            &steering(true),
+            credential("interrupt-after-loss", &upstream.url, false),
+            model,
+        )
+        .await;
+        let mut ws = connect(&url, &[]).await;
+        send(
+            &mut ws,
+            &format!(r#"{{"type":"response.create","model":"{model}","input":[]}}"#),
+        )
+        .await;
+        assert_eq!(super::recv(&mut ws).await["type"], "response.created");
+        let mut config = state.settings().config.clone();
+        if safe_mode {
+            config.api_keys.push("your-api-key-1".into());
+        } else {
+            config.api_keys = vec!["revoked-replacement".into()];
+        }
+        state.set_config(config);
+        let interrupt = r#"{"type":"response.interrupt","response_id":"own-running"}"#;
+        send(&mut ws, interrupt).await;
+        let forwarded = tokio::time::timeout(CLIENT_WAIT, received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            forwarded, interrupt,
+            "the original cancellation must reach this socket's upstream"
+        );
+        assert_eq!(super::recv(&mut ws).await["type"], "response.incomplete");
+        for payload in [
+            r#"{"type":"response.create","input":[]}"#,
+            r#"{"type":"response.steer","previous_response_id":"own-running","input":"not allowed"}"#,
+        ] {
+            send(&mut ws, payload).await;
+            assert_eq!(
+                super::recv(&mut ws).await["status"],
+                if safe_mode { 403 } else { 401 }
+            );
+        }
+        assert_eq!(
+            upstream.frames(),
+            2,
+            "no create or steer may follow access loss"
+        );
+        assert!(received.try_recv().is_err());
+        ws.close(None).await.unwrap();
+        upstream.finished().await;
+    }
+}
