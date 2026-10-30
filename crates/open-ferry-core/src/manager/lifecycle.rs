@@ -1129,7 +1129,8 @@ impl Manager {
         }
         if let Some((captured, _)) = &context.origin
             && let Some(entry) = state.auths.get(&incoming.id)
-            && entry.auth.registration_epoch == captured.registration_epoch
+            && same_record_identity(captured, &entry.auth)
+            && equal_fold(entry.auth.provider.trim(), captured.provider.trim())
             && (entry.auth.policy_generation != captured.policy_generation
                 || entry.auth.credential_version != captured.credential_version
                 || !same_observation_policy(captured, &entry.auth)
