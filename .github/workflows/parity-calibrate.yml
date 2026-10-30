@@ -187,6 +187,14 @@ jobs:
           root = pathlib.Path('observations')
           planned = json.loads(os.environ['MATRIX'])['include']
           expected = {f"config-save-{p['profile']}" for p in planned}
+          # download-artifact extracts a lone matching artifact straight into
+          # its path, without the per-artifact directory it makes for several.
+          entries = list(root.iterdir())
+          if len(planned) == 1 and entries and all(p.is_file() for p in entries):
+              (single,) = expected
+              root.rename('observation-single')
+              root.mkdir()
+              pathlib.Path('observation-single').rename(root / single)
           if {p.name for p in root.iterdir()} != expected:
               raise SystemExit('missing or unexpected profile artifact')
           gitlink = subprocess.check_output(
