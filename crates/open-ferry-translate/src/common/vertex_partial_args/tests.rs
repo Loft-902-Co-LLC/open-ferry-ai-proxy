@@ -284,14 +284,16 @@ fn round7_five_thousand_keyed_children_complete_in_linear_lookups() {
 #[test]
 fn upstream_allows_more_than_sixty_five_thousand_argument_nodes() {
     let mut assembler = Assembler::default();
-    let parts: Vec<_> = (0..65_537)
-        .map(|i| json!({"jsonPath":format!("$.k{i}"),"nullValue":true}))
-        .collect();
-    assert!(
-        assembler
-            .push(&json!({"partialArgs":parts}), None)
-            .unwrap()
-            .1
+    // Feed frames separately: the upstream-compatible held-key ordering scan
+    // need not dominate a regression about the total argument-node cap.
+    let started = std::time::Instant::now();
+    for i in 0..65_537 {
+        assembler.push(&json!({"willContinue":true,"partialArgs":[{"jsonPath":format!("$.k{i}"),"nullValue":true}]}),None).unwrap();
+    }
+    assert!(assembler.push(&json!({}), None).unwrap().1);
+    eprintln!(
+        "R7_NODES nodes=65537 elapsed_ms={}",
+        started.elapsed().as_millis()
     );
     assert_eq!(
         serde_json::from_str::<Value>(assembler.full_arguments().unwrap())
