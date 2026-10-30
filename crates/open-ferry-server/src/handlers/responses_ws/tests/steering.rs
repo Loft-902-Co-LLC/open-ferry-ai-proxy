@@ -878,6 +878,68 @@ async fn a_client_that_goes_ends_the_turn() {
     assert!(rest(&mut ws).await.0.is_empty());
 }
 
+// 3e7a21e2: changing which upgrade credential authenticates cannot change
+// the principal of an established duplex. Rejection must not consume the turn.
+#[tokio::test]
+async fn changed_principal_rejects_duplex_turns_and_recovers() {
+    let mut upstream = Upstream::start(|mut peer| async move {
+        peer.read().await.unwrap();
+        peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+            .await;
+        peer.write(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#)
+            .await;
+        peer.read().await.unwrap();
+        peer.write(r#"{"type":"response.created","response":{"id":"r2"}}"#)
+            .await;
+        peer.write(r#"{"type":"response.completed","response":{"id":"r2","output":[]}}"#)
+            .await;
+        peer.read().await;
+    })
+    .await;
+    let model = "frontend-principal-model";
+    let (url, _, state) = proxy_state(
+        &steering(true),
+        credential("frontend-principal", &upstream.url, false),
+        model,
+    )
+    .await;
+    let mut ws = connect(&url, &[("x-api-key", "alternate-frontend-key")]).await;
+    let create = format!(r#"{{"type":"response.create","model":"{model}","input":[]}}"#);
+    send(&mut ws, &create).await;
+    for _ in 0..2 {
+        next_text(&mut ws).await.unwrap();
+    }
+    let mut config = state.settings().config.clone();
+    config.api_keys = vec!["alternate-frontend-key".into()];
+    state.set_config(config.clone());
+    for payload in [
+        r#"{"type":"response.steer","previous_response_id":"r1","input":"denied"}"#,
+        r#"{"type":"response.create","input":[]}"#,
+        r#"{"type":"response.append","input":[]}"#,
+    ] {
+        send(&mut ws, payload).await;
+        let denied = super::recv(&mut ws).await;
+        assert_eq!(denied["type"], "error");
+        assert_eq!(denied["status"], 401);
+        assert!(
+            denied["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("credential changed")
+        );
+        assert_eq!(upstream.frames(), 1);
+    }
+    config.api_keys = vec!["sk-test".into()];
+    state.set_config(config);
+    send(&mut ws, &create).await;
+    for _ in 0..2 {
+        next_text(&mut ws).await.unwrap();
+    }
+    assert_eq!(upstream.frames(), 2);
+    ws.close(None).await.unwrap();
+    upstream.finished().await;
+}
+
 // b9bb031d: a revoked frontend key cannot send business input, but a
 // denied turn leaves the established duplex available after access returns.
 #[tokio::test]

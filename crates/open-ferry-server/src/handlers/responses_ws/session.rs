@@ -45,6 +45,7 @@ use super::requests::{
     normalize, normalize_create, normalize_passthrough, request_type, transcript_replacement,
 };
 use super::writer::{Conn, Socket};
+use crate::auth::Principal;
 use crate::body;
 use crate::errors::ErrorMessage;
 use crate::exec::{Call, ClientRequest, Started};
@@ -433,11 +434,21 @@ impl<S: Socket> Session<S> {
                         Arc::new(move |auth_id: &str| dispatcher.websocket_auth(auth_id));
                     let access = Arc::clone(&self.access);
                     let state = self.state.clone();
+                    let bound_principal = self.client.principal;
                     let authorize = Arc::new(move |_payload: &[u8]| {
-                        Ok(access
-                            .authorize(&state)
-                            .err()
-                            .map(|e| Bytes::from(error_payload(&e))))
+                        let result = access.authorize(&state).and_then(|identity| {
+                            if identity.principal != Principal::ANONYMOUS
+                                && identity.principal != bound_principal
+                            {
+                                Err(ErrorMessage::new(
+                                    401,
+                                    "client credential changed during the websocket stream; reconnect",
+                                ))
+                            } else {
+                                Ok(identity)
+                            }
+                        });
+                        Ok(result.err().map(|e| Bytes::from(error_payload(&e))))
                     });
                     call.options.websocket_input = Some(
                         input
