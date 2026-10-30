@@ -130,6 +130,7 @@ impl Target {
 /// A socket's session, and what it holds between turns.
 struct Session<S> {
     state: AppState,
+    access: Arc<crate::auth::WebsocketAccess>,
     client: ClientRequest,
     dispatcher: Arc<dyn Dispatcher>,
     conn: Conn<S>,
@@ -162,7 +163,12 @@ struct Session<S> {
 
 /// Runs a client's session until it or the session closes the socket
 /// (`ResponsesWebsocket`, after the upgrade).
-pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socket: S) {
+pub(super) async fn run<S: Socket>(
+    state: AppState,
+    client: ClientRequest,
+    access: crate::auth::WebsocketAccess,
+    socket: S,
+) {
     let dispatcher = state.dispatcher_arc();
     let key = session_key(&client.headers);
     // Interrupts are read all the time; with response steering on, a Codex
@@ -171,6 +177,7 @@ pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socke
     let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone());
     let mut session = Session {
         state,
+        access: Arc::new(access),
         client,
         dispatcher,
         conn,
@@ -241,6 +248,9 @@ impl<S: Socket> Session<S> {
         }
         if request_model.is_empty() {
             request_model = str_at(&self.last_request, "model").trim().to_owned();
+        }
+        if let Err(error) = self.access.authorize(&self.state) {
+            return self.reject(&error).await;
         }
         let target = Target::new(self.state.catalog(), &request_model);
         self.check_pin(&target);
@@ -389,7 +399,20 @@ impl<S: Socket> Session<S> {
                     let dispatcher = Arc::clone(&self.dispatcher);
                     let check: AuthCheck =
                         Arc::new(move |auth_id: &str| dispatcher.websocket_auth(auth_id));
-                    call.options.websocket_input = Some(input.clone().with_auth_check(check));
+                    let access = Arc::clone(&self.access);
+                    let state = self.state.clone();
+                    let authorize = Arc::new(move |_payload: &[u8]| {
+                        Ok(access
+                            .authorize(&state)
+                            .err()
+                            .map(|e| Bytes::from(error_payload(&e))))
+                    });
+                    call.options.websocket_input = Some(
+                        input
+                            .clone()
+                            .with_auth_check(check)
+                            .with_turn_authorizer(authorize),
+                    );
                 }
                 let metadata = &mut call.options.metadata;
                 call.options.downstream_websocket = true;

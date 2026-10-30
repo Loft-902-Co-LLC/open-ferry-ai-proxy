@@ -198,6 +198,15 @@ fn credential(id: &str, base_url: &str, oauth: bool) -> Auth {
 /// executor follows `config` too, with `credential` serving `model`: the
 /// socket's URL, and the manager.
 async fn proxy(config: &Config, credential: Auth, model: &str) -> (String, Arc<Manager>) {
+    let (url, manager, _) = proxy_state(config, credential, model).await;
+    (url, manager)
+}
+
+async fn proxy_state(
+    config: &Config,
+    credential: Auth,
+    model: &str,
+) -> (String, Arc<Manager>, AppState) {
     let registry = Arc::new(ModelRegistry::new());
     let manager = Arc::new(Manager::new(Settings::default(), registry.clone(), None));
     manager.register_executor(Arc::new(
@@ -215,11 +224,11 @@ async fn proxy(config: &Config, credential: Auth, model: &str) -> (String, Arc<M
     };
     let catalog = FakeCatalog::new().serve(model, &["codex"]);
     let state = AppState::new(server, manager.clone(), Arc::new(catalog));
-    let app = crate::router(state);
+    let app = crate::router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("ws://{addr}/v1/responses"), manager)
+    (format!("ws://{addr}/v1/responses"), manager, state)
 }
 
 /// The next text message, or `None` once the socket ends.
@@ -867,4 +876,61 @@ async fn a_client_that_goes_ends_the_turn() {
     eventually(|| dispatcher.live_streams() == 0).await;
     // The close is answered.
     assert!(rest(&mut ws).await.0.is_empty());
+}
+
+// b9bb031d: a revoked frontend key cannot send business input, but a
+// denied turn leaves the established duplex available after access returns.
+#[tokio::test]
+async fn revoked_client_key_rejects_duplex_turns_and_recovers() {
+    let mut upstream = Upstream::start(|mut peer| async move {
+        peer.read().await.unwrap();
+        peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+            .await;
+        peer.write(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#)
+            .await;
+        let next = peer.read().await.unwrap();
+        assert_eq!(at(&next, "/type"), "response.create");
+        peer.write(r#"{"type":"response.created","response":{"id":"r2"}}"#)
+            .await;
+        peer.write(r#"{"type":"response.completed","response":{"id":"r2","output":[]}}"#)
+            .await;
+        peer.read().await;
+    })
+    .await;
+    let model = "frontend-revoke-model";
+    let (url, _, state) = proxy_state(
+        &steering(true),
+        credential("frontend-revoke", &upstream.url, false),
+        model,
+    )
+    .await;
+    let mut ws = connect(&url, &[]).await;
+    let create = format!(r#"{{"type":"response.create","model":"{model}","input":[]}}"#);
+    send(&mut ws, &create).await;
+    for _ in 0..2 {
+        next_text(&mut ws).await.unwrap();
+    }
+    let mut config = state.settings().config.clone();
+    config.api_keys = vec!["rotated-frontend-key".into()];
+    state.set_config(config.clone());
+    for payload in [
+        r#"{"type":"response.steer","model":"other-model","previous_response_id":"r1","input":"denied"}"#,
+        r#"{"type":"response.create","input":[]}"#,
+        r#"{"type":"response.append","input":[]}"#,
+    ] {
+        send(&mut ws, payload).await;
+        let denied = super::recv(&mut ws).await;
+        assert_eq!(denied["type"], "error");
+        assert_eq!(denied["status"], 401);
+        assert_eq!(upstream.frames(), 1);
+    }
+    config.api_keys = vec!["sk-test".into()];
+    state.set_config(config);
+    send(&mut ws, &create).await;
+    for _ in 0..2 {
+        next_text(&mut ws).await.unwrap();
+    }
+    assert_eq!(upstream.frames(), 2);
+    ws.close(None).await.unwrap();
+    upstream.finished().await;
 }
