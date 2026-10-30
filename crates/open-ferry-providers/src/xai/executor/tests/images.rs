@@ -13,6 +13,9 @@
 
 use super::*;
 
+#[path = "images_payload_tests.rs"]
+mod payload_tests;
+
 /// xAI's answer to a generation in upstream's tests.
 const GENERATED: &str =
     r#"{"created":123,"data":[{"b64_json":"AA=="}],"usage":{"cost_in_usd_ticks":250000}}"#;

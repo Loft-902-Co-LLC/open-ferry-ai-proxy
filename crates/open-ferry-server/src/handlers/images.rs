@@ -148,7 +148,10 @@ pub(crate) async fn generations(
         return routed(&state, &client, &model, payload, stream).await;
     }
     if xai::is_registered_model(&state, &model) {
-        let request = xai::generations_request(&raw, &model, &format);
+        let request = XaiRequest {
+            payload: xai::generations_request(&raw, &model, &format),
+            original: xai::generations_original_request(&raw, &model),
+        };
         return xai_images(
             &state,
             &client,
@@ -215,7 +218,16 @@ async fn edits_from_json(state: &AppState, client: &ClientRequest, body: Body) -
             return invalid_request(400, "image is required");
         }
         let options = xai::edit_options_from_json(&raw);
-        let request = xai::edit_request(&model, &prompt, &images, &format, &options);
+        let request = XaiRequest {
+            payload: xai::edit_request(&model, &prompt, &images, &format, &options),
+            original: xai::edit_original_request(
+                &model,
+                &prompt,
+                &images,
+                &json::str_at(&raw, "response_format"),
+                &options,
+            ),
+        };
         return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let payload = compat_json_request(&raw, &model, stream);
@@ -252,7 +264,8 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
     if files.is_empty() {
         return invalid_request(400, "image is required");
     }
-    let format = response_format(&form_value(&form, "response_format"));
+    let raw_format = form_value(&form, "response_format");
+    let format = response_format(&raw_format);
     let stream = parse_bool(&form_value(&form, "stream"), false);
 
     // A Codex image tool model's base is never an xAI one.
@@ -266,7 +279,10 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
             quality: form_value(&form, "quality").trim().to_owned(),
             n: parse_int(&form_value(&form, "n"), 0),
         };
-        let request = xai::edit_request(&model, &prompt, &images, &format, &options);
+        let request = XaiRequest {
+            payload: xai::edit_request(&model, &prompt, &images, &format, &options),
+            original: xai::edit_original_request(&model, &prompt, &images, &raw_format, &options),
+        };
         return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let (payload, content_type) = compat_form_request(&form, &model, stream);
@@ -578,13 +594,19 @@ async fn compat(
     collect(call, timing, format).await
 }
 
+/// An xAI body and its un-defaulted original for payload-rule presence checks.
+struct XaiRequest {
+    payload: Vec<u8>,
+    original: Vec<u8>,
+}
+
 /// An xAI image call, made without a stream, its answer written as the
 /// OpenAI images API's, or as `<prefix>.completed` events (upstream's
 /// `handleXAIImages`).
 async fn xai_images(
     state: &AppState,
     client: &ClientRequest,
-    request: Vec<u8>,
+    request: XaiRequest,
     requested_model: &str,
     format: String,
     prefix: &'static str,
@@ -592,11 +614,12 @@ async fn xai_images(
 ) -> Response {
     let timing = Timing::of(state);
     let model = xai::routing_model(state, requested_model);
-    let payload = Bytes::from(request);
-    let call = match Call::image(state, client, Format::OPENAI_IMAGE, &model, payload, false) {
+    let payload = Bytes::from(request.payload);
+    let mut call = match Call::image(state, client, Format::OPENAI_IMAGE, &model, payload, false) {
         Ok(call) => call,
         Err(error) => return openai_error_response(&error, timing.passthrough),
     };
+    call.options.original_request = Bytes::from(request.original);
     if stream {
         return stream_xai(call, timing, format, prefix).await;
     }
