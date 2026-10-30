@@ -305,10 +305,10 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     release_file.send(()).unwrap();
     entered(&miss_pause).await;
     assert_eq!(starts.load(Ordering::SeqCst), 2);
-    let other_bound = tokio::time::timeout(SETTLE, other_write.0.notified())
+    let other_admitted = tokio::time::timeout(SETTLE, other_write.0.notified())
         .await
         .is_ok();
-    let attempts_at_completion = misses.load(Ordering::SeqCst);
+    let attempts_at_admission = misses.load(Ordering::SeqCst);
     api.state.oauth_sessions().overrides().bind_after_file_miss = None;
     api.state.oauth_sessions().overrides().bind_before_write = None;
     // Release both workers before awaiting their completed sessions, including
@@ -319,11 +319,11 @@ async fn round4_busy_file_allows_another_credential_to_bind() {
     completed(&api, &first).await;
     completed(&api, &second).await;
     assert_eq!(
-        attempts_at_completion, 1,
+        attempts_at_admission, 1,
         "cross-credential progress needed more F attempts"
     );
     assert!(
-        other_bound,
+        other_admitted,
         "a busy credential retained the global FIFO head"
     );
 }
