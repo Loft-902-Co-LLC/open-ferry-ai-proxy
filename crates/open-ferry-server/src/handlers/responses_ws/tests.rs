@@ -68,6 +68,7 @@ use crate::status::status_text;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 
 mod interrupts;
+mod ordered_error;
 mod steering;
 
 /// `raw` as JSON.
