@@ -209,7 +209,6 @@ impl Sticky {
                 undurable_causes: Default::default(),
                 landing_unconfirmed: Default::default(),
                 owed_save: None,
-                policy_save: None,
                 written_configuration: 0,
                 read_back_warned: Default::default(),
             },

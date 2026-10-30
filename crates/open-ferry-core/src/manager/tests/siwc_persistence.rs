@@ -929,10 +929,7 @@ fn result_save_failure_log_scrubs_outer_and_siwc_tokens() {
     tracing::subscriber::with_default(subscriber, || manager.mark_result(&success(&manager)));
     assert!(lock(&store.error_once).is_none());
     let logged = lock(&events).join("\n");
-    assert!(
-        logged.contains("failed to persist credential state"),
-        "{logged}"
-    );
+    assert!(logged.contains("failed to persist credential"), "{logged}");
     assert!(logged.contains("injected save failure"), "{logged}");
     for secret in secrets {
         assert!(!logged.contains(secret), "log contains {secret}: {logged}");
@@ -3976,6 +3973,7 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
     let done = done_tx.clone();
     let adoption = std::thread::spawn(move || {
         let result = adopting.adopt_observed(&fixture(), None, |current| {
+            assert!(!policy, "an in-flight policy edit defers before file I/O");
             let read = files.read_for_adoption(current).unwrap();
             read_tx.send(()).unwrap();
             release_rx
@@ -3983,9 +3981,15 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
                 .expect("read released");
             Ok(read)
         });
+        if policy {
+            read_tx.send(()).unwrap();
+        }
         done.send(
-            matches!(result, Ok(crate::manager::AdoptionResult::Published { .. }))
-                && (!policy || adopting.get("codex.json").unwrap().metadata["note"] == "saved"),
+            (if policy {
+                matches!(result, Ok(crate::manager::AdoptionResult::Retry))
+            } else {
+                matches!(result, Ok(crate::manager::AdoptionResult::Published { .. }))
+            }) && (!policy || adopting.get("codex.json").unwrap().metadata["note"] == "saved"),
         )
         .unwrap();
     });
@@ -4006,7 +4010,9 @@ fn adoption_load_and_save_with_owned_threads(policy: bool) {
         "reload queued acknowledgement"
     );
     save_release_tx.send(()).unwrap();
-    release_tx.send(()).unwrap();
+    if !policy {
+        release_tx.send(()).unwrap();
+    }
     let complete = (0..3).all(|_| {
         done_rx
             .recv_timeout(Duration::from_secs(5))

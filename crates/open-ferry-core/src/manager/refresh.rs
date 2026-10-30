@@ -1294,9 +1294,6 @@ impl Manager {
                 if protected.contains(failed_partition) {
                     return None;
                 }
-                if let Some(policy) = &entry.policy_save {
-                    policy.overlay(&mut disk);
-                }
                 super::lifecycle::overlay_undurable(&mut disk, &entry.auth, protected);
                 disk.rebase_pending_refreshes_with_origin(
                     &entry.auth,
