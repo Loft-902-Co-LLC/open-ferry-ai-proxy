@@ -2,11 +2,13 @@
 
 The [README](../README.md#status) has the current release status and a [quick start](../README.md#quick-start).
 
-The product reference is CLIProxyAPI **v8.0.42**. [UPSTREAM.md](../UPSTREAM.md#what-moving-from-v8038-to-v8042-left-out) accounts for the move and retained differences; parity fixtures, recalibration and new measured totals are separate work.
+Open Ferry follows CLIProxyAPI **v8.0.42**. [UPSTREAM.md](../UPSTREAM.md#what-moving-from-v8038-to-v8042-left-out) lists the changes and retained differences. The README test totals and benchmark results keep the versions they measured.
 
 ## Client APIs and media
 
 `open-ferry` reads CLIProxyAPI's `config.yaml` and auth directory, signs in to Codex and Claude with their OAuth logins (`-codex-login`, `-codex-device-login`, `-claude-login`), binds Sign in with ChatGPT to an existing Codex credential with [`-siwc-bind FILE`](cli.md#binding-sign-in-with-chatgpt-to-a-codex-credential) or the authenticated [management bind mode](dashboard-api.md#sign-in-with-chatgpt-binding), and serves Chat Completions, legacy Completions, Claude Messages, and OpenAI Responses over HTTP and WebSocket, with upstream's routing, errors, streaming and keep-alives.
+
+Open Responses WebSockets recheck client keys and safe mode for each create, append and steer, updating usage attribution without changing earlier turns. Denials preserve the connection; deferred steering is checked again before sending. A socket can still interrupt its own work after access loss.
 
 The Claude sign-in goes against Anthropic's terms and, in our testing, gets only the Haiku models ([why](claude-subscription.md#the-claude-sign-in)).
 
@@ -32,13 +34,13 @@ Requests to Codex and to the OpenAI-compatible upstreams carry the thinking sett
 
 Behind the server, upstream's credential manager picks an account per request, with its retries, cooldowns and model aliases, refreshes tokens in the background, and follows changes to the config and auth files.
 
-With the config's `codex.model-level-cooling`, a Codex usage limit cools only the model, and with `codex.stream-bootstrap-buffering`, a Codex stream that reports an overload before it starts fails over to another account.
+With the config's `codex.model-level-cooling`, a Codex usage limit cools only the model. With `codex.stream-bootstrap-buffering` on (off by default), moderation metadata stays buffered before output so an early overload can fail over to another account.
 
-Codex clients use their outer Codex credential even when Sign in with ChatGPT is enabled; ordinary clients keep the saved mode. Missing outer credentials return a request-only 401 without making a healthy Sign in with ChatGPT login unavailable. Rejections and refreshes stay independent for each login, and a request never rewrites the saved choice.
+Requests identified as Codex clients by User-Agent use their outer Codex login even when Sign in with ChatGPT is enabled; other clients keep the saved choice. Missing outer credentials return a request-only 401 without making a healthy Sign in with ChatGPT login unavailable. Refusals and refreshes stay independent for each login, and requests never change the saved choice.
 
-Credential-file observations keep live cooldowns, refresh backoff and request watermarks. Current bytes and concurrent user edits take priority; failed scans and unproven file-removal events preserve credentials. Configured request-only 401 rules do not reject or refresh a login, while rules requesting cooldown still cool it.
+When credential files change, Open Ferry keeps live cooldowns and refresh delays, rereads the file, and preserves concurrent user edits. Failed scans and file checks that cannot prove removal keep existing credentials. A matching `request-scoped-errors` 401 rule does not refuse or refresh a login; actions ending in `-and-cooldown` still start a cooldown.
 
-Thinking suffixes such as `(fast)` now return 400 when unrecognized; native Responses requests sent to Codex/xAI models that accept configuration updates keep their exception. For OpenAI Chat Completions and Responses clients, unlisted thinking levels on OpenAI-compatible, Meta and other custom catalog models return 400 rather than being quietly adjusted. Compatibility models still map `xhigh`/`max` through their levels; Claude and Gemini clients keep clamping unsupported levels.
+Thinking suffixes such as `(fast)` now return 400 when unrecognized; Responses requests sent directly to Codex/xAI models that accept configuration updates keep their existing suffix handling. For OpenAI Chat Completions and Responses clients, unlisted thinking levels on OpenAI-compatible, Meta and other custom catalog models return 400 rather than being quietly adjusted. Compatibility models still map `xhigh`/`max` through their levels; Claude and Gemini clients keep clamping unsupported levels.
 
 ## Management and observability
 
@@ -66,8 +68,6 @@ With `client.codex.optimize-multi-agent-v2`, a Codex client's multi-agent v2 req
 
 The translators are checked against upstream's ([UPSTREAM.md](../UPSTREAM.md#checking-parity)).
 
-Open Responses WebSockets recheck client keys and safe mode for each create, append and steer, updating usage attribution without changing earlier turns. Denials preserve the connection; deferred steering is checked again before sending. A socket can still interrupt its own work after access loss. Buffered Codex streams retain moderation metadata before output so early overloads can fail over.
-
-Gemini requests can mix built-in and function tools; model lists expose positive token-limit fallbacks, and Vertex US/EU locations use regional endpoints. Tool schemas retain supported reference-sibling and conjunction rules within the existing resource bounds. Gemini-to-Claude tool calls retain arguments for implicitly open object schemas and wait for streamed arguments before emitting empty inputs. Candidate-less Gemini/Vertex prompt blocks return 502; Chat/Claude streams need a candidate finish reason.
+Gemini requests can mix built-in and function tools; model lists use a model's context and output limits when Gemini-specific limits are unavailable, leaving unknown limits out, and Vertex US/EU locations use regional endpoints. Tool schemas retain supported reference-sibling and conjunction rules within the existing resource bounds. Gemini-to-Claude tool calls retain arguments for implicitly open object schemas and wait for streamed arguments before emitting empty inputs. Candidate-less Gemini/Vertex prompt blocks return 502; Chat/Claude streams need a candidate finish reason.
 
 Claude context-window exhaustion retains partial content, tool calls and usage, ending Chat Completions with `length` and Responses with `incomplete`/`max_output_tokens`. Deferred searches survive intervening tool outputs, missing prompt-overflow error codes are filled, and Codex commentary appears as unsigned Claude thinking with output order preserved.

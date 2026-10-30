@@ -14,7 +14,7 @@ When we move the pin, we update this table, bring every ported file's header to 
 
 ### What moving from v8.0.38 to v8.0.42 left out
 
-The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The product pin is v8.0.42; the updated differential parity cases, config-save recalibration and Go 1.26.10 CI toolchain remain separate work.
+The 43 upstream commits in this range are accounted for below, including covered behavior and the Home merge. Native ports retain Open Ferry’s data-preservation, resource-bound, redaction and file-mode protections. The reference is v8.0.42; the updated differential parity cases, config-save recalibration and Go 1.26.10 CI toolchain remain separate work.
 
 | Upstream commit | Status | What isn’t ported | Ported behavior / reason |
 |---|---|---|---|
@@ -70,10 +70,10 @@ Differences retained in these ports:
 | 29150a22 | Generated conjunctions pay the existing reference, depth, copied-byte/node and path-work costs; exhaustion uses bounded hint fallback. When adding missing array items after reference expansion would exceed the escaped-path depth bound, keep the original array declaration; upstream may add items:{"type":"string"} there | Retain bounded allocation, depth and literal preservation instead of unbounded copying or path construction |
 | 88732ad5 | Static-key OpenAPI routing still refuses scheme-less/failed-parse text containing aiplatform.googleapis.com, including aiplatform.googleapis.com.evil.example, relay.example/aiplatform.googleapis.com and relay-aiplatform.googleapis.com.evil.example; upstream can classify these as third-party hosts | Retain conservative destination restrictions; malformed REP hosts gain no permissive fallback |
 | 3f5d3a16 | After candidate-less prompt blocks return 502, prompt feedback accompanying candidates cannot replace a nonempty candidate finishReason for Chat or Claude completion; upstream's helper also accepts feedback as a finish signal | Require an actual candidate finish reason and retain observed usage on truncation; redaction, bounds and delivered-terminal cancellation rules remain |
-| d946c4fb | Outer and SIWC bearer refusals have independent runtime slots, retained until each bearer rotates, including same-bearer refresh and sibling merge; upstream v8.0.42 shares its active/outer rejection slot | Concurrent refusals must not make a rejected sibling look valid; round2_rejection_partitions_survive_both_orders_and_sibling_refreshes covers both orders |
-| d5816d5e, 57a12996 | Remove/rename probes treat only NotFound as proof of absence; other probe errors preserve hashes and registration, warn with basename/error kind and wait for another event or scan | Preserve user credentials through transient ACL, antivirus and filesystem failures; round2_remove_probe_errors_preserve_tracking_until_proven_missing |
-| d946c4fb | A native Codex request with stored SIWC enabled but no selected outer credential returns a local request-scoped 401, without cooling or rejecting the usable SIWC credential or model; upstream's local 401 currently causes provider cooldown | Ordinary clients can still use the healthy SIWC partition. This applies no sibling-bearer fallback and changes no stored mode |
-| b9bb031d | Deferred response.steer rechecks the bound model and current frontend policy immediately before forwarding; upstream v8.0.42 does not repeat that check | Arrival-time authorization cannot outlive revocation while the parent response starts. Own-work interrupts still forward after revocation or safe mode |
+| d946c4fb | Open Ferry remembers a refused Codex token and a refused SIWC token separately. Upstream records both in one field, so a later SIWC refusal can erase the outer one | A refusal stays recorded until that token changes. Remembering it does not prevent selection: like upstream, a healthy stored SIWC login can make the credential selectable, and a Codex request may try the refused outer token again. Its refresh and retry keep the SIWC token healthy |
+| d5816d5e, 57a12996 | Only NotFound proves that a credential file was removed. Other check failures keep the credential and trigger another check with capped backoff. Ordinary saves cannot recreate the file until a check proves it exists again | Temporary permission, antivirus or filesystem failures must not lose credentials or recreate an unresolved file |
+| d946c4fb | A Codex-client request with `use_siwc` on but no selected outer credential gets a local 401. It does not cool or reject the healthy SIWC login or model; upstream currently applies provider cooldown for that local 401 | Other clients can still use the SIWC login. No other token is substituted and the saved choice stays unchanged |
+| b9bb031d | A queued `response.steer` checks its bound model and current client access again just before sending. Upstream v8.0.42 checks only when it arrives | Access can be revoked while the request waits for its parent response. A socket can still interrupt its own work after revocation or safe mode |
 
 - **Request-log file names** (`observe::request_log::names`) follow upstream `179d43dc` from v8.0.42: both path separators are replaced, dot runs are normalized and unsafe names are rejected before creation. Each file is checked to stay directly inside the log directory, and NUL is refused before opening. Server-generated request ID tails are sanitized as extra care, where Go applies `filepath.Base` to the complete name. Open Ferry keeps its 120-character path bound, redaction and Unix mode 0600.
 
@@ -232,7 +232,7 @@ Differences retained in these ports:
   ```
 
 - **Deviations are documented** in the file, with the reason (usually an upstream issue number).
-- **Go means Go 1.26.** Upstream's releases are built with Go 1.26.4, so where its behaviour comes from Go's standard library we match Go 1.26, whatever version a ported file's header names. The difference shows in `encoding/json`, which from Go 1.27 runs on its v2 implementation, and in the Unicode tables: Go 1.26 has Unicode 15.0. Case mapping uses Rust's newer tables, so a letter added to Unicode since 15.0 may change case where upstream leaves it. Where upstream calls `strings.ToLower` or `ToUpper`, the port maps each character by its simple mapping as Go does (`open_ferry_translate::go::to_lower` and `to_upper`), not with `str::to_lowercase`, which differs for `İ`, a word-final `Σ` and `ß`. Where it calls `strings.EqualFold`, the port walks Go's case-folding orbits (`go::equal_fold`), so `ﬅ` and `ﬆ` differ though both upper-case to `ST`. Go's `json.Valid` allows 10,000 levels of nesting and gjson's `Valid` any; `go::json_valid` and `go::gjson_valid` follow whichever upstream calls.
+- **Go means Go 1.26.** Upstream's releases are built with Go 1.26.10, so where its behaviour comes from Go's standard library we match Go 1.26, whatever version a ported file's header names. The difference shows in `encoding/json`, which from Go 1.27 runs on its v2 implementation, and in the Unicode tables: Go 1.26 has Unicode 15.0. Case mapping uses Rust's newer tables, so a letter added to Unicode since 15.0 may change case where upstream leaves it. Where upstream calls `strings.ToLower` or `ToUpper`, the port maps each character by its simple mapping as Go does (`open_ferry_translate::go::to_lower` and `to_upper`), not with `str::to_lowercase`, which differs for `İ`, a word-final `Σ` and `ß`. Where it calls `strings.EqualFold`, the port walks Go's case-folding orbits (`go::equal_fold`), so `ﬅ` and `ﬆ` differ though both upper-case to `ST`. Go's `json.Valid` allows 10,000 levels of nesting and gjson's `Valid` any; `go::json_valid` and `go::gjson_valid` follow whichever upstream calls.
 - **Bugs we find upstream get reported upstream**, with a failing test case where we can.
 
 ## Module map
@@ -1470,7 +1470,7 @@ floor max(configured, 3 * proxy body limit + 96 MiB). The configured default is
 management headroom. A lowering reload retains old charges, which can temporarily
 occupy the newly defined headroom until their owners release storage. Management
 keeps its own handler bounds on both listeners. GET OAuth callbacks use queries
-and do not poll bodies, matching v8.0.42 server_routes.go:153-184. POST callback
+and do not poll bodies, matching v8.0.42 server_routes.go:154-185. POST callback
 bodies are limited to 64 KiB and share a separate process-wide 2 MiB pool. When
 full they get 503 with Retry-After: 1. A declared Content-Length is refused before
 polling; a chunked body first yields a frame, which is dropped if its capacity
@@ -1657,7 +1657,7 @@ The TUI's screens are what upstream's Charm libraries make of its views, so `ope
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 ```
 
-`--go` picks the Go toolchain. To build upstream as its releases are built, use Go >=1.26.10 (`go install golang.org/dl/go1.26.10@latest`, then `go1.26.10 download`) and pass `--go go1.26.10`. The v8.0.42 parity fixture update, config-save recalibration and CI toolchain move are pending; older measured results below are not relabeled by the product pin change.
+`--go` picks the Go toolchain. To build upstream as its releases are built, use Go >=1.26.10 (`go install golang.org/dl/go1.26.10@latest`, then `go1.26.10 download`) and pass `--go go1.26.10`. The v8.0.42 parity fixture update, config-save recalibration and CI toolchain move are pending; older measured results below are not relabeled by changing the reference.
 
 With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 

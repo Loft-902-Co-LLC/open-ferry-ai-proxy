@@ -89,7 +89,7 @@ curl -fsSLO https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-prox
 bash run-ubuntu.sh --note "Azure Standard_D8s_v6, East US" --ref main --tag v8.0.38
 ```
 
-The cloud helper retains its Go 1.26.4/v8.0.38 setup for the recorded benchmark. Use the by-hand instructions below with Go >=1.26.10 for the v8.0.42 reference; the cloud helper’s toolchain update is separate work.
+The cloud helper uses Go 1.26.4 and v8.0.38 for the recorded benchmark. To benchmark v8.0.42 with Go 1.26.10, follow the by-hand instructions below.
 
 Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. Options after `--` go to the benchmark, such as `-- --duration 2 --starts 1 --long-requests 2` for a quick check that everything works. `bash run-ubuntu.sh --help` lists the script's options.
 

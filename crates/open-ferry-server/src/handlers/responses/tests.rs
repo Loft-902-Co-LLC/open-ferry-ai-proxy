@@ -1463,7 +1463,7 @@ async fn forwards_reasoning_content_unchecked() {
 
 #[tokio::test(start_paused = true)]
 async fn pre_first_token_tick_after_partial_frame_keeps_bootstrap_headers() {
-    // openai_responses_handlers.go:737-742,900-903. Whole JSON passes exec's
+    // openai_responses_handlers.go:905-911,928-931. Whole JSON passes exec's
     // SSE check, but this data-only frame without its delimiter stays pending
     // in the handler's framer. A tick then commits the published headers.
     let first = Bytes::from_static(
