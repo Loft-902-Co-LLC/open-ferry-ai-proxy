@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI vertex_openapi_settings_test.go and
-// gemini_vertex_executor_openapi_settings_test.go (v8.0.38, MIT).
+// gemini_vertex_executor_openapi_settings_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

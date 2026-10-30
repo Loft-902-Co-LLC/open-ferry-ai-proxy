@@ -1115,7 +1115,7 @@ fn held_edits(
     (Arc::new(api), reached, release)
 }
 
-// Ported from auth_files_patch_fields_test.go (v8.0.38): selection must not
+// Ported from auth_files_patch_fields_test.go (v8.0.42): selection must not
 // authorize changing a replacement registration, even under the same file ID.
 #[tokio::test]
 async fn status_and_fields_reject_reregistration_after_lookup() {

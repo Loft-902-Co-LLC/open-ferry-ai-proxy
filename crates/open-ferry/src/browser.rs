@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/browser/browser.go and
-// internal/tui/browser.go (openBrowser) (v8.0.38, MIT).
+// internal/tui/browser.go (openBrowser) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Opening a URL in the user's browser, for the OAuth logins and the TUI's

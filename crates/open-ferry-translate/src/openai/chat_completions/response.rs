@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/chat-completions/openai_openai_response.go
-// (ConvertOpenAIResponseToOpenAI, ConvertOpenAIResponseToOpenAINonStream) (v8.0.38, MIT).
+// (ConvertOpenAIResponseToOpenAI, ConvertOpenAIResponseToOpenAINonStream) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Chat Completions chunks → Chat Completions chunks.

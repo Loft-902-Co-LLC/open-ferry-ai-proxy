@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cloudflare_520_test.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cloudflare_520_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Cloudflare 520 origin error (and other 5xx) is a transient upstream

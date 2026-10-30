@@ -3,7 +3,7 @@
 // openAIToolCallToInteractionsStep, setRawJSONValue, openAIReasoningTexts,
 // openAIChatSSEPayload, openAIChatInteractionsPayload,
 // setInteractionsUsageFromOpenAIChat, setOpenAIChatUsageFromInteractions,
-// interactionsUsageInt) (v8.0.38, MIT).
+// interactionsUsageInt) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What both directions share: reading fields as gjson does, the steps and

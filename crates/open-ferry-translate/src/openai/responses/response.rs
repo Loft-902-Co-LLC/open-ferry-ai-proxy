@@ -2,7 +2,7 @@
 // (ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput,
 // CanFinalizeResponseStream) and shell_tool.go (responsesToolInputFailure)
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → OpenAI Responses responses.

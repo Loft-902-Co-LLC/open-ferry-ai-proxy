@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/api/handlers/openai/openai_handlers.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI sdk/api/handlers/openai/openai_handlers.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Legacy OpenAI Completions (`/v1/completions`) over Chat Completions.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/openai_tools.go
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for Chat Completions tool calls, shared by translators that write

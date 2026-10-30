@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/vertex_openapi.go
-// and gemini_vertex_executor.go (v8.0.38, MIT).
+// and gemini_vertex_executor.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Vertex partner/open models use Chat Completions with the existing token cache,

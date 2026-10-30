@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector_guardian_affinity_test.go
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Guardian inheritance through real selections and the manager's candidate

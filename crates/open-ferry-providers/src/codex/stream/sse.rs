@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/helps/codex_sse_scanner.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/helps/codex_sse_scanner.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Assemble split JSON data fields without delaying complete events or comments.

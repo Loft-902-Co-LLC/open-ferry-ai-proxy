@@ -21,8 +21,8 @@
 // accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
 // (requestedModelAliasFromOptions, generateFromOptions),
 // and sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
-// GenerateFromContext, GenerateEnabled) (v8.0.38, MIT).
-// Gemini/Vertex terminal cancellation follows b12db8c3 (v8.0.38).
+// GenerateFromContext, GenerateEnabled) (v8.0.42, MIT).
+// Gemini/Vertex terminal cancellation follows b12db8c3 (v8.0.42).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage reporter: the [`Tap`] that turns each executor call of a
@@ -173,7 +173,7 @@
 //! - Gemini/Vertex cancellation succeeds after a successful terminal chunk is
 //!   returned by the call's stream to the manager; before that it is a 499
 //!   retaining observed counts. Real read failures always retain counts and
-//!   fail. This matches upstream v8.0.38's Gemini AI Studio reader. Vertex
+//!   fail. This matches upstream v8.0.42's Gemini AI Studio reader. Vertex
 //!   follows the same rule here; upstream's Vertex readers record a cancel
 //!   while handing on a chunk as success, and a read failure (including a
 //!   cut-off read) as failure without counts. Its native Interactions reader

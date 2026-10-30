@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/gemini (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/gemini (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};

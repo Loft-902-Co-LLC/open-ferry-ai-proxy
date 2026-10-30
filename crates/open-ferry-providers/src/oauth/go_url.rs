@@ -1,7 +1,7 @@
 // Ported from Go's net/url/url.go (Parse and its helpers, with
 // stringContainsCTLByte) and the IPv6 and zone checks of net/netip's
 // ParseAddr (go1.26.4, BSD-3-Clause), as CLIProxyAPI internal/misc/oauth.go
-// uses them (v8.0.38, MIT).
+// uses them (v8.0.42, MIT).
 // https://github.com/golang/go
 // https://github.com/router-for-me/CLIProxyAPI
 

@@ -7,7 +7,7 @@
 // TestBuildXAISpeechPayloadRejectsLongInput, TestSpeechRoutingModel,
 // TestSpeechResponseContentType) and openai_speech_routing_test.go
 // (TestSpeechEndpointsRouteSpeechOnlyModelsToExecutor,
-// TestChatAndResponsesRejectSpeechOnlyModels) (v8.0.38, MIT).
+// TestChatAndResponsesRejectSpeechOnlyModels) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The speech endpoints against a scripted dispatcher.

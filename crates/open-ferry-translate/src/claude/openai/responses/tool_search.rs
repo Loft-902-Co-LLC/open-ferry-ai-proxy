@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_tool_search.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_tool_search.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's client search tool and the deferred tools its results discover.

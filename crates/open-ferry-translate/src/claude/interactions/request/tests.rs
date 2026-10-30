@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions/interactions_claude_test.go
-// (the request tests) (v8.0.38, MIT), and interactions_claude_user_turn_test.go and
-// interactions_claude_instruction_test.go (v8.0.38, MIT).
+// (the request tests) (v8.0.42, MIT), and interactions_claude_user_turn_test.go and
+// interactions_claude_instruction_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported. Upstream's user turn tests go through the registry;

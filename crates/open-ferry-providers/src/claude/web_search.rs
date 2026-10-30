@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/cache/claude_web_search_result_cache.go,
 // internal/runtime/executor/helps/claude_web_search_results.go and
-// claude_executor.go (9d453bc0, cddc9bb8, v8.0.38, MIT).
+// claude_executor.go (9d453bc0, cddc9bb8, v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Session-, caller- and credential-scoped native web search results. Only

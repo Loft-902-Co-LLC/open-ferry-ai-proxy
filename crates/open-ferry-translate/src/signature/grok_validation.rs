@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/grok_validation.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/signature/grok_validation.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI Grok reasoning and compaction `encrypted_content`.

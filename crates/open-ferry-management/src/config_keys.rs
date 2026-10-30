@@ -7,7 +7,7 @@
 // DeleteVertexCompatKey, PutCodexKeys, PatchCodexKey, DeleteCodexKey,
 // PutXAIKeys, PatchXAIKey, DeleteXAIKey, PutMetaKeys, PatchMetaKey,
 // DeleteMetaKey, applyDisableCoolingPatch) and
-// internal/api/server_management.go (their routes) (v8.0.38, MIT).
+// internal/api/server_management.go (their routes) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Changing the providers' API keys: `gemini-api-key`,

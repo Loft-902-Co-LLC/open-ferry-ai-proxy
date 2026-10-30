@@ -3,7 +3,7 @@
 // ConvertInteractionsResponseToOpenAIResponses,
 // ConvertInteractionsResponseToOpenAIResponsesNonStream,
 // ConvertOpenAIResponsesResponseToInteractions,
-// ConvertOpenAIResponsesResponseToInteractionsNonStream) (v8.0.38, MIT).
+// ConvertOpenAIResponsesResponseToInteractionsNonStream) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses clients talking to a Gemini Interactions upstream, and

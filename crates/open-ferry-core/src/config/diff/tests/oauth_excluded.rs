@@ -2,7 +2,7 @@
 // (TestSummarizeExcludedModels_NormalizesAndDedupes,
 // TestDiffOAuthExcludedModelChanges,
 // TestSummarizeOAuthExcludedModels_NormalizesKeys,
-// TestSummarizeVertexModels) (v8.0.38, MIT).
+// TestSummarizeVertexModels) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The excluded-model summaries and their change lines.

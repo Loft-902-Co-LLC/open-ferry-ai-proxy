@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/api_key_model_capabilities.go and
-// internal/modelconfig/model_info.go (v8.0.38, MIT).
+// internal/modelconfig/model_info.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Bind the selected credential's configured upstream name before registry

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_responses_signature.go
-// (v8.0.38, MIT), with its compat replay of an unknown-format
+// (v8.0.42, MIT), with its compat replay of an unknown-format
 // encrypted_content.
 // https://github.com/router-for-me/CLIProxyAPI
 
