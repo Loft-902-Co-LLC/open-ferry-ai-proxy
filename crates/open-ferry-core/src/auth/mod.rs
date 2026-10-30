@@ -264,10 +264,10 @@ pub struct Auth {
     pub failed: i64,
     /// Calls per 10-minute window, for the last twenty windows.
     pub recent_requests: RecentRequests,
-    /// The access token a provider refused with a 401, until a refresh
-    /// works or the tokens change: while it is still the access token,
-    /// it counts as expired regardless of nominal expiry (upstream's
-    /// `RejectedAccessToken`). Never saved.
+    /// The outer bearer a provider refused with a 401. For Codex it stays
+    /// rejected until that bearer changes, independently of SIWC and refreshes.
+    /// Other providers retain their successful-refresh clearing policy.
+    /// Counts as expired regardless of nominal expiry. Never saved.
     pub rejected_access_token: String,
     /// Nested SIWC bearer refused with a 401, until that bearer changes.
     /// Independent of outer refreshes and the active switch. Never saved or debugged.

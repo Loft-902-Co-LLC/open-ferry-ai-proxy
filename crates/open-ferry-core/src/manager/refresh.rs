@@ -1076,8 +1076,7 @@ impl Manager {
             Ok(refreshed) => {
                 if !failed_token.is_empty()
                     && refreshed.access_token_for_request(headers) == failed_token
-                    && (refreshed.rejected_access_token == failed_token
-                        || refreshed.rejected_siwc_access_token == failed_token)
+                    && refreshed.is_access_token_rejected_for_request(headers)
                 {
                     None
                 } else {
@@ -2069,9 +2068,7 @@ impl Manager {
         updated.last_refreshed_at = Some(now);
         updated.next_refresh_after = None;
         updated.preserve_rejected_tokens_from(&auth, true);
-        if updated.rejected_access_token.is_empty()
-            || updated.access_token() != updated.rejected_access_token
-        {
+        if !updated.is_active_access_token_rejected() {
             updated.last_error = None;
             updated.status_message.clear();
             updated.unavailable = false;

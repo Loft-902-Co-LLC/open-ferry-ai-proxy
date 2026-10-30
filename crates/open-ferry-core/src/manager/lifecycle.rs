@@ -1586,10 +1586,7 @@ impl Manager {
             } else if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
                 auth.model_states = existing_auth.model_states.clone();
             }
-            if (changed || is_refresh)
-                && (auth.rejected_access_token.is_empty()
-                    || auth.access_token() != auth.rejected_access_token)
-            {
+            if (changed || is_refresh) && !auth.is_active_access_token_rejected() {
                 let new_unauthorized = auth
                     .last_error
                     .as_ref()

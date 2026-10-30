@@ -463,3 +463,86 @@ fn local_status_future_sources_and_precedence() {
         assert_eq!(auth.siwc_status(now), expected, "source: {fields}");
     }
 }
+
+#[test]
+fn round2_rejection_partitions_survive_both_orders_and_sibling_refreshes() {
+    use crate::manager::merge::merge_refreshed_auth;
+    let now = at("2026-10-21T12:00:00Z");
+    for outer_first in [false, true] {
+        for refresh_between in [false, true] {
+            let mut auth = valid();
+            let first = if outer_first {
+                auth.outer_access_token()
+            } else {
+                auth.siwc_access_token()
+            }
+            .to_owned();
+            auth.record_rejected_token(&first);
+            if refresh_between {
+                let base = auth.clone();
+                let mut updated = base.clone();
+                if outer_first {
+                    updated.metadata["siwc"]["access_token"] = json!("dummy-new-siwc");
+                } else {
+                    updated
+                        .metadata
+                        .insert("access_token".into(), json!("dummy-new-outer"));
+                }
+                updated.codex_persist_intent =
+                    CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+                        &base.metadata,
+                        &updated.metadata,
+                        !outer_first,
+                        outer_first,
+                    ));
+                auth = merge_refreshed_auth(&base, &auth, &updated, now);
+            }
+            let second = if outer_first {
+                auth.siwc_access_token()
+            } else {
+                auth.outer_access_token()
+            }
+            .to_owned();
+            auth.record_rejected_token(&second);
+            assert_eq!(auth.rejected_access_token, auth.outer_access_token());
+            assert_eq!(auth.rejected_siwc_access_token, auth.siwc_access_token());
+            assert_eq!(
+                auth.outer_expiration_time(),
+                Some(chrono::DateTime::UNIX_EPOCH)
+            );
+            assert!(!auth.has_valid_access_token(now));
+            for refreshing in [false, true] {
+                let mut published = auth.clone();
+                published.rejected_access_token.clear();
+                published.rejected_siwc_access_token.clear();
+                published.preserve_rejected_tokens_from(&auth, refreshing);
+                assert_eq!(published.rejected_access_token, auth.outer_access_token());
+                assert_eq!(
+                    published.rejected_siwc_access_token,
+                    auth.siwc_access_token()
+                );
+            }
+            for rotate_outer in [false, true] {
+                let base = auth.clone();
+                let mut updated = base.clone();
+                if rotate_outer {
+                    updated
+                        .metadata
+                        .insert("access_token".into(), json!("dummy-rotated-outer"));
+                } else {
+                    updated.metadata["siwc"]["access_token"] = json!("dummy-rotated-siwc");
+                }
+                updated.codex_persist_intent =
+                    CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+                        &base.metadata,
+                        &updated.metadata,
+                        rotate_outer,
+                        !rotate_outer,
+                    ));
+                let merged = merge_refreshed_auth(&base, &auth, &updated, now);
+                assert_eq!(merged.rejected_access_token.is_empty(), rotate_outer);
+                assert_eq!(merged.rejected_siwc_access_token.is_empty(), !rotate_outer);
+            }
+        }
+    }
+}
