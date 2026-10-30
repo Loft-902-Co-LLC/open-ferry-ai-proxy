@@ -8751,6 +8751,9 @@ self-update:
                     self.0.save(auth)
                 }
             }
+            fn delete(&self, id: &str) -> std::io::Result<()> {
+                self.0.delete(id)
+            }
             fn read_back(&self, auth: &Auth) -> std::io::Result<Option<Auth>> {
                 self.0.read_back(auth)
             }
