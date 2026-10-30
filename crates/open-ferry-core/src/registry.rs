@@ -29,8 +29,7 @@
 //! - No logging and no registration hooks (upstream's `ModelRegistryHook`,
 //!   used by plugins, which aren't ported).
 //! - A model's web search capability (`SupportsWebSearch`,
-//!   `NativeCapabilities`) is kept as the catalog gives it, but isn't merged
-//!   across clients, and `GetResponsesWebSearchCapability` and
+//!   `NativeCapabilities`) is indexed across clients. `GetResponsesWebSearchCapability` and
 //!   `ApplyClientModelCapabilities` aren't ported: the translators read web
 //!   search from the static catalog.
 //! - `LookupModelInfo` is ported inside [`crate::codex_models`], its only
@@ -98,6 +97,9 @@ struct State {
     client_model_infos: HashMap<String, HashMap<String, ModelInfo>>,
     /// Each client's provider, when it has one.
     client_providers: BTreeMap<String, String>,
+    /// Web-search contributions, once per client/model rather than per duplicate ID.
+    web_search_counts: HashMap<String, usize>,
+    web_search_provider_counts: HashMap<String, HashMap<String, usize>>,
     /// Counts each client's registrations and removals.
     client_epochs: HashMap<String, u64>,
     /// The newest projection generation applied to each client.
@@ -202,6 +204,7 @@ impl ModelRegistry {
     pub fn register_client(&self, client_id: &str, provider: &str, models: &[ModelInfo]) {
         let mut state = self.write();
         let provider = go::to_lower(provider);
+        state.drop_web_search(client_id);
 
         let mut raw_ids: Vec<String> = Vec::with_capacity(models.len());
         let mut unique_ids: Vec<String> = Vec::with_capacity(models.len());
@@ -354,6 +357,8 @@ impl ModelRegistry {
         bump(&mut state.client_generations, client_id);
         self.bump_registration_epoch();
 
+        state.drop_web_search(client_id);
+        state.client_model_infos.remove(client_id);
         let provider = state.client_providers.remove(client_id);
         let Some(models) = state.client_models.remove(client_id) else {
             return;
@@ -677,9 +682,13 @@ impl ModelRegistry {
             }
             if tally.available(entry.count) {
                 if let Some(info) = entry.info {
-                    result.push(info.clone());
+                    let mut info = info.clone();
+                    info.supports_web_search = state.has_web_search(id, &provider, None);
+                    result.push(info);
                 } else if let Some(registration) = registration {
-                    result.push(registration.info.clone());
+                    let mut info = registration.info.clone();
+                    info.supports_web_search = state.has_web_search(id, &provider, None);
+                    result.push(info);
                 }
             }
         }
@@ -930,6 +939,101 @@ impl State {
         } else {
             self.client_providers
                 .insert(client_id.to_owned(), provider.to_owned());
+        }
+        for (id, model) in models {
+            if model.supports_web_search {
+                *self.web_search_counts.entry(id.clone()).or_default() += 1;
+                if !provider.is_empty() {
+                    *self
+                        .web_search_provider_counts
+                        .entry(id.clone())
+                        .or_default()
+                        .entry(provider.to_owned())
+                        .or_default() += 1;
+                }
+            }
+            self.refresh_web_search(id);
+        }
+    }
+
+    fn has_web_search(&self, id: &str, provider: &str, exclude: Option<&str>) -> bool {
+        let count = if provider.is_empty() {
+            self.web_search_counts.get(id).copied().unwrap_or(0)
+        } else {
+            self.web_search_provider_counts
+                .get(id)
+                .and_then(|counts| counts.get(provider))
+                .copied()
+                .unwrap_or(0)
+        };
+        let excluded = exclude.is_some_and(|client| {
+            (provider.is_empty()
+                || self
+                    .client_providers
+                    .get(client)
+                    .is_some_and(|p| p == provider))
+                && self
+                    .client_model_infos
+                    .get(client)
+                    .and_then(|infos| infos.get(id))
+                    .is_some_and(|info| info.supports_web_search)
+        });
+        count > usize::from(excluded)
+    }
+
+    /// Retracts metadata even when the client's model ID list was lost.
+    fn drop_web_search(&mut self, client: &str) {
+        let Some(infos) = self.client_model_infos.get(client) else {
+            return;
+        };
+        let ids: Vec<_> = infos
+            .iter()
+            .map(|(id, info)| (id.clone(), info.supports_web_search))
+            .collect();
+        let provider = self
+            .client_providers
+            .get(client)
+            .cloned()
+            .unwrap_or_default();
+        for (id, supported) in &ids {
+            if *supported {
+                decrement(&mut self.web_search_counts, id);
+                if let Some(counts) = self.web_search_provider_counts.get_mut(id) {
+                    decrement(counts, &provider);
+                    if counts.is_empty() {
+                        self.web_search_provider_counts.remove(id);
+                    }
+                }
+            }
+        }
+        // Metadata is discarded before aggregate flags are recomputed.
+        self.client_model_infos.remove(client);
+        for (id, _) in ids {
+            self.refresh_web_search(&id);
+        }
+    }
+
+    fn refresh_web_search(&mut self, id: &str) {
+        let supported = self.has_web_search(id, "", None);
+        let Some(registration) = self.models.get_mut(id) else {
+            return;
+        };
+        registration.info.supports_web_search = supported;
+        for (provider, info) in &mut registration.info_by_provider {
+            info.supports_web_search = self
+                .web_search_provider_counts
+                .get(id)
+                .and_then(|counts| counts.get(provider))
+                .is_some_and(|count| *count > 0);
+        }
+    }
+}
+
+fn decrement(counts: &mut HashMap<String, usize>, key: &str) {
+    if let Some(count) = counts.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(key);
         }
     }
 }

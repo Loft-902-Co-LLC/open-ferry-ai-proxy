@@ -873,3 +873,93 @@ fn equal_fold_follows_simple_case_folding() {
     assert!(!equal_fold("m\u{131}", "mI"));
     assert!(!equal_fold("m\u{130}", "mi"));
 }
+
+fn search_model(id: &str, supported: bool) -> ModelInfo {
+    ModelInfo {
+        supports_web_search: supported,
+        ..model(id)
+    }
+}
+
+fn assert_search_index(registry: &ModelRegistry) {
+    let state = registry.read();
+    for id in ["m", "n", "solo", "missing"] {
+        for provider in ["", "codex", "gemini", "other"] {
+            for exclude in [
+                None,
+                Some(""),
+                Some("a"),
+                Some("b"),
+                Some("ghost"),
+                Some("missing"),
+            ] {
+                let expected = state.client_model_infos.iter().any(|(client, infos)| {
+                    Some(client.as_str()) != exclude
+                        && (provider.is_empty()
+                            || state
+                                .client_providers
+                                .get(client)
+                                .is_some_and(|p| p == provider))
+                        && infos.get(id).is_some_and(|m| m.supports_web_search)
+                });
+                assert_eq!(
+                    state.has_web_search(id, provider, exclude),
+                    expected,
+                    "{id} {provider} {exclude:?}"
+                );
+            }
+        }
+        if let Some(registration) = state.models.get(id) {
+            assert_eq!(
+                registration.info.supports_web_search,
+                state.has_web_search(id, "", None)
+            );
+            for (provider, info) in &registration.info_by_provider {
+                assert_eq!(
+                    info.supports_web_search,
+                    state.has_web_search(id, provider, None)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn web_search_index_matches_scan_across_registration_changes() {
+    let registry = ModelRegistry::new();
+    registry.register_client(
+        "a",
+        "codex",
+        &[search_model("m", true), search_model("solo", true)],
+    );
+    registry.register_client("b", "gemini", &[search_model("m", false)]);
+    assert_search_index(&registry);
+    assert!(registry.model_info("m", "").unwrap().supports_web_search);
+    assert!(
+        !registry
+            .model_info("m", "gemini")
+            .unwrap()
+            .supports_web_search
+    );
+    registry.register_client(
+        "b",
+        "gemini",
+        &[search_model("m", true), search_model("m", false)],
+    );
+    assert_search_index(&registry);
+    registry.register_client(
+        "a",
+        "other",
+        &[search_model("m", true), search_model("n", false)],
+    );
+    assert_search_index(&registry);
+    assert!(!registry.read().has_web_search("m", "codex", None));
+    registry.register_client("a", "other", &[search_model("n", false)]);
+    assert_search_index(&registry);
+    registry.unregister_client("b");
+    assert_search_index(&registry);
+    registry.register_client("a", "other", &[]);
+    assert_search_index(&registry);
+    assert!(registry.read().web_search_counts.is_empty());
+    assert!(registry.read().web_search_provider_counts.is_empty());
+}
