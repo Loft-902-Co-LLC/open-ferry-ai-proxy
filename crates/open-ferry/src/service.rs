@@ -8751,6 +8751,12 @@ self-update:
                     self.0.save(auth)
                 }
             }
+            fn read_back(&self, auth: &Auth) -> std::io::Result<Option<Auth>> {
+                self.0.read_back(auth)
+            }
+            fn same_record(&self, left: &Auth, right: &Auth) -> std::io::Result<bool> {
+                self.0.same_record(left, right)
+            }
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed-disable.json");
