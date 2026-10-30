@@ -745,7 +745,7 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
     for provider in PROVIDERS {
         for format in [Format::OPENAI, Format::CLAUDE] {
             let reply = Reply::sse(
-                "data: {\"service_tier\":\"flex\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
             );
             let mock = Mock::answering(move |seen| {
                 if seen.path == "/token" {
@@ -783,9 +783,10 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             }
             let request = request(
                 "gemini-2.5-flash",
-                r#"{"messages":[{"role":"user","content":"hello"}],"max_tokens":32,"service_tier":"priority"}"#,
+                r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"service_tier":"priority"}"#,
             );
             let mut options = stream_options(&format);
+            options.source_format = Format::GEMINI;
             options.original_request = request.payload.clone();
             let mut config = Config::default();
             config.usage_statistics_enabled = true;
@@ -839,7 +840,7 @@ async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
             assert_eq!(queued.len(), 1);
             let record = &queued[0];
             assert_eq!(record["service_tier"], "priority");
-            assert_eq!(record["response_service_tier"], "flex");
+            assert_eq!(record["effective_service_tier"], "priority");
             assert_eq!(record["fail"]["code"], "stream_truncated");
             assert!(records.try_recv().is_err());
         }
