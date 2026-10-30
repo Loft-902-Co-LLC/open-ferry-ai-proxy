@@ -132,6 +132,7 @@ struct Session<S> {
     state: AppState,
     access: Arc<crate::auth::WebsocketAccess>,
     client: ClientRequest,
+    log_context: Option<Arc<open_ferry_core::observe::RequestContext>>,
     dispatcher: Arc<dyn Dispatcher>,
     conn: Conn<S>,
     /// The session's ID, for executors that keep state per socket.
@@ -174,10 +175,16 @@ pub(super) async fn run<S: Socket>(
     // Interrupts are read all the time; with response steering on, a Codex
     // call also takes the queued create and steer messages while it runs.
     let id = Uuid::now_v7().to_string();
-    let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone());
+    let access = Arc::new(access);
+    let (check_access, check_state) = (access.clone(), state.clone());
+    let check: super::writer::FrontendCheck =
+        Arc::new(move || check_access.authorize(&check_state).map(|_| ()));
+    let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone(), Some(check));
+    let log_context = client.context.clone();
     let mut session = Session {
         state,
-        access: Arc::new(access),
+        access,
+        log_context,
         client,
         dispatcher,
         conn,
@@ -220,7 +227,7 @@ impl<S: Socket> Session<S> {
     /// Answers the request being handled with `error`, as an error event,
     /// and logs it. The session goes on, unless the event can't be written.
     async fn reject(&mut self, error: &ErrorMessage) -> ControlFlow<()> {
-        request_log::record_api_error(self.client.context.as_deref(), error);
+        request_log::record_api_error(self.log_context.as_deref(), error);
         let payload = error_payload(error);
         tracing::info!(
             id = %self.id,
@@ -249,8 +256,20 @@ impl<S: Socket> Session<S> {
         if request_model.is_empty() {
             request_model = str_at(&self.last_request, "model").trim().to_owned();
         }
-        if let Err(error) = self.access.authorize(&self.state) {
-            return self.reject(&error).await;
+        let identity = match self.access.authorize(&self.state) {
+            Ok(identity) => identity,
+            Err(error) => return self.reject(&error).await,
+        };
+        if self.client.principal != identity.principal {
+            self.caches().release(&self.key);
+            self.client.principal = identity.principal;
+            self.caches().retain(&self.key);
+        }
+        if let Some(source) = &self.log_context {
+            self.client.context = Some(crate::request_context::websocket_turn(
+                source,
+                identity.key.as_deref(),
+            ));
         }
         let target = Target::new(self.state.catalog(), &request_model);
         self.check_pin(&target);
@@ -383,9 +402,11 @@ impl<S: Socket> Session<S> {
             .codex_response_steering
             .then(|| self.conn.input())
             .flatten();
+        let mut execution_client = self.client.clone();
+        execution_client.context = None;
         let started = match Call::new(
             &self.state,
-            &self.client,
+            &execution_client,
             Format::OPENAI_RESPONSE,
             &model_name,
             Bytes::from(request),
@@ -393,6 +414,20 @@ impl<S: Socket> Session<S> {
             true,
         ) {
             Ok(mut call) => {
+                if let (Some(log), Some(turn)) = (&self.log_context, &self.client.context) {
+                    call.options.metadata.caller_scope = turn
+                        .client_key()
+                        .map(open_ferry_core::session::caller_scope)
+                        .unwrap_or_default();
+                    call.options.observation =
+                        Some(crate::request_context::observe_websocket_turn(
+                            &self.state,
+                            log,
+                            turn,
+                            &call.request,
+                            &call.options,
+                        ));
+                }
                 if let Some(input) = &input {
                     // A credential that is gone or disabled sends no more
                     // of the client's messages on its connection.
@@ -492,7 +527,7 @@ impl<S: Socket> Session<S> {
                 turn: turn.as_mut(),
                 suppress_error: &suppress_error,
                 keepalive,
-                context: self.client.context.as_deref(),
+                context: self.log_context.as_deref(),
                 duplex,
             },
         )

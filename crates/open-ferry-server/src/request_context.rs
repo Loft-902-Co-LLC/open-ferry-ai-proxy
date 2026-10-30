@@ -84,3 +84,65 @@ fn joined(headers: &HeaderMap, name: &HeaderName) -> String {
         .collect();
     values.join(", ").trim().to_owned()
 }
+
+/// A main WebSocket turn owns its authenticated identity. Async callbacks
+/// cannot replace the key in observations already handed to another turn.
+pub(crate) fn websocket_turn(source: &RequestContext, key: Option<&str>) -> Arc<RequestContext> {
+    let mut turn = RequestContext::new(source.method.clone(), source.path.clone());
+    turn.id = source.id.clone();
+    turn.started = source.started;
+    turn.started_at = source.started_at;
+    turn.endpoint.clone_from(&source.endpoint);
+    turn.client_ip.clone_from(&source.client_ip);
+    turn.resolved_client_ip
+        .clone_from(&source.resolved_client_ip);
+    turn.forwarded_for.clone_from(&source.forwarded_for);
+    turn.user_agent.clone_from(&source.user_agent);
+    if let Some(key) = key {
+        turn.set_client_key(key);
+        turn.set_access_provider("config-inline");
+        turn.set_is_native_key(true);
+    }
+    Arc::new(turn)
+}
+
+/// Keep all upstream attempts in the upgrade's existing bounded log,
+/// while usage and execution read the current main turn's identity.
+pub(crate) fn observe_websocket_turn(
+    state: &AppState,
+    log: &Arc<RequestContext>,
+    turn: &Arc<RequestContext>,
+    request: &open_ferry_core::exec::Request,
+    options: &open_ferry_core::exec::Options,
+) -> Arc<open_ferry_core::observe::Observation> {
+    let observation = state.observability();
+    let taps = [
+        observation.request_log.tap(log),
+        observation.usage.tap(turn, request, options),
+    ];
+    Arc::new(open_ferry_core::observe::Observation::new(
+        turn.clone(),
+        taps.into_iter().flatten().collect(),
+    ))
+}
+
+#[cfg(test)]
+mod websocket_tests {
+    use super::*;
+    #[test]
+    fn r2_websocket_turn_identity_is_fresh_without_mutating_previous_observations() {
+        let mut upgrade = RequestContext::new(http::Method::GET, "/v1/responses".into());
+        upgrade.set_client_key("earlier-frontend-key");
+        upgrade.user_agent = "caller-agent".into();
+        let turn = websocket_turn(&upgrade, Some("current-frontend-key"));
+        assert_eq!(turn.client_key(), Some("current-frontend-key"));
+        assert_eq!(turn.access_provider(), "config-inline");
+        assert!(turn.is_native_key());
+        assert_eq!(turn.id, upgrade.id);
+        assert_eq!(turn.user_agent, upgrade.user_agent);
+        assert_eq!(upgrade.client_key(), Some("earlier-frontend-key"));
+        let anonymous = websocket_turn(&turn, None);
+        assert!(anonymous.client_key().is_none());
+        assert!(!anonymous.is_native_key());
+    }
+}
