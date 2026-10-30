@@ -919,13 +919,13 @@ fn looks_models_up_by_provider() {
         "codex",
         &[ModelInfo {
             support_configuration_update: true,
-            ..model("gpt-5.5", "custom", Some(support(&["low"])))
+            ..model("codex-auto-review", "custom", Some(support(&["low"])))
         }],
     );
-    let found = lookup(Some(&registry), " gpt-5.5 ", " Codex ").unwrap();
+    let found = lookup(Some(&registry), " codex-auto-review ", " Codex ").unwrap();
     assert_eq!(found.model_type, "custom");
     assert!(found.support_configuration_update);
-    let fallback = lookup(None, "gpt-5.5", "codex").unwrap();
+    let fallback = lookup(None, "codex-auto-review", "codex").unwrap();
     assert_eq!(fallback.model_type, "openai");
     assert!(fallback.thinking.is_some());
     assert!(lookup(Some(&registry), "  ", "codex").is_none());
@@ -955,7 +955,7 @@ fn every_call_applies_the_setting() {
         let prepared = prepare_body(
             kind,
             Context::default(),
-            &request("gpt-5.5(low)", effort),
+            &request("codex-auto-review(low)", effort),
             &responses,
         )
         .unwrap();
@@ -968,7 +968,7 @@ fn every_call_applies_the_setting() {
         let error = prepare_body(
             kind,
             Context::default(),
-            &request("gpt-5.5(minimal)", effort),
+            &request("codex-auto-review(minimal)", effort),
             &responses,
         )
         .unwrap_err();
@@ -985,7 +985,7 @@ fn every_call_applies_the_setting() {
         Kind::Execute,
         Context::default(),
         &request(
-            "gpt-5.5",
+            "codex-auto-review",
             r#"{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}"#,
         ),
         &chat,
@@ -999,7 +999,7 @@ fn every_call_applies_the_setting() {
         Kind::Execute,
         Context::default(),
         &request(
-            "gpt-5.5",
+            "codex-auto-review",
             r#"{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}"#,
         ),
         &chat,
@@ -1009,7 +1009,11 @@ fn every_call_applies_the_setting() {
 
     // The models the executor was given come first.
     let registry = ModelRegistry::new();
-    registry.register_client("codex-client", "codex", &[model("gpt-5.5", "openai", None)]);
+    registry.register_client(
+        "codex-client",
+        "codex",
+        &[model("codex-auto-review", "openai", None)],
+    );
     let context = Context {
         models: Some(&registry),
         ..Context::default()
@@ -1017,7 +1021,7 @@ fn every_call_applies_the_setting() {
     let prepared = prepare_body(
         Kind::Execute,
         context,
-        &request("gpt-5.5(low)", effort),
+        &request("codex-auto-review(low)", effort),
         &responses,
     )
     .unwrap();

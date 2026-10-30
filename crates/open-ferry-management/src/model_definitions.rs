@@ -32,7 +32,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::Uri;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use http::StatusCode;
 use open_ferry_core::auth::compat::openai_compatible_provider_key;
 use open_ferry_core::models::ModelInfo;
@@ -40,6 +40,7 @@ use open_ferry_core::registry::StaticCatalog;
 use open_ferry_translate::go::to_lower;
 
 use crate::Route;
+use crate::auth_files::run_blocking;
 use crate::config_read::{Fields, strings, thinking_fields};
 use crate::go::lossy;
 use crate::json::{self, Json};
@@ -49,6 +50,11 @@ use crate::state::ManagementState;
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
     vec![
+        Route::key(
+            "/v8/management/routing/model-definitions/refresh",
+            get(definitions).post(refresh),
+        ),
+        Route::key("/v8/management/models/refresh", post(refresh)),
         Route::key(
             "/v0/management/model-definitions/{channel}",
             get(definitions),
@@ -81,7 +87,7 @@ async fn definitions(
     if channel.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = resolved_models(&StaticCatalog::current(), state.registry(), &channel);
+    let models = resolved_models(&state.catalogs().general(), state.registry(), &channel);
     if models.is_empty() {
         return json::response(
             StatusCode::BAD_REQUEST,
@@ -178,4 +184,61 @@ fn model(model: &ModelInfo) -> Json {
             }),
         )
         .done()
+}
+
+/// Dropping an HTTP request fences any blocking file read still in progress.
+struct CancelRefresh(open_ferry_core::registry::catalog_sources::RefreshCancellation);
+
+impl Drop for CancelRefresh {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn refresh(State(state): State<ManagementState>) -> Response {
+    let sources = state.config().models.clone();
+    if let Err(error) = sources.validate() {
+        return json::response(
+            StatusCode::BAD_REQUEST,
+            &Json::Any(serde_json::json!({
+                "ok": false, "error": error.to_string(),
+            })),
+        );
+    }
+    let runtime = state.catalogs().clone();
+    let cancel = CancelRefresh(Default::default());
+    let cancellation = cancel.0.clone();
+    // Keep this future request-scoped so dropping it cancels later publication.
+    // The helper inherits an operation if present; it does not admit one.
+    let result = run_blocking(move || runtime.refresh(&sources, &cancellation)).await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            return json::response(
+                StatusCode::BAD_REQUEST,
+                &Json::Any(serde_json::json!({"ok": false, "error": error})),
+            );
+        }
+    };
+    let errors = ["catalog", "codex-catalog", "devin-catalog"]
+        .into_iter()
+        .filter_map(|name| result.catalogs[name].error.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let failed = result.has_errors();
+    let mut body = serde_json::to_value(result).expect("catalog refresh result is serializable");
+    body["ok"] = (!failed).into();
+    if failed {
+        body["error"] = errors.into();
+    } else {
+        body["status"] = "ok".into();
+    }
+    json::response(
+        if failed {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::OK
+        },
+        &Json::Any(body),
+    )
 }

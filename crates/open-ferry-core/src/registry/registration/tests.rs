@@ -2616,3 +2616,57 @@ fn vertex_resource_partner_detection_matches_served_model_registration() {
         );
     }
 }
+
+#[test]
+fn prefixes_rewrite_gemini_names_and_preserve_channel_and_limits() {
+    for (id, name, expected) in [
+        (
+            "gemini-4-argon",
+            "models/gemini-4-argon",
+            "models/gcp/gemini-4-argon",
+        ),
+        (
+            "gemini/gemini-4-argon",
+            "models/gemini/gemini-4-argon",
+            "models/gcp/gemini/gemini-4-argon",
+        ),
+        (
+            "gemini-4-argon",
+            "channel/models/gemini-4-argon",
+            "channel/models/gcp/gemini-4-argon",
+        ),
+        ("gemini-4-argon", "gemini-4-argon", "gcp/gemini-4-argon"),
+    ] {
+        let model = ModelInfo {
+            id: id.into(),
+            name: name.into(),
+            input_token_limit: 123,
+            output_token_limit: 45,
+            context_length: 1000,
+            max_completion_tokens: 500,
+            ..ModelInfo::default()
+        };
+        for force in [false, true] {
+            let result = apply_model_prefixes(vec![model.clone()], "gcp", force);
+            assert_eq!(result.len(), if force { 1 } else { 2 });
+            let prefixed = result.last().unwrap();
+            assert_eq!(prefixed.id, format!("gcp/{id}"));
+            assert_eq!(prefixed.name, expected);
+            assert_eq!(prefixed.input_token_limit, 123);
+            assert_eq!(prefixed.output_token_limit, 45);
+            assert_eq!(prefixed.context_length, 1000);
+            assert_eq!(prefixed.max_completion_tokens, 500);
+            assert_eq!(prefixed.metadata_model_id, id);
+            let registry = ModelRegistry::new();
+            registry.register_client("test", "gemini", &result);
+            let maps = registry.available_model_maps("gemini");
+            assert!(
+                maps.iter()
+                    .any(|m| m["name"] == expected && m["inputTokenLimit"] == 123)
+            );
+            if !force {
+                assert_eq!(result[0], model);
+            }
+        }
+    }
+}

@@ -44,7 +44,7 @@ fn embedded_catalog_is_valid() {
     validate_codex_client_models_json(EMBEDDED_CATALOG).unwrap();
     let catalog = CodexClientCatalog::embedded().expect("the built-in catalog loads");
     assert_eq!(catalog.default_template()["slug"], DEFAULT_TEMPLATE);
-    assert_eq!(catalog.templates().count(), 10);
+    assert_eq!(catalog.templates().count(), 12);
     assert!(catalog.template("gpt-6-astra").is_some());
 }
 
@@ -216,4 +216,23 @@ fn gpt_5_5_takes_precedence_over_the_first_entry() {
     ]);
     let catalog = CodexClientCatalog::from_json(&raw).unwrap();
     assert_eq!(catalog.default_template()["slug"], "gpt-5.5");
+}
+
+#[test]
+fn embedded_workspace_and_cloud_restrictions_are_preserved() {
+    let catalog = CodexClientCatalog::embedded().unwrap();
+    let review = catalog.template("codex-auto-review").unwrap();
+    assert_eq!(review["allow_only_codex_cloud_agent_orchestrator"], false);
+    let workspace = catalog.template("gpt-6-chat-thinking").unwrap();
+    assert_eq!(workspace["allow_only_chatgpt_workspace_executor"], false);
+    for field in [
+        "allow_only_codex_cloud_agent_orchestrator",
+        "allow_only_chatgpt_workspace_executor",
+    ] {
+        assert_eq!(catalog.default_template()[field], false);
+    }
+    assert!(catalog.template("gpt-6.1-terra").is_some());
+    assert_eq!(catalog.default_template()["context_window"], 500_000);
+    assert_eq!(catalog.default_template()["comp_hash"], "3000");
+    assert_eq!(catalog.default_template()["multi_agent_version"], "v2");
 }
