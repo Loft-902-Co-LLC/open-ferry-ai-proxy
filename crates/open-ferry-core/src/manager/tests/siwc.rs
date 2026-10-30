@@ -1047,6 +1047,55 @@ async fn active_partial_invalid_grant_failures_back_off_longer_each_time() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn p47r2_outer_rotations_keep_active_partition_invalid_grant_backoff() {
+    let h = Harness::new(Settings::default());
+    let executor = FakeExecutor::new("codex");
+    executor.set_refresh(|before| {
+        let mut after = before.clone();
+        after.metadata.insert(
+            "access_token".into(),
+            json!(format!("dummy-outer-{}", before.credential_version)),
+        );
+        after.metadata.insert(
+            "refresh_token".into(),
+            json!(format!("dummy-refresh-{}", before.credential_version)),
+        );
+        after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &before.metadata,
+            &after.metadata,
+            true,
+            false,
+        ));
+        after.codex_refresh_failure = Some(CodexRefreshFailure {
+            partition: crate::auth::CodexCredentialPartition::Siwc,
+            error: ExecError::upstream(400, "invalid_grant"),
+        });
+        Ok(after)
+    });
+    h.executor(&executor);
+    let mut auth = fixture();
+    auth.status = Status::Active;
+    auth.metadata["siwc"]["expired"] = json!((h.now() + TimeDelta::hours(1)).to_rfc3339());
+    h.add(auth, &[]);
+    for failures in 1..=2 {
+        let before = h.get("codex.json");
+        assert!(h.manager.force_refresh("codex.json").await.is_err());
+        let live = h.get("codex.json");
+        assert!(live.credential_version > before.credential_version);
+        assert_eq!(h.refresh_failures("codex.json"), failures);
+        assert_eq!(
+            live.next_refresh_after,
+            Some(h.now() + TimeDelta::seconds(60 * i64::from(failures)))
+        );
+        assert_eq!(live.status, Status::Active);
+        assert_eq!(
+            failed_partition(&live),
+            Some(crate::auth::CodexCredentialPartition::Siwc)
+        );
+    }
+}
+
 #[tokio::test]
 async fn active_partial_invalid_grant_after_a_rejected_token_is_terminal() {
     let (_dir, _store, manager, _executor) =

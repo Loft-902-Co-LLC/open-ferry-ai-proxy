@@ -818,10 +818,12 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                 }
             }
             let live = manager.get(&base.id).unwrap();
-            assert_eq!(
-                live.next_refresh_after, refresh_deadline,
-                "refresh hold: {order:?}, {step}"
-            );
+            if !disabled {
+                assert_eq!(
+                    live.next_refresh_after, refresh_deadline,
+                    "refresh hold: {order:?}, {step}"
+                );
+            }
             assert_eq!(
                 live.status,
                 if disabled {

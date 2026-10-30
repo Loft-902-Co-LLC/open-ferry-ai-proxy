@@ -4479,6 +4479,7 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
             executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
             h.manager.register_executor(executor);
             let mut refresh_deadline = None;
+            let mut expected_status = crate::auth::Status::Error;
             let mut initial = auth_with_metadata(
                 ID,
                 "claude",
@@ -4550,6 +4551,11 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                             })
                             .unwrap();
                         refresh_deadline = None;
+                        expected_status = if quota {
+                            crate::auth::Status::Error
+                        } else {
+                            crate::auth::Status::Active
+                        };
                     }
                     "refresh" => {
                         // Use the current version so a preceding relogin cannot
@@ -4587,10 +4593,9 @@ async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
                     "refresh hold: quota={quota}, {order:?}, {step}"
                 );
                 assert_partition_hold(&h.manager, partition_deadline);
-                assert_ne!(
-                    live.status,
-                    crate::auth::Status::Disabled,
-                    "status: {order:?}, {step}"
+                assert_eq!(
+                    live.status, expected_status,
+                    "status: quota={quota}, {order:?}, {step}"
                 );
                 assert!(
                     blocked(&h, OPUS)
