@@ -176,3 +176,62 @@ async fn committed_codex_client_stream_rejects_outer_without_rejecting_nested() 
     assert!(live.rejected_siwc_access_token.is_empty());
     assert!(live.use_siwc());
 }
+
+#[tokio::test(start_paused = true)]
+async fn round2_missing_outer_never_falls_back_during_execute_refresh_or_mark() {
+    use crate::auth::AuthError;
+    let h = Harness::new(Default::default());
+    let executor = FakeExecutor::with("codex", |call| {
+        assert!(!call.auth.use_siwc_for_request(&call.options.headers));
+        assert!(
+            call.auth
+                .access_token_for_request(&call.options.headers)
+                .is_empty()
+        );
+        Reply::status(401, "missing outer bearer")
+    });
+    executor.set_refresh(|before| {
+        assert!(before.rejected_access_token.is_empty());
+        assert!(before.rejected_siwc_access_token.is_empty());
+        assert!(!before.siwc_access_token().is_empty());
+        Ok(before.clone())
+    });
+    h.executor(&executor);
+    let mut auth = fixture();
+    auth.metadata.remove("access_token");
+    h.add(auth, &["m"]);
+    let mut opts = options();
+    opts.headers = headers("codex-tui/1");
+    assert!(
+        h.manager
+            .execute(&providers(&["codex"]), request("m"), opts)
+            .await
+            .is_err()
+    );
+    assert_eq!(executor.refresh_count(), 1);
+    assert_eq!(executor.calls().len(), 2);
+    for partition in [
+        None,
+        Some(CodexCredentialPartition::Outer),
+        Some(CodexCredentialPartition::Siwc),
+    ] {
+        let live = h.get("codex");
+        assert!(live.rejected_access_token.is_empty());
+        assert!(live.rejected_siwc_access_token.is_empty());
+        assert!(live.has_valid_access_token(h.now()));
+        h.manager.mark_result(&CallResult {
+            auth_id: live.id.clone(),
+            provider: live.provider.clone(),
+            credential_version: live.credential_version,
+            registration_epoch: live.registration_epoch,
+            credential_partition: partition,
+            error: Some(AuthError {
+                http_status: 401,
+                message: "empty captured bearer".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    assert!(h.get("codex").rejected_siwc_access_token.is_empty());
+}
