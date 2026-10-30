@@ -51,7 +51,7 @@ pub(crate) fn routes() -> Vec<Route> {
     vec![
         Route::key(
             "/v8/management/routing/model-definitions/refresh",
-            post(refresh),
+            get(definitions).post(refresh),
         ),
         Route::key("/v8/management/models/refresh", post(refresh)),
         Route::key(

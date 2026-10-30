@@ -482,3 +482,22 @@ async fn both_manual_refresh_routes_report_success_error_and_skipped() {
         .expect(StatusCode::BAD_REQUEST);
     assert_eq!(body["ok"], false);
 }
+
+#[tokio::test]
+async fn manual_refresh_post_does_not_shadow_provider_definitions_get() {
+    let api = Api::new();
+    api.registry.register_client(
+        "refresh-provider",
+        "refresh",
+        &[ModelInfo {
+            id: "refresh-model".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    let body = api
+        .get("/v8/management/routing/model-definitions/refresh")
+        .await
+        .expect(StatusCode::OK);
+    assert_eq!(body["channel"], "refresh");
+    assert_eq!(ids(&body), ["refresh-model"]);
+}
