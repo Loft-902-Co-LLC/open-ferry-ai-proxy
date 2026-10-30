@@ -252,21 +252,6 @@ impl<'a> InputBuilder<'a> {
     }
 
     fn push_message(&mut self, message: &Value) {
-        // Discard empty marker messages before changing per-message replay state.
-        if message
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|parts| {
-                !parts.is_empty()
-                    && parts.iter().all(|part| {
-                        str_of(part.get("type")) == "thinking"
-                            && str_of(part.get("signature")).trim() == "cpa:commentary:v1"
-                            && str_of(part.get("thinking")).is_empty()
-                    })
-            })
-        {
-            return;
-        }
         let role = str_of(message.get("role"));
         if role == "system" {
             if let Some(text) = message_system_reminder_text(message.get("content")) {

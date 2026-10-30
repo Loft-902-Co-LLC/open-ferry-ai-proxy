@@ -358,18 +358,6 @@ fn check_empty_commentary_alignment(target: usize) {
                     "Chat compat={compat}"
                 );
             }
-            let codex = if compat {
-                crate::codex::claude::convert_claude_request_to_codex_with_compat
-            } else {
-                crate::codex::claude::convert_claude_request_to_codex
-            };
-            if target == 1 {
-                assert_eq!(
-                    codex("gpt-5.4", &marked),
-                    codex("gpt-5.4", &plain),
-                    "Codex compat={compat}"
-                );
-            }
             let gemini = if compat {
                 crate::gemini::claude::convert_claude_request_to_gemini_with_compat
             } else {
@@ -412,11 +400,6 @@ fn r2_empty_commentary_chat_alignment() {
 }
 
 #[test]
-fn r2_empty_commentary_codex_alignment() {
-    check_empty_commentary_alignment(1);
-}
-
-#[test]
 fn r2_empty_commentary_gemini_alignment() {
     check_empty_commentary_alignment(2);
 }
@@ -424,4 +407,68 @@ fn r2_empty_commentary_gemini_alignment() {
 #[test]
 fn r2_empty_commentary_interactions_alignment() {
     check_empty_commentary_alignment(3);
+}
+
+fn check_codex_inline_empty_commentary(reminder: bool) {
+    let calls = json!({"role":"assistant","content":[
+        {"type":"tool_use","id":"call_a","name":"lookup_a","input":{}},
+        {"type":"tool_use","id":"call_b","name":"lookup_b","input":{}}]});
+    let results = json!({"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"call_b","content":"b"},
+        {"type":"tool_result","tool_use_id":"call_a","content":"a"}]});
+    for count in [1, 2] {
+        for convert in [
+            crate::codex::claude::convert_claude_request_to_codex,
+            crate::codex::claude::convert_claude_request_to_codex_with_compat,
+        ] {
+            let mut messages = vec![calls.clone()];
+            if reminder {
+                messages.push(json!({"role":"system","content":"held reminder"}));
+            }
+            let plain = json!({"messages":messages.iter().cloned().chain([results.clone()]).collect::<Vec<_>>()});
+            messages.push(json!({"role":"assistant","content":vec![
+                json!({"type":"thinking","thinking":"","signature":" cpa:commentary:v1 "});count]}));
+            messages.push(results.clone());
+            let (out, error) = convert("gpt-5.4", &json!({"messages":messages}));
+            assert_eq!(error, None);
+            let items = out["input"].as_array().unwrap();
+            assert_eq!(items.len(), if reminder { 5 } else { 4 });
+            assert_eq!(items[0]["type"], "function_call");
+            assert_eq!(items[1]["type"], "function_call");
+            let first_result = if reminder { 3 } else { 2 };
+            if reminder {
+                assert_eq!(items[2]["type"], "message");
+                assert_eq!(items[2]["role"], "user");
+                assert!(
+                    items[2]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("held reminder")
+                );
+            }
+            assert_eq!(items[first_result]["type"], "function_call_output");
+            assert_eq!(items[first_result]["call_id"], "call_b");
+            assert_eq!(items[first_result + 1]["type"], "function_call_output");
+            assert_eq!(items[first_result + 1]["call_id"], "call_a");
+            assert!(!out.to_string().contains("cpa:commentary:v1"));
+            // Removing the message is deliberately different for Codex.
+            let (without_marker, error) = convert("gpt-5.4", &plain);
+            assert_eq!(error, None);
+            assert_eq!(without_marker["input"][2]["call_id"], "call_a");
+            assert_eq!(without_marker["input"][3]["call_id"], "call_b");
+            if reminder {
+                assert_eq!(without_marker["input"][4]["type"], "message");
+            }
+        }
+    }
+}
+
+#[test]
+fn r3_codex_empty_commentary_keeps_result_order() {
+    check_codex_inline_empty_commentary(false);
+}
+
+#[test]
+fn r3_codex_empty_commentary_releases_held_reminder_before_results() {
+    check_codex_inline_empty_commentary(true);
 }
