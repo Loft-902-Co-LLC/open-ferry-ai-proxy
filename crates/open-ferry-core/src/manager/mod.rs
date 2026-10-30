@@ -426,7 +426,7 @@ pub(crate) struct State {
     /// waits for it to be zero, so an older save cannot land on top of what
     /// was adopted.
     pub(crate) pending_saves: HashMap<String, u32>,
-    /// Only ordinary policy-update publications whose saves have not completed.
+    /// Policy updates and credential-changing refreshes whose saves have not completed.
     /// Scoped to a registration; failures release their guard just like successes.
     pub(crate) pending_policy_saves: HashMap<(String, u64), u32>,
     /// Counts the publications of a snapshot to be saved, over all

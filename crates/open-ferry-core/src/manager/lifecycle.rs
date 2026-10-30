@@ -1070,8 +1070,8 @@ impl Manager {
         )
     }
 
-    /// Only a policy publication whose save has not returned postpones a read.
-    /// Failed edits leave no pending policy state, regardless of later counter saves.
+    /// Only policy or token-changing publications whose saves are outstanding
+    /// postpone a read. Failed edits leave no pending state for later counter saves.
     fn policy_edit_pending(&self, state: &State, auth: &Auth) -> bool {
         state
             .pending_policy_saves
@@ -1165,7 +1165,8 @@ impl Manager {
             && equal_fold(entry.auth.provider.trim(), captured.provider.trim())
             && (entry.auth.policy_generation != captured.policy_generation
                 || entry.auth.credential_version != captured.credential_version
-                || !same_observation_policy(captured, &entry.auth))
+                || !same_observation_policy(captured, &entry.auth)
+                || (!replace && self.policy_edit_pending(&state, &entry.auth)))
         {
             return Ok(ObservedUpdate::Retry);
         }
@@ -1730,8 +1731,8 @@ impl Manager {
         state.auths.insert(snapshot.id.clone(), entry);
         state.sync_scheduler(self.models(), &snapshot.id, now);
         let mut pending = self.pending_save(state, &snapshot.id, save);
-        if !is_refresh
-            && !is_file_observation
+        if !is_file_observation
+            && (!is_refresh || changed)
             && let Some(pending) = pending.as_mut()
         {
             pending.mark_policy(state, live_epoch);
@@ -2887,6 +2888,7 @@ impl Manager {
                 entry.owed_save = Some(super::OwedSave { reason, version });
             }
         }
+        let id = crate::observe::mask::mask_emails(id);
         tracing::warn!("credential save deferred for {id}: {reason:?}");
     }
 
@@ -3091,6 +3093,7 @@ impl Manager {
             && crate::auth::codex_refresh::is_codex_auth(&snapshot)
             && !inline_ineligible;
         let manager = self.clone();
+        let refusal_auth = snapshot.clone();
         let work = move || {
             let mut deferred = false;
             match manager.persist(
@@ -3124,7 +3127,13 @@ impl Manager {
                 // Dropping its handle does not cancel persistence.
                 drop(operation.run_blocking(work));
             } else {
-                tracing::warn!("credential state save refused: operation gate is not open");
+                log_persist_failure(
+                    &refusal_auth,
+                    "credential state save",
+                    &ManagerError::NotActive(crate::gate::NotActive {
+                        state: self.gate().state(),
+                    }),
+                );
             }
         } else {
             work();

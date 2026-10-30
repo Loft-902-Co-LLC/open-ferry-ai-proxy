@@ -98,9 +98,9 @@ async fn refresh_persist_failure_logs_warn() {
 #[test]
 fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
     use crate::auth::{Auth, AuthStore};
-    use crate::manager::{CallResult, Manager, lock};
+    use crate::manager::{CallResult, Manager};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
 
     struct Store(AtomicBool);
     impl AuthStore for Store {
@@ -127,31 +127,6 @@ fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
             ))
         }
     }
-    struct Fields(String);
-    impl tracing::field::Visit for Fields {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.0.push_str(&format!("{}={value:?} ", field.name()));
-        }
-    }
-    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
-    impl tracing::Subscriber for Capture {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut fields = Fields(String::new());
-            event.record(&mut fields);
-            lock(&self.0).push((*event.metadata().level(), fields.0));
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-    crate::test_tracing::keep_every_callsite_open();
     for action in [
         "register",
         "status",
@@ -177,8 +152,7 @@ fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
         auth.file_name = "claude-1a2b3c4d-john.doe@example.com-plus.json".into();
         let before = manager.register(auth.clone()).unwrap();
         store.0.store(true, Ordering::SeqCst);
-        let events = Arc::new(Mutex::new(Vec::new()));
-        tracing::subscriber::with_default(Capture(events.clone()), || match action {
+        let events = captured_log_events(|| match action {
             "register" => {
                 manager.register(auth).unwrap();
             }
@@ -229,7 +203,6 @@ fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
                 );
             }
         });
-        let events = lock(&events);
         let failures: Vec<_> = events
             .iter()
             .filter(|(_, text)| text.contains("failed to persist credential"))
@@ -256,5 +229,142 @@ fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
         ] {
             assert!(!line.contains(secret), "secret scrubbed for {action}");
         }
+    }
+}
+
+fn captured_log_events(action: impl FnOnce()) -> Vec<(tracing::Level, String)> {
+    use crate::manager::lock;
+    use std::sync::{Arc, Mutex};
+
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?} ", field.name()));
+        }
+    }
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            lock(&self.0).push((*event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    crate::test_tracing::keep_every_callsite_open();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Capture(events.clone()), action);
+    lock(&events).clone()
+}
+
+#[tokio::test]
+async fn round7_refused_detached_save_logs_masked_file_and_cause() {
+    use crate::gate::ActiveGate;
+    use crate::manager::CallResult;
+
+    let h = Harness::with_store(Settings::default());
+    let mut auth = auth_with_metadata(
+        "codex-1a2b3c4d-john.doe@example.com-plus.json",
+        "codex",
+        json!({"access_token":"dummy-access", "refresh_token":"dummy-refresh"}),
+    );
+    auth.file_name = auth.id.clone();
+    let initial = h.manager.register_unsaved(auth).unwrap();
+    let (gate, _activation) = ActiveGate::standby();
+    h.manager.set_gate(gate);
+    let events = captured_log_events(|| {
+        h.manager.mark_result(&CallResult {
+            auth_id: initial.id.clone(),
+            provider: "codex".into(),
+            success: true,
+            ..Default::default()
+        });
+    });
+    let refused: Vec<_> = events
+        .iter()
+        .filter(|(_, line)| line.contains("credential state save refused"))
+        .collect();
+    assert_eq!(refused.len(), 1);
+    let (level, line) = refused[0];
+    assert_eq!(*level, tracing::Level::WARN);
+    assert!(line.contains("file=codex-1a2b3c4d-j***@e***.com-plus.json"));
+    assert!(line.contains("open-ferry is not the active version (closed)"));
+    assert!(!line.contains("john.doe@example.com"));
+    assert!(!line.contains("dummy-access"));
+    assert!(!line.contains("dummy-refresh"));
+    assert!(h.store.saved().is_empty());
+    assert!(h.manager.lock().pending_saves.is_empty());
+}
+
+#[test]
+fn round7_save_deferral_masks_an_email_in_the_credential_id() {
+    use crate::auth::{
+        Auth, AuthStore, CodexOrigin, GuardedSave, SaveDeferral, WithheldPartitions,
+    };
+    use crate::manager::Manager;
+    use std::sync::Arc;
+
+    struct DeferredStore;
+    impl AuthStore for DeferredStore {
+        fn list(&self) -> std::io::Result<Vec<Auth>> {
+            Ok(Vec::new())
+        }
+        fn save(&self, auth: &Auth) -> std::io::Result<String> {
+            Ok(auth.file_name.clone())
+        }
+        fn delete(&self, _: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn save_guarded(
+            &self,
+            _auth: &Auth,
+            guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
+        ) -> std::io::Result<GuardedSave> {
+            let reason = guard(None).err().unwrap_or(SaveDeferral::RefreshInFlight);
+            Ok(GuardedSave::Deferred(reason))
+        }
+    }
+    let manager = Manager::new(
+        Settings::default(),
+        Arc::new(FakeModels::default()),
+        Some(Arc::new(DeferredStore)),
+    );
+    let mut auth = auth_with_metadata(
+        "codex-1a2b3c4d-john.doe@example.com-plus.json",
+        "codex",
+        json!({"access_token":"dummy-access", "refresh_token":"dummy-refresh"}),
+    );
+    auth.file_name = auth.id.clone();
+    let initial = manager.register_unsaved(auth).unwrap();
+    let events = captured_log_events(|| {
+        manager
+            .edit(&initial.id, |auth| {
+                auth.metadata.insert("note".into(), json!("operator"));
+                Ok::<_, ()>(true)
+            })
+            .unwrap()
+            .unwrap();
+    });
+    let deferred: Vec<_> = events
+        .iter()
+        .filter(|(_, line)| line.contains("credential save deferred for "))
+        .collect();
+    assert!(!deferred.is_empty());
+    for (level, line) in deferred {
+        assert_eq!(*level, tracing::Level::WARN);
+        assert!(line.contains("codex-1a2b3c4d-j***@e***.com-plus.json"));
+        assert!(line.contains("RefreshInFlight"));
+        assert!(!line.contains("john.doe@example.com"));
+        assert!(!line.contains("dummy-access"));
+        assert!(!line.contains("dummy-refresh"));
     }
 }

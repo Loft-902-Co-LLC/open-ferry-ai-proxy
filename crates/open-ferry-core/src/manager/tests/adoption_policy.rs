@@ -439,3 +439,198 @@ fn round6_repeating_a_failed_policy_edit_waits_for_its_actual_save() {
         "operator"
     );
 }
+
+#[test]
+fn round7_observation_waits_for_a_refresh_that_changes_tokens() {
+    use crate::manager::CallResult;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for changes_tokens in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileStore::new(dir.path()));
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(store.clone()),
+        );
+        let mut auth = auth_with_metadata(
+            "refresh.json",
+            "claude",
+            serde_json::json!({
+                "type":"claude", "access_token":"dummy-access-r1",
+                "refresh_token":"dummy-refresh-r1"
+            }),
+        );
+        auth.file_name = auth.id.clone();
+        let initial = manager.register(auth).unwrap();
+        let (published_tx, published_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let once = AtomicBool::new(true);
+        *lock(&manager.shared.persist_hook) = Some(Arc::new(move |_| {
+            if once.swap(false, Ordering::SeqCst) {
+                published_tx.send(()).unwrap();
+                lock(&release_rx)
+                    .recv_timeout(Duration::from_secs(30))
+                    .unwrap();
+            }
+        }));
+        let refresher = manager.clone();
+        let base = initial.clone();
+        let refresh = std::thread::spawn(move || {
+            let mut updated = base.as_ref().clone();
+            if changes_tokens {
+                updated.metadata["access_token"] = serde_json::json!("dummy-access-r2");
+                updated.metadata["refresh_token"] = serde_json::json!("dummy-refresh-r2");
+            }
+            updated.last_refreshed_at = Some(refresher.now());
+            refresher
+                .update_refreshed(&base, base.registration_epoch, updated)
+                .unwrap()
+                .unwrap()
+        });
+        published_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let mut read = false;
+        let observed = manager
+            .adopt_observed(&initial, None, |live| {
+                read = true;
+                Ok(AdoptionRead::Record(
+                    store.read_back(live).unwrap().unwrap(),
+                ))
+            })
+            .unwrap();
+        release_tx.send(()).unwrap();
+        refresh.join().unwrap();
+        *lock(&manager.shared.persist_hook) = None;
+        let live_after_save = manager.get(&initial.id).unwrap();
+        let disk_after_save = store.read_back(&initial).unwrap().unwrap();
+        manager.mark_result(&CallResult {
+            auth_id: initial.id.clone(),
+            provider: "claude".into(),
+            success: true,
+            ..Default::default()
+        });
+        let disk_after_result = store.read_back(&initial).unwrap().unwrap();
+        if changes_tokens {
+            assert!(
+                !read,
+                "F2a: an outstanding token-changing refresh must postpone the read"
+            );
+            assert!(matches!(observed, AdoptionResult::Retry));
+        } else {
+            assert!(
+                read,
+                "a refresh without token changes need not postpone the read"
+            );
+            assert!(matches!(observed, AdoptionResult::Published { .. }));
+        }
+        let expected = if changes_tokens {
+            "dummy-access-r2"
+        } else {
+            "dummy-access-r1"
+        };
+        for record in [
+            live_after_save.as_ref(),
+            &disk_after_save,
+            &disk_after_result,
+        ] {
+            assert_eq!(record.metadata["access_token"], expected);
+            assert_eq!(
+                record.metadata["refresh_token"],
+                if changes_tokens {
+                    "dummy-refresh-r2"
+                } else {
+                    "dummy-refresh-r1"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn round7_repeated_edit_published_during_read_retries_the_observation() {
+    use crate::auth::file_guard::FileGuard;
+    use crate::manager::CallResult;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fail = Arc::new(AtomicBool::new(false));
+    let failing = fail.clone();
+    let store = Arc::new(
+        FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(move |_| {
+            if failing.load(Ordering::SeqCst) {
+                Err("test save refusal".into())
+            } else {
+                Ok(())
+            }
+        }))),
+    );
+    let manager = Manager::new(
+        Settings::default(),
+        Arc::new(FakeModels::default()),
+        Some(store.clone()),
+    );
+    let mut auth = auth_with_metadata(
+        "during-read.json",
+        "claude",
+        serde_json::json!({"type":"claude", "access_token":"dummy", "note":"before"}),
+    );
+    auth.file_name = auth.id.clone();
+    let initial = manager.register(auth).unwrap();
+    fail.store(true, Ordering::SeqCst);
+    let edit_note = |auth: &mut crate::auth::Auth| {
+        auth.metadata["note"] = serde_json::json!("operator");
+        Ok::<_, ()>(true)
+    };
+    let edited = manager.edit(&initial.id, edit_note).unwrap().unwrap();
+    fail.store(false, Ordering::SeqCst);
+    let (read_tx, read_rx) = mpsc::channel();
+    let (published_tx, published_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let once = AtomicBool::new(true);
+    *lock(&manager.shared.persist_hook) = Some(Arc::new(move |auth| {
+        if auth.metadata["note"] == "operator" && once.swap(false, Ordering::SeqCst) {
+            published_tx.send(()).unwrap();
+            lock(&release_rx)
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
+        }
+    }));
+    let editor = manager.clone();
+    let repeat = std::thread::spawn(move || {
+        read_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        editor.edit("during-read.json", edit_note).unwrap().unwrap()
+    });
+    let mut during_read = None;
+    let observed = manager
+        .adopt_observed(&edited, None, |live| {
+            let record = store.read_back(live).unwrap().unwrap();
+            read_tx.send(()).unwrap();
+            published_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            during_read = manager.get(&initial.id);
+            Ok(AdoptionRead::Record(record))
+        })
+        .unwrap();
+    release_tx.send(()).unwrap();
+    repeat.join().unwrap();
+    *lock(&manager.shared.persist_hook) = None;
+    let during_read = during_read.unwrap();
+    let after_save = manager.get(&initial.id).unwrap();
+    manager.mark_result(&CallResult {
+        auth_id: initial.id.clone(),
+        provider: "claude".into(),
+        success: true,
+        ..Default::default()
+    });
+    let final_disk = store.read_back(&initial).unwrap().unwrap();
+    assert_eq!(during_read.policy_generation, edited.policy_generation);
+    assert_eq!(during_read.credential_version, edited.credential_version);
+    assert_eq!(during_read.metadata, edited.metadata);
+    assert!(
+        matches!(observed, AdoptionResult::Retry),
+        "F2b: a repeated edit published during the read must invalidate that read"
+    );
+    assert_eq!(after_save.metadata["note"], "operator");
+    assert_eq!(final_disk.metadata["note"], "operator");
+}

@@ -703,7 +703,7 @@ async fn synchronous_codex_results_keep_the_drain_refusal_warning() {
     assert!(
         String::from_utf8(lock(&logs).clone())
             .unwrap()
-            .contains("credential state save refused: operation gate is not open")
+            .contains("credential state save refused: the gate is not open")
     );
     assert!(h.manager.lock().pending_saves.is_empty());
 }
