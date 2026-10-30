@@ -43,7 +43,7 @@ use open_ferry_core::config::Config;
 use open_ferry_core::gate::ActiveGate;
 use open_ferry_core::manager::Manager;
 use open_ferry_core::observe::Observability;
-use open_ferry_core::registry::ModelRegistry;
+use open_ferry_core::registry::{CatalogRuntime, ModelRegistry};
 use open_ferry_translate::go::trim_space;
 use open_ferry_update::UpdateService;
 
@@ -96,6 +96,7 @@ struct Loaded {
 #[derive(Clone, Default)]
 struct Parts {
     store: Option<Arc<FileStore>>,
+    catalogs: Option<CatalogRuntime>,
     sync: Option<Arc<dyn CredentialSync>>,
     config_path: Option<PathBuf>,
     config_read_check: Option<Arc<ConfigReadCheck>>,
@@ -156,6 +157,20 @@ impl ManagementState {
             }),
             parts: Arc::default(),
         }
+    }
+
+    /// Uses the service's catalog runtime for manual refresh and notifications.
+    #[must_use]
+    pub fn with_catalogs(mut self, catalogs: CatalogRuntime) -> Self {
+        Arc::make_mut(&mut self.parts).catalogs = Some(catalogs);
+        self
+    }
+
+    pub(crate) fn catalogs(&self) -> &CatalogRuntime {
+        self.parts
+            .catalogs
+            .as_ref()
+            .unwrap_or_else(|| CatalogRuntime::global())
     }
 
     /// Keeps credential files in `store`'s auth directory (upstream's

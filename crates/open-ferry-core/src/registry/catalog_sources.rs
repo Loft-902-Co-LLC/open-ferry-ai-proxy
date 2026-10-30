@@ -48,6 +48,9 @@
 //!   Devin isn't ported. Home mode isn't ported, so the general catalog is
 //!   never turned off.
 
+mod on_demand;
+pub use on_demand::{CatalogRefreshResult, CatalogSourceStatus, RefreshCancellation};
+
 use std::fs::File;
 use std::io::Read as _;
 use std::path::Path;
@@ -245,6 +248,8 @@ struct UpdaterState {
     generation: u64,
     /// Stops the thread following the file when dropped.
     poller: Option<Sender<()>>,
+    request_seq: u64,
+    published_seq: u64,
 }
 
 impl Updater {
@@ -322,33 +327,15 @@ impl Updater {
     /// Reads `source` and publishes it if `generation` is still current
     /// (upstream's `refresh`).
     fn refresh(&self, source: &str, generation: u64) {
-        let data = match (self.fetch)(source) {
-            Ok(data) => data,
-            Err(error) => {
-                if lock(&self.state).generation == generation {
-                    tracing::warn!(
-                        setting = %format_args!("models.{}", self.setting),
-                        error = %error,
-                        "model catalog refresh failed; keeping last valid catalog"
-                    );
-                }
-                return;
-            }
-        };
-        let published = {
-            let state = lock(&self.state);
-            if state.generation != generation {
-                return;
-            }
-            (self.publish)(&data)
-        };
-        match published {
-            Ok(changed) => self.notifier.notify(changed),
-            Err(error) => tracing::warn!(
+        let seq = self.next_sequence();
+        if let Err(error) =
+            self.read_and_publish(source, generation, seq, &RefreshCancellation::default())
+        {
+            tracing::warn!(
                 setting = %format_args!("models.{}", self.setting),
                 error = %error,
-                "model catalog rejected; keeping last valid catalog"
-            ),
+                "model catalog refresh failed; keeping last valid catalog"
+            );
         }
     }
 

@@ -32,7 +32,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::Uri;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use http::StatusCode;
 use open_ferry_core::auth::compat::openai_compatible_provider_key;
 use open_ferry_core::models::ModelInfo;
@@ -49,6 +49,11 @@ use crate::state::ManagementState;
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
     vec![
+        Route::key(
+            "/v8/management/routing/model-definitions/refresh",
+            post(refresh),
+        ),
+        Route::key("/v8/management/models/refresh", post(refresh)),
         Route::key(
             "/v0/management/model-definitions/{channel}",
             get(definitions),
@@ -81,7 +86,7 @@ async fn definitions(
     if channel.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = resolved_models(&StaticCatalog::current(), state.registry(), &channel);
+    let models = resolved_models(&state.catalogs().general(), state.registry(), &channel);
     if models.is_empty() {
         return json::response(
             StatusCode::BAD_REQUEST,
@@ -178,4 +183,56 @@ fn model(model: &ModelInfo) -> Json {
             }),
         )
         .done()
+}
+
+/// Dropping an HTTP request fences any blocking file read still in progress.
+struct CancelRefresh(open_ferry_core::registry::catalog_sources::RefreshCancellation);
+
+impl Drop for CancelRefresh {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn refresh(State(state): State<ManagementState>) -> Response {
+    let sources = state.config().models.clone();
+    if let Err(error) = sources.validate() {
+        return json::response(
+            StatusCode::BAD_REQUEST,
+            &Json::Any(serde_json::json!({
+                "ok": false, "error": error.to_string(),
+            })),
+        );
+    }
+    let runtime = state.catalogs().clone();
+    let cancel = CancelRefresh(Default::default());
+    let cancellation = cancel.0.clone();
+    let result =
+        tokio::task::spawn_blocking(move || runtime.refresh(&sources, &cancellation)).await;
+    let result = match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            return json::response(
+                StatusCode::BAD_REQUEST,
+                &Json::Any(serde_json::json!({"ok": false, "error": error})),
+            );
+        }
+        Err(_) => return json::error(StatusCode::BAD_GATEWAY, "model catalog refresh failed"),
+    };
+    let failed = result.has_errors();
+    let mut body = serde_json::to_value(result).expect("catalog refresh result is serializable");
+    body["ok"] = (!failed).into();
+    if failed {
+        body["error"] = "model catalog refresh failed; keeping last valid catalog".into();
+    } else {
+        body["status"] = "ok".into();
+    }
+    json::response(
+        if failed {
+            StatusCode::BAD_GATEWAY
+        } else {
+            StatusCode::OK
+        },
+        &Json::Any(body),
+    )
 }

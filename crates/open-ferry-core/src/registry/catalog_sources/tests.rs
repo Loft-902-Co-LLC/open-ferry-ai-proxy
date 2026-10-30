@@ -497,3 +497,143 @@ impl tracing::field::Visit for Line {
         let _ = write!(self.0, " {}={value:?}", field.name());
     }
 }
+
+#[test]
+fn manual_refresh_reads_files_retains_valid_data_and_notifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "models.json",
+        &with_claude_model("claude-manual"),
+    );
+    let runtime = CatalogRuntime::new(Arc::new(CatalogStore::new()), NEVER);
+    let (tx, rx) = mpsc::channel();
+    runtime.set_listener(Some(Arc::new(move |changed| {
+        tx.send(changed).unwrap();
+    })));
+    let cancellation = RefreshCancellation::default();
+    let config = sources(&path, "");
+    let result = runtime.refresh(&config, &cancellation).unwrap();
+    assert!(!result.has_errors());
+    assert!(result.catalogs["catalog"].refreshed);
+    assert!(result.catalogs["codex-catalog"].skipped);
+    assert!(result.catalogs["devin-catalog"].skipped);
+    assert_eq!(result.changed_providers, ["claude"]);
+    assert_eq!(rx.try_recv().unwrap(), ["claude"]);
+    assert!(
+        runtime
+            .refresh(&config, &cancellation)
+            .unwrap()
+            .changed_providers
+            .is_empty()
+    );
+    std::fs::write(&path, b"invalid").unwrap();
+    assert!(
+        runtime
+            .refresh(&config, &cancellation)
+            .unwrap()
+            .has_errors()
+    );
+    assert!(runtime.general().lookup("claude-manual").is_some());
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    let result = runtime
+        .refresh(
+            &sources("https://example.test/no-fetch?token=secret", ""),
+            &cancellation,
+        )
+        .unwrap();
+    assert!(result.catalogs["catalog"].skipped);
+    assert!(!serde_json::to_string(&result).unwrap().contains("secret"));
+    assert!(
+        runtime
+            .refresh(&sources("relative", ""), &cancellation)
+            .is_err()
+    );
+}
+
+#[test]
+fn manual_refresh_uses_active_sources_and_keeps_last_valid_codex_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "codex.json", &codex_with_one_model());
+    let runtime = CatalogRuntime::new(Arc::new(CatalogStore::new()), NEVER);
+    let config = sources("", &path);
+    runtime.start(&config);
+    let cancellation = RefreshCancellation::default();
+    let result = runtime
+        .refresh(&CatalogSources::default(), &cancellation)
+        .unwrap();
+    assert_eq!(result.codex_catalog, path);
+    assert!(result.catalogs["codex-catalog"].refreshed);
+    std::fs::write(&path, br#"{"models":[]}"#).unwrap();
+    assert!(
+        runtime
+            .refresh(&config, &cancellation)
+            .unwrap()
+            .has_errors()
+    );
+    assert_eq!(runtime.store().codex().unwrap().templates().count(), 1);
+    runtime.stop();
+}
+
+#[test]
+fn manual_refresh_fences_cancelled_stale_and_older_completions() {
+    for mode in [
+        "cancel",
+        "source-change",
+        "stop",
+        "newer-manual",
+        "newer-background",
+    ] {
+        let (started, starts) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let resumed = Mutex::new(resumed);
+        let (published, publications) = mpsc::channel();
+        let updater = updater(
+            move |source| {
+                if source.ends_with("old") {
+                    started.send(()).unwrap();
+                    lock(&resumed).recv().unwrap();
+                }
+                Ok(source.as_bytes().to_vec())
+            },
+            move |data| {
+                published.send(data.to_vec()).unwrap();
+                Ok(vec!["claude".into()])
+            },
+        );
+        let cancellation = RefreshCancellation::default();
+        let worker = Arc::clone(&updater);
+        let cancelled = cancellation.clone();
+        let task = thread::spawn(move || {
+            let request = worker.request(&file_source("old"));
+            worker.on_demand(request, &cancelled)
+        });
+        starts.recv_timeout(Duration::from_secs(10)).unwrap();
+        match mode {
+            "cancel" => cancellation.cancel(),
+            "source-change" => updater.configure(""),
+            "stop" => updater.stop(),
+            "newer-manual" => {
+                let request = updater.request(&file_source("new"));
+                assert!(updater.on_demand(request, &Default::default()).refreshed);
+            }
+            "newer-background" => updater.refresh(&file_source("new"), 0),
+            _ => unreachable!(),
+        }
+        resume.send(()).unwrap();
+        let status = task.join().unwrap();
+        if mode.starts_with("newer") {
+            assert!(status.refreshed);
+        } else {
+            assert!(status.error.is_some(), "{mode}");
+        }
+        let results: Vec<_> = publications.try_iter().collect();
+        assert!(
+            !results.contains(&file_source("old").into_bytes()),
+            "{mode}: {results:?}"
+        );
+        if mode.starts_with("newer") {
+            assert_eq!(results, [file_source("new").into_bytes()]);
+        }
+    }
+}
