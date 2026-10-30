@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n";
 const EMPTY_METADATA: &str = "event: response.metadata\ndata:";
 const DATA_FIRST: &str = "data: {\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}";
-const SPLIT_FIELD: &str = "responses-sse-split-standard-field";
 const BARE_WORD: &str = "responses-sse-bare-word-data-continuation";
 const PRIVATE_RECOVERY: &str = "responses-sse-malformed-private-recovery";
 
@@ -208,14 +207,6 @@ fn field_prefixes_in_json_strings_are_not_sse_fields() {
     }
 }
 
-#[test]
-fn fragmented_standard_data_field_preserves_malformed_payload() {
-    for codex in [false, true] {
-        let (got, _) = run(codex, &[b"data", b": not-json\n\n"]);
-        assert_eq!(got, "data: not-json\n\n");
-    }
-}
-
 // Exact expected differences from the literal v8.0.47 oracle. No catch-all
 // exception: each retained difference has a concrete corrupted/lost event.
 #[test]
@@ -229,13 +220,6 @@ fn upstream_expected_framing_differences() {
     }
     let differences = [
         Difference {
-            name: "responses-sse-split-standard-field",
-            reason: "upstream turns the data-field colon into a comment, losing the data event",
-            chunks: &[b"data", b": not-json\n\n"],
-            upstream: &[b"data\n: not-json\n\n"],
-            retained: &[b"data: not-json\n\n"],
-        },
-        Difference {
             name: "responses-sse-bare-word-data-continuation",
             reason: "upstream emits empty custom data and separates its malformed payload into a no-data frame",
             chunks: &[b"event: custom\ndata:", b"bad\n\n"],
@@ -244,7 +228,7 @@ fn upstream_expected_framing_differences() {
         },
         Difference {
             name: "responses-sse-malformed-private-recovery",
-            reason: "upstream inserts a comment before the type value and leaks private metadata; Codex receives corrupted bytes",
+            reason: "upstream hides the malformed private type behind a synthetic comment and leaks it to standard clients",
             chunks: &[b"data: {\"type\"", b":\"response.metadata\",\"bad\":}\n\n"],
             upstream: &[b"data: {\"type\"\n:\"response.metadata\",\"bad\":}\n\n"],
             retained: &[b"data: {\"type\":\"response.metadata\",\"bad\":}\n\n"],
@@ -264,19 +248,32 @@ fn upstream_expected_framing_differences() {
                 difference.name, difference.reason
             );
             assert_eq!(
-                framer.frames, difference.retained,
+                framer.frames,
+                if codex && difference.name == PRIVATE_RECOVERY {
+                    difference.upstream
+                } else {
+                    difference.retained
+                },
                 "{}: {}",
-                difference.name, difference.reason
+                difference.name,
+                difference.reason
             );
-            assert_ne!(oracle.frames, framer.frames, "{}", difference.name);
+            if !codex || difference.name != PRIVATE_RECOVERY {
+                assert_ne!(oracle.frames, framer.frames, "{}", difference.name);
+            }
             if difference.name == "responses-sse-malformed-private-recovery" {
                 assert_eq!(out.is_empty(), !codex);
                 if codex {
-                    assert_eq!(out.as_bytes(), difference.retained[0]);
+                    assert_eq!(out.as_bytes(), upstream::wire(&oracle.frames).as_ref());
                 }
+                let mut upstream_sink = Framer::new(false);
+                let upstream_visible = upstream_sink.repair_frame(&oracle.frames[0]);
+                assert!(!upstream_visible.is_empty());
                 assert!(
-                    String::from_utf8_lossy(&upstream::wire(&oracle.frames))
-                        .contains("response.metadata")
+                    Framer::new(false)
+                        .repair_frame(&framer.frames[0])
+                        .is_empty()
+                        || codex
                 );
             } else {
                 assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
@@ -549,7 +546,7 @@ fn recovered_terminal_output_is_rebuilt_exactly_once() {
     }
 }
 
-const PARTITION_INVARIANT: &str = "Every partition matches the independent v8.0.47 oracle's recovered pre-repair frames (event, data, id, retry, comments and no-data frames) and terminal decision, except explicitly listed fixtures under the three named differences.";
+const PARTITION_INVARIANT: &str = "Every partition matches the independent v8.0.47 oracle's recovered pre-repair frame bytes (including CR/LF, whitespace, field order and repeated fields) and terminal decision, except explicitly listed fixtures under the two named differences.";
 
 fn partition_streams() -> Vec<Vec<u8>> {
     let mut streams: Vec<Vec<u8>> = vec![
@@ -583,7 +580,9 @@ fn partition_streams() -> Vec<Vec<u8>> {
         "data: {\"type\":\"response.metadata\",\"metadata\":{\"marker\":\"data: private\"}}\n\n",
         "data: {\"type\"\n:\ndata: :\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n",
     ] {
-        streams.push(wire.as_bytes().to_vec());
+        if !streams.iter().any(|stream| stream == wire.as_bytes()) {
+            streams.push(wire.as_bytes().to_vec());
+        }
     }
     streams
 }
@@ -606,15 +605,11 @@ fn frame_fields(frames: &[Vec<u8>]) -> Vec<FrameFields> {
                 data: None,
                 other: Vec::new(),
             };
-            let mut event_seen = false;
             for line in frame.split(|&byte| byte == b'\n') {
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 let trimmed = go::trim_space(line);
                 if let Some(event) = trimmed.strip_prefix(b"event:") {
-                    if !event_seen {
-                        fields.event = String::from_utf8_lossy(go::trim_space(event)).into_owned();
-                        event_seen = true;
-                    }
+                    fields.event = String::from_utf8_lossy(go::trim_space(event)).into_owned();
                 } else if let Some(data) = trimmed.strip_prefix(b"data:") {
                     if let Some(payload) = &mut fields.data {
                         payload.push(b'\n');
@@ -635,10 +630,22 @@ fn frame_fields(frames: &[Vec<u8>]) -> Vec<FrameFields> {
 
 fn for_each_partition(wire: &[u8], mut check: impl FnMut(&[&[u8]])) {
     check(&wire.chunks(1).collect::<Vec<_>>());
+    let mut boundaries = std::collections::BTreeSet::from([0, wire.len()]);
+    for (i, &byte) in wire.iter().enumerate() {
+        if byte == b':' || i == 0 || wire[i - 1] == b'\n' {
+            for cut in i.saturating_sub(1)..=(i + 1).min(wire.len()) {
+                boundaries.insert(cut);
+            }
+        }
+    }
     for a in 0..=wire.len() {
         check(&[&wire[..a], &wire[a..]]);
         if wire.len() <= 60 {
             for b in a..=wire.len() {
+                check(&[&wire[..a], &wire[a..b], &wire[b..]]);
+            }
+        } else if boundaries.contains(&a) {
+            for &b in boundaries.range(a..) {
                 check(&[&wire[..a], &wire[a..b], &wire[b..]]);
             }
         }
@@ -667,117 +674,6 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
             retained,
         });
     };
-    // Field-colon splits. The masks enumerate only the named field occurrences
-    // in each fixture; both single-field and bytewise combinations are explicit.
-    for (stream, fields) in [
-        (1, &["event", "data"][..]),
-        (2, &["id", "retry"][..]),
-        (5, &["event", "data"][..]),
-        (7, &["event"][..]),
-        (11, &["event"][..]),
-        (12, &["id", "retry"][..]),
-        (13, &["event"][..]),
-        (14, &["event"][..]),
-        (16, &["event"][..]),
-    ] {
-        for mask in 1..1 << fields.len() {
-            let mut broken = String::from_utf8(streams[stream].clone()).unwrap();
-            for (i, field) in fields.iter().enumerate() {
-                if mask & (1 << i) != 0 {
-                    broken = broken.replacen(&format!("{field}:"), &format!("{field}\n:"), 1);
-                }
-            }
-            let mut endings = vec![broken.as_bytes().to_vec()];
-            if stream == 12 {
-                endings.push(broken.replace("\r\n", "\n").into_bytes());
-            }
-            for (ending, upstream) in endings.into_iter().enumerate() {
-                add(
-                    &[SPLIT_FIELD],
-                    stream,
-                    format!("family-{stream}/field-mask-{mask}/ending-{ending}"),
-                    vec![upstream],
-                    vec![streams[stream].clone()],
-                );
-            }
-        }
-    }
-    // A split data colon delays upstream emission until its recovery at the
-    // delimiter. Retaining the field can emit sooner, including an empty frame.
-    let wire = &streams[4];
-    let broken = String::from_utf8(wire.clone())
-        .unwrap()
-        .replacen("event:", "event\n:", 1)
-        .into_bytes();
-    for ending in 0..=2 {
-        add(
-            &[SPLIT_FIELD],
-            4,
-            format!("codex-event/early-ending-{ending}"),
-            vec![broken.clone()],
-            vec![wire[..wire.len() - 2 + ending].to_vec()],
-        );
-    }
-    for (recovery, upstream) in [broken, wire.clone()].into_iter().enumerate() {
-        add(
-            &[SPLIT_FIELD],
-            4,
-            format!("codex-event/early-plus-blank/recovery-{recovery}"),
-            vec![upstream],
-            vec![wire[..wire.len() - 2].to_vec(), b"\n\n".to_vec()],
-        );
-    }
-    // Data-first completion: splitting either its data or event field changes
-    // when upstream can emit. Enumerate every prefix of this particular name,
-    // rather than accepting arbitrary partial event names or terminal losses.
-    let wire = &streams[10];
-    let text = String::from_utf8(wire.clone()).unwrap();
-    let event_colon = text.find("event:").unwrap() + "event:".len();
-    let event_end = wire.len() - 2;
-    let broken_event = text.replacen("event:", "event\n:", 1).into_bytes();
-    let recovered_data =
-        b"event: response.completed\ndata: {\"response\":{\"id\":\"r\"}}\n\n".to_vec();
-    for cut in event_colon..=event_end + 1 {
-        let retained = if cut < event_end {
-            vec![wire[..cut].to_vec(), wire[cut..].to_vec()]
-        } else {
-            vec![wire[..cut].to_vec()]
-        };
-        add(
-            &[SPLIT_FIELD],
-            10,
-            format!("data-first/split-event-prefix-{cut}"),
-            vec![broken_event.clone()],
-            retained.clone(),
-        );
-        if cut < event_end {
-            add(
-                &[SPLIT_FIELD],
-                10,
-                format!("data-first/split-data-prefix-{cut}"),
-                vec![recovered_data.clone()],
-                retained,
-            );
-        }
-    }
-    add(
-        &[SPLIT_FIELD],
-        10,
-        "data-first/split-event-whole".into(),
-        vec![broken_event],
-        vec![wire.clone()],
-    );
-    let broken_both =
-        b"event\n: response.completed\ndata: {\"response\":{\"id\":\"r\"}}\n\n".to_vec();
-    for (order, retained) in [wire.clone(), recovered_data].into_iter().enumerate() {
-        add(
-            &[SPLIT_FIELD],
-            10,
-            format!("data-first/split-both-fields/order-{order}"),
-            vec![broken_both.clone()],
-            vec![retained],
-        );
-    }
     // Empty metadata data followed by a bare malformed word, with/without a
     // leading space. Both are the existing bare-word-continuation difference.
     for space in ["", " "] {
@@ -792,9 +688,9 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
             vec![streams[5].clone()],
         );
     }
-    // Malformed private JSON: the two JSON colons and the data field colon
-    // are the only repair sites. A combined fixture names both differences.
-    for mask in 1..8 {
+    // Only a hidden private type changes standard-client filtering. A split
+    // after an already visible type is byte-identical to upstream.
+    for mask in [1, 2, 3, 5, 6, 7] {
         let mut broken = String::from_utf8(streams[15].clone()).unwrap();
         for (bit, from, to) in [
             (1, "data:", "data\n:"),
@@ -805,34 +701,12 @@ fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
                 broken = broken.replacen(from, to, 1);
             }
         }
-        let names: &'static [&'static str] = if mask == 1 {
-            &[SPLIT_FIELD]
-        } else if mask & 1 == 0 {
-            &[PRIVATE_RECOVERY]
-        } else {
-            &[SPLIT_FIELD, PRIVATE_RECOVERY]
-        };
         add(
-            names,
+            &[PRIVATE_RECOVERY],
             15,
             format!("malformed-private/colon-mask-{mask}"),
             vec![broken.into_bytes()],
             vec![streams[15].clone()],
-        );
-    }
-    // Bytewise versions of the three multiline recovered-wire fixtures. Their
-    // broken data-field colon prevents upstream's otherwise-valid JSON recovery.
-    for stream in [17, 19, 21] {
-        let comment = if stream == 17 { "" } else { ": keepalive\n" };
-        let broken = format!(
-            "{comment}data\n: {{\"type\"\n:\"response.metadata\",\n:{{\"marker\"\n:\"private\"}}}}\ndata: \"metadata\"\n\n"
-        );
-        add(
-            &[SPLIT_FIELD],
-            stream,
-            format!("recovered-wire-{stream}/bytewise"),
-            vec![broken.into_bytes()],
-            vec![streams[stream].clone()],
         );
     }
     differences
@@ -968,11 +842,9 @@ fn client_frames(out: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-// This separate unsplit-equality check is intentionally limited to event-first
-// delta streams with no fields after their complete data payload. It compares
-// post-repair client events, ignoring only empty delimiter-only separators.
+// Additional delta streams use the same exact upstream differential contract.
 #[test]
-fn complete_delta_streams_without_trailing_fields_are_partition_invariant() {
+fn complete_delta_streams_match_upstream_for_every_partition() {
     let delta = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n";
     let streams = [
         "event: delta\ndata: {\"delta\":\"a\"}\n\n".to_owned(),
@@ -981,16 +853,11 @@ fn complete_delta_streams_without_trailing_fields_are_partition_invariant() {
         format!(": keepalive\nid: seven\nretry: 500\n{delta}"),
         format!("{delta}{delta}{COMPLETED}"),
     ];
-    let client_events = |out: &str| frame_fields(&client_frames(out));
     for wire in &streams {
         for codex in [false, true] {
-            let expected = client_events(&run(codex, &[wire.as_bytes()]).0);
             for_each_partition(wire.as_bytes(), |chunks| {
-                assert_eq!(
-                    client_events(&run(codex, chunks).0),
-                    expected,
-                    "codex={codex} chunks={chunks:?}"
-                );
+                let (_, framer) = run(codex, chunks);
+                assert_upstream_frames(codex, chunks, &framer);
             });
         }
     }
@@ -1001,6 +868,10 @@ fn terminal_for_frames(codex: bool, frames: &[Vec<u8>]) -> String {
     oracle.write_chunk(&upstream::wire(frames));
     oracle.flush();
     oracle.terminal_event
+}
+
+fn framing_matches(framer: &Framer, oracle: &upstream::Upstream) -> bool {
+    framer.frames == oracle.frames && framer.terminal_event == oracle.terminal_event
 }
 
 #[test]
@@ -1016,7 +887,7 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
             difference
                 .names
                 .iter()
-                .all(|name| { [SPLIT_FIELD, BARE_WORD, PRIVATE_RECOVERY].contains(name) })
+                .all(|name| { [BARE_WORD, PRIVATE_RECOVERY].contains(name) })
         );
     }
     let mut hits = vec![0; differences.len()];
@@ -1031,11 +902,10 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
                     oracle.write_chunk(chunk);
                 }
                 oracle.flush();
-                if frame_fields(&framer.frames) != frame_fields(&oracle.frames)
-                    || framer.terminal_event != oracle.terminal_event
-                {
+                if !framing_matches(&framer, &oracle) {
                     let expected = differences.iter().position(|difference| {
-                        difference.stream == i
+                        (!codex || !difference.names.contains(&PRIVATE_RECOVERY))
+                            && difference.stream == i
                             && difference.upstream == oracle.frames
                             && difference.retained == framer.frames
                             && terminal_for_frames(codex, &difference.upstream)
@@ -1072,6 +942,12 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
         "{PARTITION_INVARIANT}\nsmallest mismatches: {:#?}",
         &mismatches[..mismatches.len().min(8)]
     );
+    for (difference, count) in differences.iter().zip(&hits) {
+        eprintln!(
+            "exception {} {:?}: {count} partitions",
+            difference.fixture, difference.names
+        );
+    }
     let unused: Vec<_> = differences
         .iter()
         .zip(&hits)
@@ -1082,4 +958,133 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
         unused.is_empty(),
         "unexercised exception fixtures: {unused:?}"
     );
+}
+
+fn assert_r3_split_fields(index: usize) {
+    let fixtures: &[&[&[u8]]] = &[
+        &[
+            b"data",
+            b": {\"response\":{\"id\":\"r\"}}\nevent:",
+            b" response.completed\n\n",
+        ],
+        &[
+            b"data",
+            b": {\"response\":{\"id\":\"r\"}}\nevent: respon",
+            b"se.completed\n\n",
+        ],
+        &[
+            b"data",
+            b": {\"marker\":\"private\"}\nevent: response.",
+            b"metadata\n\n",
+        ],
+        &[
+            b"event: response.completed\ndata",
+            b": {\"type\":\"response.completed\"}",
+            b"\nid: terminal\nretry: 1000\n\n",
+        ],
+        &[b": keepalive\nid: seven\nretry: 500\ndata", b": {}\r\n\r\n"],
+    ];
+    let chunks = fixtures[index];
+    for codex in [false, true] {
+        let (_, framer) = run(codex, chunks);
+        assert_upstream_frames(codex, chunks, &framer);
+    }
+}
+
+#[test]
+fn r3_already_visible_malformed_private_type_matches_upstream() {
+    let fixtures: &[(&[u8], &[u8])] = &[
+        (b"data: {\"type\":\"response.metadata\",\"bad\"", b":\n\n"),
+        (b"data: {\"type\":\" response.metadata \",\"bad\"", b":\n\n"),
+        (
+            b"event: response.metadata\ndata: {\"type\"",
+            b":\"response.metadata\",\"bad\":\n\n",
+        ),
+    ];
+    for &(prefix, suffix) in fixtures {
+        let chunks: &[&[u8]] = &[prefix, suffix];
+        for codex in [false, true] {
+            let (_, framer) = run(codex, chunks);
+            assert_upstream_frames(codex, chunks, &framer);
+        }
+    }
+}
+
+#[test]
+fn r3_hidden_malformed_private_type_preserves_codex_bytes() {
+    let chunks: &[&[u8]] = &[b"data: {\"type\"", b":\"response.metadata\",\"bad\":}\n\n"];
+    let (out, framer) = run(true, chunks);
+    assert_upstream_frames(true, chunks, &framer);
+    assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
+}
+
+#[test]
+fn r3_comparison_distinguishes_repeated_event_fields() {
+    let a = vec![b"event: a\nevent: b\ndata: {}\n\n".to_vec()];
+    let b = vec![b"event: a\nevent: c\ndata: {}\n\n".to_vec()];
+    assert_ne!(frame_fields(&a), frame_fields(&b));
+    assert_ne!(a, b);
+}
+
+#[test]
+fn r3_long_partitions_cover_field_boundaries() {
+    let wire = &partition_streams()[16];
+    let mut found = false;
+    let a = wire.windows(5).position(|w| w == b"data:").unwrap() + 4;
+    let b = wire.windows(3).position(|w| w == b"}\ni").unwrap() + 1;
+    for_each_partition(wire, |chunks| {
+        found |= chunks.len() == 3 && chunks[0].len() == a && chunks[1].len() == b - a;
+    });
+    assert!(found);
+    let streams = partition_streams();
+    let unique: std::collections::HashSet<_> = streams.iter().collect();
+    assert_eq!(streams.len(), unique.len());
+}
+
+#[test]
+fn r3_comparison_preserves_all_frame_bytes_and_terminal_decision() {
+    let input = b"event: a\nevent: b\ndata: {}\n\n";
+    let (_, framer) = run(false, &[input]);
+    for changed in [
+        &b"event: a\nevent: c\ndata: {}\n\n"[..],
+        &b"event: a\r\nevent: b\r\ndata: {}\r\n\r\n"[..],
+        &b"event: a\nevent: b\ndata:  {}\n\n"[..],
+        &b"event: a\ndata: {}\nevent: b\n\n"[..],
+    ] {
+        let mut oracle = upstream::Upstream::new(false);
+        oracle.write_chunk(changed);
+        oracle.flush();
+        assert!(!framing_matches(&framer, &oracle));
+    }
+    let mut oracle = upstream::Upstream::new(false);
+    oracle.write_chunk(input);
+    oracle.flush();
+    assert!(framing_matches(&framer, &oracle));
+    oracle.terminal_event = "response.completed".into();
+    assert!(!framing_matches(&framer, &oracle));
+}
+
+#[test]
+fn r3_split_empty_event_completion_matches_upstream() {
+    assert_r3_split_fields(0);
+}
+
+#[test]
+fn r3_split_partial_event_completion_matches_upstream() {
+    assert_r3_split_fields(1);
+}
+
+#[test]
+fn r3_split_private_event_matches_upstream() {
+    assert_r3_split_fields(2);
+}
+
+#[test]
+fn r3_split_terminal_trailing_fields_matches_upstream() {
+    assert_r3_split_fields(3);
+}
+
+#[test]
+fn r3_split_crlf_matches_upstream() {
+    assert_r3_split_fields(4);
 }

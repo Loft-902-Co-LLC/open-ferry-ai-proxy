@@ -1850,3 +1850,36 @@ async fn prompt_overflow_as_stream_chunk_after_created_keeps_http_200_and_error_
         assert_eq!(dispatcher.calls().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn r3_http_split_data_field_keeps_completion() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data",
+            ": {\"response\":{\"id\":\"r\"}}\nevent:",
+            " response.completed\n\n",
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+    assert!(!body.contains("event: error"), "{body}");
+}
+
+#[tokio::test]
+async fn r3_http_split_data_field_filters_private_event() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data",
+            ": {\"marker\":\"private\"}\nevent: response.",
+            "metadata\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.contains("private"), "{body}");
+    assert!(body.contains("response.completed"), "{body}");
+}

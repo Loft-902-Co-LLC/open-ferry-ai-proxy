@@ -15,12 +15,11 @@
 //! - The held-back event may grow to at most [`MAX_EVENT_BYTES`]. Past it,
 //!   [`Framer::write_chunk`] drops it and fails with a 502, which ends the
 //!   stream. Upstream holds it back without limit.
-//! - A synthetic newline does not split a standard field name; a bare malformed
-//!   data word is not treated as a colon-bearing field after empty event data.
-//!   Both avoid concrete upstream event corruption (see the oracle fixtures).
-//!   Event names themselves are emitted immediately, as upstream does.
-//! - Malformed private types can also be recovered across synthetic newlines,
-//!   so a split before a JSON colon cannot bypass public-client filtering.
+//! - A bare malformed data word is not treated as a colon-bearing field
+//!   after empty event data (see the oracle fixtures).
+//! - For standard clients only, malformed private types hidden by synthetic
+//!   newlines are recovered so the private event is filtered. Frames whose
+//!   original event or payload type is already private retain upstream's bytes.
 //!
 //! [`MAX_EVENT_BYTES`]: crate::sse_check::MAX_EVENT_BYTES
 
@@ -209,10 +208,11 @@ impl Framer {
     /// Takes what is held back.
     fn take_pending(&mut self) -> Vec<u8> {
         let pending = std::mem::take(&mut self.pending);
-        let pending = match recover_json_frame(&pending, &self.synthetic_breaks) {
-            Cow::Borrowed(_) => pending,
-            Cow::Owned(recovered) => recovered,
-        };
+        let pending =
+            match recover_json_frame(&pending, &self.synthetic_breaks, self.is_codex_client) {
+                Cow::Borrowed(_) => pending,
+                Cow::Owned(recovered) => recovered,
+            };
         self.reset();
         pending
     }
@@ -227,7 +227,7 @@ impl Framer {
 
     /// `writeFrame`.
     fn write_frame(&mut self, out: &mut BytesMut, frame: &[u8]) {
-        let recovered = recover_json_frame(frame, &self.synthetic_breaks);
+        let recovered = recover_json_frame(frame, &self.synthetic_breaks, self.is_codex_client);
         #[cfg(test)]
         self.frames.push(recovered.to_vec());
         let frame = self.repair_frame(&recovered);
