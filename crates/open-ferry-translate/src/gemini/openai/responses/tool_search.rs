@@ -150,7 +150,7 @@ pub(super) fn call_item(call_id: &str, status: &str, arguments: &str) -> Value {
     } else {
         status
     };
-    let mut item = json!({"id":format!("ts_{call_id}"),"type":"tool_search_call","status":status,
+    let mut item = json!({"id":format!("tsc_{call_id}"),"type":"tool_search_call","status":status,
         "execution":"client","call_id":call_id});
     item["arguments"] = args.unwrap_or_else(|| json!({}));
     item

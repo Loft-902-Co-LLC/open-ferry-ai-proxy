@@ -134,7 +134,7 @@ fn tool_search_call_stream() {
         assert_eq!(item["call_id"], added["call_id"]);
         assert_eq!(
             item["id"],
-            format!("ts_{}", item["call_id"].as_str().unwrap())
+            format!("tsc_{}", item["call_id"].as_str().unwrap())
         );
     }
 }
@@ -156,6 +156,69 @@ fn tool_search_call_non_stream() {
     assert_eq!(item["status"], "completed");
     assert_eq!(item["arguments"], json!({"query":"fixture tools"}));
     assert!(item.get("name").is_none());
+    let call_id = item["call_id"].as_str().unwrap();
+    assert!(!call_id.is_empty());
+    assert_eq!(item["id"], format!("tsc_{call_id}"));
+}
+
+// Ported from 90c447d3's TestOpenAIResponsesToolSearchCallItemID.
+#[test]
+fn tool_search_call_item_id_uses_tsc_prefix() {
+    let item = call_item("call_fixture", "completed", r#"{"query":"fixture"}"#);
+    assert_eq!(item["id"], "tsc_call_fixture");
+    assert_eq!(item["call_id"], "call_fixture");
+}
+
+#[test]
+fn partial_args_tool_search_identity_is_stable_and_round_trips_by_call_id() {
+    let mut request = fixture();
+    let mut translator = GeminiToOpenAIResponsesStream::new(MODEL, &request, &Value::Null);
+    let chunks = [
+        json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_search","id":"call_fixture","willContinue":true,"partialArgs":[{"jsonPath":"$.query","stringValue":"fixture ","willContinue":true}]}}]}}]}),
+        json!({"candidates":[{"content":{"parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.query","stringValue":"tools"}]}}]},"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":1}}),
+    ];
+    let first = sse_events(&translator.translate_line(chunks[0].to_string().as_bytes()));
+    assert!(done_items(&first).is_empty());
+    let mut events = first;
+    events.extend(sse_events(
+        &translator.translate_line(chunks[1].to_string().as_bytes()),
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|(kind, _)| kind.starts_with("response.function_call_arguments."))
+    );
+    let added = &events
+        .iter()
+        .find(|(kind, _)| kind == "response.output_item.added")
+        .unwrap()
+        .1["item"];
+    let done = done_items(&events)[0];
+    let completed = &events
+        .iter()
+        .find(|(kind, _)| kind == "response.completed")
+        .unwrap()
+        .1["response"]["output"][0];
+    for item in [added, done, completed] {
+        assert_eq!(item["id"], "tsc_call_fixture");
+        assert_eq!(item["call_id"], "call_fixture");
+    }
+    assert_eq!(done["arguments"], json!({"query":"fixture tools"}));
+    assert_eq!(completed, done);
+    request["input"] = json!([
+        {"type":"message","role":"user","content":"find tools"},
+        done,
+        {"type":"tool_search_output","id":"tso_fixture","call_id":"call_fixture","execution":"client","status":"completed","tools":[]}
+    ]);
+    let translated = convert(MODEL, &request, true);
+    assert_eq!(
+        translated["contents"][1]["parts"][0]["functionCall"]["id"],
+        "call_fixture"
+    );
+    assert_eq!(
+        translated["contents"][2]["parts"][0]["functionResponse"]["id"],
+        "call_fixture"
+    );
 }
 
 // Ported from TestConvertOpenAIResponsesRequestToGemini_ToolSearchCallWithStringArgumentsAndEmptyOutput.
@@ -339,11 +402,11 @@ fn missing_search_arguments_follow_response_mode() {
     .unwrap();
     assert_eq!(
         out["output"][0],
-        json!({"id":"ts_s1","type":"tool_search_call",
+        json!({"id":"tsc_s1","type":"tool_search_call",
         "status":"incomplete","execution":"client","call_id":"s1","arguments":{}})
     );
     let events = stream(&req, &resp);
-    let expected = json!({"id":"ts_s1","type":"tool_search_call",
+    let expected = json!({"id":"tsc_s1","type":"tool_search_call",
         "status":"completed","execution":"client","call_id":"s1","arguments":{}});
     assert_eq!(*done_items(&events)[0], expected);
     let completed = events
