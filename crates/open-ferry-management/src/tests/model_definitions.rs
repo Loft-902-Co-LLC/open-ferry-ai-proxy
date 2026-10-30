@@ -191,13 +191,13 @@ async fn channels_list_their_models() {
         (
             "codex",
             concat!(
-                r#"{"id":"gpt-5.5","object":"model","created":1776902400,"owned_by":"openai","#,
-                r#""type":"openai","display_name":"GPT 5.5","version":"gpt-5.5","#,
-                r#""description":"Frontier model for complex coding, research, and real-world work.","#,
+                r#"{"id":"gpt-6-astra","object":"model","created":1783616400,"owned_by":"openai","#,
+                r#""type":"openai","display_name":"GPT 6.0 Astra","version":"gpt-6.0","#,
+                r#""description":"GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.","#,
                 r#""context_length":272000,"max_completion_tokens":128000,"#,
                 r#""supported_parameters":["tools"],"supportedInputModalities":["text","image"],"#,
                 r#""supportedOutputModalities":["text"],"#,
-                r#""thinking":{"levels":["low","medium","high","xhigh"]}}"#,
+                r#""thinking":{"levels":["low","medium","high","xhigh","max"]}}"#,
             ),
         ),
     ] {
@@ -290,6 +290,7 @@ async fn xai_and_meta_channels_list_their_models() {
     assert_eq!(
         imagine,
         [
+            "grok-imagine-video-1.5-lite",
             "grok-imagine-image",
             "grok-imagine-image-quality",
             "grok-imagine-image-2.0",
