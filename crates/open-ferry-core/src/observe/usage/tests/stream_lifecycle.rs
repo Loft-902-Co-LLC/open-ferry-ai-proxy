@@ -574,3 +574,20 @@ fn p47_truncation_keeps_partial_usage_tier_and_classification() {
         assert_eq!(record["service_tier"], "priority");
     }
 }
+
+#[tokio::test]
+async fn p47_cancellation_before_and_after_first_output_publishes_once() {
+    use futures_util::stream;
+    for after_first in [false,true] {
+        let h=Harness::new();let driver=ClientCall::new("m").stream().tap(&h);
+        let observation=Arc::new(Observation::new(driver.context.clone(),vec![driver.tap.clone()]));
+        let report=CallReport::observing(Some(&observation));
+        driver.attempt(AttemptKind::Stream,"openai","m",&auth("a","0","openai"));
+        driver.head(200,&[]);
+        let chunks=stream::iter(after_first.then(||Ok(Bytes::from_static(b"first")))).chain(stream::pending()).boxed();
+        let mut response=report.stream(Ok(StreamResponse{headers:HeaderMap::new(),chunks})).unwrap();
+        if after_first {assert!(response.chunks.next().await.unwrap().is_ok());}
+        assert!(h.records().is_empty());drop(response);
+        let record=h.record();assert_eq!(int_at(&record,"/fail/status_code"),499);assert!(h.records().is_empty());
+    }
+}
