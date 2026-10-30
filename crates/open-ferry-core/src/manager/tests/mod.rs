@@ -10,6 +10,7 @@
 //!   own [`FakeModels`].
 
 mod p47_failures;
+mod p47_socket;
 mod p47_issue7017;
 mod adoption_policy;
 mod affinity;

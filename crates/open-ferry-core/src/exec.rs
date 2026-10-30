@@ -74,6 +74,8 @@ pub enum FailureClass {
     StreamTruncated,
     /// A model's transient admission/capacity 429, without quota exhaustion.
     TransientCapacity,
+    /// Upstream socket loss terminates one turn; the downstream stays open.
+    UpstreamWebsocketTurn,
 }
 
 impl FailureClass {
@@ -82,6 +84,7 @@ impl FailureClass {
         match self {
             Self::StreamTruncated => "stream_truncated",
             Self::TransientCapacity => "transient_rate_limit",
+            Self::UpstreamWebsocketTurn => "upstream_websocket_turn",
         }
     }
 }
