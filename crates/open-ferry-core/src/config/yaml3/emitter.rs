@@ -251,6 +251,8 @@ pub(crate) struct Emitter {
     indention: bool,
     /// If an explicit document end is required?
     open_ended: bool,
+    /// The protected block body already supplied its kept trailing breaks.
+    keep_chomped_scalar: bool,
 
     /// Is there's an empty line above?
     space_above: bool,
@@ -364,6 +366,7 @@ impl Emitter {
             whitespace: false,
             indention: false,
             open_ended: false,
+            keep_chomped_scalar: false,
             space_above: false,
             foot_indent: 0,
             anchor_data: AnchorData::default(),
@@ -1901,7 +1904,7 @@ impl Emitter {
         }
         // Before the first comment after a keep-chomped scalar, another
         // separator would be data. Its trailing breaks already separate it.
-        if self.foot_indent == indent && !(self.protect_config_comments && self.open_ended) {
+        if self.foot_indent == indent && !self.keep_chomped_scalar {
             self.put_break()?;
         }
         while self.column < indent {
@@ -1929,6 +1932,7 @@ impl Emitter {
         self.whitespace = is_whitespace;
         self.indention = self.indention && is_indention;
         self.open_ended = false;
+        self.keep_chomped_scalar = false;
         Ok(())
     }
 
@@ -2197,8 +2201,8 @@ impl Emitter {
     }
 
     /// yaml_emitter_write_block_scalar_hints.
-    /// Returns keep chomping: writing its indicator resets `open_ended`, so
-    /// config emission restores that state after the scalar body.
+    /// Returns keep chomping so protected emission can track the body separately
+    /// from yaml.v3's document-end marker state.
     fn write_block_scalar_hints(&mut self, value: &[u8]) -> Result<bool, EmitterError> {
         if is_space(value, 0)
             || is_break(value, 0)
@@ -2247,6 +2251,11 @@ impl Emitter {
         self.write_indicator(b"|", true, false, false)?;
         let keep = self.write_block_scalar_hints(value)?;
         self.process_line_comment()?;
+        // With a leading break, yaml.v3 consumes the first value break as
+        // the header terminator. Supply that terminator before the body.
+        if self.protect_config_comments && keep && is_break(value, 0) && !self.indention {
+            self.put_break()?;
+        }
         //emitter.indention = true
         self.whitespace = true;
         let mut breaks = true;
@@ -2267,7 +2276,7 @@ impl Emitter {
         }
 
         if self.protect_config_comments {
-            self.open_ended = keep;
+            self.keep_chomped_scalar = keep;
         }
         Ok(())
     }
@@ -2277,6 +2286,9 @@ impl Emitter {
         self.write_indicator(b">", true, false, false)?;
         let keep = self.write_block_scalar_hints(value)?;
         self.process_line_comment()?;
+        if self.protect_config_comments && keep && is_break(value, 0) && !self.indention {
+            self.put_break()?;
+        }
 
         //emitter.indention = true
         self.whitespace = true;
@@ -2330,7 +2342,7 @@ impl Emitter {
             }
         }
         if self.protect_config_comments {
-            self.open_ended = keep;
+            self.keep_chomped_scalar = keep;
         }
         Ok(())
     }
@@ -2426,7 +2438,7 @@ impl Emitter {
         }
 
         if self.protect_config_comments {
-            self.open_ended = false;
+            self.keep_chomped_scalar = false;
         }
         self.whitespace = true;
         //emitter.indention = true
