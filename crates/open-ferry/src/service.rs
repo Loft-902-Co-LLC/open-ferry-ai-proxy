@@ -2755,6 +2755,14 @@ impl Service {
                 let mut unsupported_sourceless = false;
                 let has_source = source.is_some();
                 let tagged = command.is_some();
+                let runtime_edit = !tagged
+                    && matches!(&source,
+                    Some(SyncChange::Upsert(auth)) if auth.generation > 0
+                        && auth.metadata_str("type").is_some_and(|kind| {
+                            !go::equal_fold(kind.trim(), "codex")
+                                && !go::equal_fold(kind.trim(), "gemini")
+                                && go::equal_fold(kind.trim(), auth.provider.trim())
+                        }));
                 let mut hint = match source {
                     Some(SyncChange::Upsert(auth)) => *auth,
                     Some(SyncChange::FileWritten(file)) => {
@@ -2798,6 +2806,11 @@ impl Service {
                                 })))
                     {
                         return Ok(AdoptionRead::Invalid);
+                    }
+                    // A management edit already published this live record.
+                    // Its save may have failed; old disk bytes cannot undo it.
+                    if runtime_edit {
+                        return Ok(AdoptionRead::Record(live.clone()));
                     }
                     let status = store.read_for_adoption(live).map_err(ManagerError::Store)?;
                     // Native files use current disk bytes even outside Codex's
@@ -8722,6 +8735,68 @@ self-update:
         );
         assert_eq!(service.file_auths.get(&path), Some(&id));
         assert_eq!(service.manager.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn round2_failed_disable_save_is_not_undone_by_runtime_upsert() {
+        struct RefuseDisable(Arc<FileStore>);
+        impl open_ferry_core::auth::AuthStore for RefuseDisable {
+            fn list(&self) -> std::io::Result<Vec<Auth>> {
+                self.0.list()
+            }
+            fn save(&self, auth: &Auth) -> std::io::Result<String> {
+                if auth.disabled {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    self.0.save(auth)
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed-disable.json");
+        std::fs::write(
+            &path,
+            br#"{"type":"claude","access_token":"dummy","disabled":false}"#,
+        )
+        .unwrap();
+        let mut service = service(dir.path(), "");
+        service.manager = Manager::new(
+            Settings::from(&*service.config),
+            service.registry.clone(),
+            Some(Arc::new(RefuseDisable(service.store.clone()))),
+        );
+        service.handle_and_drain(added(&path), Path::new("")).await;
+        let initial = service.manager.list()[0].clone();
+        let edited = service
+            .manager
+            .edit_at_epoch(&initial.id, initial.registration_epoch, |auth| {
+                auth.disabled = true;
+                auth.status = open_ferry_core::auth::Status::Disabled;
+                auth.metadata
+                    .insert("disabled".into(), serde_json::json!(true));
+                Ok::<_, ()>(true)
+            })
+            .unwrap()
+            .unwrap();
+        assert!(edited.disabled);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["disabled"],
+            false
+        );
+        let (applied, done) = oneshot::channel();
+        service.apply_sync(SyncRequest {
+            change: SyncChange::Upsert(Box::new(edited.as_ref().clone())),
+            revision: next_revision(),
+            applied,
+            operation: None,
+        });
+        drain_reads(&mut service).await;
+        done.await.unwrap();
+        assert!(service.manager.get(&initial.id).unwrap().disabled);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["disabled"],
+            false
+        );
     }
 
     #[tokio::test]
