@@ -3278,3 +3278,22 @@ fn claude_55_forced_tools_leave_other_provider_translations_unchanged() {
         assert_eq!(body["tool_choice"], payload["tool_choice"], "{provider}");
     }
 }
+
+#[test]
+fn r2_provider_empty_commentary_is_removed_before_replay() {
+    let plain = json!({"messages":[
+        {"role":"assistant","content":[{"type":"tool_use","id":"call_a","name":"lookup","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_a","content":"result"}]}]});
+    for model in ["claude-sonnet-5-5", "deepseek-v4"] {
+        let mut expected = plain.clone();
+        sanitize_for_upstream(&mut expected, model);
+        let mut marked = plain.clone();
+        marked["messages"].as_array_mut().unwrap().insert(
+            1,
+            json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}),
+        );
+        sanitize_for_upstream(&mut marked, model);
+        assert_eq!(marked, expected);
+    }
+}

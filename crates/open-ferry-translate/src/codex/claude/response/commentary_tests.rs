@@ -332,3 +332,96 @@ fn commentary_marker_is_plain_text_for_other_native_targets() {
         assert!(!out.to_string().contains("cpa:commentary:v1"));
     }
 }
+
+fn check_empty_commentary_alignment(target: usize) {
+    let plain = json!({"messages":[
+        {"role":"assistant","content":[
+            {"type":"tool_use","id":"call_a","name":"lookup_a","input":{}},
+            {"type":"tool_use","id":"call_b","name":"lookup_b","input":{}}]},
+        {"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"call_b","content":"b"},
+            {"type":"tool_result","tool_use_id":"call_a","content":"a"}]}]});
+    for count in [1, 2] {
+        let mut marked = plain.clone();
+        marked["messages"].as_array_mut().unwrap().insert(1, json!({"role":"assistant","content":
+            vec![json!({"type":"thinking","thinking":"","signature":" cpa:commentary:v1 "});count]}));
+        for compat in [false, true] {
+            let chat = if compat {
+                crate::openai::claude::convert_claude_request_to_openai_with_compat
+            } else {
+                crate::openai::claude::convert_claude_request_to_openai
+            };
+            if target == 0 {
+                assert_eq!(
+                    chat("test-model", &marked, false),
+                    chat("test-model", &plain, false),
+                    "Chat compat={compat}"
+                );
+            }
+            let codex = if compat {
+                crate::codex::claude::convert_claude_request_to_codex_with_compat
+            } else {
+                crate::codex::claude::convert_claude_request_to_codex
+            };
+            if target == 1 {
+                assert_eq!(
+                    codex("gpt-5.4", &marked),
+                    codex("gpt-5.4", &plain),
+                    "Codex compat={compat}"
+                );
+            }
+            let gemini = if compat {
+                crate::gemini::claude::convert_claude_request_to_gemini_with_compat
+            } else {
+                crate::gemini::claude::convert_claude_request_to_gemini
+            };
+            let models = crate::models::ModelCatalog::embedded();
+            if target == 2 {
+                assert_eq!(
+                    gemini("test-model", &marked, false, models),
+                    gemini("test-model", &plain, false, models),
+                    "Gemini compat={compat}"
+                );
+            }
+            let interactions = if compat {
+                crate::interactions::claude::convert_claude_request_to_interactions_with_compat
+            } else {
+                crate::interactions::claude::convert_claude_request_to_interactions
+            };
+            if target == 3 {
+                assert_eq!(
+                    interactions("test-model", &marked, false),
+                    interactions("test-model", &plain, false),
+                    "Interactions compat={compat}"
+                );
+            }
+            let mut restored = marked.clone();
+            crate::signature::sanitize_claude_messages_for_claude_upstream(
+                &mut restored,
+                "test-model",
+                compat,
+            );
+            assert_eq!(restored, plain);
+        }
+    }
+}
+
+#[test]
+fn r2_empty_commentary_chat_alignment() {
+    check_empty_commentary_alignment(0);
+}
+
+#[test]
+fn r2_empty_commentary_codex_alignment() {
+    check_empty_commentary_alignment(1);
+}
+
+#[test]
+fn r2_empty_commentary_gemini_alignment() {
+    check_empty_commentary_alignment(2);
+}
+
+#[test]
+fn r2_empty_commentary_interactions_alignment() {
+    check_empty_commentary_alignment(3);
+}

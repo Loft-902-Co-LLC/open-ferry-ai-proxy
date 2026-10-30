@@ -1779,3 +1779,20 @@ fn commentary_replay_stays_separate_from_real_reasoning_and_tools() {
         assert!(!out.to_string().contains("private summary"));
     }
 }
+
+#[test]
+fn r2_commentary_item_has_upstream_key_order() {
+    let request = json!({"messages":[{"role":"assistant","content":[
+        {"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"}]}]});
+    for convert in [
+        super::convert_claude_request_to_codex,
+        super::convert_claude_request_to_codex_with_compat,
+    ] {
+        let (out, error) = convert("gpt-5.4", &request);
+        assert_eq!(error, None);
+        assert_eq!(
+            out["input"][0].to_string(),
+            r#"{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]}"#
+        );
+    }
+}

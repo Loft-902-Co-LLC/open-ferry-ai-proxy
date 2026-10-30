@@ -178,6 +178,21 @@ fn convert_messages(
     // count.
     let mut pending_tool_use_ids: Vec<String> = Vec::new();
     for message in messages {
+        // Discard empty marker messages before changing per-message replay state.
+        if message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                !parts.is_empty()
+                    && parts.iter().all(|part| {
+                        str_of(part.get("type")) == "thinking"
+                            && str_of(part.get("signature")).trim() == "cpa:commentary:v1"
+                            && str_of(part.get("thinking")).is_empty()
+                    })
+            })
+        {
+            continue;
+        }
         let Some(Value::String(original_role)) = message.get("role") else {
             continue;
         };
