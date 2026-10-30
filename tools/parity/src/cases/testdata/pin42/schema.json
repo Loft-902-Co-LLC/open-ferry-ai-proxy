@@ -1,0 +1,1532 @@
+[
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-conflict-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-equal-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-equal-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-equal-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-equal-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-equal-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-annotations-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-scope-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-scope-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-scope-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-scope-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-scope-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-arrays-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-dialect-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-union-required-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-cleaned-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}]}"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-equal-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-equal-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-equal-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-equal-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-scope-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-scope-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-scope-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-scope-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-conflict-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":8}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-equal-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"maxLength\":5}},\"$ref\":\"#/$defs/S\",\"maxLength\":5}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-annotations-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"description\":\"base\",\"title\":\"base\"}},\"$ref\":\"#/$defs/S\",\"description\":\"sibling\",\"title\":\"sibling\"}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-existing-allof-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"allOf\":[{\"maximum\":9}]}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-scope-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"additionalProperties\":false}},\"$ref\":\"#/$defs/S\",\"properties\":{\"b\":{\"type\":\"number\"}},\"unevaluatedProperties\":false}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-arrays-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":2}},\"$ref\":\"#/$defs/S\",\"maxItems\":4,\"contains\":{\"const\":\"x\"},\"minContains\":1,\"maxContains\":2,\"prefixItems\":[{\"const\":\"a\"}],\"unevaluatedItems\":false}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-array-sibling-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"array\",\"maxItems\":4}},\"$ref\":\"#/$defs/S\",\"items\":{\"type\":\"integer\"},\"minItems\":2}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-dialect-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"urn:pin42\",\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "repeat_clean": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-union-required-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"object\",\"anyOf\":[{\"required\":[\"a\"]},{\"required\":[\"b\"]}]}},\"$ref\":\"#/$defs/S\",\"anyOf\":[{\"required\":[\"c\"]},{\"required\":[\"d\"]}]}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-integer-spellings-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"number\",\"minimum\":1}},\"$ref\":\"#/$defs/S\",\"minimum\":1.0,\"maximum\":9007199254740993}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-nested-conflict-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":5}}}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-nested-equal-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\",\"minLength\":3}},\"type\":\"object\",\"properties\":{\"value\":{\"$ref\":\"#/$defs/S\",\"minLength\":3}}}}]}",
+    "options": {
+      "repeat_clean": true
+    },
+    "known_difference": "UPSTREAM.md:295: upstream sorts schema keys through Go maps; Open Ferry preserves client key order"
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-cleaned-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"description\":\"kept\"}}}}]}",
+    "options": {
+      "repeat_clean": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/claude/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/claude/request-compat"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/claude/request-compat",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-chat/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/openai-chat/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}}]}"
+  },
+  {
+    "suites": [
+      "gemini/openai-responses/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/openai-responses/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}"
+  },
+  {
+    "suites": [
+      "gemini/gemini/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/gemini/request",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}]}"
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/claude/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "from": "claude",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/openai-chat/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}}]}",
+    "options": {
+      "from": "openai",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/openai-responses/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"input\":\"hi\",\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/gemini/request-registry",
+    "model": "gemini-3.1-pro",
+    "request": "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}],\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\",\"parametersJsonSchema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}]}",
+    "options": {
+      "from": "gemini",
+      "to": "gemini",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "gemini/claude/request"
+    ],
+    "name": "pin42-schema-identity-ref-gemini/claude/request-reclean",
+    "model": "gemini-3.1-pro",
+    "request": "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"f\",\"input_schema\":{\"$defs\":{\"S\":{\"type\":\"string\"}},\"$ref\":\"#/$defs/S\"}}]}",
+    "options": {
+      "repeat_clean": true
+    }
+  }
+]

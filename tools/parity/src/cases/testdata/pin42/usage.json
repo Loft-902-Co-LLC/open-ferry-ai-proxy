@@ -1,0 +1,4152 @@
+[
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-normal-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-normal-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-normal-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-normal-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-normal-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-normal-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-normal-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-normal-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-legacy-usage",
+    "model": "",
+    "request": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-legacy-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-legacy-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-legacy-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-legacy-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-legacy-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-legacy-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-legacy-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-camel-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-camel-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-camel-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-camel-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-camel-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-camel-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-camel-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-camel-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-only-usage",
+    "model": "",
+    "request": "{\"usage\":{\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-only-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-only-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-only-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-only-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-only-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-only-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-only-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-reasoning-only-usage",
+    "model": "",
+    "request": "{\"usage\":{\"reasoning_tokens\":5}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-reasoning-only-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"reasoning_tokens\":5}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-reasoning-only-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"reasoning_tokens\":5}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-reasoning-only-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"reasoning_tokens\":5}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-reasoning-only-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"reasoning_tokens\":5}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-reasoning-only-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"reasoning_tokens\":5}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-reasoning-only-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"reasoning_tokens\":5}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-reasoning-only-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"reasoning_tokens\":5}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-negative-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-negative-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-negative-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":-1,\"output_tokens\":3}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-negative-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":-1,\"output_tokens\":3}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-negative-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-negative-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-negative-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":-1,\"output_tokens\":3}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-negative-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":-1,\"output_tokens\":3}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-beyond-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-beyond-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-beyond-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-beyond-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-beyond-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-beyond-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-cache-beyond-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-cache-beyond-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-inconsistent-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-inconsistent-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-inconsistent-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-inconsistent-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-inconsistent-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-inconsistent-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-inconsistent-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-inconsistent-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-boundary-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":9223372036854775807}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-boundary-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":9223372036854775807}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-boundary-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":9223372036854775807}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-boundary-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":9223372036854775807}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-boundary-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":9223372036854775807}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-boundary-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":9223372036854775807}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-boundary-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":9223372036854775807}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-boundary-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":9223372036854775807}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-overflow-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-overflow-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-overflow-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-overflow-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-overflow-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-overflow-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-overflow-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-overflow-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-zero-usage",
+    "model": "",
+    "request": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-zero-usage",
+    "model": "",
+    "request": "data: {\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-zero-total_usage",
+    "model": "",
+    "request": "{\"total_usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-zero-total_usage",
+    "model": "",
+    "request": "data: {\"total_usage\":{\"input_tokens\":0,\"output_tokens\":0}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-zero-interaction.usage",
+    "model": "",
+    "request": "{\"interaction\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-zero-interaction.usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-zero-interaction.total_usage",
+    "model": "",
+    "request": "{\"interaction\":{\"total_usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+    "options": {
+      "parser": "interactions"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-stream-zero-interaction.total_usage",
+    "model": "",
+    "request": "data: {\"interaction\":{\"total_usage\":{\"input_tokens\":0,\"output_tokens\":0}}}",
+    "options": {
+      "parser": "interactions-stream"
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-normal-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-normal-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-legacy-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-legacy-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-legacy-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-legacy-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-camel-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-camel-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-camel-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-camel-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-reasoning-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-reasoning-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-reasoning-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-reasoning-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-negative-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-negative-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-negative-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-negative-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-beyond-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-beyond-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-beyond-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-cache-beyond-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-inconsistent-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-inconsistent-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-inconsistent-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-inconsistent-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-boundary-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-boundary-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-boundary-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-boundary-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-overflow-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-overflow-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-overflow-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-overflow-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-zero-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-zero-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-zero-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-0-zero-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-normal-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-normal-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-normal-identical",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-normal-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-normal-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-legacy-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-legacy-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-legacy-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-legacy-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-camel-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-camel-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-camel-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-camel-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-reasoning-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-reasoning-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-reasoning-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-reasoning-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-negative-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-negative-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-negative-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-negative-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-beyond-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-beyond-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-beyond-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-cache-beyond-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-inconsistent-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-inconsistent-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-inconsistent-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-inconsistent-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-boundary-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-boundary-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-boundary-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-boundary-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-overflow-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-overflow-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-overflow-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-overflow-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-zero-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-zero-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-zero-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-1-zero-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "openai",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":5}}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-normal-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-normal-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-normal-identical",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-normal-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-normal-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"reasoning_tokens\":5,\"cache_read_tokens\":30,\"cache_write_tokens\":10,\"tool_use_tokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-legacy-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-legacy-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-legacy-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-legacy-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"total_input_tokens\":100,\"total_output_tokens\":20,\"total_thought_tokens\":5,\"total_cached_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-camel-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-camel-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-camel-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-camel-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cacheReadTokens\":30,\"cacheCreationTokens\":10,\"totalToolUseTokens\":7}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-reasoning-only-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-reasoning-only-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-reasoning-only-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-reasoning-only-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"reasoning_tokens\":5}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-negative-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-negative-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-negative-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-negative-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":-1,\"output_tokens\":3}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-beyond-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-beyond-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-beyond-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-cache-beyond-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"cache_read_tokens\":30}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-inconsistent-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-inconsistent-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-inconsistent-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-inconsistent-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":99}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-boundary-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-boundary-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-boundary-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-boundary-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-overflow-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-overflow-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-overflow-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-overflow-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":9223372036854775807,\"tool_use_tokens\":1}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-zero-update",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-zero-existing",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-zero-final",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-merge-2-zero-cumulative",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "merge",
+      "steps": [
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "interactions",
+          "body": "{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"
+        },
+        {
+          "parser": "claude",
+          "body": "{\"usage\":{\"input_tokens\":100,\"output_tokens\":25,\"cache_read_input_tokens\":30,\"cache_creation_input_tokens\":10}}"
+        }
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-openai-sequence-253",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "openai",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10}}",
+        "data: {\"usage\":{\"output_tokens\":4}}",
+        "data: {\"usage\":{\"output_tokens\":8}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-openai-sequence-254",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "openai",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}",
+        "data: {\"usage\":{\"output_tokens\":4,\"speed\":\"standard\"}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-openai-sequence-255",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "openai",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10}}",
+        "data: {\"usage\":{\"cache_read_input_tokens\":3}}",
+        "data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-claude-sequence-256",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-claude-sequence-257",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4,\"speed\":\"standard\"}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-claude-sequence-258",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "claude",
+      "lines": [
+        "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"cache_read_input_tokens\":3}}",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-sequence-259",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "interactions",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10}}",
+        "data: {\"usage\":{\"output_tokens\":4}}",
+        "data: {\"usage\":{\"output_tokens\":8}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-sequence-260",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "interactions",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10,\"speed\":\"fast\"}}",
+        "data: {\"usage\":{\"output_tokens\":4,\"speed\":\"standard\"}}"
+      ]
+    }
+  },
+  {
+    "suites": [
+      "usage/parse"
+    ],
+    "name": "pin42-usage-interactions-sequence-261",
+    "model": "",
+    "request": "{}",
+    "options": {
+      "parser": "sequence",
+      "protocol": "interactions",
+      "lines": [
+        "data: {\"usage\":{\"input_tokens\":10}}",
+        "data: {\"usage\":{\"cache_read_input_tokens\":3}}",
+        "data: {\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}"
+      ]
+    }
+  }
+]

@@ -204,12 +204,17 @@ pub fn gemini(payload: &Value, options: &Value) -> Value {
         &clean, validation,
     ));
     let pairing = error_text(signature::validate_gemini_function_call_pairing(payload));
-    object([
-        ("sanitized", clean),
+    let mut output = object([
+        ("sanitized", clean.clone()),
         ("validate", validate),
         ("validate_sanitized", validate_sanitized),
         ("pairing", pairing),
-    ])
+    ]);
+    if options["repeat_sanitize"] == true {
+        signature::sanitize_gemini_request_thought_signatures(&mut clean, contents_path);
+        output["sanitized_twice"] = clean;
+    }
+    output
 }
 
 /// A provider by upstream's name. The harness sends only names upstream defines.

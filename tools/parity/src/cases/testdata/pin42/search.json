@@ -1,0 +1,578 @@
+[
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-none-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-none-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-typed-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-typed-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-untyped-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-untyped-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-typed-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-typed-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-untyped-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-untyped-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-typed-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-typed-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-False",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-True",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-none-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-none-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-typed-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-typed-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-untyped-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-function_call_output-untyped-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-typed-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-typed-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-untyped-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-custom_tool_call_output-untyped-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-none-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-none-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-typed-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-typed-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-False-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "registry/request"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-True-registry",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}",
+    "options": {
+      "from": "openai-response",
+      "to": "claude",
+      "stream": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-False-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-True-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-typed-False-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-typed-True-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\",\"type\":\"message\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-False-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-untyped-True-disabled",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]},{\"role\":\"user\",\"content\":\"thanks\"}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": false
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-none-True-inherited-none",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-none-True-inherited-typed",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"new turn\",\"type\":\"message\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-function_call_output-none-True-inherited-untyped",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"function_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"new turn\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-True-inherited-none",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-True-inherited-typed",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"new turn\",\"type\":\"message\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-custom_tool_call_output-none-True-inherited-untyped",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"custom_tool_call\",\"call_id\":\"call_p42\",\"name\":\"f\",\"input\":\"fixture\"},{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_p42\",\"output\":\"fixture\"},{\"role\":\"user\",\"content\":\"new turn\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}]}"
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-True-inherited-none",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-True-inherited-typed",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"new turn\",\"type\":\"message\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  },
+  {
+    "suites": [
+      "claude/openai-responses/request",
+      "claude/openai-responses/request-compat"
+    ],
+    "name": "pin42-search-tool_search_output-none-True-inherited-untyped",
+    "model": "claude-test",
+    "request": "{\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"fixture search request\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"fixture\"},\"status_details\":{\"reason\":\"tool_use\"}},{\"type\":\"tool_search_call\",\"call_id\":\"call_p42\",\"execution\":\"client\",\"arguments\":{\"query\":\"f\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_p42\",\"tools\":[]},{\"role\":\"user\",\"content\":\"new turn\"},{\"type\":\"web_search_call\",\"id\":\"srv_p42\",\"status\":\"completed\",\"action\":{\"type\":\"search\"},\"status_details\":{\"reason\":\"tool_use\"},\"results\":[{\"url\":\"https://example.com\",\"title\":\"Fixture\",\"encrypted_content\":\"dummy-result\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Answer\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}},{\"type\":\"tool_search\",\"execution\":\"client\"}]}",
+    "options": {
+      "native_tool_search": true
+    }
+  }
+]
