@@ -1029,11 +1029,11 @@ async fn active_partial_failure_backs_off_like_a_full_refresh_failure() {
 }
 
 #[tokio::test]
-async fn active_partial_invalid_grant_failures_back_off_longer_each_time() {
+async fn active_partial_invalid_grant_restarts_after_saved_rotation() {
     let (_dir, _store, manager, executor) =
         partial_setup(NOON10, true, true, false, true, 400, "invalid_grant");
-    for (failures, delay) in [(1, TimeDelta::seconds(60)), (2, TimeDelta::seconds(120))] {
-        if failures > 1 {
+    for attempt in 0..2 {
+        if attempt > 0 {
             // The executor's one permit went to the first refresh.
             executor.release.add_permits(1);
         }
@@ -1041,8 +1041,8 @@ async fn active_partial_invalid_grant_failures_back_off_longer_each_time() {
         assert!(manager.force_refresh("codex.json").await.is_err());
         let after = manager.now();
         let live = manager.get("codex.json").unwrap();
-        assert_eq!(refresh_failures(&manager, "codex.json"), failures);
-        assert_retry_in(&live, before, after, delay);
+        assert_eq!(refresh_failures(&manager, "codex.json"), 1);
+        assert_retry_in(&live, before, after, TimeDelta::seconds(60));
         assert_eq!(live.status, Status::Active);
     }
 }

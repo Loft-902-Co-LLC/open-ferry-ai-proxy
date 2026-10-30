@@ -214,8 +214,9 @@ impl ExecError {
             ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
     }
 
-    /// Trusted deadlines suppress raw passthrough even after expiry. A capacity
-    /// hint owns delivery only when positive; zero leaves raw headers alone.
+    /// Trusted deadlines suppress raw passthrough even after expiry. Native
+    /// waits and capacity hints own delivery only when positive; zero leaves
+    /// raw headers alone.
     pub fn has_retry_after_override(&self) -> bool {
         self.has_trusted_retry_deadline()
             || self.failure_code() == Some("transient_rate_limit")

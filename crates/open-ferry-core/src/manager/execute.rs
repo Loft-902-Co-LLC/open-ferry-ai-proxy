@@ -815,6 +815,8 @@ impl Manager {
 
     /// Trust only the error's positive hint, never a scheduler cooldown floor.
     /// An existing deadline retains its identity, including after expiry.
+    /// Called after marking pre-output failures; neutral and accepted-stream
+    /// errors retain only the executor's own annotation, if any.
     fn annotate_retry_deadline(&self, error: ExecError) -> ExecError {
         if error.has_trusted_retry_deadline() {
             return error;

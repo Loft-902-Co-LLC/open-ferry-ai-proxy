@@ -831,6 +831,19 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                 }
                 "401" | "invalid_grant" => {}
                 _ => {
+                    if step == "relogin" {
+                        let current = manager.get(&base.id).unwrap();
+                        let mut fresh = store.read_back(&current).unwrap().unwrap();
+                        fresh
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-recovered"));
+                        store
+                            .write_file(
+                                &fresh.file_name,
+                                &serde_json::to_vec(&fresh.metadata).unwrap(),
+                            )
+                            .unwrap();
+                    }
                     let hint = match step {
                         "scan" => &scan,
                         "persist" => &persisted,
@@ -843,6 +856,12 @@ async fn p47_adoption_ordering_family_preserves_a_later_disable() {
                             ))
                         })
                         .unwrap();
+                    if step == "relogin" && !disabled {
+                        let live = manager.get(&base.id).unwrap();
+                        assert_eq!(live.status, Status::Active);
+                        assert!(live.last_error.is_none());
+                        assert!(live.next_refresh_after.is_none());
+                    }
                 }
             }
             let live = manager.get(&base.id).unwrap();
