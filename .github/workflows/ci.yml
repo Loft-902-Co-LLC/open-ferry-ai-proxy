@@ -141,6 +141,50 @@ jobs:
         with:
           cache: tests
 
+      # Pinned release assets, checked before extraction; no install action or
+      # unverified fallback (the repository allows GitHub-owned actions only).
+      - &install-nextest
+        name: Install cargo-nextest
+        shell: bash
+        env:
+          VERSION: 0.9.146
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)
+              target=x86_64-unknown-linux-musl
+              sha256=b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa
+              temp="$RUNNER_TEMP"
+              ;;
+            Windows)
+              target=x86_64-pc-windows-msvc
+              sha256=809b01f2c94d031ab6cf5f4d4a4f477c8f51b69c96ab3cb2fe4db7ecb222d0d3
+              temp=$(cygpath -u "$RUNNER_TEMP")
+              ;;
+            macOS)
+              target=universal-apple-darwin
+              sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
+              temp="$RUNNER_TEMP"
+              ;;
+            *) echo "unsupported nextest platform: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          name="cargo-nextest-$VERSION-$target.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --output "$temp/$name" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$name"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            echo "$sha256  $temp/$name" | shasum -a 256 --check --strict
+          else
+            echo "$sha256  $temp/$name" | sha256sum --check --strict
+          fi
+          mkdir "$temp/nextest-$VERSION"
+          tar -xzf "$temp/$name" -C "$temp/nextest-$VERSION"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cygpath -w "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
+          else
+            echo "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
+          fi
+
       - name: Format
         if: github.event_name != 'push'
         run: cargo fmt --all --check
@@ -155,9 +199,18 @@ jobs:
         if: github.event_name == 'push' && steps.rust.outputs.cache-hit != 'true'
         run: cargo test --workspace --locked --no-run
 
+      # Overlap the long core/parity binaries without changing test selection.
+      # The default profile has no termination timeout; ci's process-test limits
+      # and timeout remain specific to the blue-green seam jobs below.
       - name: Test
         if: github.event_name != 'push'
-        run: cargo test --workspace --locked --no-fail-fast
+        run: cargo nextest run --profile default --workspace --locked --no-fail-fast --retries 0
+
+      # nextest does not run doctests. Run them even if a regular test failed,
+      # matching cargo test --no-fail-fast across both kinds of test.
+      - name: Doc tests
+        if: ${{ !cancelled() && github.event_name != 'push' && steps.rust.outcome == 'success' }}
+        run: cargo test --workspace --locked --doc --no-fail-fast
 
       # The generator runs every named fixture in the compiled Rust test
       # harness and checks the committed matrix. Reuse the existing tests
@@ -324,48 +377,7 @@ jobs:
         with:
           cache: blue-green
 
-      # Pinned release assets, checked before extraction; no install action or
-      # unverified fallback (the repository allows GitHub-owned actions only).
-      - name: Install cargo-nextest
-        shell: bash
-        env:
-          VERSION: 0.9.146
-        run: |
-          set -euo pipefail
-          case "$RUNNER_OS" in
-            Linux)
-              target=x86_64-unknown-linux-musl
-              sha256=b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa
-              temp="$RUNNER_TEMP"
-              ;;
-            Windows)
-              target=x86_64-pc-windows-msvc
-              sha256=809b01f2c94d031ab6cf5f4d4a4f477c8f51b69c96ab3cb2fe4db7ecb222d0d3
-              temp=$(cygpath -u "$RUNNER_TEMP")
-              ;;
-            macOS)
-              target=universal-apple-darwin
-              sha256=39785160b3c2f6ed9a765049cf4fa79f3b39aa02eb7598a5a0e2a1a0b9ffb9a8
-              temp="$RUNNER_TEMP"
-              ;;
-            *) echo "unsupported nextest platform: $RUNNER_OS" >&2; exit 1 ;;
-          esac
-          name="cargo-nextest-$VERSION-$target.tar.gz"
-          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            --output "$temp/$name" \
-            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$VERSION/$name"
-          if [[ "$RUNNER_OS" == macOS ]]; then
-            echo "$sha256  $temp/$name" | shasum -a 256 --check --strict
-          else
-            echo "$sha256  $temp/$name" | sha256sum --check --strict
-          fi
-          mkdir "$temp/nextest-$VERSION"
-          tar -xzf "$temp/$name" -C "$temp/nextest-$VERSION"
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            cygpath -w "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
-          else
-            echo "$temp/nextest-$VERSION" >> "$GITHUB_PATH"
-          fi
+      - *install-nextest
 
       - name: Check the launchd GUI domain
         id: launchd
