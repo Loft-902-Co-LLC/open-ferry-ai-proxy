@@ -260,7 +260,7 @@ async fn update_without_credential_change_preserves_rejected_access_token() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn refresh_success_with_unchanged_token_clears_rejected_access_token() {
+async fn codex_refresh_with_unchanged_token_preserves_rejection() {
     let (h, _executor, tokens) = new_unauthorized_refresh_fixture(false);
     let token = access_token(&h.get(PRIMARY));
     h.manager.mark_rejected_access_token(PRIMARY, &token);
@@ -275,12 +275,12 @@ async fn refresh_success_with_unchanged_token_clears_rejected_access_token() {
         .force_refresh(PRIMARY)
         .await
         .expect("force refresh");
-    assert!(refreshed.rejected_access_token.is_empty());
+    assert_eq!(refreshed.rejected_access_token, token);
     let fetched = h.get(PRIMARY);
-    assert!(fetched.rejected_access_token.is_empty());
+    assert_eq!(fetched.rejected_access_token, token);
     assert!(
-        !is_auth_blocked_for_model(&fetched, MODEL, h.now()).0,
-        "primary is blocked after successful refresh with unchanged token"
+        is_auth_blocked_for_model(&fetched, MODEL, h.now()).0,
+        "same Codex bearer remains rejected after refresh"
     );
 }
 

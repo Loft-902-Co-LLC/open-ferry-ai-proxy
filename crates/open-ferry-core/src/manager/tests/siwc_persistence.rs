@@ -4278,7 +4278,7 @@ async fn rejection_adoption_does_not_fall_back_to_consumed_disk_tokens() {
         "consumed disk token never replaces live rotation"
     );
     assert!(
-        live.rejected_access_token == failed.access_token(),
+        live.is_active_access_token_rejected(),
         "read-only adoption refusal still remembers the executed bearer's 401"
     );
 }
@@ -4738,7 +4738,7 @@ async fn marked_rejection_refuses_different_disk_tokens() {
             "marked rejection leaves credentials unchanged"
         );
         assert!(
-            live.rejected_access_token == failed.access_token(),
+            live.is_active_access_token_rejected(),
             "adoption refusal still remembers the executed bearer's 401"
         );
     }
@@ -5146,7 +5146,7 @@ async fn missing_and_invalid_rejection_never_calls_legacy_readback() {
                 "classified rejection keeps credentials despite different legacy token"
             );
             assert!(
-                live.rejected_access_token == before.access_token(),
+                live.is_active_access_token_rejected(),
                 "Missing and Invalid still remember the executed bearer's 401"
             );
         }
