@@ -235,3 +235,36 @@ async fn round2_missing_outer_never_falls_back_during_execute_refresh_or_mark() 
     }
     assert!(h.get("codex").rejected_siwc_access_token.is_empty());
 }
+
+#[test]
+fn round2_codex_user_agents_match_non_ascii_header_bytes() {
+    for ua in [
+        "CoDeX-DeSkToP/1",
+        "CoDeX DeSkToP",
+        "CoDeX-Rs/1",
+        "CoDeX_ClI_Rs/1",
+        "CoDeX-TuI/1",
+        "CoDeX_ExEc/1",
+    ] {
+        let mut raw = b"\xff client(\xc3\xa9 ".to_vec();
+        raw.extend_from_slice(ua.as_bytes());
+        raw.extend_from_slice(b") ");
+        let mut opts = options();
+        opts.headers
+            .insert("user-agent", http::HeaderValue::from_bytes(&raw).unwrap());
+        assert!(opts.is_codex_client_request());
+        let auth = fixture();
+        assert!(!auth.use_siwc_for_request(&opts.headers));
+        assert_eq!(
+            auth.access_token_for_request(&opts.headers),
+            auth.outer_access_token()
+        );
+    }
+    let mut opts = options();
+    opts.headers.insert(
+        "user-agent",
+        http::HeaderValue::from_bytes(b"\xff ordinary").unwrap(),
+    );
+    assert!(!opts.is_codex_client_request());
+    assert!(fixture().use_siwc_for_request(&opts.headers));
+}
