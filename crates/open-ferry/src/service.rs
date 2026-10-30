@@ -2801,9 +2801,13 @@ impl Service {
                     }
                     let status = store.read_for_adoption(live).map_err(ManagerError::Store)?;
                     // Native files use current disk bytes even outside Codex's
-                    // partitioned contract. Legacy Gemini management payloads
-                    // retain their Unsupported compatibility path.
-                    let native_file = !go::equal_fold(live.provider.trim(), "gemini");
+                    // partitioned contract. Recognized file records carry their
+                    // provider type; untyped runtime/legacy Gemini payloads keep
+                    // their Unsupported compatibility path.
+                    let native_file = live.metadata_str("type").is_some_and(|kind| {
+                        !go::equal_fold(kind.trim(), "gemini")
+                            && go::equal_fold(kind.trim(), live.provider.trim())
+                    });
                     let status =
                         if (tagged || native_file) && matches!(status, AdoptionRead::Unsupported) {
                             store
