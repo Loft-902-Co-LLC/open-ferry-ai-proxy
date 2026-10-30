@@ -14,7 +14,7 @@
 //! last chunk's (see [`super::sse`]), and only the JSON object on a line is
 //! translated; blank lines, event names and `[DONE]` are skipped. From
 //! Vertex AI, each line goes to the translator as it is, except the Interactions
-//! fallback receives normalized JSON or DONE and skips SSE control lines. When
+//! fallback receives normalized payloads and skips SSE control lines. When
 //! the stream ends, the translator finishes and a final `[DONE]` is
 //! translated. When the connection fails instead, the translator finishes
 //! and the read error follows, with no `[DONE]`, so the client gets no
@@ -153,11 +153,15 @@ impl State {
                 let payload = open_ferry_translate::go::trim_space(
                     trimmed.strip_prefix(b"data:").unwrap_or(trimmed),
                 );
-                if payload == b"[DONE]" {
-                    self.send(payload).await;
-                } else if let Some(payload) = json_payload(payload) {
-                    self.send(payload).await;
+                if payload.is_empty()
+                    || payload.starts_with(b":")
+                    || [b"event:".as_slice(), b"id:", b"retry:"]
+                        .iter()
+                        .any(|prefix| payload.starts_with(prefix))
+                {
+                    return;
                 }
+                self.send(payload).await;
             }
             Lines::Raw => self.send(&line).await,
         }
