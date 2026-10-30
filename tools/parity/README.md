@@ -577,6 +577,56 @@ the certifier. The refresh command never silently updates a running CI budget.
 The kind classifier has an explicit `classifier_version` in the fingerprint;
 bump it when changing how diagnostic kinds are assigned.
 
+#### Calibrating on GitHub
+
+After `parity-calibrate.yml` is on `main`, dispatch it with the exact commit
+SHA to measure (branches, tags and abbreviated SHAs are rejected):
+
+```sh
+gh workflow run parity-calibrate.yml -f ref=<sha>
+gh run list --workflow parity-calibrate.yml
+# Set RUN_ID to the dispatched run's ID.
+gh run download "$RUN_ID" --dir target/parity-calibration-ci
+```
+
+The default runs 15 independent Ubuntu jobs: the exact PR profile (seed 1,
+random 25), random-500 seeds 11, 12, 38 and 39, and random-5000 seeds 30–39.
+Each uses Go 1.26.10 and the commit's pinned submodule. Optional
+`-f profiles='pr,5000:30'` collects a unique subset of those profiles;
+`-f timeout-minutes=180` changes the per-job limit (default 150, minimum 120,
+maximum 360). Runs for the same ref share a concurrency group.
+
+Every `config-save-<profile>` artifact contains `obs.json`, `summary.md` and
+`meta.json` (ref, gitlink, Go version, runner OS, comparison wall seconds and
+exit code). Exit 1 is allowed during collection because Different cases are
+expected; other exit codes fail. The combine job checks the planned artifact
+set, ref, gitlink, profiles, matching fingerprints and zero non-certification
+failures. It rebuilds the same ref and asks the existing full-refresh writer
+to accept all observations. `calibration-combined` contains `manifest.json`
+and, only after acceptance, `baseline.json`. A subset without ten full seeds
+and the exact PR observation will fail this full-refresh check while keeping
+its profile artifacts. CI never commits or pushes a baseline.
+
+To write the baseline locally, check out the calibrated SHA, initialize its
+submodule, and use only observation files from the profile artifacts:
+
+```sh
+observations=()
+for file in target/parity-calibration-ci/config-save-*/obs.json; do
+  observations+=(--baseline-observation "$file")
+done
+cargo run --locked -p open-ferry-parity -- \
+  --write-baseline tools/parity/baseline/config-save.json "${observations[@]}"
+```
+
+Review the result before committing it. Cross-run saved-failure downloading
+is not included: it would require a GitHub token and `actions: read`, beyond
+this workflow's `contents: read` permission. Re-execute saved scheduled
+config-save failures for seeds 11 and 12 locally as described above, then add
+each replay observation with another `--baseline-observation` when writing
+the final baseline. The default CI baseline covers the generated profiles;
+it does not replace that historical replay kind coverage.
+
 ### Fingerprint-only relabel
 
 A full refresh records `random_case_probes`, a map from `seed-1-random-25` and
