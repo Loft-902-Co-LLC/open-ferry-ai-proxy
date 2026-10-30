@@ -843,6 +843,12 @@ pub(crate) fn translate_request_for_auth(
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }
+    let provider = if auth.provider.is_empty() {
+        "claude"
+    } else {
+        &auth.provider
+    };
+    super::request::normalize_claude_tool_choice(provider, base_model, &mut body);
     thinking::apply_request_with_models(
         &mut body,
         &request.model,

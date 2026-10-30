@@ -193,6 +193,49 @@ pub(crate) fn ensure_model_max_tokens(
     json::set(body, "max_tokens", max_tokens.into());
 }
 
+/// Claude 5.5 rejects forced tools. Normalize the routed model before thinking;
+/// explicit payload rules still run afterwards.
+pub(crate) fn normalize_claude_tool_choice(provider: &str, model: &str, body: &mut Value) {
+    if provider != "claude" || !is_claude_55_model(model) || !tool_choice_forces_tool_use(body) {
+        return;
+    }
+    json::set(body, "tool_choice.type", "auto".into());
+    json::delete(body, "tool_choice.name");
+}
+
+fn is_claude_55_model(model: &str) -> bool {
+    let model = super::thinking::parse_suffix(model.trim())
+        .0
+        .to_ascii_lowercase();
+    let model = if let Some((base, context)) = model.split_once('[') {
+        let Some(context) = context.strip_suffix(']') else {
+            return false;
+        };
+        if context.is_empty() || context.contains(['[', ']']) {
+            return false;
+        }
+        base
+    } else {
+        model.as_str()
+    };
+    let Some(mut suffix) = model
+        .strip_prefix("claude-opus-5-5")
+        .or_else(|| model.strip_prefix("claude-sonnet-5-5"))
+    else {
+        return false;
+    };
+    for variant in ["-high", "-reasoning"] {
+        if let Some(rest) = suffix.strip_prefix(variant) {
+            suffix = rest;
+            break;
+        }
+    }
+    suffix.is_empty()
+        || suffix
+            .strip_prefix('-')
+            .is_some_and(|date| date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// `disableThinkingIfToolChoiceForced`: Claude doesn't allow thinking when
 /// `tool_choice` forces a tool.
 pub(crate) fn disable_thinking_if_tool_choice_forced(body: &mut Value) {
@@ -789,6 +832,71 @@ pub(crate) fn apply_preserved_thinking_binding(body: &mut Value) {
 mod tests {
     use super::*;
     use open_ferry_core::models::ModelInfo;
+
+    #[test]
+    fn claude_55_forced_tool_boundaries() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5-20260901",
+            "claude-sonnet-5-5[1m]",
+            "claude-opus-5-5-high-20260901[1m](high)",
+            "claude-sonnet-5-5-reasoning",
+            " CLAUDE-OPUS-5-5 ",
+        ] {
+            for choice in ["any", "tool"] {
+                let mut body = signed_history("spoofed", json!({"type":"adaptive"}));
+                body["tool_choice"] =
+                    json!({"type":choice,"name":"lookup","disable_parallel_tool_use":false});
+                let original = body.clone();
+                normalize_claude_tool_choice("claude", model, &mut body);
+                assert_eq!(
+                    body["tool_choice"],
+                    json!({"type":"auto","disable_parallel_tool_use":false}),
+                    "{model}"
+                );
+                assert_eq!(body["thinking"], original["thinking"]);
+                assert_eq!(body["messages"], original["messages"]);
+            }
+        }
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-5-5",
+            "claude-opus-5-50",
+            "claude-sonnet-5-50",
+            "claude-opus-5-5-custom",
+            "claude-opus-5-5[]",
+            "claude-opus-5-5[[1m]]",
+            "claude-opus-5-5-2026090",
+            "claude-opus-5-5-high-reasoning",
+            "other-claude-opus-5-5",
+        ] {
+            let mut body =
+                json!({"model":"claude-opus-5-5","tool_choice":{"type":"tool","name":"lookup"}});
+            let before = body.clone();
+            normalize_claude_tool_choice("claude", model, &mut body);
+            assert_eq!(body, before, "{model}");
+        }
+        let provider = "claude-cli";
+        let mut body = json!({"tool_choice":{"type":"any"}});
+        let before = body.clone();
+        normalize_claude_tool_choice(provider, "claude-opus-5-5", &mut body);
+        assert_eq!(body, before, "{provider}");
+        for choice in [
+            json!({"type":"auto"}),
+            json!({"type":"none"}),
+            Value::Null,
+            json!("required"),
+        ] {
+            let mut body = json!({"tool_choice":choice});
+            let before = body.clone();
+            normalize_claude_tool_choice("claude", "claude-opus-5-5", &mut body);
+            assert_eq!(body, before);
+        }
+        let mut omitted = json!({});
+        normalize_claude_tool_choice("claude", "claude-opus-5-5", &mut omitted);
+        assert_eq!(omitted, json!({}));
+    }
 
     fn signed_history(model: &str, thinking: Value) -> Value {
         json!({"model": model, "thinking": thinking, "messages": [
