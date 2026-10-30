@@ -579,11 +579,13 @@ bump it when changing how diagnostic kinds are assigned.
 
 #### Calibrating on GitHub
 
-After `parity-calibrate.yml` is on `main`, dispatch it with the exact commit
-SHA to measure (branches, tags and abbreviated SHAs are rejected):
+Dispatch `parity-calibrate.yml` on the branch whose head you want to measure.
+The run calibrates that commit and checks out nothing else, so a run never
+builds code from another ref. The branch must contain the workflow. Pass the
+expected full SHA, so a branch that moved in the meantime is refused:
 
 ```sh
-gh workflow run parity-calibrate.yml -f ref=<sha>
+gh workflow run parity-calibrate.yml --ref <branch> -f expect-sha=<sha>
 gh run list --workflow parity-calibrate.yml
 # Set RUN_ID to the dispatched run's ID.
 gh run download "$RUN_ID" --dir target/parity-calibration-ci
@@ -594,7 +596,7 @@ random 25), random-500 seeds 11, 12, 38 and 39, and random-5000 seeds 30–39.
 Each uses Go 1.26.10 and the commit's pinned submodule. Optional
 `-f profiles='pr,5000:30'` collects a unique subset of those profiles;
 `-f timeout-minutes=180` changes the per-job limit (default 150, minimum 120,
-maximum 360). Runs for the same ref share a concurrency group.
+maximum 360). Runs for the same commit share a concurrency group.
 
 Every `config-save-<profile>` artifact contains `obs.json`, `summary.md` and
 `meta.json` (ref, gitlink, Go version, runner OS, comparison wall seconds and

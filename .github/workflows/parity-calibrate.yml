@@ -2,10 +2,12 @@ name: Parity (calibration)
 
 on:
   workflow_dispatch:
+    # The run calibrates the commit it was dispatched on (`--ref <branch>`),
+    # never another checkout, so the job only builds code from that ref.
     inputs:
-      ref:
-        description: 'Exact full 40-hex commit SHA to calibrate'
-        required: true
+      expect-sha:
+        description: 'Optional full 40-hex SHA the dispatched ref must be at'
+        required: false
         type: string
       profiles:
         description: 'Comma-separated profiles (pr or random:seed)'
@@ -20,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: parity-calibrate-${{ inputs.ref }}
+  group: parity-calibrate-${{ github.sha }}
   cancel-in-progress: false
 
 env:
@@ -44,15 +46,20 @@ jobs:
       - name: Validate inputs and plan profiles
         id: plan
         env:
-          CALIBRATION_REF: ${{ inputs.ref }}
+          CALIBRATION_REF: ${{ github.sha }}
+          EXPECT_SHA: ${{ inputs.expect-sha }}
           PROFILES: ${{ inputs.profiles }}
           TIMEOUT: ${{ inputs.timeout-minutes }}
         run: |
           python3 - <<'PY'
           import json, os, re
           ref = os.environ['CALIBRATION_REF']
-          if not re.fullmatch(r'[0-9a-fA-F]{40}', ref):
-              raise SystemExit('ref must be a full 40-hex commit SHA')
+          expect = os.environ['EXPECT_SHA'].strip()
+          if expect:
+              if not re.fullmatch(r'[0-9a-fA-F]{40}', expect):
+                  raise SystemExit('expect-sha must be a full 40-hex commit SHA')
+              if expect.lower() != ref.lower():
+                  raise SystemExit(f'dispatched ref is at {ref}, not the expected {expect}')
           timeout = float(os.environ['TIMEOUT'])
           if not 120 <= timeout <= 360 or not timeout.is_integer():
               raise SystemExit('timeout-minutes must be an integer from 120 to 360')
@@ -79,7 +86,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.ref }}
           submodules: true
           persist-credentials: false
           fetch-depth: 1
@@ -157,7 +163,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.ref }}
           submodules: true
           persist-credentials: false
           fetch-depth: 1
