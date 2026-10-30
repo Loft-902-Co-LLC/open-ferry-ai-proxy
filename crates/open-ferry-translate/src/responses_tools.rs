@@ -479,10 +479,20 @@ pub(crate) fn map_client_search_name(forward: &HashMap<String, String>) -> Strin
 /// `sanitizeResponsesToolNames`: a Gemini name for each tool name. Names
 /// that sanitize alike, or to a name already taken, get a hash suffix.
 pub(crate) fn sanitize_tool_names(names: &[&str]) -> HashMap<String, String> {
+    sanitize_tool_names_metered(names, |_| true).expect("unbounded name sanitization")
+}
+
+pub(crate) fn sanitize_tool_names_metered(
+    names: &[&str],
+    charge: impl Fn(usize) -> bool,
+) -> Option<HashMap<String, String>> {
     let mut seen = HashSet::with_capacity(names.len());
     let mut unique = Vec::new();
     let mut base_counts = HashMap::<String, usize>::new();
     for &name in names {
+        if !charge(name.len().saturating_add(32)) {
+            return None;
+        }
         if name.is_empty() || !seen.insert(name) {
             continue;
         }
@@ -491,28 +501,53 @@ pub(crate) fn sanitize_tool_names(names: &[&str]) -> HashMap<String, String> {
             .entry(sanitize_gemini_function_name(name))
             .or_default() += 1;
     }
-    unique.sort_unstable();
+    // Pay for comparisons the sort performs, including shared name prefixes,
+    // rather than assuming every name is compared with every other name.
+    let mut fits = true;
+    unique.sort_unstable_by(|left, right| {
+        fits &= charge(left.len().min(right.len()).saturating_add(1));
+        left.cmp(right)
+    });
+    if !fits {
+        return None;
+    }
 
     let mut out = HashMap::with_capacity(unique.len());
     let mut used = HashSet::with_capacity(unique.len());
     for name in unique {
+        if !charge(name.len().saturating_add(64)) {
+            return None;
+        }
         let base = sanitize_gemini_function_name(name);
         let mapped = if base_counts[&base] > 1 || used.contains(&base) {
-            disambiguate_sanitized_name(&base, name, &used)
+            disambiguate_sanitized_name_metered(&base, name, &used, &charge)?
         } else {
             base
         };
         used.insert(mapped.clone());
         out.insert(name.to_owned(), mapped);
     }
-    out
+    Some(out)
 }
 
 /// `disambiguateResponsesSanitizedName`: `base` with a suffix from the hash
 /// of the original name and an attempt number, cut so the whole fits in 64
 /// bytes, trying attempts until one is free.
 fn disambiguate_sanitized_name(base: &str, original: &str, used: &HashSet<String>) -> String {
+    disambiguate_sanitized_name_metered(base, original, used, &|_| true)
+        .expect("unbounded name disambiguation")
+}
+
+fn disambiguate_sanitized_name_metered(
+    base: &str,
+    original: &str,
+    used: &HashSet<String>,
+    charge: &impl Fn(usize) -> bool,
+) -> Option<String> {
     for attempt in 0u64.. {
+        if !charge(original.len().saturating_add(base.len()).saturating_add(64)) {
+            return None;
+        }
         let digest = Sha256::digest(format!("{original}\0{attempt}").as_bytes());
         let mut suffix = String::from("_");
         for byte in &digest[..6] {
@@ -522,7 +557,7 @@ fn disambiguate_sanitized_name(base: &str, original: &str, used: &HashSet<String
         let prefix = &base[..base.len().min(GEMINI_FUNCTION_NAME_LIMIT - suffix.len())];
         let candidate = format!("{prefix}{suffix}");
         if !used.contains(&candidate) {
-            return candidate;
+            return Some(candidate);
         }
     }
     unreachable!("some attempt gives an unused name")

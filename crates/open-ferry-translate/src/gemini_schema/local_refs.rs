@@ -21,21 +21,43 @@ pub(crate) fn inline_for_clean(schema: &Value, budget: &mut SchemaCopyBudget) ->
     inline_with_depth(schema, MAX_OUTPUT_DEPTH, budget).0
 }
 
+#[cfg(test)]
 pub(crate) fn inline_for_projection(schema: &Value) -> Option<Value> {
-    // The projection has its own total allowance, including the source clone.
-    // Preflight before the shared inliner allocates, not after expansion.
-    let nodes = node_count(schema, 100_000, false);
-    if nodes > 100_000 {
+    inline_for_projection_metered(schema, |_| true)
+}
+
+pub(crate) fn inline_for_projection_metered(
+    schema: &Value,
+    charge: impl FnOnce(usize) -> bool,
+) -> Option<Value> {
+    const NODES: usize = 100_000;
+    const BYTES: usize = super::SCHEMA_COPY_BYTES_PER_REQUEST;
+    // A successful projection pays its copy ledger once, including the source
+    // clone. A truncated one pays the private limit rather than poisoning the
+    // entire streaming call with an unbounded charge.
+    let limit = BYTES + 32 * NODES;
+    let nodes = node_count(schema, NODES, false);
+    if nodes > NODES {
+        charge(limit);
         return None;
     }
-    let bytes = super::copy_bytes(schema, super::SCHEMA_COPY_BYTES_PER_REQUEST)?;
+    let Some(bytes) = super::copy_bytes(schema, BYTES) else {
+        charge(limit);
+        return None;
+    };
     let mut budget = SchemaCopyBudget {
-        remaining: super::SCHEMA_COPY_BYTES_PER_REQUEST - bytes,
-        nodes: 100_000 - nodes,
+        remaining: BYTES - bytes,
+        nodes: NODES - nodes,
         path_work: usize::MAX,
     };
     let (value, truncated) = inline_with_depth(schema, 64, &mut budget);
-    (!truncated).then_some(value)
+    let work = if truncated {
+        limit
+    } else {
+        BYTES - budget.remaining + 32 * (NODES - budget.nodes)
+    };
+    let fits = charge(work);
+    (!truncated && fits).then_some(value)
 }
 
 fn inline_with_depth(

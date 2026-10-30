@@ -112,3 +112,18 @@ fn final_and_fallback_cleaners_cannot_hide_exhaustion() {
         assert!(assembler.full.is_empty());
     }
 }
+
+#[test]
+fn round3_root_paths_are_compatible_before_push_rejects_them() {
+    for path in [None, Some(""), Some("$"), Some("  $  ")] {
+        let mut call = StreamingCall::new("weather".into(), String::new(), "call".into(), 0);
+        call.assembler.push(&json!({"willContinue":true,"partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}]}), None).unwrap();
+        let mut part = json!({"stringValue":"x"});
+        if let Some(path) = path {
+            part["jsonPath"] = json!(path);
+        }
+        let next = json!({"name":"weather","partialArgs":[part]});
+        assert!(call.can_continue(&next), "{path:?}");
+        assert!(call.assembler.push(&next, None).is_err(), "{path:?}");
+    }
+}

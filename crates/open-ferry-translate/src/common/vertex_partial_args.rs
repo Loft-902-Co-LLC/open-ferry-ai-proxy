@@ -591,6 +591,9 @@ impl Assembler {
             let Ok(segments) = parse_path(&path) else {
                 continue;
             };
+            if segments.is_empty() {
+                continue;
+            }
             let Some(index) = self.find(&segments)? else {
                 continue;
             };

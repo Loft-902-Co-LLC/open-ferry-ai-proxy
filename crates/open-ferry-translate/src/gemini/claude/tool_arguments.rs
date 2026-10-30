@@ -557,14 +557,6 @@ fn analyze_depth_memo<'a>(
     info
 }
 
-pub(super) fn parameterless_bounded(
-    request: &Value,
-    name: &str,
-    work: &crate::common::vertex_partial_args::WorkBudget,
-) -> bool {
-    budget::with(work, || parameterless(request, name))
-}
-
 pub(super) fn parameterless(request: &Value, name: &str) -> bool {
     match original_schema(request, name) {
         Some(None) => true,
@@ -616,13 +608,7 @@ fn sent_tool_name(original: &Value, target: &str) -> Option<String> {
         collect_function_names(tool, &mut names);
     }
     let names: Vec<_> = names.iter().map(String::as_str).collect();
-    let bytes = names.iter().fold(0usize, |bytes, name| {
-        bytes.saturating_add(name.len().saturating_add(32))
-    });
-    if !budget::charge(bytes.saturating_mul(names.len().saturating_add(1))) {
-        return None;
-    }
-    crate::responses_tools::sanitize_tool_names(&names).remove(target)
+    crate::responses_tools::sanitize_tool_names_metered(&names, budget::charge)?.remove(target)
 }
 
 fn translated_schemas<'a>(sent: &'a Value, original: &Value, name: &str) -> Vec<&'a Value> {
@@ -950,13 +936,17 @@ fn clean_value(
     {
         return;
     }
+    let translated_infos: Vec<_> = translated
+        .iter()
+        .map(|schema| analyze(schema, schema))
+        .collect();
     for (key, children) in &info.properties {
         if info.parent_accepts(key, value) || candidate_accepts(&infos, Some(key), value) {
             continue;
         }
         let mut translated_children = Schemas::default();
-        for schema in translated {
-            if let Some(children) = analyze(schema, schema).properties.get(key) {
+        for translated_info in &translated_infos {
+            if let Some(children) = translated_info.properties.get(key) {
                 for child in children {
                     unique(&mut translated_children, child);
                 }
@@ -1012,25 +1002,70 @@ fn clean_value(
     }
 }
 
-pub(super) fn clean_arguments_bounded(
-    args: &Value,
-    name: &str,
-    original: &Value,
-    sent: &Value,
-    work: &crate::common::vertex_partial_args::WorkBudget,
-) -> Value {
-    budget::with(work, || clean_arguments(args, name, original, sent))
+// Owned once per streaming call: probes must not resolve or copy request-wide
+// tools again. The unbounded whole-response path still borrows its schemas.
+#[derive(Default)]
+pub(super) struct CallSchemas {
+    original: Option<Option<Value>>,
+    translated: Vec<Value>,
+}
+
+impl CallSchemas {
+    pub(super) fn resolve(
+        name: &str,
+        original: &Value,
+        sent: &Value,
+        work: &crate::common::vertex_partial_args::WorkBudget,
+    ) -> Self {
+        budget::with(work, || Self {
+            original: original_schema(original, name).map(|schema| schema.map(budget::copy)),
+            translated: translated_schemas(sent, original, name)
+                .into_iter()
+                .map(budget::copy)
+                .collect(),
+        })
+    }
+
+    pub(super) fn parameterless(
+        &self,
+        work: &crate::common::vertex_partial_args::WorkBudget,
+    ) -> bool {
+        budget::with(work, || match &self.original {
+            Some(None) => true,
+            Some(Some(schema)) => analyze(schema, schema).parameterless(),
+            None => false,
+        })
+    }
+
+    pub(super) fn clean(
+        &self,
+        args: &Value,
+        work: &crate::common::vertex_partial_args::WorkBudget,
+    ) -> Value {
+        budget::with(work, || {
+            let translated: Vec<_> = self.translated.iter().collect();
+            clean_resolved(
+                args,
+                self.original.as_ref().map(|schema| schema.as_ref()),
+                &translated,
+            )
+        })
+    }
 }
 
 pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: &Value) -> Value {
+    let translated = translated_schemas(sent, original, name);
+    clean_resolved(args, original_schema(original, name), &translated)
+}
+
+fn clean_resolved(args: &Value, original: Option<Option<&Value>>, translated: &[&Value]) -> Value {
     if !budget::value(args) {
         return Value::Null;
     }
-    let translated = translated_schemas(sent, original, name);
     if !args.is_object() && !translated.is_empty() {
         return budget::copy(args);
     }
-    let Some(schema) = original_schema(original, name) else {
+    let Some(schema) = original else {
         return budget::copy(args);
     };
     let Some(schema) = schema else {
@@ -1040,7 +1075,7 @@ pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: 
         return budget::copy(args);
     }
     let mut args = budget::copy(args);
-    clean_value(&mut args, &[schema], &translated, schema, true, 0);
+    clean_value(&mut args, &[schema], translated, schema, true, 0);
     args
 }
 

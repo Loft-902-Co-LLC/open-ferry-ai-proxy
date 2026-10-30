@@ -596,22 +596,11 @@ pub(super) fn requires(schema: &Value, placeholder: &str) -> bool {
         return false;
     };
     let wrapped = Value::Object(Map::from_iter([("schema".into(), schema)]));
-    // The shared inliner owns its existing depth/copy bounds. Charge a
-    // conservative four walks per possible projection level (64), covering
-    // overlapping target scans, sorting, and transient copies, on both sides.
-    // Its own preflight still bounds the one expansion before the output check.
-    if !budget::copies(&wrapped, 4 * 64) {
-        return false;
-    }
-    let Some(inlined) = crate::gemini_schema::local_refs::inline_for_projection(&wrapped) else {
-        // A truncated projection has spent its private allowance without a
-        // measurable output. Do not let later probes repeat that work.
-        let _ = budget::charge(usize::MAX);
+    let Some(inlined) =
+        crate::gemini_schema::local_refs::inline_for_projection_metered(&wrapped, budget::charge)
+    else {
         return false;
     };
-    if !budget::copies(&inlined, 4 * 64) {
-        return false;
-    }
     drop(wrapped);
     let Some(mut projected) = copy_bounded(&inlined, 0, &mut 100_000) else {
         return false;
@@ -668,5 +657,31 @@ mod depth_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod round3_tests {
+    use super::*;
+    use crate::common::vertex_partial_args::WorkBudget;
+
+    #[test]
+    fn round3_truncated_projection_preserves_the_work_allowance() {
+        let mut literal = json!("x");
+        for _ in 0..65 {
+            literal = json!([literal]);
+        }
+        let schema =
+            json!({"type":"object","properties":{"value":{"type":"string","enum":literal}}});
+        let repaired = repair(schema.clone(), 0).unwrap();
+        let wrapped = json!({"schema":repaired});
+        assert!(crate::gemini_schema::local_refs::inline_for_projection(&wrapped).is_none());
+        let work = WorkBudget::default();
+        assert!(!budget::with(&work, || requires(&schema, "reason")));
+        assert!(
+            work.check().is_ok(),
+            "a truncated projection must leave room for call completion"
+        );
+        assert!(work.used() > 0);
     }
 }

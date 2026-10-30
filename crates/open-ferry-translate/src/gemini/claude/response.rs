@@ -83,6 +83,7 @@ pub struct GeminiToClaudeStream {
     current_input_emitted: bool,
     current_pending_empty: bool,
     active_call: Option<StreamingCall>,
+    active_schemas: Option<super::tool_arguments::CallSchemas>,
     incomplete_call: bool,
     pending_tool_signatures: Vec<String>,
     /// Sanitized function names → the names the client declared.
@@ -115,6 +116,7 @@ impl GeminiToClaudeStream {
             current_input_emitted: false,
             current_pending_empty: false,
             active_call: None,
+            active_schemas: None,
             incomplete_call: false,
             pending_tool_signatures: Vec::new(),
             sanitized_names: sanitized_tool_name_map(original_request),

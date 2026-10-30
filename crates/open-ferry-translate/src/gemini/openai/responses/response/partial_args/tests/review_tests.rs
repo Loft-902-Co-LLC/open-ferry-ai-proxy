@@ -264,3 +264,40 @@ fn responses_finalize_after_finish_does_not_fail_or_complete_unfinished_argument
         }
     }
 }
+
+#[test]
+fn round3_root_paths_do_not_open_an_extra_responses_item() {
+    for path in [None, Some(""), Some("$"), Some("  $  ")] {
+        let mut stream =
+            GeminiToOpenAIResponsesStream::new("gemini-test", &json!({}), &Value::Null);
+        let mut all = feed(
+            &mut stream,
+            &frame(
+                json!([{"functionCall":{"name":"weather","willContinue":true,"partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}]}}]),
+                false,
+            ),
+        );
+        let mut part = json!({"stringValue":"x"});
+        if let Some(path) = path {
+            part["jsonPath"] = json!(path);
+        }
+        all.extend(feed(
+            &mut stream,
+            &frame(
+                json!([{"functionCall":{"name":"weather","partialArgs":[part]}}]),
+                true,
+            ),
+        ));
+        all.extend(parse(&stream.translate_line(b"data: [DONE]")));
+        assert_eq!(
+            of_type(&all, "response.output_item.added").len(),
+            1,
+            "{path:?}"
+        );
+        assert!(
+            of_type(&all, "response.function_call_arguments.done").is_empty(),
+            "{path:?}"
+        );
+        assert!(of_type(&all, "response.completed").is_empty(), "{path:?}");
+    }
+}

@@ -3,6 +3,7 @@ use super::*;
 impl GeminiToClaudeStream {
     pub(super) fn abort_streaming_call(&mut self) {
         self.incomplete_call = true;
+        self.active_schemas = None;
         if self.active_call.take().is_some() {
             self.pending_tool_signatures.clear();
             self.current_pending_empty = false;
@@ -51,20 +52,22 @@ impl GeminiToClaudeStream {
         };
         let name = restore_sanitized_tool_name(self.sanitized_names.as_ref(), &active.raw_name);
         let tool = map_tool_name(self.tool_names.as_ref(), &name);
-        let parameterless = !continuation
-            && crate::gemini::claude::tool_arguments::parameterless_bounded(
-                &self.original_request,
-                &tool,
-                active.assembler.work_budget(),
-            );
+        if !continuation {
+            self.active_schemas =
+                Some(crate::gemini::claude::tool_arguments::CallSchemas::resolve(
+                    &tool,
+                    &self.original_request,
+                    &self.translated_request,
+                    active.assembler.work_budget(),
+                ));
+        }
+        let schemas = self
+            .active_schemas
+            .as_ref()
+            .expect("schemas resolved for the active call");
+        let parameterless = !continuation && schemas.parameterless(active.assembler.work_budget());
         let clean = |args: &Value, work: &crate::common::vertex_partial_args::WorkBudget| {
-            crate::gemini::claude::tool_arguments::clean_arguments_bounded(
-                args,
-                &tool,
-                &self.original_request,
-                &self.translated_request,
-                work,
-            )
+            schemas.clean(args, work)
         };
         let (delta, done) = match active.assembler.push(call, Some(&clean)) {
             Ok(result) => result,
@@ -75,6 +78,7 @@ impl GeminiToClaudeStream {
                 } else {
                     // No block was opened for this failed call. Keep the prior block.
                     self.incomplete_call = true;
+                    self.active_schemas = None;
                 }
                 return true;
             }
@@ -114,6 +118,7 @@ impl GeminiToClaudeStream {
             self.current_pending_empty = false;
         }
         if done {
+            self.active_schemas = None;
             self.push_block_stop(out);
             self.block_index = active.index as usize + 1;
             self.block = Block::None;
