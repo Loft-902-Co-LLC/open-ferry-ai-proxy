@@ -637,3 +637,18 @@ fn p47r2_only_truncation_adds_a_usage_failure_code() {
     }
 }
 
+#[test]
+fn p47_cancellation_before_bootstrap_publishes_once() {
+    let h = Harness::new();
+    let driver = ClientCall::new("m").stream().tap(&h);
+    let observation = Arc::new(Observation::new(
+        driver.context.clone(),
+        vec![driver.tap.clone()],
+    ));
+    let report = CallReport::observing(Some(&observation));
+    driver.attempt(AttemptKind::Stream, "codex", "m", &auth("a", "0", "codex"));
+    drop(report);
+    let record = h.record();
+    assert_eq!(int_at(&record, "/fail/status_code"), 499);
+    assert!(h.records().is_empty());
+}
