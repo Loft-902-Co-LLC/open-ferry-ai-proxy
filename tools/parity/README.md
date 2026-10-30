@@ -489,6 +489,23 @@ observation must have exactly that set. Use a full refresh to lower the budget.
 
 ### Full refresh
 
+**Before writing a baseline**, check that every observation's producer commit
+still has the same verdict inputs as HEAD. Record that commit when collecting;
+observations do not store it. Repeat `--observation` for every collection file:
+
+```sh
+python -I .github/scripts/parity-collection-valid.py --producer <collection-commit> --observation target/parity-calibration/seed30.json
+```
+
+Proceed only on exit 0 (valid); 1 means stale and 2 means an input error. The
+check compares committed config, parity code (excluding docs and baseline data),
+build inputs and upstream pin, and checks observation pins, fingerprints and
+non-certification counts. For collections split across producer commits, use
+`--manifest collection.json` instead of `--producer` and `--observation`, with a
+JSON list of `{"observation": "seed30.json", "producer": "<commit>"}` pairs;
+relative observation paths resolve from the manifest's directory. `--head <rev>`
+selects another target commit and `--json` emits one machine-readable result.
+
 Collect new observations with the unchanged verdict logic. This Bash example
 collects ten full config profiles and the exact PR profile:
 
