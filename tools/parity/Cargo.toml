@@ -21,4 +21,4 @@ ureq = "3.4.2"
 
 [dev-dependencies]
 proc-macro2 = "1"
-syn = { version = "2.0.119", features = ["full", "visit"] }
+syn = { version = "3.0.6", features = ["full", "visit"] }
