@@ -18,7 +18,6 @@ impl SchemaIndex {
         mut depth: usize,
         mut active: Map,
     ) -> usize {
-        let origin = node;
         while depth <= 16 && self.alias(node) {
             let Some(raw) = self.field(node, "$ref") else {
                 unreachable!()
@@ -38,7 +37,7 @@ impl SchemaIndex {
         if depth > 16 {
             return 0;
         }
-        let own = self.own(node, origin);
+        let own = self.own(node);
         let shape = self.shape(node, scope, &mut HashSet::new());
         let cache_node = node;
         let cache_depth = if shape.is_some_and(|shape| depth + shape.depth <= 16) {

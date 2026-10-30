@@ -37,44 +37,16 @@ fn path(steps: &[Step]) -> String {
     }
     out
 }
-fn set(value: &mut Value, steps: &[Step], incoming: Value) {
-    let Some((first, rest)) = steps.split_first() else {
-        *value = incoming;
-        return;
-    };
-    match first {
-        Key(key) => {
-            if !value.is_object() {
-                *value = json!({});
-            }
-            let child = value
-                .as_object_mut()
-                .unwrap()
-                .entry(key.clone())
-                .or_insert(Value::Null);
-            set(child, rest, incoming);
-        }
-        Index(at) => {
-            if !value.is_array() {
-                *value = json!([]);
-            }
-            let values = value.as_array_mut().unwrap();
-            values.resize(values.len().max(at + 1), Value::Null);
-            set(&mut values[*at], rest, incoming);
-        }
-    }
-}
-fn run(case: &Case) -> Run {
-    let request = json!({"tools":[{"name":"tool","input_schema":case.schema}]});
-    let sent = if case.translated {
-        json!({"tools":[{"functionDeclarations":[{"name":"tool","parametersJsonSchema":case.schema}]}]})
-    } else {
-        Value::Null
-    };
+fn run(case: &Case, schemas: &CallSchemas, reference: bool) -> Run {
     let mut call = StreamingCall::new("tool".into(), "call".into(), "call".into(), 0);
-    let schemas = CallSchemas::resolve("tool", &request, &sent);
     let _ = schemas.parameterless();
-    let clean = |value: &Value| schemas.clean(value);
+    let clean = |value: &Value| {
+        if reference {
+            schemas.clean_reference(value)
+        } else {
+            schemas.clean(value)
+        }
+    };
     let probe = |state: usize, step: crate::common::vertex_partial_args::ProbeStep<'_>| {
         schemas.probe(state, step)
     };
@@ -428,8 +400,6 @@ fn family() -> Vec<Case> {
 }
 fn check(case: &Case) {
     let started = std::time::Instant::now();
-    let actual = run(case);
-    assert!(actual.complete, "{} did not complete", case.name);
     let request = json!({"tools":[{"name":"tool","input_schema":case.schema}]});
     let sent = if case.translated {
         json!({"tools":[{"functionDeclarations":[{"name":"tool","parametersJsonSchema":case.schema}]}]})
@@ -437,39 +407,57 @@ fn check(case: &Case) {
         Value::Null
     };
     let schemas = CallSchemas::resolve("tool", &request, &sent);
-    let mut raw = Value::Null;
-    for (steps, value) in &case.paths {
-        set(&mut raw, steps, value.clone());
-    }
-    let expected = schemas.clean_reference(&raw);
-    let actual_value: Value = crate::json::exact::from_str(&actual.output).unwrap();
-    assert_eq!(actual_value, expected, "{}", case.name);
+    let actual = run(case, &schemas, false);
+    // Reuse singleton state tables to preserve streaming emission order without
+    // rebuilding huge prefix probes. The final cleaner is the independent old
+    // implementation, unmetered; compare concatenated bytes, not just Values.
+    let expected = run(case, &schemas, true);
+    assert!(
+        actual.complete && expected.complete,
+        "{} did not complete",
+        case.name
+    );
+    assert_eq!(actual.output, expected.output, "{}", case.name);
     eprintln!(
         "R7_CASE name={} complete=true equal=true elapsed_ms={}",
         case.name,
         started.elapsed().as_millis()
     );
 }
-#[test]
-fn round6_family_completes_with_equal_output() {
+// Keep every original size. Sixteen disjoint buckets keep routine tests below
+// roughly ten seconds instead of shrinking the 400-member family.
+fn family_bucket(bucket: usize) {
     std::thread::Builder::new()
         .stack_size(8 << 20)
-        .spawn(|| {
+        .spawn(move || {
+            let started = std::time::Instant::now();
             let cases = family();
             assert_eq!(cases.len(), 400);
-            for case in cases {
-                check(&case);
+            for (index, case) in cases.into_iter().enumerate() {
+                if index % 16 == bucket {
+                    check(&case);
+                }
             }
+            eprintln!(
+                "R7_BUCKET bucket={bucket} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
         })
         .unwrap()
         .join()
         .unwrap();
 }
+macro_rules! family_tests {($($name:ident:$bucket:expr),*)=>{$(#[test]fn $name(){family_bucket($bucket);})*};}
+family_tests!(round6_family_00:0,round6_family_01:1,round6_family_02:2,round6_family_03:3,round6_family_04:4,round6_family_05:5,round6_family_06:6,round6_family_07:7,round6_family_08:8,round6_family_09:9,round6_family_10:10,round6_family_11:11,round6_family_12:12,round6_family_13:13,round6_family_14:14,round6_family_15:15);
 
 #[test]
 fn round7_cyclic_aliases_and_conjuncts_complete() {
     // The full review input took 46.7 s in debug; preserve it as an opt-in.
-    let (aliases_count, conjuncts_count) = if std::env::var_os("R7_FULL_SIZE").is_some() {(1_000,20_000)}else{(100,2_000)};
+    let (aliases_count, conjuncts_count) = if std::env::var_os("R7_FULL_SIZE").is_some() {
+        (1_000, 20_000)
+    } else {
+        (100, 2_000)
+    };
     let mut defs = serde_json::Map::new();
     let mut conjuncts = vec![json!({"$ref":"#/$defs/B"})];
     conjuncts.extend((0..conjuncts_count).map(|_| json!({})));

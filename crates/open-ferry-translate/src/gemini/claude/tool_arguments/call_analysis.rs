@@ -14,7 +14,7 @@ impl Info<'_> {
             properties: self
                 .properties
                 .into_iter()
-                .map(|(key, schemas)| (key, schemas.into_iter().map(Value::clone).collect()))
+                .map(|(key, schemas)| (key, schemas.into_iter().cloned().collect()))
                 .collect(),
             required: self.required,
             allows: self.allows,
@@ -69,7 +69,7 @@ impl CallAnalysis {
                 }
             }
         }
-        let result = Arc::new(children.into_iter().map(Value::clone).collect());
+        let result = Arc::new(children.into_iter().cloned().collect());
         self.children.insert(key, Arc::clone(&result));
         result
     }
@@ -100,7 +100,7 @@ impl CallAnalysis {
                     unique(&mut values, item);
                 }
             }
-            Some(Arc::new(values.into_iter().map(Value::clone).collect()))
+            Some(Arc::new(values.into_iter().cloned().collect()))
         })();
         self.array_items.insert(key, result.clone());
         result

@@ -357,7 +357,7 @@ impl GeminiToClaudeStream {
             self.saw_tool_call = true;
             let upstream_name = restore_sanitized_tool_name(
                 self.sanitized_names.as_ref(),
-                &str_of(call.get("name")),
+                str_of(call.get("name")).trim(),
             );
             let client_name = map_tool_name(self.tool_names.as_ref(), &upstream_name);
             let args = call.get("args");

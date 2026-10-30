@@ -174,39 +174,34 @@ impl Assembler {
         Ok(())
     }
 
-    fn alloc(&mut self, kind: Kind, held: bool) -> Result<usize> {
+    fn alloc(&mut self, kind: Kind, held: bool) -> usize {
         let index = self.nodes.len();
         self.nodes.push(Node {
             kind,
             held,
             ..Node::default()
         });
-        Ok(index)
+        index
     }
 
     fn object_child(&self, children: &ObjectChildren, key: &str) -> Option<usize> {
         #[cfg(test)]
-        self.lookup_steps
-            .set(self.lookup_steps.get() + 1);
+        self.lookup_steps.set(self.lookup_steps.get() + 1);
         children.by_key.get(key).copied()
     }
 
-    fn find(&self, segments: &[Segment]) -> Result<Option<usize>> {
-        let Some(mut current) = self.root else {
-            return Ok(None);
-        };
+    fn find(&self, segments: &[Segment]) -> Option<usize> {
+        let mut current = self.root?;
         for segment in segments {
             let child = match (&self.nodes[current].kind, segment) {
                 (Kind::Object(children), Segment::Key(key)) => self.object_child(children, key),
                 (Kind::Array(children), Segment::Index(index)) => children.get(index).copied(),
                 _ => None,
             };
-            let Some(child) = child else {
-                return Ok(None);
-            };
+            let child = child?;
             current = child;
         }
-        Ok(Some(current))
+        Some(current)
     }
 
     fn push_part(&mut self, part: &Value, cleaner: Cleaner<'_>, probe: Probe<'_>) -> Result<()> {
@@ -227,7 +222,7 @@ impl Assembler {
             let node = if segments.is_empty() {
                 self.last_string
             } else {
-                self.find(&segments)?
+                self.find(&segments)
             };
             if let Some(node) = node
                 && let Kind::String { open, .. } = &mut self.nodes[node].kind
@@ -242,7 +237,7 @@ impl Assembler {
         let root = match self.root {
             Some(root) => root,
             None => {
-                let root = self.alloc(container(&segments[0]), false)?;
+                let root = self.alloc(container(&segments[0]), false);
                 self.root = Some(root);
                 root
             }
@@ -274,14 +269,14 @@ impl Assembler {
                             self.reserve(key.len())?;
                             match indexed {
                                 Some((held, _)) => held,
-                                None => self.should_hold(&segments[..at], key, cleaner)?,
+                                None => self.should_hold(&segments[..at], key, cleaner),
                             }
                         }
                         Segment::Index(_) => false,
                     };
                     let kind = segments.get(at + 1).map_or(Kind::Unset, container);
                     self.reserve(4)?;
-                    let child = self.alloc(kind, held)?;
+                    let child = self.alloc(kind, held);
                     self.nodes[child].probe_state = indexed.map_or(0, |(_, state)| state);
                     let next = self.nodes[current].next;
                     let insert = match &self.nodes[current].kind {
@@ -358,9 +353,9 @@ impl Assembler {
         Ok(())
     }
 
-    fn should_hold(&mut self, path: &[Segment], key: &str, cleaner: Cleaner<'_>) -> Result<bool> {
+    fn should_hold(&mut self, path: &[Segment], key: &str, cleaner: Cleaner<'_>) -> bool {
         let Some(clean) = cleaner else {
-            return Ok(false);
+            return false;
         };
         let probe_key = if matches!(key, "reason" | "_") {
             key
@@ -376,7 +371,7 @@ impl Assembler {
         }
         cache_key.push(Segment::Key(probe_key.to_owned()));
         if let Some(held) = self.probes.get(&cache_key) {
-            return Ok(*held);
+            return *held;
         }
         // Probe paths are not buffered argument bytes.
         let mut probe = serde_json::json!({probe_key:1});
@@ -400,51 +395,47 @@ impl Assembler {
         }
         let held = current.and_then(|v| v.get(probe_key)).is_none();
         self.probes.insert(cache_key, held);
-        Ok(held)
+        held
     }
 
     fn serialize(&self, index: usize, out: &mut String) -> Result<()> {
-        // Upstream does not apply its emitted-output limit to the pre-clean
-        // snapshot, including sparse-array padding outside buffered raw bytes.
-        let append = |out: &mut String, text: &str| -> Result<()> {
-            out.push_str(text);
-            Ok(())
-        };
+        // Upstream applies no emitted-output limit to this pre-clean snapshot.
         match &self.nodes[index].kind {
             Kind::Object(children) => {
-                append(out, "{")?;
+                out.push('{');
                 for (at, (key, child)) in children.order.iter().enumerate() {
                     if at > 0 {
-                        append(out, ",")?;
+                        out.push(',');
                     }
-                    append(out, &bounded_quoted(key)?)?;
-                    append(out, ":")?;
+                    out.push_str(&bounded_quoted(key)?);
+                    out.push(':');
                     self.serialize(*child, out)?;
                 }
-                append(out, "}")
+                out.push('}');
             }
             Kind::Array(children) => {
-                append(out, "[")?;
+                out.push('[');
                 for at in 0..=children.last_key_value().map_or(0, |(at, _)| *at) {
                     if at > 0 {
-                        append(out, ",")?;
+                        out.push(',');
                     }
                     if let Some(child) = children.get(&at) {
                         self.serialize(*child, out)?;
                     } else {
-                        append(out, "null")?;
+                        out.push_str("null");
                     }
                 }
-                append(out, "]")
+                out.push(']');
             }
             Kind::String { escaped, .. } => {
-                append(out, "\"")?;
-                append(out, escaped)?;
-                append(out, "\"")
+                out.push('"');
+                out.push_str(escaped);
+                out.push('"');
             }
-            Kind::Scalar(raw) => append(out, raw),
-            Kind::Unset => append(out, "null"),
+            Kind::Scalar(raw) => out.push_str(raw),
+            Kind::Unset => out.push_str("null"),
         }
+        Ok(())
     }
 
     fn prune(&mut self, index: usize, cleaned: &Value) {
@@ -573,19 +564,19 @@ impl Assembler {
         Ok(true)
     }
 
-    fn can_accept(&self, call: &Value) -> Result<bool> {
+    fn can_accept(&self, call: &Value) -> bool {
         if self.error.is_some() || self.finished {
-            return Ok(false);
+            return false;
         }
         let Some(parts) = field(call, "partialArgs", "partial_args") else {
-            return Ok(true);
+            return true;
         };
         let Some(parts) = parts.as_array() else {
-            return Ok(false);
+            return false;
         };
         for part in parts {
             if !part.is_object() {
-                return Ok(false);
+                return false;
             }
             let path = crate::json::str_of(field(part, "jsonPath", "json_path"));
             let Ok(segments) = parse_path(&path) else {
@@ -594,7 +585,7 @@ impl Assembler {
             if segments.is_empty() {
                 continue;
             }
-            let Some(index) = self.find(&segments)? else {
+            let Some(index) = self.find(&segments) else {
                 continue;
             };
             let node = &self.nodes[index];
@@ -612,10 +603,10 @@ impl Assembler {
                 || node.closed
                 || !matches!(node.kind, Kind::String { open: true, .. })
             {
-                return Ok(false);
+                return false;
             }
         }
-        Ok(true)
+        true
     }
 }
 
@@ -651,8 +642,7 @@ impl StreamingCall {
         let name = name.trim();
         name.is_empty()
             || (name == self.raw_name
-                && ((!id.is_empty() && id == self.upstream_id)
-                    || self.assembler.can_accept(call).unwrap_or(true)))
+                && ((!id.is_empty() && id == self.upstream_id) || self.assembler.can_accept(call)))
     }
 }
 

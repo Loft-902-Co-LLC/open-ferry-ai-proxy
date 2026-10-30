@@ -234,3 +234,34 @@ fn round3_claude_fallback_keeps_exact_numbers() {
         r#"{"exponent":1E5,"large":123456789012345678901234567890}"#
     );
 }
+
+#[test]
+fn round7_normal_call_trims_name_before_generating_id() {
+    for name in ["Write ", " Write ", "\tWrite\n"] {
+        for args in [None, Some(json!({}))] {
+            let mut stream = GeminiToClaudeStream::new(
+                &json!({"tools":[{"name":"Write","input_schema":{"type":"object"}}]}),
+            );
+            let mut call = json!({"name":name});
+            if let Some(args) = args {
+                call["args"] = args;
+            }
+            let out = events(&mut stream, &frame(json!([{"functionCall":call}]), true));
+            let block = out
+                .iter()
+                .find(|event| {
+                    event["type"] == "content_block_start"
+                        && event["content_block"]["type"] == "tool_use"
+                })
+                .unwrap();
+            assert_eq!(block["content_block"]["name"], "Write");
+            assert!(
+                block["content_block"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Write-"),
+                "{name:?}: {block}"
+            );
+        }
+    }
+}

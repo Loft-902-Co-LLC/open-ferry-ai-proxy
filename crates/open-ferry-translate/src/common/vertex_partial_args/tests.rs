@@ -263,12 +263,7 @@ fn round7_five_thousand_keyed_children_complete_in_linear_lookups() {
     for at in 0..5_000 {
         let key = format!("k{at:04}");
         output.push_str(&assembler.push(&json!({"willContinue":true,"partialArgs":[{"jsonPath":format!("$.{key}"),"stringValue":"x"}]}),None).unwrap().0);
-        assert!(
-            assembler
-                .find(&[Segment::Key(key.clone())])
-                .unwrap()
-                .is_some()
-        );
+        assert!(assembler.find(&[Segment::Key(key.clone())]).is_some());
         expected.insert(key, json!("x"));
     }
     let (delta, done) = assembler.push(&json!({}), None).unwrap();
@@ -306,4 +301,15 @@ fn upstream_allows_more_than_sixty_five_thousand_argument_nodes() {
             .len(),
         65_537
     );
+}
+
+#[test]
+fn fallback_arguments_have_no_added_structure_limit() {
+    let mut args = json!(1);
+    for _ in 0..65 {
+        args = json!({"a":args});
+    }
+    let mut assembler = Assembler::default();
+    assert!(assembler.push(&json!({"args":args}), None).unwrap().1);
+    assert_eq!(assembler.full_arguments().unwrap(), args.to_string());
 }

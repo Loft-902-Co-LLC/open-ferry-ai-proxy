@@ -58,7 +58,7 @@ impl SchemaIndex {
                     distances.insert(next, *found);
                     continue;
                 }
-                let program = Arc::clone(&self.own(next, next).deep);
+                let program = Arc::clone(&self.own(next).deep);
                 distances.insert(next, program.declared.map(|has| if has { 0 } else { 17 }));
                 let target = program
                     .reference

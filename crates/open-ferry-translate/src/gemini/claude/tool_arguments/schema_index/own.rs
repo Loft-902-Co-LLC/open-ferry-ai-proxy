@@ -19,7 +19,7 @@ pub(super) struct Shape {
     pub(super) items_safe: bool,
 }
 impl SchemaIndex {
-    pub(super) fn own(&mut self, node: Id, _origin: Id) -> Arc<Own> {
+    pub(super) fn own(&mut self, node: Id) -> Arc<Own> {
         let key = node;
         if let Some(own) = self.own_nodes.get(&key) {
             return Arc::clone(own);
@@ -103,7 +103,7 @@ impl SchemaIndex {
         if visiting.len() > 16 || !visiting.insert(node) {
             return None;
         }
-        let own = self.own(node, node);
+        let own = self.own(node);
         let result = (|| {
             let mut result = Shape {
                 depth: 0,

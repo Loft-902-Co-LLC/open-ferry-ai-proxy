@@ -270,9 +270,7 @@ fn walk(value: &mut Value, name_map: bool, phase: fn(&mut Value, bool)) {
             walk(child, false, phase);
         }
     }
-    {
-        phase(value, name_map);
-    }
+    phase(value, name_map);
 }
 fn reference_hint(value: &mut Value, name_map: bool) {
     if !name_map
@@ -438,9 +436,8 @@ fn unions(node: &mut Value, name_map: bool) {
                 };
                 let selected: Map<_, _> = names
                     .iter()
-                    .map(|n| Some((n.clone(), props[n].clone())))
-                    .collect::<Option<_>>()
-                    .unwrap_or_default();
+                    .map(|n| (n.clone(), props[n].clone()))
+                    .collect();
                 branch["type"] = json!("object");
                 branch["properties"] = Value::Object(selected);
             }
