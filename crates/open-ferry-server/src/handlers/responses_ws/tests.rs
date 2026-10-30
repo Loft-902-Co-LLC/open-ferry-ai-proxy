@@ -3468,7 +3468,7 @@ async fn refuses_requests_nested_too_deeply() {
 // b9bb031d: access is checked after upgrade, before the first turn as well
 // as follow-ups. Denied turns neither dispatch nor replace the transcript.
 #[tokio::test]
-async fn rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
+async fn r2_rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
     for (header, query) in [
         (Some("authorization"), ""),
         (Some("x-api-key"), ""),
@@ -3497,7 +3497,7 @@ async fn rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
             .into_iter()
             .collect();
         let (mut ws, _) = connect_key(&url, None, &headers).await;
-        let create = r#"{"type":"response.create","model":"test-model","input":[]}"#;
+        let create = r#"{"type":"response.create","model":"test-model","input":[{"id":"initial","role":"user","content":"initial"}]}"#;
         let mut config = state.settings().config.clone();
         config.api_keys = vec!["rotated-frontend-key".into()];
         state.set_config(config.clone());
@@ -3511,14 +3511,18 @@ async fn rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
         assert_eq!(recv(&mut ws).await["type"], "response.completed");
         config.api_keys = vec!["rotated-again".into()];
         state.set_config(config.clone());
-        send(&mut ws, r#"{"type":"response.append","input":[]}"#).await;
+        send(&mut ws, r#"{"type":"response.append","input":[{"id":"denied","role":"user","content":"denied"}]}"#).await;
         assert_eq!(recv(&mut ws).await["status"], 401);
         assert_eq!(dispatcher.calls().len(), 1);
         config.api_keys = vec!["sk-test".into()];
         state.set_config(config);
-        send(&mut ws, create).await;
+        send(&mut ws, r#"{"type":"response.append","input":[{"id":"accepted","role":"user","content":"accepted"}]}"#).await;
         assert_eq!(recv(&mut ws).await["type"], "response.completed");
         assert_eq!(dispatcher.calls().len(), 2);
+        assert_eq!(
+            input_ids(&dispatcher.calls()[1].request.payload),
+            ["initial", "accepted"]
+        );
         for call in dispatcher.calls() {
             assert!(!call.options.headers.contains_key("authorization"));
             assert!(!call.options.headers.contains_key("x-api-key"));
@@ -3533,4 +3537,157 @@ async fn rotated_client_key_after_upgrade_rejects_turns_and_recovers() {
         }
         ws.close(None).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn r2_main_turn_refreshes_principal_usage_context_and_cache_partition() {
+    let (url, dispatcher, state) = serve_keys(
+        test_catalog(),
+        vec![completes("r1", "[]"), completes("r2", "[]")],
+        &["frontend-one", "frontend-two"],
+    )
+    .await;
+    let (mut ws, _) = connect_key(
+        &url,
+        Some("frontend-one"),
+        &[("x-api-key", "frontend-two"), ("session-id", "shared")],
+    )
+    .await;
+    send(&mut ws, ALICE_TURN).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    let first = dispatcher.calls()[0]
+        .options
+        .observation
+        .as_ref()
+        .unwrap()
+        .context()
+        .clone();
+    assert_eq!(first.client_key(), Some("frontend-one"));
+    let mut config = state.settings().config.clone();
+    config.api_keys = vec!["frontend-two".into()];
+    state.set_config(config);
+    send(&mut ws, r#"{"type":"response.create","model":"test-model","input":[{"type":"function_call","id":"fc-2","call_id":"call_2","name":"other","arguments":"{}"}]}"#).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    eventually(|| {
+        state
+            .tool_caches()
+            .lock(state.principal_tags().of("frontend-two"))
+            .calls
+            .get("shared", "call_2")
+            .is_some()
+    })
+    .await;
+    let calls = dispatcher.calls();
+    let second = calls[1].options.observation.as_ref().unwrap().context();
+    assert_eq!(second.client_key(), Some("frontend-two"));
+    assert_eq!(second.access_provider(), "config-inline");
+    assert!(second.is_native_key());
+    assert_eq!(
+        first.client_key(),
+        Some("frontend-one"),
+        "an older async observation changed identity"
+    );
+    assert_eq!(
+        calls[1].options.metadata.caller_scope,
+        open_ferry_core::session::caller_scope("frontend-two")
+    );
+    assert!(
+        state
+            .tool_caches()
+            .lock(state.principal_tags().of("frontend-one"))
+            .calls
+            .get("shared", "call_1")
+            .is_none()
+    );
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn r2_anonymous_upgrade_is_rechecked_when_keys_are_enabled() {
+    for presents_key in [true, false] {
+        let (url, dispatcher, state) =
+            serve_keys(test_catalog(), vec![completes("r1", "[]")], &[]).await;
+        let (mut ws, _) = connect_key(&url, presents_key.then_some("enabled-later"), &[]).await;
+        let mut config = state.settings().config.clone();
+        config.api_keys = vec!["enabled-later".into()];
+        state.set_config(config);
+        send(
+            &mut ws,
+            r#"{"type":"response.create","model":"test-model","input":[]}"#,
+        )
+        .await;
+        let event = recv(&mut ws).await;
+        if presents_key {
+            assert_eq!(event["type"], "response.completed");
+            assert_eq!(
+                dispatcher.calls()[0]
+                    .options
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .context()
+                    .client_key(),
+                Some("enabled-later")
+            );
+        } else {
+            assert_eq!(event["status"], 401);
+            assert!(dispatcher.calls().is_empty());
+        }
+        ws.close(None).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
+    let (url, dispatcher, state) =
+        serve_keys(test_catalog(), vec![completes("r1", "[]")], &["sk-test"]).await;
+    let mut ws = connect(&url, &[]).await;
+    let mut config = state.settings().config.clone();
+    config.api_keys.push("your-api-key-1".into());
+    state.set_config(config.clone());
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"test-model","input":[]}"#,
+    )
+    .await;
+    let denied = recv(&mut ws).await;
+    assert_eq!(denied["status"], 403);
+    assert_eq!(denied["error"], "unsafe_example_api_key");
+    assert_eq!(denied["headers"]["X-Cpa-Safe-Mode"], "example-api-key");
+    assert!(dispatcher.calls().is_empty());
+    config.api_keys = vec!["sk-test".into()];
+    state.set_config(config);
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"test-model","input":[]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn r2_revoked_interrupt_uses_current_frontend_check_and_leaves_socket_usable() {
+    let (url, dispatcher, state) =
+        serve_keys(test_catalog(), vec![completes("r1", "[]")], &["sk-test"]).await;
+    let mut ws = connect(&url, &[]).await;
+    let mut config = state.settings().config.clone();
+    config.api_keys = vec!["replacement".into()];
+    state.set_config(config.clone());
+    send(
+        &mut ws,
+        r#"{"type":"response.interrupt","response_id":"r1"}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["status"], 401);
+    assert!(dispatcher.calls().is_empty());
+    config.api_keys = vec!["sk-test".into()];
+    state.set_config(config);
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"test-model","input":[]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    ws.close(None).await.unwrap();
 }

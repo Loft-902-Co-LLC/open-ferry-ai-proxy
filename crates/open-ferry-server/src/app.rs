@@ -20,8 +20,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
-use serde_json::json;
+use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::auth::require_key;
@@ -257,19 +256,13 @@ async fn safe_mode(State(state): State<AppState>, request: Request, next: Next) 
     if !state.settings().safe_mode || !is_safe_mode_path(request.uri().path()) {
         return next.run(request).await;
     }
-    let body = json!({
-        "error": "unsafe_example_api_key",
-        "message": "Proxy API endpoints are disabled because api-keys contains template \
-                    values. Open /management.html?safe-mode=configure, update api-keys in \
-                    Management, then retry.",
-    })
-    .to_string();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HeaderName::from_static("x-cpa-safe-mode"),
-        HeaderValue::from_static("example-api-key"),
-    );
-    error_response(403, headers, Bytes::from(body), JSON_UTF8)
+    let error = crate::auth::safe_mode_error();
+    error_response(
+        error.status,
+        error.addon,
+        Bytes::from(error.text),
+        JSON_UTF8,
+    )
 }
 
 /// Whether safe mode shuts `path`.
