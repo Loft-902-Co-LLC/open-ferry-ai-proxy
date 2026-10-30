@@ -1636,3 +1636,104 @@ async fn frontend_authorization_checks_bound_model_and_preserves_socket() {
         assert_eq!(messages(&server).len(), 2, "denied frame reached upstream");
     }
 }
+
+#[tokio::test]
+async fn r2_frontend_check_infrastructure_error_never_cools_provider_credential() {
+    let server = serve(|mut peer| async move {
+        if peer.recv().await.is_none() {
+            return;
+        }
+        peer.send(&response("response.created", "r1")).await;
+        peer.hold().await;
+    })
+    .await;
+    let manager = manager(&server.url, MODEL, &[("A", "key-A", "1")]);
+    let (mut client, input) = Client::new(2);
+    let input = input.with_turn_authorizer(Arc::new(|_| {
+        Err(ExecError::upstream(503, "frontend checker unavailable"))
+    }));
+    let chunks = start_managed(&manager, MODEL, "frontend-infrastructure-error", input).await;
+    let (_, error) = run(chunks, |event, _| {
+        if event["type"] == "response.created" {
+            client.send(r#"{"type":"response.create","input":[]}"#);
+        }
+    })
+    .await;
+    let error = error.unwrap();
+    assert!(error.request_scoped);
+    let auth = manager.get("A").unwrap();
+    assert!(!auth.unavailable);
+    assert!(auth.model_states.values().all(|state| !state.unavailable));
+    client.close();
+}
+
+#[tokio::test]
+async fn r2_deferred_steer_rechecks_frontend_access_before_sending() {
+    let checked = Arc::new(tokio::sync::Notify::new());
+    let signal = checked.clone();
+    let server = serve(move |mut peer| {
+        let checked = checked.clone();
+        async move {
+            if peer.recv().await.is_none() {
+                return;
+            }
+            peer.send(&response("response.created", "r1")).await;
+            if peer.recv().await.is_none() {
+                return;
+            }
+            checked.notified().await;
+            peer.send(&response("response.created", "r2")).await;
+            peer.send(&response("response.completed", "r2")).await;
+            if peer.recv().await.is_some() {
+                peer.send(r#"{"type":"response.steer.accepted"}"#).await;
+            }
+            peer.hold().await;
+        }
+    })
+    .await;
+    let checks = Arc::new(AtomicUsize::new(0));
+    let counted = checks.clone();
+    let (mut client, input) = Client::new(4);
+    let input = input.with_turn_authorizer(Arc::new(move |payload| {
+        if json(std::str::from_utf8(payload).unwrap())["type"] == "response.steer" {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                signal.notify_one();
+            } else {
+                return Ok(Some(Bytes::from_static(
+                    br#"{"type":"error","status":401,"error":{"message":"access revoked"}}"#,
+                )));
+            }
+        }
+        Ok(None)
+    }));
+    let chunks = start(
+        &steering(),
+        &server.url,
+        "A",
+        r#"{"model":"gpt-6-astra","input":[]}"#,
+        duplex_options("deferred-access", input),
+    )
+    .await;
+    let mut denied = false;
+    let (_, error) = run(chunks, |event, _| {
+        if event["type"] == "response.created" && event["response"]["id"] == "r1" {
+            client.send(r#"{"type":"response.create","input":[]}"#);
+            client.send(
+                r#"{"type":"response.steer","previous_response_id":"r2","input":"deferred"}"#,
+            );
+        }
+        if event["type"] == "error" {
+            assert_eq!(event["status"], 401);
+            denied = true;
+            client.close();
+        }
+        if event["type"] == "response.steer.accepted" {
+            client.close();
+        }
+    })
+    .await;
+    assert!(denied);
+    assert!(error.is_none());
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+    assert_eq!(messages(&server).len(), 2);
+}
