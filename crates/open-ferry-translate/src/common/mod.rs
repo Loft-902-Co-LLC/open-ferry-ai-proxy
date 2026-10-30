@@ -17,6 +17,7 @@ pub(crate) mod parts;
 pub(crate) mod responses;
 pub(crate) mod sse;
 pub(crate) mod tool_names;
+pub(crate) mod vertex_partial_args;
 
 use serde_json::Value;
 

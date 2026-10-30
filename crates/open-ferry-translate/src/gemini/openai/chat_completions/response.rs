@@ -38,6 +38,7 @@ use serde_json::{Map, Value, json};
 use crate::common::gemini::{
     SanitizedToolNames, restore_sanitized_tool_name, sanitized_tool_name_map,
 };
+use crate::common::vertex_partial_args::{StreamingCall, is_streaming};
 use crate::go;
 use crate::json::{bool_of, int_of, object, path, str_of};
 
@@ -60,6 +61,8 @@ pub struct GeminiToOpenAIStream {
     model_version: String,
     response_id: String,
     pending_usage: Option<Value>,
+    active_calls: HashMap<i64, StreamingCall>,
+    incomplete_calls: HashSet<i64>,
 }
 
 impl GeminiToOpenAIStream {
@@ -76,6 +79,8 @@ impl GeminiToOpenAIStream {
             model_version: "model".to_owned(),
             response_id: String::new(),
             pending_usage: None,
+            active_calls: HashMap::new(),
+            incomplete_calls: HashSet::new(),
         }
     }
 
@@ -120,7 +125,7 @@ impl GeminiToOpenAIStream {
         match response.get("candidates") {
             Some(Value::Array(candidates)) => candidates
                 .iter()
-                .map(|candidate| self.candidate_chunk(&base, candidate, usage.is_some()))
+                .filter_map(|candidate| self.candidate_chunk(&base, candidate, usage.is_some()))
                 .collect(),
             _ if usage.is_some() => {
                 if !self.sent_finish_reason.contains(&0) {
@@ -152,7 +157,10 @@ impl GeminiToOpenAIStream {
             .finish_reason
             .iter()
             .filter(|(index, reason)| {
-                !reason.is_empty() && !self.sent_finish_reason.contains(index)
+                !reason.is_empty()
+                    && !self.sent_finish_reason.contains(index)
+                    && !self.active_calls.contains_key(index)
+                    && !self.incomplete_calls.contains(index)
             })
             .map(|(&index, _)| index)
             .collect();
@@ -169,6 +177,9 @@ impl GeminiToOpenAIStream {
     }
 
     fn apply_finish_reason(&mut self, choice: &mut Value, index: i64) {
+        if self.active_calls.contains_key(&index) || self.incomplete_calls.contains(&index) {
+            return;
+        }
         let reason = self.finish_reason.get(&index).map_or("", String::as_str);
         if !reason.is_empty() {
             self.sent_finish_reason.insert(index);
@@ -188,7 +199,12 @@ impl GeminiToOpenAIStream {
 
     /// The chunk for one candidate: `base` with the candidate's index, parts
     /// and, once `has_usage`, its finish reason.
-    fn candidate_chunk(&mut self, base: &Value, candidate: &Value, has_usage: bool) -> Value {
+    fn candidate_chunk(
+        &mut self,
+        base: &Value,
+        candidate: &Value,
+        has_usage: bool,
+    ) -> Option<Value> {
         let mut chunk = base.clone();
         let index = candidate.get("index").map_or(0, int_of);
         let choice = &mut chunk["choices"][0];
@@ -199,9 +215,17 @@ impl GeminiToOpenAIStream {
         }
 
         let delta = &mut choice["delta"];
+        let mut noop_call = false;
         if let Some(Value::Array(parts)) = path(candidate, "content.parts") {
             for part in parts {
                 if let Some(text) = part_text(part) {
+                    if self.active_calls.contains_key(&index) {
+                        if str_of(Some(text)).is_empty() {
+                            noop_call = true;
+                            continue;
+                        }
+                        self.abort_streaming_call(index);
+                    }
                     let field = if part.get("thought").is_some_and(bool_of) {
                         "reasoning_content"
                     } else {
@@ -210,38 +234,17 @@ impl GeminiToOpenAIStream {
                     delta["role"] = Value::from("assistant");
                     delta[field] = Value::String(str_of(Some(text)).into_owned());
                 } else if let Some(function_call) = part.get("functionCall") {
-                    self.saw_tool_call.insert(index);
-                    let made = self.function_index.entry(index).or_default();
-                    let call_index = *made;
-                    *made += 1;
-                    if !delta["tool_calls"].is_array() {
-                        delta["tool_calls"] = json!([]);
+                    if let Some(call) = self.function_call_delta(index, function_call) {
+                        if !delta["tool_calls"].is_array() {
+                            delta["tool_calls"] = json!([]);
+                        }
+                        delta["role"] = Value::from("assistant");
+                        push(&mut delta["tool_calls"], call);
+                    } else {
+                        noop_call = true;
                     }
-                    let name = restore_sanitized_tool_name(
-                        self.sanitized_names.as_ref(),
-                        &str_of(function_call.get("name")),
-                    );
-                    let mut call = object([
-                        (
-                            "id",
-                            Value::String(supplied_or_generated_call_id(function_call, &name)),
-                        ),
-                        ("index", Value::from(call_index)),
-                        ("type", Value::from("function")),
-                        (
-                            "function",
-                            object([
-                                ("name", Value::String(name)),
-                                ("arguments", Value::from("")),
-                            ]),
-                        ),
-                    ]);
-                    if let Some(args) = function_call.get("args") {
-                        call["function"]["arguments"] = Value::String(args.to_string());
-                    }
-                    delta["role"] = Value::from("assistant");
-                    push(&mut delta["tool_calls"], call);
                 } else if let Some(inline) = inline_data(part) {
+                    self.abort_streaming_call(index);
                     let Some(url) = data_url(inline) else {
                         continue;
                     };
@@ -258,7 +261,15 @@ impl GeminiToOpenAIStream {
         if has_usage {
             self.apply_finish_reason(choice, index);
         }
-        chunk
+        if noop_call
+            && choice["delta"]["role"].is_null()
+            && choice["finish_reason"].is_null()
+            && !has_usage
+        {
+            None
+        } else {
+            Some(chunk)
+        }
     }
 }
 
@@ -623,6 +634,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
+
+mod partial_args;
 
 #[cfg(test)]
 mod tests;

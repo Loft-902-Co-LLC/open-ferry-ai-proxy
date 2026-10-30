@@ -100,6 +100,7 @@ use crate::common::gemini::{
 use crate::common::request_model_name;
 use crate::common::responses::{echo_fields, pick_request, set_tool_call_identity};
 use crate::common::sse::push_event;
+use crate::common::vertex_partial_args::{ArgumentError, StreamingCall, is_streaming};
 use crate::go;
 use crate::json::{bool_of, int_of, object, path, raw, str_of};
 use crate::responses_tools::{
@@ -249,6 +250,9 @@ pub struct GeminiToOpenAIResponsesStream {
     /// Tool calls, by output index.
     calls: BTreeMap<i64, Call>,
     evidence: EvidenceStore,
+    active_call: Option<partial_args::ActiveCall>,
+    incomplete_call: bool,
+    pending_tool_signatures: Vec<String>,
     web_search_opened: bool,
     web_search_done: bool,
     web_search_index: i64,
@@ -320,6 +324,8 @@ enum ToolInputError {
     /// A chunk or response couldn't be read. Upstream fails so only when it
     /// finds an `apply_patch` call in invalid JSON.
     Unreadable,
+    /// A structured Vertex partial argument violated a bound or tree shape.
+    Vertex(ArgumentError),
 }
 
 impl fmt::Display for ToolInputError {
@@ -332,6 +338,7 @@ impl fmt::Display for ToolInputError {
                 f.write_str("upstream apply_patch stream ended before protocol completion")
             }
             Self::Unreadable => f.write_str("invalid Gemini apply_patch response JSON"),
+            Self::Vertex(error) => fmt::Display::fmt(error, f),
         }
     }
 }
@@ -368,7 +375,7 @@ impl EvidenceStore {
         &mut self,
         identities: &HashMap<String, ToolIdentity>,
         call: &Value,
-        args: &str,
+        args: Option<&str>,
         part_index: i64,
     ) -> Result<usize, ToolInputError> {
         const CONFLICTING_INDEXES: &str = "conflicting apply_patch call indexes";
@@ -456,6 +463,7 @@ impl EvidenceStore {
                 evidence.upstream_id = id.into_owned();
             }
         }
+        let Some(args) = args else { return Ok(index) };
         match CallState::default().finish_arguments(args) {
             Err(error) => record(evidence, ToolInputError::Arguments(error)),
             Ok((_, input)) => {
@@ -554,6 +562,9 @@ impl GeminiToOpenAIResponsesStream {
             next_index: 0,
             calls: BTreeMap::new(),
             evidence: EvidenceStore::default(),
+            active_call: None,
+            incomplete_call: false,
+            pending_tool_signatures: Vec::new(),
             web_search_opened: false,
             web_search_done: false,
             web_search_index: 0,
@@ -588,7 +599,7 @@ impl GeminiToOpenAIResponsesStream {
         }
         let done = data == b"[DONE]";
         let text = if done {
-            if !self.started {
+            if !self.started || self.active_call.is_some() || self.incomplete_call {
                 return out;
             }
             if self.finish_reason.is_empty() {
@@ -645,7 +656,7 @@ impl GeminiToOpenAIResponsesStream {
         if !reason.is_empty() && self.finish_reason.is_empty() {
             self.finish_reason = reason.into_owned();
         }
-        if !self.finish_reason.is_empty() {
+        if !self.finish_reason.is_empty() && self.active_call.is_none() && !self.incomplete_call {
             self.finish(done || has_usage, &mut out);
         }
         out
@@ -660,6 +671,12 @@ impl GeminiToOpenAIResponsesStream {
     pub fn finalize_tool_input(&mut self) -> String {
         let mut out = String::new();
         if self.error.is_some() || self.completed {
+            return out;
+        }
+        if self.active_call.is_some() || self.incomplete_call {
+            if patch_enabled(&self.identities) {
+                self.fail(ToolInputError::Unterminated, &mut out);
+            }
             return out;
         }
         if !self.finish_reason.is_empty() {
@@ -1343,6 +1360,20 @@ impl GeminiToOpenAIResponsesStream {
         let text = str_of(text_value);
         let has_text = text_value.is_some();
         let is_thought = part.get("thought").is_some_and(bool_of);
+        let continuation = function_call.is_some_and(|call| {
+            self.active_call
+                .as_ref()
+                .is_some_and(|active| active.call.can_continue(call))
+        });
+        if self.active_call.is_some() && function_call.is_none() {
+            if text.is_empty() {
+                if !signature.is_empty() {
+                    self.pending_tool_signatures.push(signature);
+                }
+                return true;
+            }
+            self.abort_streaming_call();
+        }
         let kind = if is_thought {
             "thought"
         } else if function_call.is_some() {
@@ -1385,7 +1416,7 @@ impl GeminiToOpenAIResponsesStream {
             current_index = self.logical_part_index;
         }
 
-        if function_call.is_some() && !self.pending_signature.is_empty() {
+        if function_call.is_some() && !continuation && !self.pending_signature.is_empty() {
             let pending = std::mem::take(&mut self.pending_signature);
             if signature.is_empty() {
                 self.emit_detached(&pending, NEXT, FUNCTION, out);
@@ -1397,7 +1428,9 @@ impl GeminiToOpenAIResponsesStream {
             || (!self.reasoning_opened
                 && (!self.reasoning_text.is_empty() || !self.reasoning_signature.is_empty()));
         if !signature.is_empty() && !is_thought {
-            if reasoning_active {
+            if continuation {
+                self.pending_tool_signatures.push(signature.clone());
+            } else if reasoning_active {
                 if self.reasoning_signature.is_empty() || self.reasoning_signature == signature {
                     self.reasoning_signature = signature.clone();
                     (self.reasoning_direction, self.reasoning_target) = if function_call.is_some() {
@@ -1571,11 +1604,22 @@ impl GeminiToOpenAIResponsesStream {
         self.finalize_message(out);
         self.last_kind = FUNCTION;
 
+        if self
+            .active_call
+            .as_ref()
+            .is_some_and(|active| active.call.can_continue(call))
+            || is_streaming(call)
+        {
+            return self.streaming_call(call, explicit_index, out);
+        }
+        if self.active_call.is_some() {
+            self.abort_streaming_call();
+        }
         let raw_args = args.read(call.get("args"));
         let evidence_index = match self.evidence.record(
             &self.identities,
             call,
-            raw_args.as_deref().unwrap_or(""),
+            Some(raw_args.as_deref().unwrap_or("")),
             explicit_index,
         ) {
             Ok(index) => index,
@@ -2227,7 +2271,7 @@ fn non_stream<'r>(
             let evidence_index = match evidence.record(
                 &identities,
                 call,
-                raw_args.as_deref().unwrap_or(""),
+                Some(raw_args.as_deref().unwrap_or("")),
                 explicit_index,
             ) {
                 Ok(index) => index,
@@ -2718,6 +2762,8 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
+
+mod partial_args;
 
 #[cfg(test)]
 mod tests;

@@ -38,6 +38,7 @@ use crate::common::gemini::{
 use crate::common::tool_names::{
     ToolNameMap, map_tool_name, unambiguous_tool_name_map_from_claude_request,
 };
+use crate::common::vertex_partial_args::{StreamingCall, is_streaming};
 use crate::gemini_schema::get;
 use crate::json::{bool_of, int_of, path, str_of};
 
@@ -81,6 +82,9 @@ pub struct GeminiToClaudeStream {
     current_parameterless: bool,
     current_input_emitted: bool,
     current_pending_empty: bool,
+    active_call: Option<StreamingCall>,
+    incomplete_call: bool,
+    pending_tool_signatures: Vec<String>,
     /// Sanitized function names → the names the client declared.
     sanitized_names: Option<SanitizedToolNames>,
     /// Canonical names and their collision policy, pinned even when empty.
@@ -110,6 +114,9 @@ impl GeminiToClaudeStream {
             current_parameterless: false,
             current_input_emitted: false,
             current_pending_empty: false,
+            active_call: None,
+            incomplete_call: false,
+            pending_tool_signatures: Vec::new(),
             sanitized_names: sanitized_tool_name_map(original_request),
             tool_names: unambiguous_tool_name_map_from_claude_request(original_request),
             has_first_response: false,
@@ -208,7 +215,12 @@ impl GeminiToClaudeStream {
             self.finish_malformed(&mut out);
             return out;
         }
-        if usage.is_some() && contains(chunk, br#""finishReason""#) && !self.has_final_events {
+        if usage.is_some()
+            && contains(chunk, br#""finishReason""#)
+            && !self.has_final_events
+            && self.active_call.is_none()
+            && !self.incomplete_call
+        {
             self.open_empty_text_block(&mut out);
             if self.has_content {
                 self.stop_open_block(&mut out);
@@ -233,6 +245,9 @@ impl GeminiToClaudeStream {
     /// The end of the stream: closes the message, if it was started, with an
     /// empty text block if nothing else was sent.
     fn finish(&mut self, out: &mut String) {
+        if self.active_call.is_some() || self.incomplete_call {
+            return;
+        }
         if self.malformed() {
             self.finish_malformed(out);
             return;
@@ -293,6 +308,16 @@ impl GeminiToClaudeStream {
         let has_signature = !signature.is_empty();
         let text_is_empty = text.is_none_or(|text| str_of(Some(text)).is_empty());
 
+        if self.active_call.is_some() && function_call.is_none() {
+            if text_is_empty {
+                if has_signature {
+                    self.pending_tool_signatures.push(signature.into_owned());
+                }
+                return;
+            }
+            self.abort_streaming_call();
+        }
+
         // A part that carries only a signature.
         if has_signature && text_is_empty && function_call.is_none() {
             self.push_signature(&signature, out);
@@ -320,6 +345,13 @@ impl GeminiToClaudeStream {
         }
 
         if let Some(call) = function_call {
+            if self.streaming_call(call, &signature, out) {
+                return;
+            }
+            if str_of(call.get("name")).trim().is_empty() && call.get("args").is_none() {
+                self.push_carrier(&signature, out);
+                return;
+            }
             self.saw_tool_call = true;
             let upstream_name = restore_sanitized_tool_name(
                 self.sanitized_names.as_ref(),
@@ -704,6 +736,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .windows(needle.len())
         .any(|window| window == needle)
 }
+
+mod partial_args;
 
 #[cfg(test)]
 mod tests;
