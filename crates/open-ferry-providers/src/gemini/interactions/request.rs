@@ -165,8 +165,9 @@ fn same_bytes(a: &Bytes, b: &Bytes) -> bool {
 /// steps and content parts that the API's schema rejects removed. A
 /// `function_call` needs an `id` and takes no `call_id`; a
 /// `function_result` needs a `call_id` and takes no `id`; other steps and
-/// content parts take no `id`.
-pub(super) fn sanitize_input_ids(body: &mut Value) {
+/// content parts take no `id`. Bare-Tink thoughts are kept only when the
+/// executor identifies the destination as Vertex.
+pub(super) fn sanitize_input_ids(body: &mut Value, allow_vertex_bare_tink: bool) {
     let Some(Value::Array(items)) = body.get_mut("input") else {
         return;
     };
@@ -174,15 +175,17 @@ pub(super) fn sanitize_input_ids(body: &mut Value) {
         if json::str_at(&item, "type") == "thought" {
             use open_ferry_translate::signature::{
                 Provider, compatible_signature_for_provider, is_gemini_thought_signature_bypass,
+                is_gemini_vertex_bare_tink_signature,
             };
             let sig = ["signature", "thought_signature", "thoughtSignature"]
                 .iter()
                 .map(|k| json::str_of(item.get(*k)))
                 .find(|s| !s.trim().is_empty())
                 .unwrap_or_default();
-            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig)
-                .filter(|s| !is_gemini_thought_signature_bypass(s))
-            else {
+            let Some(sig) = compatible_signature_for_provider(Provider::Gemini, &sig).filter(|s| {
+                !is_gemini_thought_signature_bypass(s)
+                    && (allow_vertex_bare_tink || !is_gemini_vertex_bare_tink_signature(s))
+            }) else {
                 continue;
             };
             item["signature"] = sig.into();
@@ -288,7 +291,7 @@ mod signature_filter_tests {
             {"type":"thought","signature":"corrupt"},
             {"type":"function_call","call_id":"keep","content":[{"id":"drop","text":"keep"}]}
         ]});
-        sanitize_input_ids(&mut body);
+        sanitize_input_ids(&mut body, false);
         assert_eq!(body["input"].as_array().unwrap().len(), 2);
         assert_eq!(
             body["input"][0],

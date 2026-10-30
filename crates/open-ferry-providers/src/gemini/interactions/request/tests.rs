@@ -307,3 +307,51 @@ fn response_translation_keeps_tools_from_a_truncated_original_request() {
         Bytes::from_static(br#"{"tools":[{"type":"custom","name":"lookup"}]"#);
     assert_eq!(run(&options), expected);
 }
+
+#[test]
+fn native_interactions_signature_destination_table() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = vec![0xa5; 405];
+    bytes[..5].copy_from_slice(&[1, 0x8f, 0x3d, 0x6b, 0x5f]);
+    let mut unknown = bytes.clone();
+    unknown[1] = 0x69;
+    let opaque = |len| {
+        let mut bytes: Vec<u8> = (0..len).map(|i| (i * 47) as u8).collect();
+        bytes[0] = 1;
+        STANDARD.encode(bytes)
+    };
+    for (name, signature, recognized, vertex_only) in [
+        ("vertex", STANDARD.encode(&bytes), true, true),
+        ("floor", STANDARD.encode(&bytes[..21]), true, true),
+        ("unknown key", STANDARD.encode(unknown), false, false),
+        ("short", STANDARD.encode(&bytes[..20]), false, false),
+        ("random", STANDARD.encode([1; 64]), false, false),
+        ("xai", opaque(256), false, false),
+        ("kimi", opaque(3255), false, false),
+        (
+            "wrapped",
+            crate::gemini::testing::native_gemini_signature(),
+            true,
+            false,
+        ),
+    ] {
+        for vertex in [false, true] {
+            let mut body = serde_json::json!({"input":[
+                {"type":"thought","signature":signature,"summary":[{"text":"reason"}]},
+                {"type":"text","text":"answer"}
+            ]});
+            sanitize_input_ids(&mut body, vertex);
+            let keep = recognized && (vertex || !vertex_only);
+            assert_eq!(
+                body["input"].as_array().unwrap().len(),
+                if keep { 2 } else { 1 },
+                "{name}/{vertex}"
+            );
+            if keep {
+                assert_eq!(body["input"][0]["signature"], signature);
+            } else {
+                assert_eq!(body["input"][0]["text"], "answer");
+            }
+        }
+    }
+}
