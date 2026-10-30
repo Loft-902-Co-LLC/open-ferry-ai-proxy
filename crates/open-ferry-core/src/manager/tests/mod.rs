@@ -89,6 +89,7 @@ mod metadata_keys;
 mod metadata_merge;
 mod oauth_model_alias;
 mod openai_compat_pool;
+mod p47_failures;
 mod persist_policy;
 mod quota_check;
 mod quota_recovery;

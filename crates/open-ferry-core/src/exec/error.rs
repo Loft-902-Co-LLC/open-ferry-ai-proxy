@@ -128,6 +128,8 @@ pub struct ExecError {
     /// over: the failure's usage record keeps the counts the answer gave
     /// (upstream's `StreamUsageBuffer.PublishFailure` with what it observed).
     pub keeps_usage: bool,
+    /// An explicit provider classification; generic statuses never imply it.
+    pub failure_class: Option<super::FailureClass>,
 }
 
 impl ExecError {
@@ -146,12 +148,31 @@ impl ExecError {
             credential_scoped: false,
             request_scoped: false,
             keeps_usage: false,
+            failure_class: None,
         }
     }
 
     /// A provider's error: its status and body.
     pub fn upstream(status: u16, body: impl Into<String>) -> Self {
         Self::new(ErrorKind::Upstream, body).with_status(status)
+    }
+
+    /// Missing terminal frame after an accepted response. Public 502, retained
+    /// partial usage, no credential cooldown and no replay or failover.
+    pub fn stream_truncated(message: impl Into<String>) -> Self {
+        let mut error = Self::upstream(502, message).with_usage_kept();
+        error.failure_class = Some(super::FailureClass::StreamTruncated);
+        error
+    }
+
+    /// Stable structured failure code for credential/usage accounting.
+    pub fn failure_code(&self) -> Option<&'static str> {
+        self.failure_class.map(super::FailureClass::code)
+    }
+
+    /// Whether retrying could duplicate an accepted generation.
+    pub fn stops_replay(&self) -> bool {
+        self.failure_class == Some(super::FailureClass::StreamTruncated)
     }
 
     /// No credential serves the model.
