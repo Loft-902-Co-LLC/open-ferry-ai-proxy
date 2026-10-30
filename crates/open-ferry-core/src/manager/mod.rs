@@ -422,10 +422,13 @@ pub(crate) struct State {
     pub(crate) refresh_jobs: HashMap<String, RefreshJob>,
     /// For each credential, how many published snapshots are still to be
     /// saved: raised with the publication, lowered when its save returns,
-    /// whatever the result (see `PendingSave`). Adopting a credential from
-    /// the store waits for it to be zero, so an older save can't land on top
-    /// of what was adopted.
+    /// whatever the result (see `PendingSave`). Request-aware standby adoption
+    /// waits for it to be zero, so an older save cannot land on top of what
+    /// was adopted.
     pub(crate) pending_saves: HashMap<String, u32>,
+    /// Only ordinary policy-update publications whose saves have not completed.
+    /// Scoped to a registration; failures release their guard just like successes.
+    pub(crate) pending_policy_saves: HashMap<(String, u64), u32>,
     /// Counts the publications of a snapshot to be saved, over all
     /// credentials, and never goes back, so a number it gave is never given
     /// again.
@@ -648,6 +651,7 @@ impl Manager {
             pool_offsets: HashMap::new(),
             refresh_jobs: HashMap::new(),
             pending_saves: HashMap::new(),
+            pending_policy_saves: HashMap::new(),
             save_publications: 0,
             save_sequence: HashMap::new(),
             quota_checks: quota_check::QuotaChecks::default(),

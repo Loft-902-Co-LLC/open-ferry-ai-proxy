@@ -186,6 +186,17 @@ pub(crate) enum Save {
 pub(crate) struct PendingSave {
     shared: Arc<Shared>,
     id: String,
+    policy_epoch: Option<u64>,
+}
+
+impl PendingSave {
+    fn mark_policy(&mut self, state: &mut State, epoch: u64) {
+        self.policy_epoch = Some(epoch);
+        *state
+            .pending_policy_saves
+            .entry((self.id.clone(), epoch))
+            .or_insert(0) += 1;
+    }
 }
 
 /// One result mutation's admission. Only the async fast path may opt out of
@@ -205,6 +216,15 @@ impl Drop for PendingSave {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 state.pending_saves.remove(&self.id);
+            }
+        }
+        if let Some(epoch) = self.policy_epoch {
+            let key = (self.id.clone(), epoch);
+            if let Some(count) = state.pending_policy_saves.get_mut(&key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.pending_policy_saves.remove(&key);
+                }
             }
         }
     }
@@ -232,6 +252,7 @@ impl Manager {
         Some(PendingSave {
             shared: Arc::clone(&self.shared),
             id: id.to_owned(),
+            policy_epoch: None,
         })
     }
 }
@@ -1049,23 +1070,13 @@ impl Manager {
         )
     }
 
-    /// A file read cannot cover a policy edit still being saved. Runtime
-    /// counters may stay live; the existing write watermark distinguishes them.
-    /// The pending-save guard drops on failure, so no failed edit is retained.
+    /// Only a policy publication whose save has not returned postpones a read.
+    /// Failed edits leave no pending policy state, regardless of later counter saves.
     fn policy_edit_pending(&self, state: &State, auth: &Auth) -> bool {
-        // Generation one is the registration/load baseline, including stores
-        // loaded without a manager write. A counter save is not a policy edit.
-        if auth.policy_generation <= 1
-            || state.pending_saves.get(&auth.id).copied().unwrap_or(0) == 0
-        {
-            return false;
-        }
-        let mark = lock(&self.shared.persist_locks).get(&auth.id).cloned();
-        mark.is_none_or(|mark| {
-            let (epoch, generation) = *lock(&mark);
-            epoch < auth.registration_epoch
-                || (epoch == auth.registration_epoch && generation < auth.policy_generation)
-        })
+        state
+            .pending_policy_saves
+            .get(&(auth.id.clone(), auth.registration_epoch))
+            .is_some_and(|count| *count > 0)
     }
 
     fn observe_update_retaining_command(
@@ -1718,7 +1729,13 @@ impl Manager {
         }
         state.auths.insert(snapshot.id.clone(), entry);
         state.sync_scheduler(self.models(), &snapshot.id, now);
-        let pending = self.pending_save(state, &snapshot.id, save);
+        let mut pending = self.pending_save(state, &snapshot.id, save);
+        if !is_refresh
+            && !is_file_observation
+            && let Some(pending) = pending.as_mut()
+        {
+            pending.mark_policy(state, live_epoch);
+        }
         Ok(Some(PublishedUpdate {
             snapshot,
             epoch: live_epoch,
