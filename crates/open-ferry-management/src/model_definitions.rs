@@ -40,6 +40,7 @@ use open_ferry_core::registry::StaticCatalog;
 use open_ferry_translate::go::to_lower;
 
 use crate::Route;
+use crate::auth_files::run_blocking;
 use crate::config_read::{Fields, strings, thinking_fields};
 use crate::go::lossy;
 use crate::json::{self, Json};
@@ -207,17 +208,15 @@ async fn refresh(State(state): State<ManagementState>) -> Response {
     let runtime = state.catalogs().clone();
     let cancel = CancelRefresh(Default::default());
     let cancellation = cancel.0.clone();
-    let result =
-        tokio::task::spawn_blocking(move || runtime.refresh(&sources, &cancellation)).await;
+    let result = run_blocking(move || runtime.refresh(&sources, &cancellation)).await;
     let result = match result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
+        Ok(result) => result,
+        Err(error) => {
             return json::response(
                 StatusCode::BAD_REQUEST,
                 &Json::Any(serde_json::json!({"ok": false, "error": error})),
             );
         }
-        Err(_) => return json::error(StatusCode::BAD_GATEWAY, "model catalog refresh failed"),
     };
     let failed = result.has_errors();
     let mut body = serde_json::to_value(result).expect("catalog refresh result is serializable");
