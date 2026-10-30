@@ -268,3 +268,77 @@ fn round2_codex_user_agents_match_non_ascii_header_bytes() {
     assert!(!opts.is_codex_client_request());
     assert!(fixture().use_siwc_for_request(&opts.headers));
 }
+
+#[tokio::test(start_paused = true)]
+async fn round3_siwc_only_observation_keeps_upstream_outer_retry_selection() {
+    use crate::auth::{AdoptionRead, AuthError, Status};
+    use crate::manager::select::is_auth_blocked_for_model;
+    let h = Harness::new(Default::default());
+    let executor = FakeExecutor::with("codex", |call| {
+        let bearer = call.auth.access_token_for_request(&call.options.headers);
+        if bearer == "outer-old" {
+            Reply::status(401, "dummy refused outer")
+        } else {
+            Reply::ok("ok")
+        }
+    });
+    executor.set_refresh(|auth| {
+        let mut next = auth.clone();
+        next.metadata
+            .insert("access_token".into(), json!("outer-recovered"));
+        Ok(next)
+    });
+    h.executor(&executor);
+    let initial = h.add(fixture(), &["m"]);
+    h.manager.mark_rejected_access_token("codex", "outer-old");
+    h.manager
+        .edit_unsaved("codex", |auth| {
+            auth.status = Status::Error;
+            auth.last_error = Some(AuthError {
+                http_status: 401,
+                message: "dummy unauthorized".into(),
+                ..Default::default()
+            });
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+    let mut disk = initial.as_ref().clone();
+    disk.metadata["siwc"]["access_token"] = json!("nested-rotated");
+    h.manager
+        .adopt_observed(&initial, None, |_| Ok(AdoptionRead::Record(disk)))
+        .unwrap();
+    let live = h.get("codex");
+    assert_eq!(live.rejected_access_token, "outer-old");
+    assert_eq!(live.status, Status::Active);
+    assert!(!is_auth_blocked_for_model(&live, "m", h.now()).0);
+    let mut opts = options();
+    opts.headers = headers("codex-tui/1");
+    h.manager
+        .execute(&providers(&["codex"]), request("m"), opts)
+        .await
+        .unwrap();
+    assert_eq!(executor.calls().len(), 2);
+    assert_eq!(
+        executor.calls()[0]
+            .auth
+            .access_token_for_request(&headers("codex-tui/1")),
+        "outer-old"
+    );
+    assert_eq!(
+        executor.calls()[1]
+            .auth
+            .access_token_for_request(&headers("codex-tui/1")),
+        "outer-recovered"
+    );
+    assert_eq!(executor.refresh_count(), 1);
+    h.manager
+        .execute(&providers(&["codex"]), request("m"), options())
+        .await
+        .unwrap();
+    let live = h.get("codex");
+    assert_eq!(live.siwc_access_token(), "nested-rotated");
+    assert!(live.rejected_siwc_access_token.is_empty());
+    assert!(!live.unavailable);
+    assert!(live.model_states.values().all(|state| !state.unavailable));
+    assert_eq!(executor.refresh_count(), 1);
+}

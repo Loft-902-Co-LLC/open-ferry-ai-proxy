@@ -201,6 +201,8 @@ pub(crate) struct Entry {
     pub(crate) landing_unconfirmed: UndurablePartitions,
     /// A refused save whose change is still owed. Memory only.
     pub(crate) owed_save: Option<OwedSave>,
+    /// Unsaved operator leaves; file observations merge around them.
+    pub(crate) policy_save: Option<lifecycle::PolicySave>,
     /// The newest generation a Configuration save has written for this
     /// registration. A refusal at or below it owes nothing, as that save
     /// covered it. Memory only.

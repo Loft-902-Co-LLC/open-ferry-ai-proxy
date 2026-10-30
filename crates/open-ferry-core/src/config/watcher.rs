@@ -247,6 +247,21 @@ impl ConfigWatcher {
         guard: Option<ReadGuard>,
         file_guard: Option<crate::auth::file_guard::FileGuard>,
     ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
+        let probe_state = file_guard
+            .as_ref()
+            .map(|guard| guard.probe_state())
+            .unwrap_or_default();
+        Self::start_with_probe_state(config_path, config, guard, file_guard, probe_state)
+    }
+
+    /// Shares removal-probe uncertainty with the credential store.
+    pub fn start_with_probe_state(
+        config_path: impl AsRef<Path>,
+        config: &Config,
+        guard: Option<ReadGuard>,
+        file_guard: Option<crate::auth::file_guard::FileGuard>,
+        probe_state: crate::auth::file_guard::ProbeState,
+    ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
         let config_path = absolute(config_path.as_ref(), "config file")?;
         if let Err(error) = fs::metadata(&config_path) {
             return Err(WatchError::new(format!(
@@ -293,6 +308,7 @@ impl ConfigWatcher {
         let mut state = WatchState::new(config_path.clone(), auth_dir.clone());
         state.read_guard = guard;
         state.file_guard = file_guard;
+        state.probe_state = probe_state;
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
         let stopped = Arc::new(AtomicBool::new(false));
         let thread_stopped = Arc::clone(&stopped);
@@ -474,6 +490,8 @@ struct WatchState {
     file_guard: Option<crate::auth::file_guard::FileGuard>,
     auth_reader: Arc<ConfigReader>,
     auth_probe: Arc<AuthProbe>,
+    probe_state: crate::auth::file_guard::ProbeState,
+    probe_retries: HashMap<String, (PathBuf, Instant, u32)>,
 }
 
 impl WatchState {
@@ -491,6 +509,8 @@ impl WatchState {
             file_guard: None,
             auth_reader: Arc::new(read_capped),
             auth_probe: Arc::new(|path| fs::metadata(path).map(|_| ())),
+            probe_state: Default::default(),
+            probe_retries: HashMap::new(),
         }
     }
 
@@ -548,15 +568,55 @@ impl WatchState {
         Step::Send(WatchEvent::AuthRemoved(path.to_path_buf(), revision))
     }
 
-    fn auth_file_exists(&self, path: &Path) -> Option<bool> {
+    fn auth_file_exists(&mut self, path: &Path) -> Option<bool> {
         match (self.auth_probe)(path) {
-            Ok(()) => Some(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+            Ok(()) => {
+                self.probe_state.present(path);
+                self.probe_retries.remove(&path_key(path));
+                Some(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.probe_retries.remove(&path_key(path));
+                Some(false)
+            }
             Err(error) => {
+                self.probe_state.unknown(path);
+                let key = path_key(path);
+                let attempt = self
+                    .probe_retries
+                    .get(&key)
+                    .map_or(0, |(_, _, attempt)| attempt.saturating_add(1));
+                let delay = Duration::from_millis(100 * (1u64 << attempt.min(8)));
+                self.probe_retries
+                    .insert(key, (path.to_path_buf(), Instant::now() + delay, attempt));
                 warn!(file = %file_name(path), error_kind = ?error.kind(), "cannot confirm auth file removal");
                 None
             }
         }
+    }
+
+    fn retry_probes(&mut self, now: Instant) -> Vec<WatchEvent> {
+        let due: Vec<_> = self
+            .probe_retries
+            .iter()
+            .filter(|(_, (_, at, _))| *at <= now)
+            .map(|(key, (path, _, _))| (key.clone(), path.clone()))
+            .collect();
+        let mut events = Vec::new();
+        for (key, path) in due {
+            match self.auth_file_exists(&path) {
+                Some(true) => {
+                    if let Step::Send(event) = self.add_or_update(&path, key) {
+                        events.push(event);
+                    }
+                }
+                Some(false) if self.auth_hashes.remove(&key).is_some() => {
+                    events.push(WatchEvent::AuthRemoved(path, next_revision()));
+                }
+                _ => {}
+            }
+        }
+        events
     }
 
     /// Upstream's `addOrUpdateClient`, with its `authFileUnchanged` check
@@ -577,6 +637,8 @@ impl WatchState {
                 return Step::Nothing;
             }
         };
+        self.probe_state.present(path);
+        self.probe_retries.remove(&key);
         if data.is_empty() {
             debug!(file = %file_name(path), "ignoring empty auth file");
             return Step::Nothing;
@@ -828,7 +890,16 @@ fn run(
                 return;
             }
         }
-        let message = match reload_at {
+        for event in state.retry_probes(Instant::now()) {
+            if !send(events, stopped, event) {
+                return;
+            }
+        }
+        let wake_at = reload_at
+            .into_iter()
+            .chain(state.probe_retries.values().map(|(_, at, _)| *at))
+            .min();
+        let message = match wake_at {
             Some(at) => match messages.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(message) => message,
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -1493,6 +1564,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn round3_failed_remove_probe_retries_without_an_event_and_fences_recreation() {
+        use crate::auth::{AuthStore, FileStore};
+        for op in [Op::Remove, Op::Rename] {
+            let fixture = Fixture::new();
+            let path = fixture.write_auth(
+                "probe.json",
+                r#"{"type":"claude","access_token":"dummy","disabled":false}"#,
+            );
+            let store = FileStore::new(&fixture.auth_dir);
+            let mut credential = store.list().unwrap().remove(0);
+            let mut state = fixture.state();
+            state.probe_state = store.file_guard().unwrap().probe_state();
+            state.initial_scan();
+            fs::remove_file(&path).unwrap();
+            state.auth_probe =
+                Arc::new(|_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+            assert_eq!(state.handle_event(&path, op, Instant::now()), Step::Nothing);
+            assert!(known(&state, &path).is_some());
+            let deadline = state.probe_retries[&path_key(&path)].1;
+            assert!(
+                store.save(&credential).is_err(),
+                "enabled runtime save must not recreate an unresolved path"
+            );
+            assert!(!path.exists());
+            state.auth_probe =
+                Arc::new(|_| Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+            let events = state.retry_probes(deadline);
+            assert!(
+                matches!(events.as_slice(), [WatchEvent::AuthRemoved(removed, _)] if removed == &path)
+            );
+            assert!(known(&state, &path).is_none());
+            assert!(state.probe_retries.is_empty());
+            assert!(
+                store.save(&credential).is_err(),
+                "absence does not lift the recreation fence"
+            );
+            fs::write(
+                &path,
+                br#"{"type":"claude","access_token":"dummy-restored","disabled":false}"#,
+            )
+            .unwrap();
+            state.auth_probe = Arc::new(|_| Ok(()));
+            state.handle_event(&path, Op::Write, Instant::now());
+            credential
+                .metadata
+                .insert("access_token".into(), serde_json::json!("dummy-runtime"));
+            store.save(&credential).unwrap();
+            assert!(path.exists());
+            assert_eq!(
+                store
+                    .read_back(&credential)
+                    .unwrap()
+                    .unwrap()
+                    .access_token(),
+                "dummy-runtime"
+            );
+        }
+    }
+
+    #[test]
+    fn round3_remove_retry_backoff_is_capped_and_presence_releases_it() {
+        let fixture = Fixture::new();
+        let path = fixture.write_auth("retry.json", DEMO);
+        let mut state = fixture.state();
+        state.initial_scan();
+        state.auth_probe = Arc::new(|_| Err(std::io::Error::from(std::io::ErrorKind::Other)));
+        state.handle_event(&path, Op::Remove, Instant::now());
+        for _ in 0..12 {
+            let deadline = state.probe_retries[&path_key(&path)].1;
+            assert!(
+                deadline.saturating_duration_since(Instant::now()) <= Duration::from_millis(25_600)
+            );
+            assert!(state.retry_probes(deadline).is_empty());
+            assert!(known(&state, &path).is_some());
+        }
+        state.auth_probe = Arc::new(|_| Ok(()));
+        let deadline = state.probe_retries[&path_key(&path)].1;
+        state.retry_probes(deadline);
+        assert!(state.probe_retries.is_empty());
+        assert!(known(&state, &path).is_some());
     }
 
     #[test]

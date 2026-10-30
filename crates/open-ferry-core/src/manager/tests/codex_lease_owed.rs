@@ -1807,11 +1807,10 @@ async fn b38_f_a_confirming_map_with_another_field_unequal_keeps_the_mark() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn b38_g_a_replace_observation_discards_an_owed_change() {
-    // B-38 (g): a change is owed; a Replace observation of a rewritten file
-    // takes the file's `note`; step 14 then writes the file's note and clears
-    // the flag, so the owed note is lost. Mutation: the flush writing
-    // the owed change over the observed file, or the flag surviving.
+async fn b38_g_a_replace_observation_preserves_owed_policy_and_adopts_other_fields() {
+    // Round 3 design B: the unsaved operator note remains owed while the
+    // observation adopts the file's other fields. Step 14 persists the merged
+    // record, preserving PR129's refresh and refusal bookkeeping.
     bounded(async {
         let rig = rig();
         let (manager, path, files) = (rig.manager.clone(), rig.path(), rig.store.files.clone());
@@ -1825,8 +1824,12 @@ async fn b38_g_a_replace_observation_discards_an_owed_change() {
             observed(&manager, &files, &hint);
         })
         .await;
-        assert_eq!(rig.live().metadata["note"], "file");
-        assert_eq!(disk_note(&rig), "file", "step 14 wrote the file's note");
+        assert_eq!(rig.live().metadata["note"], "owed");
+        assert_eq!(
+            disk_note(&rig),
+            "owed",
+            "step 14 wrote the owed operator note"
+        );
         assert_eq!(owed(&rig.manager), None, "the flush cleared the flag");
         assert_eq!(rig.disk()["refresh_token"], "r-refresh");
     })
