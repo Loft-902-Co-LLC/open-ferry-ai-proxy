@@ -19,8 +19,11 @@ async fn p47_truncation_is_one_attempt_without_cooldown() {
             }
         });
         h.executor(&executor);
-        h.add(auth("a", "gemini"), &["m"]);
-        h.add(auth("b", "gemini"), &["m"]);
+        for id in ["a", "b"] {
+            let mut candidate = auth(id, "gemini");
+            candidate.metadata.insert("request_scoped_errors".into(), serde_json::json!([{"status":502,"match":["terminal"],"action":"continue-and-cooldown"}]));
+            h.add(candidate, &["m"]);
+        }
         let error = if stream {
             match h
                 .manager

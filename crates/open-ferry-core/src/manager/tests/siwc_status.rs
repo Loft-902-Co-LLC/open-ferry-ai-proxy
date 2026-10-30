@@ -546,3 +546,55 @@ fn round2_rejection_partitions_survive_both_orders_and_sibling_refreshes() {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47_siwc_bearer_rebind_clears_refresh_delay_but_same_bearer_keeps_it() {
+    use crate::auth::Status;
+    use chrono::TimeDelta;
+    for changed in [false, true] {
+        let h = Harness::new(Default::default());
+        let mut a = valid();
+        a.file_name = "codex.json".into();
+        a.attributes.insert("path".into(), "codex.json".into());
+        let id = a.id.clone();
+        let deadline = h.now() + TimeDelta::hours(1);
+        a.status = Status::Error;
+        a.unavailable = true;
+        a.last_error = Some(AuthError {
+            http_status: 400,
+            message: "invalid_grant".into(),
+            ..Default::default()
+        });
+        a.next_retry_after = Some(deadline);
+        a.next_refresh_after = Some(deadline);
+        let expected = h.add(a, &[]);
+        h.manager
+            .lock()
+            .auths
+            .get_mut(&id)
+            .unwrap()
+            .refresh_failures = 3;
+        let mut bound = expected.as_ref().clone();
+        if changed {
+            bound.metadata["siwc"]["access_token"] = json!("new-dummy-siwc-bearer");
+        }
+        let completed = h
+            .manager
+            .try_commit_siwc_bind(&expected, || Ok(bound))
+            .unwrap()
+            .unwrap();
+        h.manager.update_unsaved(completed).unwrap();
+        let live = h.get(&id);
+        assert_eq!(h.refresh_failures(&id), if changed { 0 } else { 3 });
+        assert_eq!(
+            live.next_refresh_after,
+            if changed { None } else { Some(deadline) }
+        );
+        if changed {
+            assert!(!live.unavailable);
+            assert!(live.last_error.is_none());
+        } else {
+            assert!(live.unavailable);
+        }
+    }
+}

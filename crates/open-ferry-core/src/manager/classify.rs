@@ -237,8 +237,10 @@ pub(crate) fn should_skip_credential_cooldown(err: Option<&AuthError>) -> bool {
     if err.code == CODE_FORCE_COOLDOWN {
         return false;
     }
-    matches!(err.code.as_str(), "stream_truncated" | "upstream_websocket_turn")
-        || is_request_scoped_result_error(err)
+    matches!(
+        err.code.as_str(),
+        "stream_truncated" | "upstream_websocket_turn"
+    ) || is_request_scoped_result_error(err)
         || is_connection_lifecycle_result_error(err)
         || is_transient_transport_result_error(err)
 }

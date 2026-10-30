@@ -1287,6 +1287,7 @@ impl Manager {
     ) -> Result<Option<PublishedUpdate>, ManagerError> {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
+        let is_edit = matches!(mode, UpdateMode::Edit { .. });
         let is_file_observation = context.file_observation;
         let lease_tail = match &mode {
             UpdateMode::Refresh { lease, .. } => lease.cloned().map(Box::new),
@@ -1456,8 +1457,16 @@ impl Manager {
                 // Settings edits must not inherit an in-flight rotation's
                 // partition-only persistence intent from the live snapshot.
                 auth.codex_persist_intent = Default::default();
-                auth.codex_refresh_failure = None;
-                0
+                if !credentials_changed(&existing_auth, &auth)
+                    && auth.next_refresh_after == existing_auth.next_refresh_after
+                    && !has_unauthorized_auth_failure(&auth)
+                    && !is_disabled(&auth)
+                {
+                    existing_failures
+                } else {
+                    auth.codex_refresh_failure = None;
+                    0
+                }
             }
             UpdateMode::Refresh {
                 base,
@@ -1606,7 +1615,12 @@ impl Manager {
         let mut generation = existing_generation.saturating_add(1);
         let existing_version = existing_auth.credential_version.max(1);
         let changed = credentials_changed(&existing_auth, &auth);
-        if !changed && !is_refresh && !is_disabled(&auth) {
+        if !changed
+            && !is_refresh
+            && !is_edit
+            && !is_disabled(&auth)
+            && !has_unauthorized_auth_failure(&auth)
+        {
             refresh_failures = existing_failures;
             auth.next_refresh_after = existing_auth.next_refresh_after;
             auth.codex_refresh_failure = existing_auth.codex_refresh_failure.clone();

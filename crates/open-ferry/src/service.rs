@@ -8984,15 +8984,26 @@ self-update:
             service
                 .handle_and_drain(changed(auth_file(&path)), Path::new(""))
                 .await;
-            service.manager.reset_quota(&stale.id).unwrap();
+            assert!(
+                service.manager.reset_quota(&stale.id).is_err(),
+                "reset must refuse the corrupt credential file"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"{");
             assert!(service.manager.get(&stale.id).unwrap().disabled);
             assert!(!service.dirty_reads.is_empty());
+            reload(&mut service, dir.path(), "force-model-prefix: true\n").await;
+            assert!(
+                service.manager.get(&stale.id).unwrap().disabled,
+                "reload must not republish the discarded login payload"
+            );
             std::fs::write(&path, &saved).unwrap();
             service
                 .handle_and_drain(changed(auth_file(&path)), Path::new(""))
                 .await;
             assert!(service.manager.get(&stale.id).unwrap().disabled);
             assert_eq!(std::fs::read(&path).unwrap(), saved);
+            service.manager.reset_quota(&stale.id).unwrap();
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
         }
     }
 

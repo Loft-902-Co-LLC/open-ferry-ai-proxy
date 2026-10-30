@@ -180,7 +180,10 @@ impl ExecError {
 
     /// Whether retrying could duplicate an accepted generation.
     pub fn stops_replay(&self) -> bool {
-        matches!(self.failure_class, Some(super::FailureClass::StreamTruncated | super::FailureClass::UpstreamWebsocketTurn))
+        matches!(
+            self.failure_class,
+            Some(super::FailureClass::StreamTruncated | super::FailureClass::UpstreamWebsocketTurn)
+        )
     }
 
     /// Provider-vouched per-model capacity rejection, never inferred from a
@@ -209,6 +212,12 @@ impl ExecError {
                 self.kind,
                 ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
             ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
+    }
+
+    /// A deadline or explicit provider hint owns Retry-After delivery. Header
+    /// writers must remove raw passthrough even for zero or expired overrides.
+    pub fn has_retry_after_override(&self) -> bool {
+        self.has_trusted_retry_deadline() || self.retry_after.is_some()
     }
 
     /// A live trusted deadline wins over the provider hint. After natural
@@ -393,6 +402,10 @@ impl ExecError {
         match self.kind {
             ErrorKind::ModelCooldown => self.headers.get(header::RETRY_AFTER).cloned(),
             ErrorKind::AuthUnavailable => {
+                let wait = self.retry_after.filter(|wait| !wait.is_zero())?;
+                Some(HeaderValue::from(ceil_seconds(wait).max(1)))
+            }
+            ErrorKind::Upstream if self.failure_code() == Some("transient_rate_limit") => {
                 let wait = self.retry_after.filter(|wait| !wait.is_zero())?;
                 Some(HeaderValue::from(ceil_seconds(wait).max(1)))
             }

@@ -9,10 +9,6 @@
 //! - Upstream's tests share a global model registry; each test here has its
 //!   own [`FakeModels`].
 
-mod p47_failures;
-mod p47_identity;
-mod p47_socket;
-mod p47_issue7017;
 mod adoption_policy;
 mod affinity;
 mod affinity_rebind;
@@ -93,6 +89,10 @@ mod metadata_keys;
 mod metadata_merge;
 mod oauth_model_alias;
 mod openai_compat_pool;
+mod p47_failures;
+mod p47_identity;
+mod p47_issue7017;
+mod p47_socket;
 mod persist_policy;
 mod quota_check;
 mod quota_recovery;

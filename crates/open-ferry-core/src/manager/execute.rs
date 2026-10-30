@@ -1682,6 +1682,9 @@ impl Forwarder {
                         .mark_call_result_async(&result, attempt.session())
                         .await;
                 }
+                let err = self
+                    .manager
+                    .annotate_retry_deadline(&self.auth, &self.result_model, err);
                 return self.tx.send(Err(err)).await.is_ok();
             }
             Ok(payload) => payload,

@@ -231,14 +231,16 @@ async fn p47_issue7017_wait_floor_uses_own_live_quota_only() {
 
 #[tokio::test(start_paused = true)]
 async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers() {
-    for path in [0, 1, 2, 3] {
+    for path in [0, 1, 2, 3, 4] {
         for credentials in [1, 2] {
             let h = Harness::new(Settings::default());
             let executor = FakeExecutor::with("codex", move |_| {
                 let mut e = error(Some(Duration::from_secs(256)));
                 e.headers.insert("retry-after", "9999".parse().unwrap());
                 e.headers.insert("x-request-id", "dummy".parse().unwrap());
-                if path == 3 {
+                if path == 4 {
+                    Reply::chunks(vec![Ok("accepted".into()), Err(e)])
+                } else if path == 3 {
                     Reply::chunks(vec![Err(e)])
                 } else {
                     Reply::Err(e)
@@ -283,7 +285,7 @@ async fn p47_issue7017_execute_count_stream_and_bootstrap_keep_trusted_headers()
                         _ => Kind::Stream,
                     })
                     .len(),
-                credentials
+                if path == 4 { 1 } else { credentials }
             );
             assert!(!h.get("a").model_states["m"].quota.exceeded);
         }
@@ -326,6 +328,12 @@ fn p47_issue7017_trusted_deadline_identity_precedence_decay_and_expiry() {
             .with_trusted_retry_after(Duration::ZERO)
             .has_trusted_retry_deadline()
     );
+    assert!(cause.has_retry_after_override());
+    assert_eq!(cause.retry_after_header().unwrap(), "256");
+    let mut zero = error(Some(Duration::ZERO));
+    zero.headers.insert("retry-after", "9999".parse().unwrap());
+    assert!(zero.has_retry_after_override());
+    assert!(zero.retry_after_header().is_none());
     let mut e = cause.with_trusted_retry_after(Duration::from_secs(8));
     assert_eq!(e.to_string(), original);
     assert_eq!(e.retry_after, Some(Duration::from_secs(256)));
@@ -397,11 +405,33 @@ async fn p47_issue7017_stale_capacity_cannot_undo_newer_state_or_refresh_merge()
 
 #[tokio::test(start_paused = true)]
 async fn p47_issue7017_disabled_transient_default_preserves_quota() {
-    let h=Harness::new(Settings{transient_error_cooldown_seconds:-1,..Default::default()});
-    let mut a=auth("a","codex");let future=h.now()+TimeDelta::hours(2);
-    a.model_states.insert("m".into(),ModelState{unavailable:true,status:Status::Error,next_retry_after:Some(future),quota:QuotaState{exceeded:true,reason:"quota".into(),next_recover_at:Some(future),backoff_level:2,..Default::default()},..Default::default()});
-    h.add(a,&["m"]);h.manager.mark_result(&result("m",None));
-    assert_eq!(h.get("a").model_states["m"].next_retry_after,Some(future));
+    let h = Harness::new(Settings {
+        transient_error_cooldown_seconds: -1,
+        ..Default::default()
+    });
+    let mut a = auth("a", "codex");
+    let future = h.now() + TimeDelta::hours(2);
+    a.model_states.insert(
+        "m".into(),
+        ModelState {
+            unavailable: true,
+            status: Status::Error,
+            next_retry_after: Some(future),
+            quota: QuotaState {
+                exceeded: true,
+                reason: "quota".into(),
+                next_recover_at: Some(future),
+                backoff_level: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    h.add(a, &["m"]);
+    h.manager.mark_result(&result("m", None));
+    assert_eq!(h.get("a").model_states["m"].next_retry_after, Some(future));
     assert!(h.get("a").model_states["m"].unavailable);
-    h.manager.mark_result(&result("fresh",None));assert!(!h.get("a").model_states["fresh"].unavailable);assert!(!h.get("a").model_states["fresh"].quota.exceeded);
+    h.manager.mark_result(&result("fresh", None));
+    assert!(!h.get("a").model_states["fresh"].unavailable);
+    assert!(!h.get("a").model_states["fresh"].quota.exceeded);
 }

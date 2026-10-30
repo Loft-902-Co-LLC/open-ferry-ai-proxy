@@ -316,6 +316,18 @@ async fn p47_relogin_recovers_refresh_failures_and_preserves_live_holds() {
                     .unwrap()
                     .refresh_failures = 3;
             }
+            h.manager
+                .edit_unsaved("a", |auth| {
+                    auth.prefix = "policy-edit".into();
+                    Ok::<_, ()>(true)
+                })
+                .unwrap();
+            assert_eq!(
+                h.refresh_failures("a"),
+                3,
+                "policy edit retains refresh failures"
+            );
+            assert_eq!(h.get("a").next_refresh_after, Some(deadline));
             let unchanged = (*h.get("a")).clone();
             h.manager
                 .adopt_observed(&unchanged, None, |_| {
