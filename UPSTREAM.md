@@ -14,6 +14,12 @@ When we move the pin, we update this table, bring every ported file's header to 
 
 ### Ports prepared through v8.0.47 ahead of the pin
 
+Pending v8.0.47 slice:
+
+| Upstream commits | What isn't ported | Why |
+|---|---|---|
+| 90c447d3 | Codex input-item ID updates in SanitizeCodexInputItemIDs | Keep Codex request-ID normalization separate from Gemini response translation so the remaining request-side collision rules can be integrated and verified together; the Gemini Responses tsc_ item-ID prefix is ported |
+
 Differences retained in these ports:
 
 | Upstream commits | What differs | Why |
