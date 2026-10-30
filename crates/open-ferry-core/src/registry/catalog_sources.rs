@@ -204,7 +204,7 @@ impl CatalogRuntime {
         }
     }
 
-    /// Stops following the files, and has reads under way publish nothing.
+    /// Stops following the files, fencing reads begun under active updaters.
     /// The catalogs in use stay; a later start reads every source again.
     pub fn stop(&self) {
         let mut running = lock(&self.inner.running);
@@ -243,9 +243,10 @@ struct UpdaterState {
     /// Whether the source is being followed: configured, and not stopped
     /// since.
     active: bool,
-    /// Counts source changes and stops; a read publishes only for the
-    /// current one.
+    /// Counts source changes; a read publishes only for the current one.
     generation: u64,
+    /// The active source's lifetime, cancelled on source change or stop.
+    cancellation: RefreshCancellation,
     /// Stops the thread following the file when dropped.
     poller: Option<Sender<()>>,
     request_seq: u64,
@@ -278,6 +279,8 @@ impl Updater {
             if state.active && state.source == source {
                 return;
             }
+            state.cancellation.cancel();
+            state.cancellation = RefreshCancellation::default();
             state.generation = state.generation.wrapping_add(1);
             state.source = source.to_owned();
             state.active = true;
@@ -328,20 +331,20 @@ impl Updater {
     /// (upstream's `refresh`).
     fn refresh(&self, source: &str, generation: u64) {
         let seq = self.next_sequence();
-        if let Err(error) =
-            self.read_and_publish(source, generation, seq, &RefreshCancellation::default())
-        {
-            let current = lock(&self.state).generation == generation;
+        let cancellation = lock(&self.state).cancellation.clone();
+        if let Err(error) = self.read_and_publish(source, generation, seq, &cancellation, None) {
+            let current =
+                lock(&self.state).generation == generation && !cancellation.is_cancelled();
             if current {
                 error.warn(self.setting);
             }
         }
     }
 
-    /// Stops following the source; reads under way publish nothing.
+    /// Cancels the active source without changing its generation.
     fn stop(&self) {
         let mut state = lock(&self.state);
-        state.generation = state.generation.wrapping_add(1);
+        state.cancellation.cancel();
         state.active = false;
         state.poller = None;
     }

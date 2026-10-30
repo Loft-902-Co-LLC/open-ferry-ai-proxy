@@ -21,6 +21,10 @@ impl RefreshCancellation {
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -110,6 +114,7 @@ pub(super) struct Request {
     source: String,
     generation: u64,
     seq: u64,
+    updater_cancellation: Option<RefreshCancellation>,
 }
 
 #[derive(Debug)]
@@ -165,6 +170,7 @@ impl Updater {
             },
             generation: state.generation,
             seq: state.request_seq,
+            updater_cancellation: state.active.then(|| state.cancellation.clone()),
         }
     }
 
@@ -186,13 +192,21 @@ impl Updater {
             request.generation,
             request.seq,
             cancellation,
+            request.updater_cancellation.as_ref(),
         ) {
             Ok(changed) => {
                 status.refreshed = true;
                 status.changed_providers = changed;
             }
             Err(error) => {
-                error.warn(self.setting);
+                let cancelled = cancellation.is_cancelled()
+                    || request
+                        .updater_cancellation
+                        .as_ref()
+                        .is_some_and(RefreshCancellation::is_cancelled);
+                if !matches!(error, RefreshError::Fetch(_)) || !cancelled {
+                    error.warn(self.setting);
+                }
                 status.error = Some(error.message().to_owned());
             }
         }
@@ -205,22 +219,19 @@ impl Updater {
         generation: u64,
         seq: u64,
         cancellation: &RefreshCancellation,
+        updater_cancellation: Option<&RefreshCancellation>,
     ) -> Result<Vec<String>, RefreshError> {
-        if cancellation.0.load(Ordering::Acquire) {
+        if cancellation.is_cancelled() {
             return Err(RefreshError::Cancelled);
         }
-        let data = (self.fetch)(source).map_err(|error| {
-            if cancellation.0.load(Ordering::Acquire) {
-                RefreshError::Cancelled
-            } else {
-                RefreshError::Fetch(error)
-            }
-        })?;
+        let data = (self.fetch)(source).map_err(RefreshError::Fetch)?;
         let mut state = lock(&self.state);
         if state.generation != generation {
             return Err(RefreshError::SourceChanged);
         }
-        if cancellation.0.load(Ordering::Acquire) {
+        if cancellation.is_cancelled()
+            || updater_cancellation.is_some_and(RefreshCancellation::is_cancelled)
+        {
             return Err(RefreshError::Cancelled);
         }
         if seq <= state.published_seq {

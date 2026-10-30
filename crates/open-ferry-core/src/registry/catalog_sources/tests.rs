@@ -621,15 +621,17 @@ fn manual_refresh_errors_keep_upstream_text_and_warn_with_the_cause() {
 }
 
 #[test]
-fn a_cancelled_manual_fetch_returns_the_context_error_without_warning() {
+fn a_cancelled_manual_fetch_keeps_failed_fetch_text_without_warning() {
     for fail_fetch in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "invalid.json", b"invalid");
         let cancellation = RefreshCancellation::default();
         let token = cancellation.clone();
         let updater = updater(
-            move |_| {
+            move |source| {
                 token.cancel();
                 if fail_fetch {
-                    Err("specific read failure".into())
+                    fetch_general(source)
                 } else {
                     Ok(Vec::new())
                 }
@@ -637,10 +639,16 @@ fn a_cancelled_manual_fetch_returns_the_context_error_without_warning() {
             |_| unreachable!("a cancelled fetch must not publish"),
         );
         let warnings = Warnings::capture();
-        for _ in 0..2 {
-            let status =
-                updater.on_demand(updater.request(&file_source("cancelled")), &cancellation);
-            assert_eq!(status.error.as_deref(), Some("context canceled"));
+        for attempt in 0..2 {
+            let status = updater.on_demand(updater.request(&path), &cancellation);
+            assert_eq!(
+                status.error.as_deref(),
+                Some(if fail_fetch && attempt == 0 {
+                    "no valid model catalog source"
+                } else {
+                    "context canceled"
+                })
+            );
         }
         assert!(warnings.lines().is_empty());
     }
@@ -672,6 +680,11 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
                 Ok(vec!["claude".into()])
             },
         );
+        if mode == "stop" {
+            let mut state = lock(&updater.state);
+            state.active = true;
+            state.source = file_source("old");
+        }
         let cancellation = RefreshCancellation::default();
         let worker = Arc::clone(&updater);
         let cancelled = cancellation.clone();
@@ -686,7 +699,11 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
         match mode {
             "cancel" => cancellation.cancel(),
             "source-change" => updater.configure(""),
-            "stop" => updater.stop(),
+            "stop" => {
+                let generation = lock(&updater.state).generation;
+                updater.stop();
+                assert_eq!(lock(&updater.state).generation, generation);
+            }
             "newer-manual" => {
                 let request = updater.request(&file_source("new"));
                 assert!(updater.on_demand(request, &Default::default()).refreshed);
@@ -701,7 +718,7 @@ fn manual_refresh_fences_cancelled_stale_and_older_completions() {
         } else {
             assert_eq!(
                 status.error.as_deref(),
-                Some(if mode == "cancel" {
+                Some(if matches!(mode, "cancel" | "stop") {
                     "context canceled"
                 } else {
                     "model catalog source changed during refresh"
@@ -736,7 +753,7 @@ fn cancellation_does_not_wait_for_publication_already_started() {
     let cancellation = RefreshCancellation::default();
     let worker = Arc::clone(&updater);
     let token = cancellation.clone();
-    let publisher = thread::spawn(move || worker.read_and_publish("", 0, 1, &token));
+    let publisher = thread::spawn(move || worker.read_and_publish("", 0, 1, &token, None));
     starts.recv_timeout(Duration::from_secs(10)).unwrap();
     let token = cancellation.clone();
     let (done, finished) = mpsc::channel();
@@ -749,7 +766,11 @@ fn cancellation_does_not_wait_for_publication_already_started() {
     cancel.join().unwrap();
     publisher.join().unwrap().unwrap();
     assert!(cancelled_without_waiting);
-    assert!(updater.read_and_publish("", 0, 2, &cancellation).is_err());
+    assert!(
+        updater
+            .read_and_publish("", 0, 2, &cancellation, None)
+            .is_err()
+    );
 }
 
 #[test]
@@ -759,4 +780,119 @@ fn a_current_failed_poll_still_warns() {
     updater.refresh("", 0);
     assert_eq!(warnings.lines().len(), 1);
     assert!(warnings.lines()[0].contains("refresh failed"));
+}
+
+#[test]
+fn a_failed_manual_fetch_tracks_the_updater_active_at_request_time() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for active in [true, false] {
+        for stop in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let bad = write(dir.path(), "bad.json", embedded_catalog_json().as_bytes());
+            let other = write(dir.path(), "other.json", embedded_catalog_json().as_bytes());
+            let (started, starts) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let resumed = Mutex::new(resumed);
+            let pause = Arc::new(AtomicBool::new(false));
+            let paused = Arc::clone(&pause);
+            let bad_source = bad.clone();
+            let store = Arc::new(CatalogStore::new());
+            let current = Arc::clone(&store);
+            let updater = updater(
+                move |source| {
+                    if source == bad_source && paused.load(Ordering::Acquire) {
+                        started.send(()).unwrap();
+                        lock(&resumed).recv().unwrap();
+                    }
+                    fetch_general(source)
+                },
+                move |data| {
+                    current
+                        .publish_general(data, "test")
+                        .map_err(|error| error.to_string())
+                },
+            );
+            if active {
+                updater.configure(&bad);
+            }
+            std::fs::write(&bad, b"invalid").unwrap();
+            pause.store(true, Ordering::Release);
+            let worker = Arc::clone(&updater);
+            let task = thread::spawn(move || {
+                let warnings = Warnings::capture();
+                let request = worker.request(&bad);
+                let status = worker.on_demand(request, &Default::default());
+                (status, warnings.lines())
+            });
+            starts.recv_timeout(Duration::from_secs(10)).unwrap();
+            if stop {
+                updater.stop();
+            } else {
+                updater.configure(&other);
+            }
+            resume.send(()).unwrap();
+            let (status, warnings) = task.join().unwrap();
+            assert_eq!(
+                status.error.as_deref(),
+                Some("no valid model catalog source")
+            );
+            assert!(!status.refreshed);
+            assert_eq!(
+                warnings.len(),
+                usize::from(!active),
+                "active={active}, stop={stop}: {warnings:?}"
+            );
+            if !active {
+                assert!(
+                    warnings[0]
+                        .contains("model catalog refresh failed; keeping last valid catalog")
+                );
+            }
+            assert_eq!(*store.general(), *StaticCatalog::embedded());
+        }
+    }
+}
+
+#[test]
+fn a_stopped_poll_cannot_publish_or_warn() {
+    for fail_fetch in [false, true] {
+        let (started, starts) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let resumed = Mutex::new(resumed);
+        let (published, publications) = mpsc::channel();
+        let updater = updater(
+            move |_| {
+                started.send(()).unwrap();
+                lock(&resumed).recv().unwrap();
+                if fail_fetch {
+                    Err("specific read failure".into())
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+            move |_| {
+                published.send(()).unwrap();
+                Ok(Vec::new())
+            },
+        );
+        let source = file_source("stopped-poll");
+        {
+            let mut state = lock(&updater.state);
+            state.active = true;
+            state.source.clone_from(&source);
+        }
+        let worker = Arc::clone(&updater);
+        let task = thread::spawn(move || {
+            let warnings = Warnings::capture();
+            worker.refresh(&source, 0);
+            warnings.lines()
+        });
+        starts.recv_timeout(Duration::from_secs(10)).unwrap();
+        updater.stop();
+        assert_eq!(lock(&updater.state).generation, 0);
+        resume.send(()).unwrap();
+        assert!(task.join().unwrap().is_empty());
+        assert_eq!(publications.try_recv(), Err(TryRecvError::Empty));
+    }
 }
