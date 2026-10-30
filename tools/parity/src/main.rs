@@ -1583,15 +1583,9 @@ fn evaluate_with_whole_counterfactual(
     let Ok(rust) = &evaluated.rust_output else {
         return Ok(evaluated);
     };
-    if let Some(proof) = config_save::keep_chomped::evidence(case, &original_go, rust) {
+    if let Some((outcome, proof)) = scalar_reencode_proof(case, &original_go, rust) {
         save_counterfactual(work_dir, case, &proof)?;
-        evaluated.outcome = Outcome::KnownDifference(config_save::keep_chomped::REASON);
-        return Ok(evaluated);
-    }
-    if let Some(proof) = config_save::folded::evidence(case, &original_go, rust) {
-        save_counterfactual(work_dir, case, &proof)?;
-        evaluated.outcome =
-            Outcome::Equivalent(BTreeSet::from([Deviation::UpstreamFoldedScalarReencode]));
+        evaluated.outcome = outcome;
         return Ok(evaluated);
     }
     let Some(candidate) = config_save::counterfactual::rewritten(case) else {
@@ -1667,6 +1661,21 @@ fn evaluate_with_whole_counterfactual(
         evaluated.outcome = Outcome::Equivalent(proof_deviations(reason, &counterfactual.outcome));
     }
     Ok(evaluated)
+}
+
+fn scalar_reencode_proof(case: &Case, go: &Value, rust: &Value) -> Option<(Outcome, Value)> {
+    if let Some(proof) = config_save::folded::evidence(case, go, rust) {
+        return Some((
+            Outcome::Equivalent(BTreeSet::from([Deviation::UpstreamFoldedScalarReencode])),
+            proof,
+        ));
+    }
+    config_save::keep_chomped::evidence(case, go, rust).map(|proof| {
+        (
+            Outcome::KnownDifference(config_save::keep_chomped::REASON),
+            proof,
+        )
+    })
 }
 
 fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {

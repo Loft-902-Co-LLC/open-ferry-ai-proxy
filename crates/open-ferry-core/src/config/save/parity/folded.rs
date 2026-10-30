@@ -246,10 +246,62 @@ pub fn folded_scalar_reencode(
 
 /// A separate known difference, never an equivalence: only extra trailing LF
 /// bytes in keep-chomped scalars may differ from the source-preserving output.
-pub fn extra_keep_chomped_newlines(source: &str, go: &str, rust: &str) -> bool {
-    fn prove(source: &str, go: &str, rust: &str) -> Option<bool> {
+pub fn extra_keep_chomped_newlines(
+    source: &str,
+    go: &str,
+    rust: &str,
+    config: Option<&str>,
+    nested: Option<(&[String], &str)>,
+) -> bool {
+    // Omitted mapping keys do not request a change. A supplied value, or a
+    // replacement of one of its parents, must retain the exact source string.
+    fn requested_value_unchanged(request: &Node, path: &[Part], original: &Node) -> bool {
+        let Some((part, rest)) = path.split_first() else {
+            return request.kind == super::super::Kind::Scalar
+                && request.tag == STR_TAG
+                && request.value == original.value;
+        };
+        match (part, request.kind) {
+            (Part::Key(key), super::super::Kind::Mapping) => request
+                .pairs()
+                .find(|(k, _)| k.value == *key)
+                .is_none_or(|(_, value)| requested_value_unchanged(value, rest, original)),
+            (Part::Index(index), super::super::Kind::Sequence) => request
+                .content
+                .get(*index)
+                .is_some_and(|value| requested_value_unchanged(value, rest, original)),
+            _ => false,
+        }
+    }
+    fn prove(
+        source: &str,
+        go: &str,
+        rust: &str,
+        config: Option<&str>,
+        nested: Option<(&[String], &str)>,
+    ) -> Option<bool> {
         let source_node = root(source)?;
         let rust_node = root(rust)?;
+        let mut requests = Vec::new();
+        if let Some(config) = config {
+            requests.push(root(config)?);
+        }
+        if let Some((keys, value)) = nested {
+            if keys.is_empty() {
+                return None;
+            }
+            // Build the requested assignment independently of the writer,
+            // then resolve v8 aliases just as for the source's paths.
+            let request = keys
+                .iter()
+                .rev()
+                .fold(Node::scalar(STR_TAG, value), |n, key| {
+                    let mut map = Node::mapping();
+                    map.content = vec![Node::scalar(STR_TAG, key), n];
+                    map
+                });
+            requests.push(super::super::flatten_v8(&request).ok()?);
+        }
         let mut source_values = Vec::new();
         let mut rust_values = Vec::new();
         at_path(&source_node, &[], &mut source_values);
@@ -270,6 +322,12 @@ pub fn extra_keep_chomped_newlines(source: &str, go: &str, rust: &str) -> bool {
                 .iter()
                 .find(|(_, n)| n.line == r.line && n.column == r.column)?;
             let original = source_values.iter().find(|(p, _)| p == path)?.1;
+            if !requests
+                .iter()
+                .all(|request| requested_value_unchanged(request, path, original))
+            {
+                return None;
+            }
             let source_scalar = ss
                 .iter()
                 .find(|s| s.line == original.line && s.column == original.column)?;
@@ -282,7 +340,7 @@ pub fn extra_keep_chomped_newlines(source: &str, go: &str, rust: &str) -> bool {
                     indicator.contains(&b'+')
                 })
             };
-            let extra = g.value.strip_prefix(&original.value)?;
+            let extra = g.value.strip_prefix(&r.value)?;
             let raw_extra = graw.strip_prefix(rraw)?;
             if original.tag != STR_TAG
                 || value.tag != STR_TAG
@@ -308,7 +366,7 @@ pub fn extra_keep_chomped_newlines(source: &str, go: &str, rust: &str) -> bool {
         fixed.push_str(go.get(last..)?);
         Some(changed && fixed == rust)
     }
-    prove(source, go, rust) == Some(true)
+    prove(source, go, rust, config, nested) == Some(true)
 }
 
 #[cfg(test)]
