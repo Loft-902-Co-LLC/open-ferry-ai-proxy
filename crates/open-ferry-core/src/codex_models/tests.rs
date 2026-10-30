@@ -1015,16 +1015,20 @@ fn non_template_models_follow_the_catalog_by_display_name() {
         .iter()
         .map(|entry| (string_value(entry, "slug"), int_value(entry, "priority")))
         .collect();
-    // The catalog's own priorities come first; the rest follow the highest
-    // of them (43), 100 apart, by display name in lower case, then slug.
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let base = templates.templates().map(model_priority).max().unwrap();
+    // Non-template priorities follow the catalog's maximum, 100 apart.
     assert_eq!(
         order,
         [
-            ("gpt-6-astra", 2),
-            ("gpt-5.5", 13),
-            ("Alpha", 143),
-            ("alpha-model", 243),
-            ("zeta-model", 343),
+            (
+                "gpt-6-astra",
+                model_priority(templates.template("gpt-6-astra").unwrap())
+            ),
+            ("gpt-5.5", model_priority(templates.default_template())),
+            ("Alpha", base + 100),
+            ("alpha-model", base + 200),
+            ("zeta-model", base + 300),
         ]
     );
 }
