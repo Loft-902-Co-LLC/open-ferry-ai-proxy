@@ -1013,3 +1013,6 @@ mod walk_memo_tests;
 
 #[cfg(test)]
 mod round6_tests;
+
+#[cfg(test)]
+mod round8_tests;

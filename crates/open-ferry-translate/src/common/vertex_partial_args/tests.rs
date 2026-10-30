@@ -315,3 +315,36 @@ fn fallback_arguments_have_no_added_structure_limit() {
     assert!(assembler.push(&json!({"args":args}), None).unwrap().1);
     assert_eq!(assembler.full_arguments().unwrap(), args.to_string());
 }
+
+#[test]
+fn round8_held_count_clears_retained_and_removed_subtrees() {
+    let mut assembler = Assembler::default();
+    let clean = |value: &Value| {
+        let mut value = value.clone();
+        value.as_object_mut().unwrap().shift_remove("drop");
+        value
+    };
+    let probe = |_: usize, step: ProbeStep<'_>| Some((matches!(step, ProbeStep::Key(_)), 0));
+    let (first, done) = assembler
+        .push_indexed(
+            &json!({"willContinue":true,"partialArgs":[
+                {"jsonPath":"$.drop.inner[0].leaf","numberValue":1},
+                {"jsonPath":"$.keep.inner","numberValue":2}
+            ]}),
+            Some(&clean),
+            Some(&probe),
+        )
+        .unwrap();
+    assert!(!done);
+    assert!(first.is_empty());
+    assert_eq!(assembler.held_nodes, 5);
+    assert_eq!(assembler.nodes.iter().filter(|node| node.held).count(), 5);
+    let (last, done) = assembler
+        .push_indexed(&json!({}), Some(&clean), Some(&probe))
+        .unwrap();
+    assert!(done);
+    assert_eq!(last, r#"{"keep":{"inner":2}}"#);
+    assert_eq!(assembler.final_clean_calls(), 1);
+    assert_eq!(assembler.held_nodes, 0);
+    assert!(assembler.nodes.iter().all(|node| !node.held));
+}

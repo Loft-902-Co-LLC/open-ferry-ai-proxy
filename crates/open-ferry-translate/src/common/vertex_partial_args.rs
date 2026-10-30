@@ -84,8 +84,11 @@ pub(crate) struct Assembler {
     last_string: Option<usize>,
     probes: HashMap<Vec<Segment>, bool>,
     buffered: usize,
+    held_nodes: usize,
     #[cfg(test)]
     lookup_steps: std::cell::Cell<usize>,
+    #[cfg(test)]
+    final_clean_calls: usize,
     full: String,
     error: Option<ArgumentError>,
     finished: bool,
@@ -144,7 +147,14 @@ impl Assembler {
                 None => bounded_json(args)?,
             };
         } else if let Some(root) = self.root {
-            if final_chunk && let Some(clean) = cleaner {
+            if final_chunk
+                && self.held_nodes != 0
+                && let Some(clean) = cleaner
+            {
+                #[cfg(test)]
+                {
+                    self.final_clean_calls += 1;
+                }
                 let mut raw = String::new();
                 self.serialize(root, &mut raw)?;
                 let value = crate::json::exact::from_str(&raw)
@@ -156,6 +166,11 @@ impl Assembler {
         }
         self.finished = final_chunk;
         Ok((self.full[start..].to_owned(), final_chunk))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn final_clean_calls(&self) -> usize {
+        self.final_clean_calls
     }
 
     pub(crate) fn full_arguments(&self) -> Result<&str> {
@@ -176,6 +191,7 @@ impl Assembler {
 
     fn alloc(&mut self, kind: Kind, held: bool) -> usize {
         let index = self.nodes.len();
+        self.held_nodes += usize::from(held);
         self.nodes.push(Node {
             kind,
             held,
@@ -438,6 +454,26 @@ impl Assembler {
         Ok(())
     }
 
+    fn release_held(&mut self, index: usize) {
+        if self.nodes[index].held {
+            self.nodes[index].held = false;
+            self.held_nodes -= 1;
+        }
+    }
+
+    fn release_held_subtree(&mut self, root: usize) {
+        // Removed nodes stay in the arena, but no longer count as held fields.
+        let mut pending = vec![root];
+        while let Some(index) = pending.pop() {
+            self.release_held(index);
+            match &self.nodes[index].kind {
+                Kind::Object(children) => pending.extend(children.order.iter().map(|(_, id)| *id)),
+                Kind::Array(children) => pending.extend(children.values().copied()),
+                _ => {}
+            }
+        }
+    }
+
     fn prune(&mut self, index: usize, cleaned: &Value) {
         let next = self.nodes[index].next;
         let children: Vec<_> = match &self.nodes[index].kind {
@@ -461,9 +497,10 @@ impl Assembler {
                 Segment::Index(at) => cleaned.get(*at),
             };
             if self.nodes[child].held && value.is_none() {
+                self.release_held_subtree(child);
                 removed.insert(child);
             } else {
-                self.nodes[child].held = false;
+                self.release_held(child);
                 self.prune(child, value.unwrap_or(&Value::Null));
             }
         }

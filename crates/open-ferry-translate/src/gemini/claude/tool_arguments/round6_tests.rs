@@ -452,7 +452,7 @@ family_tests!(round6_family_00:0,round6_family_01:1,round6_family_02:2,round6_fa
 
 #[test]
 fn round7_cyclic_aliases_and_conjuncts_complete() {
-    // The full review input took 46.7 s in debug; preserve it as an opt-in.
+    // The final full review input took 40.8 s in debug; preserve it as an opt-in.
     let (aliases_count, conjuncts_count) = if std::env::var_os("R7_FULL_SIZE").is_some() {
         (1_000, 20_000)
     } else {
