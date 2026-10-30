@@ -29,7 +29,10 @@ fn path(steps: &[Step]) -> String {
     let mut out = "$".to_owned();
     for step in steps {
         match step {
-            Key(key) if key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') => {
+            Key(key)
+                if !key.is_empty()
+                    && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') =>
+            {
                 out.push('.');
                 out.push_str(key);
             }
@@ -365,21 +368,60 @@ fn family() -> Vec<Case> {
         }
         cases.push(cleanup);
     }
+    for translated in [false, true] {
+        let mut spelled = reference(500, 100, 0, translated);
+        spelled.name = format!("alias-fanout-t{translated}");
+        for i in 0..500 {
+            spelled.schema["$defs"][format!("A{i}")] = json!({"$ref":"#/$defs/Big"});
+            spelled.schema["properties"][format!("k{i:03}")]["$ref"] =
+                json!(format!("#/$defs/A{i}"));
+        }
+        cases.push(spelled);
+        cases.push(Case{name:format!("root-array-preserved-t{translated}"),translated,schema:json!({"type":"array","items":{"type":"object","properties":{},"additionalProperties":false}}),paths:vec![(vec![Index(2),Key("reason".into())],json!("x"))]});
+        cases.push(Case{name:format!("empty-key-t{translated}"),translated,schema:json!({"type":"object","properties":{"":{"type":"object","properties":{},"additionalProperties":false}}}),paths:vec![(vec![Key("".into()),Key("reason".into())],json!("x"))]});
+        for kind in ["self", "mutual", "deep"] {
+            cases.push(Case {
+                name: format!("cyclic-diamond-{kind}-t{translated}"),
+                translated,
+                schema: analysis_memo_tests::cyclic_reference_graph(6, 7, kind),
+                paths: vec![
+                    (vec![Key("p".into())], json!("x")),
+                    (vec![Key("reason".into())], json!("x")),
+                ],
+            });
+        }
+    }
+    let mut generator = analysis_memo_tests::Generator(0x680047);
+    for i in 0..256 {
+        cases.push(Case {
+            name: format!("generated-{i}"),
+            translated: i % 2 == 0,
+            schema: generator.wide_schema(),
+            paths: vec![
+                (vec![Key("p".into())], json!("x")),
+                (vec![Key("reason".into())], json!("x")),
+                (vec![Key("_".into())], json!("x")),
+            ],
+        });
+    }
     cases
 }
 #[test]
 fn round6_whole_call_work_invariant() {
     std::thread::Builder::new().stack_size(8<<20).spawn(|| {
         let mut failures = Vec::new(); let mut maximum = 0f64;
-        for case in family() {
+        let opus_only=std::env::var_os("R6_OPUS_ONLY").is_some();
+        let stop=std::env::var_os("R6_STOP_AFTER_FAILURE").is_some();
+        for case in family().into_iter().take(if opus_only {4}else{usize::MAX}) {
             let (schema,paths,args) = input_sizes(&case); let size = schema+paths+args;
             let actual = WorkBudget::with_index_audit(||run(&case));
             let expected = WorkBudget::with_test_limit(usize::MAX, || run(&case));
             let index_probe = actual.total.saturating_sub(actual.predicates);
             let ratio = index_probe as f64 / size.max(1) as f64; maximum = maximum.max(ratio);
-            let ok = actual.complete && expected.complete && actual.output==expected.output && index_probe<=K*size && actual.predicates<=K2*actual.allowance;
+            let predicate_proof=case.name!="predicate-lists" || (actual.predicates==32*129 && actual.allowance==32*129);
+            let ok = predicate_proof && actual.complete && expected.complete && actual.output==expected.output && index_probe<=K*size && actual.predicates<=K2*actual.allowance;
             eprintln!("R6_CASE name={} schema={schema} paths={paths} args={args} total={} index_probe={index_probe} predicate={} allowance={} ratio={ratio:.6} complete={} equal={} ok={ok}",case.name,actual.total,actual.predicates,actual.allowance,actual.complete,actual.output==expected.output);
-            if !ok { failures.push(case.name); }
+            if !ok { failures.push(case.name); if stop {break;} }
         }
         eprintln!("R6_BOUND K={K} K2={K2} max_ratio={maximum:.6} failures={}",failures.len());
         assert!(failures.is_empty(), "failed family members: {}",failures.join(", "));

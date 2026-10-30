@@ -14,6 +14,11 @@ impl SchemaIndex {
         if self.failed || !budget::value(args) {
             return Value::Null;
         }
+        // The upstream entry point cleans objects only; nested arrays are
+        // traversed after entering a declared object property.
+        if !args.is_object() {
+            return budget::copy(args);
+        }
         let mut args = budget::copy(args);
         self.clean_value(&mut args, self.original_group, self.translated, true, 0);
         args
@@ -23,7 +28,16 @@ impl SchemaIndex {
         if required == 0 {
             return true;
         }
-        let matched = if let Some(matched) = state.matches.get(&plan) {
+        if value.as_object().is_some_and(|v| v.len() <= 1) {
+            return value
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .and_then(|key| self.name_ids.get(key.as_str()))
+                .is_some_and(|key| self.required_singleton(required).contains(&self.maps, *key));
+        }
+        let matched = if let Some(matched) = state.matches.get(&required) {
             *matched
         } else {
             if !budget::predicate(self.maps.len(required)) {
@@ -42,7 +56,7 @@ impl SchemaIndex {
                 .required_keys(required)
                 .into_iter()
                 .all(|key| present.contains(&key));
-            state.matches.insert(plan, matched);
+            state.matches.insert(required, matched);
             matched
         };
         if !matched {
@@ -147,7 +161,15 @@ impl SchemaIndex {
             return *value;
         }
         let branches = self.infos[set.merged].branches;
-        let plans = self.maps.merge(Op::Union, branches, set.candidates);
+        let mut plans = branches;
+        if set.count > 1 {
+            for (candidate, _) in self.maps.entries(set.candidates) {
+                if !self.infos[candidate].complex {
+                    let one = self.maps.singleton(candidate, 1);
+                    plans = self.maps.merge(Op::Union, plans, one);
+                }
+            }
+        }
         let amount = self
             .maps
             .entries(plans)

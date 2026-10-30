@@ -239,7 +239,7 @@ impl Maps {
         result
     }
 }
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Hash, Eq, PartialEq)]
 pub(super) struct Keys {
     pub(super) default: bool,
     pub(super) exceptions: Map,
@@ -276,5 +276,81 @@ impl Keys {
     }
     pub(super) fn and(self, other: Self, maps: &mut Maps) -> Self {
         self.not().or(other.not(), maps).not()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn persistent_integer_maps_match_set_operations_and_preserve_sources() {
+        let mut maps = Maps::new();
+        let mut seed = 0x80047u64;
+        for _ in 0..128 {
+            let mut left = 0;
+            let mut right = 0;
+            let mut a = BTreeSet::new();
+            let mut b = BTreeSet::new();
+            for at in 0..32 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let key = if at == 0 {
+                    usize::MAX
+                } else {
+                    (seed >> 32) as usize % 256
+                };
+                let one = maps.singleton(key, 1);
+                if seed & 1 == 0 {
+                    left = maps.merge(Op::Union, left, one);
+                    a.insert(key);
+                } else {
+                    right = maps.merge(Op::Union, right, one);
+                    b.insert(key);
+                }
+            }
+            for (op, want) in [
+                (Op::Union, a.union(&b).copied().collect::<BTreeSet<_>>()),
+                (Op::Intersection, a.intersection(&b).copied().collect()),
+                (Op::Difference, a.difference(&b).copied().collect()),
+            ] {
+                let merged = maps.merge(op, left, right);
+                assert_eq!(
+                    maps.entries(merged)
+                        .into_iter()
+                        .map(|(key, _)| key)
+                        .collect::<BTreeSet<_>>(),
+                    want
+                );
+                for key in 0..256 {
+                    assert_eq!(maps.get(merged, key).is_some(), want.contains(&key));
+                }
+            }
+            assert_eq!(
+                maps.entries(left)
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect::<BTreeSet<_>>(),
+                a
+            );
+            assert_eq!(
+                maps.entries(right)
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect::<BTreeSet<_>>(),
+                b
+            );
+        }
+        let a1 = maps.singleton(1, 111);
+        let a2 = maps.singleton(2, 222);
+        let a = maps.merge(Op::Union, a1, a2);
+        let b2 = maps.singleton(2, 999);
+        let b3 = maps.singleton(3, 333);
+        let b = maps.merge(Op::Union, b2, b3);
+        let left = maps.singleton(9, a);
+        let right = maps.singleton(9, b);
+        let combined = maps.merge(Op::Properties, left, right);
+        let values = maps.get(combined, 9).unwrap();
+        assert_eq!(maps.entries(values), vec![(1, 111), (2, 222), (3, 333)]);
+        assert_eq!(maps.entries(a), vec![(1, 111), (2, 222)]);
+        assert_eq!(maps.entries(b), vec![(2, 999), (3, 333)]);
     }
 }

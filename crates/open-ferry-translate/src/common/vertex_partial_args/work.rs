@@ -65,7 +65,7 @@ impl WorkBudget {
                     .lock()
                     .unwrap()
                     .insert((node, scope, depth, active)),
-                "resolved schema node was re-analyzed in one guard context"
+                "resolved schema node program was compiled twice"
             );
         }
     }

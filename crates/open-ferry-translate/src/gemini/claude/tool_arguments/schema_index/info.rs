@@ -38,47 +38,38 @@ impl SchemaIndex {
         if depth > 16 || self.failed {
             return 0;
         }
+        let own = self.own(node, origin);
+        let shape = self.shape(node, scope, &mut HashSet::new());
         let cache_node = node;
-        let key = (cache_node, scope, depth, active);
+        let cache_depth = if shape.is_some_and(|shape| depth + shape.depth <= 16) {
+            0
+        } else {
+            depth
+        };
+        let cache_active = if let Some(shape) = shape {
+            self.maps.merge(Op::Intersection, active, shape.references)
+        } else {
+            active
+        };
+        let key = (cache_node, scope, cache_depth, cache_active);
         if let Some(id) = self.info_ids.get(&key) {
             return *id;
         }
-        budget::analyzed(node, scope, depth, active);
-        let _ = origin;
-        let Some(fields) = self.object(node) else {
+        if !own.valid {
             self.info_ids.insert(key, 0);
             return 0;
-        };
-        if !budget::charge(32 + fields.len() * 8) {
-            return 0;
         }
-        let mut out = Info::default();
-        const KNOWN: &str = "type description title properties required items additionalProperties patternProperties anyOf oneOf allOf $ref $defs definitions nullable minLength maxLength minimum maximum exclusiveMinimum exclusiveMaximum multipleOf pattern format default examples minItems maxItems maxProperties $schema $id id $comment deprecated readOnly writeOnly example contentEncoding contentMediaType";
-        let unsafe_complex = fields.iter().any(|(key, _)| {
-            !self.names[*key].starts_with("x-")
-                && !KNOWN
-                    .split_whitespace()
-                    .any(|known| known == &*self.names[*key])
-        });
-        if unsafe_complex {
-            let id = self.add_info(Info {
-                complex: true,
-                unsafe_complex: true,
-                ..out
-            });
+        let mut out = own.head;
+        if out.unsafe_complex {
+            let complete = self.complete_info(out);
+            let id = self.add_info(complete);
             self.info_ids.insert(key, id);
             return id;
         }
-        out.object = self.field(node, "type").is_some_and(|id| {
-            self.is_string(id, "object")
-                || self
-                    .array(id)
-                    .is_some_and(|v| v.into_iter().any(|v| self.is_string(v, "object")))
-        });
-        let has_union = self.field(node, "anyOf").is_some() || self.field(node, "oneOf").is_some();
+        let has_union = own.has_union;
         let mut multiple = false;
         if has_union {
-            let Some(branches) = self.branches(node).filter(|v| !v.is_empty()) else {
+            let Some(branches) = own.union.as_ref() else {
                 out.complex = true;
                 let complete = self.complete_info(out);
                 let id = self.add_info(complete);
@@ -86,7 +77,7 @@ impl SchemaIndex {
                 return id;
             };
             multiple = branches.len() > 1;
-            for branch in branches {
+            for &branch in branches.iter() {
                 let branch = self.info(branch, scope, depth + 1, active);
                 let info = self.infos[branch];
                 if multiple {
@@ -97,8 +88,7 @@ impl SchemaIndex {
             }
             out.complex |= multiple;
         }
-        if let Some(raw) = self.field(node, "$ref") {
-            let name = self.spelling(raw);
+        if let Some(name) = own.reference {
             let target = if self.maps.get(active, name).is_none() {
                 self.reference(scope, name)
             } else {
@@ -117,9 +107,9 @@ impl SchemaIndex {
                 return id;
             }
         }
-        if let Some(all) = self.field(node, "allOf") {
-            if let Some(values) = self.array(all) {
-                for value in values {
+        if let Some(all) = &own.all {
+            if let Some(values) = all {
+                for &value in values.iter() {
                     let child = self.info(value, scope, depth + 1, active);
                     out = self.union_info(out, self.infos[child]);
                 }
@@ -127,33 +117,7 @@ impl SchemaIndex {
                 out.complex = true;
             }
         }
-        out.pattern |= self
-            .field(node, "patternProperties")
-            .is_some_and(|id| self.object(id).is_some_and(|v| !v.is_empty()));
-        out.allows |= out.pattern
-            || self
-                .field(node, "additionalProperties")
-                .is_some_and(|id| !self.truth_false(id));
-        out.forbids |= self
-            .field(node, "additionalProperties")
-            .is_some_and(|id| self.truth_false(id));
-        if let Some(properties) = self.field(node, "properties") {
-            if let Some(values) = self.object(properties) {
-                out.object = true;
-                for (name, value) in values {
-                    if !budget::charge(32) {
-                        return 0;
-                    }
-                    let group = self.singleton(value);
-                    let one = self.maps.singleton(name, group);
-                    out.properties = self.maps.merge(Op::Properties, out.properties, one);
-                }
-            } else {
-                out.complex = true;
-            }
-        }
-        let required = self.own_required(node);
-        out.required = self.maps.merge(Op::Union, out.required, required);
+        out = self.union_info(out, own.tail);
         let complete = self.complete_info(out);
         let id = self.add_info(complete);
         self.info_ids.insert(key, id);

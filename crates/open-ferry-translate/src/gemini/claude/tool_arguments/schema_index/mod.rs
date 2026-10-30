@@ -2,6 +2,7 @@
 use super::*;
 mod clean;
 mod info;
+mod own;
 mod probe;
 mod trie;
 use trie::{Keys, Map, Maps, Op};
@@ -27,7 +28,7 @@ struct Record {
     fields: HashMap<usize, Id>,
     canonical: usize,
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Hash, Eq, PartialEq)]
 struct Info {
     properties: Map,
     required: Map,
@@ -73,6 +74,10 @@ pub(super) struct SchemaIndex {
     maps: Maps,
     infos: Vec<Info>,
     info_ids: HashMap<(Id, Id, usize, Map), usize>,
+    own_nodes: HashMap<Id, Arc<own::Own>>,
+    graph_shapes: HashMap<(Id, Id), Option<own::Shape>>,
+    info_intern: HashMap<Info, usize>,
+    required_cache: HashMap<Id, Map>,
     references: HashMap<(Id, usize), Option<Id>>,
     sets: HashMap<(Map, Id), SetInfo>,
     items: HashMap<(Id, Id, usize, Map), Option<Map>>,
@@ -107,6 +112,10 @@ impl SchemaIndex {
                 ..Info::default()
             }],
             info_ids: HashMap::new(),
+            own_nodes: HashMap::new(),
+            graph_shapes: HashMap::new(),
+            info_intern: HashMap::new(),
+            required_cache: HashMap::new(),
             references: HashMap::new(),
             sets: HashMap::new(),
             items: HashMap::new(),
@@ -374,6 +383,9 @@ impl SchemaIndex {
         }
     }
     fn own_required(&mut self, node: Id) -> Map {
+        if let Some(value) = self.required_cache.get(&node) {
+            return *value;
+        }
         let mut out = 0;
         if let Some(required) = self.field(node, "required") {
             for value in self.garray(required) {
@@ -382,6 +394,7 @@ impl SchemaIndex {
                 out = self.maps.merge(Op::Union, out, one);
             }
         }
+        self.required_cache.insert(node, out);
         out
     }
     fn required_singleton(&self, required: Map) -> Keys {
@@ -451,8 +464,12 @@ impl SchemaIndex {
         info
     }
     fn add_info(&mut self, info: Info) -> usize {
+        if let Some(id) = self.info_intern.get(&info) {
+            return *id;
+        }
         let id = self.infos.len();
         self.infos.push(info);
+        self.info_intern.insert(info, id);
         id
     }
 }

@@ -71,6 +71,9 @@ impl SchemaIndex {
         let ProbeState::Clean(originals, translated, top) = state else {
             unreachable!()
         };
+        if index && top {
+            return (false, 2);
+        }
         let key = match step {
             ProbeStep::Key(text) => {
                 if !budget::charge(text.len()) {
