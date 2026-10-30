@@ -606,12 +606,21 @@ pub(crate) fn build_headers(
     client: &HeaderMap,
     event_stream: bool,
 ) -> Result<HeaderMap, ExecError> {
+    build_headers_from_sources(auth, client, client, event_stream)
+}
+
+pub(crate) fn build_headers_from_sources(
+    auth: &Auth,
+    incoming: &HeaderMap,
+    client: &HeaderMap,
+    event_stream: bool,
+) -> Result<HeaderMap, ExecError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let (token, _) = credentials(auth, client);
+    let (token, _) = credentials(auth, incoming);
     if !token.trim().is_empty() {
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             ExecError::new(
@@ -648,7 +657,7 @@ pub(crate) fn build_headers(
     );
     ensure_header(&mut headers, client, HeaderName::from_static("originator"));
 
-    if !uses_api_key(auth, client)
+    if !uses_api_key(auth, incoming)
         && let Some(account) = auth
             .metadata_str("account_id")
             .map(str::trim)
@@ -664,7 +673,7 @@ pub(crate) fn build_headers(
         }
     }
     custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
-    if auth.use_siwc_for_request(client) {
+    if auth.use_siwc_for_request(incoming) {
         super::siwc_request::enforce_headers(&mut headers, auth, client)?;
     }
     Ok(headers)
