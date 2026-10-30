@@ -437,3 +437,46 @@ async fn status_bearing_error_after_timeout_delivered_in_stream() {
     let error = error.expect("the status-bearing error must come in-stream");
     assert_eq!(error.status, 429);
 }
+
+// 9e79552f: an overload after moderation metadata still fails before a
+// stream is returned, so no held frame can reach the downstream socket.
+#[tokio::test]
+async fn moderation_metadata_then_overload_fails_attempt() {
+    let server = serve_frames(&[
+        CREATED_EVENT,
+        IN_PROGRESS_EVENT,
+        MODERATION_METADATA_EVENT,
+        OVERLOAD_EVENT,
+    ])
+    .await;
+    let error = failed_over(start_ws(&buffering(true), &server).await);
+    assert_eq!(error.status, 503);
+    assert_eq!(server.record().handshakes.len(), 1);
+}
+
+#[tokio::test]
+async fn moderation_metadata_then_output_flushes_in_order() {
+    let server = serve_frames(&[
+        CREATED_EVENT,
+        IN_PROGRESS_EVENT,
+        MODERATION_METADATA_EVENT,
+        OUTPUT_DELTA_EVENT,
+        COMPLETED_EVENT,
+    ])
+    .await;
+    let (combined, error) = drain(started(start_ws(&buffering(true), &server).await)).await;
+    assert!(error.is_none(), "{error:?}");
+    let markers = [
+        "response.created",
+        "response.in_progress",
+        "response.metadata",
+        "response.output_text.delta",
+        "response.completed",
+    ];
+    let mut tail = combined.as_str();
+    for marker in markers {
+        assert_eq!(combined.matches(marker).count(), 1, "{combined}");
+        let offset = tail.find(marker).expect("event in upstream order");
+        tail = &tail[offset + marker.len()..];
+    }
+}
