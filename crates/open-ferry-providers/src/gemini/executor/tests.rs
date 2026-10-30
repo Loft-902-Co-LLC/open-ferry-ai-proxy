@@ -840,31 +840,65 @@ async fn bare_tink_is_scoped_to_vertex_on_outbound_requests() {
     ]})
     .to_string();
     for vertex in [false, true] {
-        let mock = Mock::start(Reply::json(OK_ANSWER)).await;
-        let provider = if vertex { "vertex" } else { "gemini" };
-        let exec: Box<dyn open_ferry_core::executor::ProviderExecutor> = if vertex {
-            Box::new(crate::gemini::VertexExecutor::new("direct"))
-        } else {
-            Box::new(executor())
-        };
-        exec.execute(
-            key_auth(provider, "local-key", &mock.url),
-            request("gemini-2.5-pro", &payload),
-            options(&Format::GEMINI),
-        )
-        .await
-        .unwrap();
-        let body = mock.last().json();
-        let parts = &body["contents"][1]["parts"];
-        assert_eq!(
-            parts[1]["thoughtSignature"],
-            if vertex {
-                sig.as_str()
+        for count in [false, true] {
+            let reply = if count {
+                Reply::json(r#"{"totalTokens":7}"#)
             } else {
-                GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+                Reply::json(OK_ANSWER)
+            };
+            let mock = Mock::start(reply).await;
+            let provider = if vertex { "vertex" } else { "gemini" };
+            let exec: Box<dyn open_ferry_core::executor::ProviderExecutor> = if vertex {
+                Box::new(crate::gemini::VertexExecutor::new("direct"))
+            } else {
+                Box::new(executor())
+            };
+            let auth = key_auth(provider, "local-key", &mock.url);
+            let request = request("gemini-2.5-pro", &payload);
+            let options = options(&Format::GEMINI);
+            if count {
+                exec.count_tokens(auth, request, options).await.unwrap();
+            } else {
+                exec.execute(auth, request, options).await.unwrap();
             }
-        );
-        assert_eq!(parts[0].get("thoughtSignature").is_some(), vertex);
-        assert_eq!(parts[2].get("thoughtSignature").is_some(), vertex);
+            let seen = mock.last();
+            let body = seen.json();
+            let parts = &body["contents"][1]["parts"];
+            assert_eq!(
+                parts[1]["thoughtSignature"],
+                if vertex {
+                    sig.as_str()
+                } else {
+                    GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
+                }
+            );
+            assert_eq!(parts[0].get("thoughtSignature").is_some(), vertex);
+            assert_eq!(parts[2].get("thoughtSignature").is_some(), vertex);
+            if count {
+                assert!(seen.path.ends_with(":countTokens"));
+                let expected_parts = if vertex {
+                    json!([
+                        {"thought":true,"text":"reason","thoughtSignature":sig},
+                        {"functionCall":{"name":"weather","args":{}},"thoughtSignature":sig},
+                        {"functionCall":{"name":"time","args":{}},"thoughtSignature":sig}
+                    ])
+                } else {
+                    json!([
+                        {"thought":true,"text":"reason"},
+                        {"functionCall":{"name":"weather","args":{}},"thoughtSignature":GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR},
+                        {"functionCall":{"name":"time","args":{}}}
+                    ])
+                };
+                assert_eq!(
+                    body,
+                    json!({"model":"gemini-2.5-pro","contents":[
+                        {"role":"user","parts":[{"text":"hello"}]},
+                        {"role":"model","parts":expected_parts},
+                        {"role":"user","parts":[{"text":"next"}]}
+                    ]}),
+                    "{provider}/countTokens exact outbound body"
+                );
+            }
+        }
     }
 }

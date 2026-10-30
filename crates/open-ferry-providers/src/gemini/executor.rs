@@ -228,7 +228,7 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
-        prepare_count_body(&mut body, base);
+        prepare_count_body(&mut body, base, true);
         self.apply_payload_rules(request, options, false, None, &mut body);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;

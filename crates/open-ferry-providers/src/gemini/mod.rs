@@ -100,7 +100,10 @@ use open_ferry_core::exec::{
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::{Registry, ResponseContext};
-use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
+use open_ferry_translate::signature::{
+    sanitize_gemini_request_thought_signatures,
+    sanitize_non_vertex_gemini_request_thought_signatures,
+};
 use serde_json::Value;
 
 use self::stream::{Lines, StreamSetup};
@@ -175,12 +178,16 @@ fn translate_request(
 /// settings or safety settings, the model without its suffix, no thought
 /// signatures Gemini would reject, and an empty user turn before a first
 /// model turn.
-fn prepare_count_body(body: &mut Value, base: &str) {
+fn prepare_count_body(body: &mut Value, base: &str, non_vertex: bool) {
     for field in ["tools", "generationConfig", "safetySettings"] {
         json::delete(body, field);
     }
     set_string_if_different(body, "model", base);
-    sanitize_gemini_request_thought_signatures(body, "contents");
+    if non_vertex {
+        sanitize_non_vertex_gemini_request_thought_signatures(body, "contents");
+    } else {
+        sanitize_gemini_request_thought_signatures(body, "contents");
+    }
     turns::ensure_leading_user(body, "contents");
 }
 
