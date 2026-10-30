@@ -1899,7 +1899,9 @@ impl Emitter {
         if !self.indention || self.column > indent || (self.column == indent && !self.whitespace) {
             self.put_break()?;
         }
-        if self.foot_indent == indent {
+        // Before the first comment after a keep-chomped scalar, another
+        // separator would be data. Its trailing breaks already separate it.
+        if self.foot_indent == indent && !(self.protect_config_comments && self.open_ended) {
             self.put_break()?;
         }
         while self.column < indent {
@@ -2195,7 +2197,9 @@ impl Emitter {
     }
 
     /// yaml_emitter_write_block_scalar_hints.
-    fn write_block_scalar_hints(&mut self, value: &[u8]) -> Result<(), EmitterError> {
+    /// Returns keep chomping: writing its indicator resets `open_ended`, so
+    /// config emission restores that state after the scalar body.
+    fn write_block_scalar_hints(&mut self, value: &[u8]) -> Result<bool, EmitterError> {
         if is_space(value, 0)
             || is_break(value, 0)
             || (self.protect_config_comments && is_blank(value, 0))
@@ -2235,13 +2239,13 @@ impl Emitter {
         if chomp_hint != 0 {
             self.write_indicator(&[chomp_hint], false, false, false)?;
         }
-        Ok(())
+        Ok(chomp_hint == b'+')
     }
 
     /// yaml_emitter_write_literal_scalar.
     fn write_literal_scalar(&mut self, value: &[u8]) -> Result<(), EmitterError> {
         self.write_indicator(b"|", true, false, false)?;
-        self.write_block_scalar_hints(value)?;
+        let keep = self.write_block_scalar_hints(value)?;
         self.process_line_comment()?;
         //emitter.indention = true
         self.whitespace = true;
@@ -2262,13 +2266,16 @@ impl Emitter {
             }
         }
 
+        if self.protect_config_comments {
+            self.open_ended = keep;
+        }
         Ok(())
     }
 
     /// yaml_emitter_write_folded_scalar.
     fn write_folded_scalar(&mut self, value: &[u8]) -> Result<(), EmitterError> {
         self.write_indicator(b">", true, false, false)?;
-        self.write_block_scalar_hints(value)?;
+        let keep = self.write_block_scalar_hints(value)?;
         self.process_line_comment()?;
 
         //emitter.indention = true
@@ -2321,6 +2328,9 @@ impl Emitter {
                 self.indention = false;
                 breaks = false;
             }
+        }
+        if self.protect_config_comments {
+            self.open_ended = keep;
         }
         Ok(())
     }
@@ -2415,6 +2425,9 @@ impl Emitter {
             self.put_break()?;
         }
 
+        if self.protect_config_comments {
+            self.open_ended = false;
+        }
         self.whitespace = true;
         //emitter.indention = true
         Ok(())

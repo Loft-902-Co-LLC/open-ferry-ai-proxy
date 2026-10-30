@@ -5,6 +5,7 @@
 pub mod ablation;
 pub mod counterfactual;
 pub mod folded;
+pub mod keep_chomped;
 pub(crate) mod metrics;
 pub mod version;
 

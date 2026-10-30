@@ -33,7 +33,7 @@ pub use comments::{
 };
 
 mod folded;
-pub use folded::{folded_scalar_reencode, folded_scalar_values};
+pub use folded::{extra_keep_chomped_newlines, folded_scalar_reencode, folded_scalar_values};
 
 /// Quote only source block scalars the writer protects from multiline line
 /// comments. Anchors, explicit tags, header comments and all other bytes are

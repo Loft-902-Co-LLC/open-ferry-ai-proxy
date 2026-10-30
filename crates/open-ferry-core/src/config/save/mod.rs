@@ -1189,6 +1189,53 @@ mod tests {
     }
 
     #[test]
+    fn raw_write_preserves_plugin_keep_chomped_text() {
+        for style in [">+", "|+"] {
+            let source = format!(
+                "config-version: 8\nplugins:\n  configs:\n    example:\n      text: {style}\n        fictional note\n\n\n      # fictional footer\n"
+            );
+            let dir = TempDir::new();
+            let path = dir.path().join("config.yaml");
+            write_file(&path, source.as_bytes()).expect("write without changing the plugin text");
+            for step in 0..=3 {
+                let bytes = fs::read(&path).unwrap();
+                Config::load_bytes(&bytes).expect("written config loads");
+                assert_eq!(
+                    scalar(&root(&bytes), "plugins.configs.example.text"),
+                    Some("fictional note\n\n\n")
+                );
+                assert!(String::from_utf8_lossy(&bytes).contains("# fictional footer"));
+                if step < 3 {
+                    let cfg = Config::parse(&bytes).unwrap();
+                    save_preserving_comments(&path, &cfg, false).expect("save preserves the text");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raw_write_preserves_keep_chomped_text_before_typed_normalization() {
+        // The old guard accepted this setting because its loader trims it.
+        // The shared emitter also changes those previously accepted bytes.
+        let source = b"config-version: 8\nmanagement:\n  panel-github-repository: >+\n    https://panel.example/fictional\n\n\n  # fictional footer\n";
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        write_file(&path, source).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            scalar(&root(&bytes), "management.panel-github-repository"),
+            Some("https://panel.example/fictional\n\n\n")
+        );
+        assert_eq!(
+            Config::load_bytes(&bytes)
+                .unwrap()
+                .remote_management
+                .panel_github_repository,
+            "https://panel.example/fictional"
+        );
+    }
+
+    #[test]
     fn plugin_mapping_line_comment_reaches_generated_auth_dir() {
         // The exact final save from config-save/random-6-2628, including
         // upstream's complete expected file. A reduced document can flush

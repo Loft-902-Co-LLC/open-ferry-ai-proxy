@@ -73,6 +73,7 @@ fn parallel_fixture_records_and_artifacts_match_sequential_in_case_order() {
             (case, evaluated, proof.evidence)
         }, |_, (case, evaluated, proof)| -> Result<(), Box<dyn Error>> {
             let outcome = match &evaluated.outcome {
+                Outcome::KnownDifference(reason) => json!(["known", reason]),
                 Outcome::Identical => json!(["identical"]),
                 Outcome::Equivalent(d) => json!(["equivalent", d.iter().map(|d| d.describe()).collect::<Vec<_>>()]),
                 Outcome::Different(d) => json!(["different", d.iter().map(|d| (&d.path, &d.go, &d.rust)).collect::<Vec<_>>()]),
