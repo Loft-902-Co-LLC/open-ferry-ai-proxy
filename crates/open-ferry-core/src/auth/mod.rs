@@ -671,53 +671,6 @@ pub trait AuthStore: Send + Sync + 'static {
             Ok(_) => self.save(auth).map(GuardedSave::Written),
         }
     }
-
-    /// Saves only the policy changes supplied by `apply`. File stores must
-    /// read the destination inside their save transaction, call `apply` with
-    /// `fresh = true`, and return the representation actually committed.
-    /// The callback does no I/O and must not acquire manager locks. The guard
-    /// still checks the original submitted snapshot, before applying changes.
-    /// Opaque stores retain their whole-record save contract (`fresh = false`);
-    /// stores which transform records must override this or return a read-back.
-    #[doc(hidden)]
-    fn save_policy_guarded(
-        &self,
-        auth: &Auth,
-        apply: &mut dyn FnMut(&mut Auth, bool),
-        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
-    ) -> io::Result<(GuardedSave, Option<Auth>)> {
-        let mut writing = auth.clone();
-        apply(&mut writing, false);
-        let outcome = self.save_guarded(&writing, guard)?;
-        let committed = if matches!(&outcome, GuardedSave::Written(path) if !path.is_empty()) {
-            Some(self.read_back(&writing)?.unwrap_or(writing))
-        } else {
-            None
-        };
-        Ok((outcome, committed))
-    }
-
-    /// The bound counterpart of `save_policy_guarded`, with `save_bound`'s
-    /// origin proof and refusal callback. Applying policy must not bypass
-    /// that proof or relax any protected credential partition.
-    #[doc(hidden)]
-    fn save_policy_bound(
-        &self,
-        auth: &Auth,
-        origin: &CodexOrigin,
-        apply: &mut dyn FnMut(&mut Auth, bool),
-        refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
-    ) -> io::Result<(Option<String>, Option<Auth>)> {
-        let mut writing = auth.clone();
-        apply(&mut writing, false);
-        let path = self.save_bound(&writing, origin, refused)?;
-        let committed = if path.as_ref().is_some_and(|path| !path.is_empty()) {
-            Some(self.read_back(&writing)?.unwrap_or(writing))
-        } else {
-            None
-        };
-        Ok((path, committed))
-    }
 }
 
 /// The partitions an unleased save must leave exactly as the destination file

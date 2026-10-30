@@ -1294,11 +1294,6 @@ impl Manager {
                 if protected.contains(failed_partition) {
                     return None;
                 }
-                let mut policy_save = entry.policy_save.clone();
-                super::lifecycle::PolicySave::observe_file(&mut policy_save, &disk);
-                if let Some(policy) = &policy_save {
-                    policy.overlay(&mut disk);
-                }
                 super::lifecycle::overlay_undurable(&mut disk, &entry.auth, protected);
                 disk.rebase_pending_refreshes_with_origin(
                     &entry.auth,
@@ -1315,7 +1310,6 @@ impl Manager {
                     &disk.metadata,
                     self.permanently_ineligible(&entry.auth),
                 );
-                entry.policy_save = policy_save;
                 let auth = Arc::make_mut(&mut entry.auth);
                 let previous = auth.clone();
                 auth.metadata = disk.metadata;

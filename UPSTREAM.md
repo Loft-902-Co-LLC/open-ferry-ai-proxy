@@ -869,7 +869,11 @@ Deviations, each also noted in its module:
 | `PATCH /v0/management/auth-files/fields` | `PATCH /v8/management/credentials/fields` |
 | `POST /v0/management/auth-files/refresh` | `POST /v8/management/credentials/refresh` |
 
-A status or field change is saved to the credential's file, then applied by the service, which registers the credential's models again, so a credential turned back on gets its models back. The credential lock is never held while the service applies a change. A refresh refreshes one credential at a time per ID, and refreshing all of them runs at most the manager's `refresh_workers` at once. As upstream, the refresh answer holds the refreshed credential's tokens; the route is behind the management key.
+A status or field change attempts to save the credential's file, then is applied by the service, which registers the credential's models again, so a credential turned back on gets its models back. The credential lock is never held while the service applies a change. A refresh refreshes one credential at a time per ID, and refreshing all of them runs at most the manager's `refresh_workers` at once. As upstream, the refresh answer holds the refreshed credential's tokens; the route is behind the management key.
+
+**Failed credential-file saves behave the same as upstream.** An ordinary save failure is logged with its cause, while otherwise valid status and fields edits return HTTP 200. The change stays in memory only, and its own runtime sync keeps that memory change. A later genuine read of the file, for example after an outside edit or a restart, restores the file's contents. A disable reported as successful can therefore come back enabled if saving failed. Fix file permissions or locks and repeat the ordinary change.
+
+If saving a rotated OAuth refresh token fails, the next read of the file can bring back the old, already-used token. The account then needs signing in again. This is upstream behavior too.
 
 Deviations, each also noted in its module:
 

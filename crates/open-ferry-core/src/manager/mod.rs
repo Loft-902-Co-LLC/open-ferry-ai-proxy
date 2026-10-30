@@ -201,9 +201,6 @@ pub(crate) struct Entry {
     pub(crate) landing_unconfirmed: UndurablePartitions,
     /// A refused save whose change is still owed. Memory only.
     pub(crate) owed_save: Option<OwedSave>,
-    /// Unsaved operator leaves. Memory only; lost on restart, which reads the
-    /// file. Newer file edits to an owed field win over its pre-edit baseline.
-    pub(crate) policy_save: Option<lifecycle::PolicySave>,
     /// The newest generation a Configuration save has written for this
     /// registration. A refusal at or below it owes nothing, as that save
     /// covered it. Memory only.
@@ -484,9 +481,6 @@ pub(crate) struct Shared {
     /// including for no-store and unsaved updates.
     #[cfg(test)]
     persist_hook: Mutex<Option<PersistHook>>,
-    /// Test seam: each retry wait announces its delay, then consumes one permit.
-    #[cfg(test)]
-    policy_retry_wait: Mutex<Option<PolicyRetryWait>>,
     /// Test seam: after final write admission, with save mutex held and no state lock.
     #[cfg(test)]
     persist_admitted_hook: Mutex<Option<PersistHook>>,
@@ -524,12 +518,6 @@ pub(crate) struct Shared {
     #[cfg(test)]
     unleased_saved_hook: Mutex<Option<PersistHook>>,
 }
-
-#[cfg(test)]
-type PolicyRetryWait = (
-    tokio::sync::mpsc::UnboundedSender<std::time::Duration>,
-    Arc<tokio::sync::Semaphore>,
-);
 
 /// What a test runs after each proof of a leased origin check.
 #[cfg(test)]
@@ -682,8 +670,6 @@ impl Manager {
             execution_seq: AtomicU64::new(0),
             #[cfg(test)]
             persist_hook: Mutex::new(None),
-            #[cfg(test)]
-            policy_retry_wait: Mutex::new(None),
             #[cfg(test)]
             persist_admitted_hook: Mutex::new(None),
             #[cfg(test)]

@@ -1317,9 +1317,9 @@ async fn assert_next_401_adopts_disk_tokens(env: &Env) {
     );
 }
 
-// Round 4: a non-Codex policy save also merges only owed fields into fresh disk.
+// An admitted ordinary non-Codex save writes the submitted memory fields, as upstream does.
 #[tokio::test(start_paused = true)]
-async fn an_admitted_non_codex_policy_save_keeps_unobserved_disk_tokens() {
+async fn an_admitted_non_codex_save_overwrites_the_tokens_on_disk() {
     let dir = tempfile::tempdir().expect("temp dir");
     let files = Arc::new(FileStore::new(dir.path()));
     let gate = ActiveGate::open();
@@ -1356,8 +1356,8 @@ async fn an_admitted_non_codex_policy_save_keeps_unobserved_disk_tokens() {
         .expect("credential");
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("json");
-    assert_eq!(saved["access_token"], "access-9");
-    assert_eq!(saved["refresh_token"], "refresh-9");
+    assert_eq!(saved["access_token"], "access-0");
+    assert_eq!(saved["refresh_token"], "refresh-0");
     assert_eq!(saved["note"], "kept");
     assert_eq!(
         access_token(&manager.get(&registered.id).unwrap()),
@@ -1495,7 +1495,7 @@ fn logged_events<T>(f: impl FnOnce() -> T) -> (T, Vec<(tracing::Level, String)>)
 // of a switch under way, is logged at debug: every request's outcome would
 // otherwise log a warning. The credential is still published in memory.
 #[tokio::test(start_paused = true)]
-async fn a_save_the_gate_refused_logs_at_debug_and_not_as_a_warning() {
+async fn a_save_the_gate_refused_logs_a_warning_with_cause() {
     let env = Env::new();
     let held = env.gate.begin_operation().expect("operation");
     let closing = env.close();
@@ -1511,11 +1511,11 @@ async fn a_save_the_gate_refused_logs_at_debug_and_not_as_a_warning() {
         .filter(|(_, message)| message.contains("refused: the gate is not open"))
         .collect();
     assert_eq!(refused.len(), 1, "{events:?}");
-    assert_eq!(refused[0].0, tracing::Level::DEBUG, "{events:?}");
+    assert_eq!(refused[0].0, tracing::Level::WARN, "{events:?}");
     assert!(
         events
             .iter()
-            .all(|(level, _)| *level != tracing::Level::WARN && *level != tracing::Level::ERROR),
+            .all(|(level, _)| *level != tracing::Level::ERROR),
         "{events:?}"
     );
     assert!(env.on_disk().get("note").is_none(), "nothing saved");

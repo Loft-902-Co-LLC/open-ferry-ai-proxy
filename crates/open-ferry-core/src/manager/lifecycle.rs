@@ -181,183 +181,6 @@ pub(crate) enum Save {
     Failed,
 }
 
-/// Operator changes that have published but have not reached the file.
-/// Leaves are retained independently, so a disk token rotation is still adopted.
-#[derive(Clone, Default)]
-pub(crate) struct PolicySave {
-    changes: std::collections::BTreeMap<Vec<String>, PolicyChange>,
-    generation: u64,
-    pub(super) retry_at: Option<Timestamp>,
-    pub(super) retry_scheduled: bool,
-    retry_ticket: u64,
-}
-
-#[derive(Clone, PartialEq)]
-struct PolicyChange {
-    before: Option<serde_json::Value>,
-    desired: Option<serde_json::Value>,
-}
-
-fn policy_leaf<'a>(value: &'a serde_json::Value, path: &[String]) -> Option<&'a serde_json::Value> {
-    path.iter().try_fold(value, |value, key| value.get(key))
-}
-
-fn policy_value(auth: &Auth) -> serde_json::Value {
-    serde_json::json!({
-        "disabled": auth.disabled, "status_disabled": auth.status == Status::Disabled,
-        "status_message": auth.status_message, "metadata": auth.metadata,
-        "attributes": auth.attributes, "prefix": auth.prefix,
-        "label": auth.label, "proxy_url": auth.proxy_url
-    })
-}
-
-fn policy_delta(
-    before: Option<&serde_json::Value>,
-    after: Option<&serde_json::Value>,
-    path: &mut Vec<String>,
-    changes: &mut std::collections::BTreeMap<Vec<String>, PolicyChange>,
-) {
-    if before == after {
-        return;
-    }
-    if let (Some(serde_json::Value::Object(before)), Some(serde_json::Value::Object(after))) =
-        (before, after)
-    {
-        let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
-        for key in keys {
-            path.push(key.clone());
-            policy_delta(before.get(key), after.get(key), path, changes);
-            path.pop();
-        }
-    } else {
-        changes.insert(
-            path.clone(),
-            PolicyChange {
-                before: before.cloned(),
-                desired: after.cloned(),
-            },
-        );
-    }
-}
-
-fn set_policy_value(
-    target: &mut serde_json::Value,
-    path: &[String],
-    value: &Option<serde_json::Value>,
-) {
-    if path.is_empty() {
-        *target = value.clone().unwrap_or(serde_json::Value::Null);
-        return;
-    }
-    if !target.is_object() {
-        *target = serde_json::json!({});
-    }
-    let map = target.as_object_mut().expect("policy object");
-    if path.len() == 1 {
-        if let Some(value) = value {
-            map.insert(path[0].clone(), value.clone());
-        } else {
-            map.remove(&path[0]);
-        }
-    } else {
-        set_policy_value(
-            map.entry(path[0].clone())
-                .or_insert_with(|| serde_json::json!({})),
-            &path[1..],
-            value,
-        );
-    }
-}
-
-impl PolicySave {
-    fn extend(&mut self, before: &Auth, after: &Auth, generation: u64) {
-        // Recover each original file baseline before composing successive edits.
-        // Recomputing leaves also handles ancestor replacement and deletion.
-        let mut baseline = policy_value(before);
-        for (path, change) in &self.changes {
-            set_policy_value(&mut baseline, path, &change.before);
-        }
-        self.changes.clear();
-        policy_delta(
-            Some(&baseline),
-            Some(&policy_value(after)),
-            &mut Vec::new(),
-            &mut self.changes,
-        );
-        self.generation = generation;
-    }
-
-    /// A newer file edit wins per field. An unchanged baseline still owes the
-    /// operator's edit; seeing the desired value also settles that field.
-    pub(super) fn observe(&mut self, auth: &Auth) {
-        let file = policy_value(auth);
-        self.changes
-            .retain(|path, change| policy_leaf(&file, path) == change.before.as_ref());
-    }
-
-    pub(super) fn observe_file(policy: &mut Option<Self>, auth: &Auth) {
-        if let Some(owed) = policy {
-            owed.observe(auth);
-            if owed.is_empty() {
-                *policy = None;
-            }
-        }
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.changes.is_empty()
-    }
-
-    fn confirm(&mut self, committed: &Auth) {
-        let file = policy_value(committed);
-        self.changes
-            .retain(|path, change| policy_leaf(&file, path) != change.desired.as_ref());
-    }
-
-    pub(super) fn overlay(&self, auth: &mut Auth) {
-        let mut value = policy_value(auth);
-        for (path, change) in &self.changes {
-            set_policy_value(&mut value, path, &change.desired);
-        }
-        auth.metadata = value["metadata"]
-            .as_object()
-            .expect("policy metadata")
-            .clone();
-        auth.attributes = value["attributes"]
-            .as_object()
-            .expect("policy attributes")
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    value.as_str().expect("policy attribute").to_owned(),
-                )
-            })
-            .collect();
-        auth.disabled = value["disabled"].as_bool().expect("policy disabled");
-        if self.changes.keys().any(|path| {
-            path.first()
-                .is_some_and(|key| key == "disabled" || key == "status_disabled")
-        }) {
-            if auth.disabled || value["status_disabled"].as_bool() == Some(true) {
-                auth.status = Status::Disabled;
-            } else if auth.status == Status::Disabled {
-                auth.status = Status::Active;
-            }
-        }
-        auth.status_message = value["status_message"]
-            .as_str()
-            .expect("policy message")
-            .to_owned();
-        auth.prefix = value["prefix"].as_str().expect("policy prefix").to_owned();
-        auth.label = value["label"].as_str().expect("policy label").to_owned();
-        auth.proxy_url = value["proxy_url"]
-            .as_str()
-            .expect("policy proxy")
-            .to_owned();
-    }
-}
-
 /// A published snapshot whose save hasn't returned: while it lives, the
 /// credential's entry in [`State::pending_saves`] is raised.
 pub(crate) struct PendingSave {
@@ -385,46 +208,6 @@ impl Drop for PendingSave {
             }
         }
     }
-}
-
-fn policy_retry_runtime() -> Option<tokio::runtime::Handle> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return Some(handle);
-    }
-    static TIMER: std::sync::OnceLock<Option<tokio::runtime::Handle>> = std::sync::OnceLock::new();
-    TIMER
-        .get_or_init(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .ok()?;
-            let handle = runtime.handle().clone();
-            let worker = std::thread::Builder::new()
-                .name("open-ferry-policy-timer".into())
-                .spawn(move || runtime.block_on(std::future::pending::<()>()))
-                .ok()?;
-            drop(worker);
-            Some(handle)
-        })
-        .clone()
-}
-
-async fn policy_retry_wait(shared: &std::sync::Weak<Shared>, delay: std::time::Duration) {
-    #[cfg(test)]
-    {
-        let test_wait = shared
-            .upgrade()
-            .and_then(|shared| lock(&shared.policy_retry_wait).clone());
-        if let Some((waiting, release)) = test_wait {
-            let _ = waiting.send(delay);
-            if let Ok(permit) = release.acquire().await {
-                permit.forget();
-            }
-            return;
-        }
-    }
-    let _ = shared;
-    tokio::time::sleep(delay).await;
 }
 
 impl Manager {
@@ -607,6 +390,8 @@ struct PublishedUpdate {
     changed: bool,
     ineligible: bool,
     metadata_unchanged: bool,
+    /// This publication intentionally edited Codex fields protected by its save.
+    reconcile_configuration: bool,
     /// The leased pass's tail; `None` for every other update.
     lease: Option<Box<LeasedTail>>,
 }
@@ -716,9 +501,8 @@ impl Manager {
         let (snapshot, pending) = snapshot;
         self.queue_refresh_reschedule(&snapshot.id);
         cooldown_store::changed(self);
-        if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, 0, save) {
-            log_persist_failure(&snapshot, "failed to persist registered auth", &err);
-        }
+        // Save errors are logged at the persistence boundary and remain nonfatal.
+        let _ = self.persist(&snapshot, snapshot.registration_epoch, 1, 0, save);
         drop(pending);
         drop(gate);
         Ok(snapshot)
@@ -768,7 +552,6 @@ impl Manager {
                 undurable_causes: Default::default(),
                 landing_unconfirmed: Default::default(),
                 owed_save: None,
-                policy_save: None,
                 written_configuration: 0,
                 read_back_warned: Default::default(),
             },
@@ -1187,6 +970,7 @@ impl Manager {
                 changed: true,
                 ineligible: false,
                 metadata_unchanged: false,
+                reconcile_configuration: false,
                 lease: None,
             }))
         })?;
@@ -1265,6 +1049,25 @@ impl Manager {
         )
     }
 
+    /// A file read cannot cover a policy edit still being saved. Runtime
+    /// counters may stay live; the existing write watermark distinguishes them.
+    /// The pending-save guard drops on failure, so no failed edit is retained.
+    fn policy_edit_pending(&self, state: &State, auth: &Auth) -> bool {
+        // Generation one is the registration/load baseline, including stores
+        // loaded without a manager write. A counter save is not a policy edit.
+        if auth.policy_generation <= 1
+            || state.pending_saves.get(&auth.id).copied().unwrap_or(0) == 0
+        {
+            return false;
+        }
+        let mark = lock(&self.shared.persist_locks).get(&auth.id).cloned();
+        mark.is_none_or(|mark| {
+            let (epoch, generation) = *lock(&mark);
+            epoch < auth.registration_epoch
+                || (epoch == auth.registration_epoch && generation < auth.policy_generation)
+        })
+    }
+
     fn observe_update_retaining_command(
         &self,
         _guard: &AdoptionGuard<'_>,
@@ -1280,6 +1083,9 @@ impl Manager {
             let Some(entry) = state.auths.get(&incoming.id) else {
                 return Ok(ObservedUpdate::RegistrationChanged);
             };
+            if !replace && self.policy_edit_pending(&state, &entry.auth) {
+                return Ok(ObservedUpdate::Retry);
+            }
             entry.auth.clone()
         };
         let binding = self
@@ -1470,9 +1276,6 @@ impl Manager {
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
         let is_file_observation = context.file_observation;
-        let policy_edit = save == Save::Yes
-            && matches!(&mode, UpdateMode::Edit { .. } | UpdateMode::Replace)
-            && !is_file_observation;
         let lease_tail = match &mode {
             UpdateMode::Refresh { lease, .. } => lease.cloned().map(Box::new),
             _ => None,
@@ -1502,13 +1305,6 @@ impl Manager {
         let mut undurable_causes = existing.undurable_causes.clone();
         let mut landing_unconfirmed = existing.landing_unconfirmed;
         let owed_save = existing.owed_save;
-        let mut policy_save = existing.policy_save.clone();
-        if is_file_observation && let Some(policy) = &mut policy_save {
-            policy.observe(&auth);
-            if policy.is_empty() {
-                policy_save = None;
-            }
-        }
         let written_configuration = existing.written_configuration;
         let mut read_back_warned = existing.read_back_warned;
         let mut unresolved_origin = existing.unresolved_origin.clone();
@@ -1562,12 +1358,6 @@ impl Manager {
                 .map(|u| u.partitions)
                 .unwrap_or_default(),
         );
-        if !policy_edit
-            && matches!(&mode, UpdateMode::Replace)
-            && let Some(policy) = &policy_save
-        {
-            policy.overlay(&mut auth);
-        }
         let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
         *slot = (*slot).max(existing_epoch);
         let live_epoch = *slot;
@@ -1628,6 +1418,7 @@ impl Manager {
                             changed: false,
                             ineligible: false,
                             metadata_unchanged: false,
+                            reconcile_configuration: false,
                             lease: None,
                         }));
                     }
@@ -1721,6 +1512,7 @@ impl Manager {
                         changed: false,
                         ineligible: false,
                         metadata_unchanged: false,
+                        reconcile_configuration: false,
                         lease: lease_tail.clone(),
                     }));
                 }
@@ -1774,24 +1566,6 @@ impl Manager {
                 existing_failures
             }
         };
-        if policy_edit
-            && crate::auth::codex_refresh::is_codex_auth(&existing_auth)
-            && self
-                .shared
-                .store
-                .as_ref()
-                .is_some_and(|store| store.supports_codex_refresh_patches())
-            && (existing_auth.metadata.get("siwc") != auth.metadata.get("siwc")
-                || (existing_auth.metadata.contains_key("use_siwc")
-                    && !auth.metadata.contains_key("use_siwc")))
-        {
-            return Err(ManagerError::Other(
-                "Codex policy edits cannot replace SIWC or remove use_siwc; use the credential commands".into(),
-            ));
-        }
-        if !policy_edit && let Some(policy) = &policy_save {
-            policy.overlay(&mut auth);
-        }
         let ineligible = context.policy_only_ineligible || self.permanently_ineligible(&auth);
         let mut discard_epoch = existing_discard_epoch;
         if ineligible {
@@ -1908,21 +1682,19 @@ impl Manager {
             let carried = super::quota_recovery::cooldown_scopes(&auth);
             state.quota_recovery.restored(&auth.id, &carried);
         }
-        if policy_edit && !ineligible && !same_observation_policy(&existing_auth, &auth) {
-            policy_save.get_or_insert_with(PolicySave::default).extend(
-                &existing_auth,
-                &auth,
-                generation,
-            );
-            if policy_save.as_ref().is_some_and(PolicySave::is_empty) {
-                policy_save = None;
-            }
-        }
         auth.policy_generation = if same_observation_policy(&existing_auth, &auth) {
             existing_auth.policy_generation
         } else {
             generation
         };
+        let reconcile_configuration = save == Save::Yes
+            && !is_refresh
+            && crate::auth::codex_refresh::is_codex_auth(&auth)
+            && crate::auth::codex_refresh::OUTER_KEYS
+                .iter()
+                .copied()
+                .chain(["siwc", "use_siwc"])
+                .any(|key| existing_auth.metadata.get(key) != auth.metadata.get(key));
         auth.ensure_index();
         auth.registration_epoch = live_epoch;
         auth.generation = generation;
@@ -1937,7 +1709,6 @@ impl Manager {
             undurable_causes,
             landing_unconfirmed,
             owed_save,
-            policy_save,
             written_configuration,
             read_back_warned,
         };
@@ -1958,6 +1729,7 @@ impl Manager {
             changed: true,
             ineligible,
             metadata_unchanged: context.metadata_unchanged,
+            reconcile_configuration,
             lease: lease_tail,
         }))
     }
@@ -1978,6 +1750,7 @@ impl Manager {
             changed,
             ineligible,
             metadata_unchanged,
+            reconcile_configuration,
             lease,
             revision,
             ..
@@ -2023,8 +1796,7 @@ impl Manager {
             }
         };
         match persisted {
-            Err(err) => {
-                log_persist_failure(&snapshot, "failed to persist updated auth", &err);
+            Err(_) => {
                 if !metadata_unchanged
                     && let crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) =
                         &snapshot.codex_persist_intent
@@ -2056,9 +1828,16 @@ impl Manager {
                 }
             }
             Ok(super::Persisted::Written { requested })
-                if (is_refresh || !snapshot.codex_pending_refresh.is_empty())
-                    && save == Save::Yes
-                    && crate::auth::codex_refresh::is_codex_auth(&snapshot) =>
+                if save == Save::Yes
+                    && crate::auth::codex_refresh::is_codex_auth(&snapshot)
+                    && (is_refresh
+                        || !snapshot.codex_pending_refresh.is_empty()
+                        || (reconcile_configuration
+                            && self
+                                .shared
+                                .store
+                                .as_ref()
+                                .is_some_and(|store| store.supports_codex_refresh_patches()))) =>
             {
                 // The FileStore baseline check may have kept newer disk tokens
                 // and settings. Publish the record actually persisted, but only
@@ -2141,7 +1920,6 @@ impl Manager {
                         && entry.discard_epoch == discard_epoch
                     {
                         let owed = entry.owed_save.is_some();
-                        let mut policy = entry.policy_save.clone();
                         if same_record
                             && raw_origin
                             && kept.unwrap_or_else(|| {
@@ -2183,17 +1961,6 @@ impl Manager {
                                 None
                             };
                             if let Some(mut disk) = disk {
-                                if same_record
-                                    && raw_origin
-                                    && self
-                                        .shared
-                                        .store
-                                        .as_ref()
-                                        .is_some_and(|store| store.binding_generation() == binding)
-                                {
-                                    PolicySave::observe_file(&mut policy, &disk);
-                                    entry.policy_save = policy.clone();
-                                }
                                 overlay_undurable(&mut disk, live, undurable);
                                 let previous = live.clone();
                                 let changed = credentials_changed(live, &disk);
@@ -2230,9 +1997,6 @@ impl Manager {
                                             || disk.attributes.contains_key(key)
                                     });
                                     live.attributes.extend(disk.attributes);
-                                }
-                                if let Some(policy) = &policy {
-                                    policy.overlay(live);
                                 }
                                 if !same_observation_policy(&previous, live) {
                                     live.policy_generation = live.generation.saturating_add(1);
@@ -2312,11 +2076,12 @@ impl Manager {
         }
         if revision.is_some() {
             let state = self.lock();
-            if state.auths.get(&snapshot.id).is_some_and(|entry| {
-                entry.policy_save.is_none()
-                    && same_record_identity(&snapshot, &entry.auth)
-                    && entry.auth.policy_generation <= snapshot.policy_generation
-            }) {
+            if state.pending_saves.get(&snapshot.id).copied().unwrap_or(0) == 0
+                && state.auths.get(&snapshot.id).is_some_and(|entry| {
+                    same_record_identity(&snapshot, &entry.auth)
+                        && entry.auth.policy_generation <= snapshot.policy_generation
+                })
+            {
                 let mark = lock(&self.shared.persist_locks)
                     .entry(snapshot.id.clone())
                     .or_default()
@@ -2328,7 +2093,6 @@ impl Manager {
         drop(pending);
         drop(gate);
         self.flush_owed_save(&snapshot.id, epoch);
-        self.schedule_policy_retry(&snapshot.id, epoch);
         Ok(Some((snapshot, generation)))
     }
 
@@ -2456,7 +2220,6 @@ impl Manager {
                     undurable_causes: Default::default(),
                     landing_unconfirmed: Default::default(),
                     owed_save: None,
-                    policy_save: None,
                     written_configuration: 0,
                     read_back_warned: Default::default(),
                 },
@@ -2553,14 +2316,8 @@ impl Manager {
             own_tail,
             &mut written_origin,
         );
-        if persisted.is_err() {
-            let mut state = self.lock();
-            if let Some(entry) = state.auths.get_mut(&auth.id)
-                && entry.auth.registration_epoch == epoch
-                && let Some(policy) = entry.policy_save.as_mut()
-            {
-                policy.retry_at.get_or_insert(self.now());
-            }
+        if let Err(error) = &persisted {
+            log_persist_failure(auth, "failed to persist credential", error);
         }
         let persisted = persisted?;
         Ok((persisted, written_origin))
@@ -2647,38 +2404,6 @@ impl Manager {
             let (last_epoch, last_generation) = *last;
             drop(last);
             let mut writing = auth.clone();
-            let mut policy_retry = None;
-            // A configuration save queued before a fair observation must carry
-            // the newly adopted disk fields too, not write its old token snapshot.
-            if !matches!(writing.codex_persist_intent, CodexPersistIntent::Refresh(_)) {
-                let compared = self
-                    .lock()
-                    .auths
-                    .get(&auth.id)
-                    .filter(|entry| entry.policy_save.is_some())
-                    .map(|entry| entry.auth.clone());
-                let same_record = compared
-                    .as_ref()
-                    .is_some_and(|live| store.same_record(auth, live).unwrap_or(false));
-                let state = self.lock();
-                if let Some(entry) = state.auths.get(&auth.id)
-                    && let Some(policy) = &entry.policy_save
-                    && same_record
-                    && compared
-                        .as_ref()
-                        .is_some_and(|before| same_record_identity(before, &entry.auth))
-                    && entry.auth.registration_epoch == epoch
-                {
-                    writing = entry.auth.as_ref().clone();
-                    policy_retry = Some(policy.clone());
-                    writing.codex_persist_intent = CodexPersistIntent::Configuration;
-                }
-            }
-            let generation = if policy_retry.is_some() {
-                generation.max(writing.generation)
-            } else {
-                generation
-            };
             if matches!(&writing.codex_persist_intent,
             crate::auth::codex_refresh::CodexPersistIntent::Refresh(patch) if patch.is_written())
             {
@@ -2752,29 +2477,14 @@ impl Manager {
                 }
                 unwritten
             };
-            let mut committed_policy = None;
             let (saved, unwritten) = if let Some(tail) = lease {
                 let mut refused = |resolved: &CodexOrigin, proof: OriginProof| {
                     self.record_refused_tail(&auth.id, epoch, tail, resolved, proof);
                 };
-                let path = if let Some(policy) = policy_retry.as_mut() {
-                    let mut apply = |current: &mut Auth, fresh: bool| {
-                        if fresh {
-                            policy.observe(current);
-                        }
-                        policy.overlay(current);
-                    };
-                    let (path, committed) = store
-                        .save_policy_bound(&writing, &tail.origin, &mut apply, &mut refused)
-                        .map_err(ManagerError::Store)?;
-                    committed_policy = committed;
-                    path
-                } else {
-                    store
-                        .save_bound(&writing, &tail.origin, &mut refused)
-                        .map_err(ManagerError::Store)?
-                };
-                match path {
+                match store
+                    .save_bound(&writing, &tail.origin, &mut refused)
+                    .map_err(ManagerError::Store)?
+                {
                     Some(path) => {
                         let unwritten = land(&path);
                         (path, unwritten)
@@ -2788,24 +2498,10 @@ impl Manager {
                 let mut guard = |dest: Option<&CodexOrigin>| {
                     self.save_guard(&writing, epoch, withheld, dest, own_tail, &mut held)
                 };
-                let outcome = if let Some(policy) = policy_retry.as_mut() {
-                    let mut apply = |current: &mut Auth, fresh: bool| {
-                        if fresh {
-                            policy.observe(current);
-                        }
-                        policy.overlay(current);
-                    };
-                    let (outcome, committed) = store
-                        .save_policy_guarded(&writing, &mut apply, &mut guard)
-                        .map_err(ManagerError::Store)?;
-                    committed_policy = committed;
-                    outcome
-                } else {
-                    store
-                        .save_guarded(&writing, &mut guard)
-                        .map_err(ManagerError::Store)?
-                };
-                match outcome {
+                match store
+                    .save_guarded(&writing, &mut guard)
+                    .map_err(ManagerError::Store)?
+                {
                     GuardedSave::Written(path) => {
                         let unwritten = land(&path);
                         (path, unwritten)
@@ -2889,31 +2585,6 @@ impl Manager {
                     entry.written_configuration = entry.written_configuration.max(generation);
                     if covers_owed(entry.owed_save, generation) {
                         entry.owed_save = None;
-                    }
-                }
-            }
-            if let (Some(mut attempted), Some(committed)) = (policy_retry, committed_policy) {
-                // FileStore's merge can protect fields instead of writing the
-                // submitted value. Only its committed representation covers debt.
-                attempted.confirm(&committed);
-                let mut state = self.lock();
-                if let Some(entry) = state.auths.get_mut(&auth.id)
-                    && entry.auth.registration_epoch == epoch
-                    && entry.discard_epoch == discard_epoch
-                    && same_record_identity(&writing, &entry.auth)
-                    && store.binding_generation() == binding
-                    && entry
-                        .policy_save
-                        .as_ref()
-                        .is_some_and(|policy| policy.generation == attempted.generation)
-                {
-                    if attempted.is_empty() {
-                        entry.policy_save = None;
-                    } else if let Some(policy) = &mut entry.policy_save {
-                        // An error in another queued save may already have
-                        // armed a timer. Preserve that timer's ticket/state.
-                        policy.changes = attempted.changes;
-                        policy.retry_at.get_or_insert(self.now());
                     }
                 }
             }
@@ -3264,156 +2935,13 @@ impl Manager {
             }
             (entry.auth.clone(), entry.discard_epoch)
         };
-        if let Err(error) = self.persist(
+        let _ = self.persist(
             &snapshot,
             epoch,
             snapshot.generation,
             discard_epoch,
             Save::Yes,
-        ) {
-            log_persist_failure(&snapshot, "failed to persist owed save", &error);
-        }
-    }
-
-    fn schedule_policy_retry(&self, id: &str, epoch: u64) {
-        let (ticket, first_wait) = {
-            let mut state = self.lock();
-            let Some(entry) = state.auths.get_mut(id) else {
-                return;
-            };
-            if entry.auth.registration_epoch != epoch {
-                return;
-            }
-            let Some(policy) = entry.policy_save.as_mut() else {
-                return;
-            };
-            let Some(at) = policy.retry_at else {
-                return;
-            };
-            if policy.retry_scheduled {
-                return;
-            }
-            policy.retry_scheduled = true;
-            policy.retry_ticket = policy.generation;
-            (
-                policy.retry_ticket,
-                (at - self.now()).to_std().unwrap_or_default(),
-            )
-        };
-        let Some(runtime) = policy_retry_runtime() else {
-            let mut state = self.lock();
-            if let Some(policy) = state
-                .auths
-                .get_mut(id)
-                .filter(|entry| entry.auth.registration_epoch == epoch)
-                .and_then(|entry| entry.policy_save.as_mut())
-                .filter(|policy| policy.retry_ticket == ticket)
-            {
-                policy.retry_scheduled = false;
-            }
-            drop(state);
-            tracing::warn!("policy-save retry timer could not start");
-            return;
-        };
-        // The timer owns only a weak manager and no operation. A quiesce or
-        // handoff never waits for backoff, and sleeping credentials consume no
-        // blocking workers. Reacquire admission for each individual attempt.
-        let shared = Arc::downgrade(&self.shared);
-        let id = id.to_owned();
-        // ActiveGate::spawn would hold admission across timer waits; each
-        // awakened save must take its own operation instead.
-        #[allow(clippy::disallowed_methods)]
-        drop(runtime.spawn(async move {
-            if !first_wait.is_zero() {
-                policy_retry_wait(&shared, first_wait).await;
-            }
-            loop {
-                for millis in [100, 500, 2000] {
-                    policy_retry_wait(&shared, std::time::Duration::from_millis(millis)).await;
-                    let Some(shared_now) = shared.upgrade() else {
-                        return;
-                    };
-                    let manager = Manager {
-                        shared: shared_now,
-                        _owner: None,
-                    };
-                    if !manager.policy_retry_pending(&id, epoch, ticket) {
-                        return;
-                    }
-                    let Ok(operation) = manager.gate().begin_operation() else {
-                        // A closed gate cannot write. Keep the bounded schedule
-                        // so reopening needs no unrelated credential operation.
-                        continue;
-                    };
-                    let retry_id = id.clone();
-                    let task = operation.run_blocking(move || {
-                        let _gate = manager.mutation_gate();
-                        let snapshot = {
-                            let state = manager.lock();
-                            state
-                                .auths
-                                .get(&retry_id)
-                                .filter(|entry| {
-                                    entry.auth.registration_epoch == epoch
-                                        && entry.policy_save.as_ref().is_some_and(|policy| {
-                                            policy.retry_scheduled && policy.retry_ticket == ticket
-                                        })
-                                })
-                                .map(|entry| (entry.auth.clone(), entry.discard_epoch))
-                        };
-                        let Some((snapshot, discard_epoch)) = snapshot else {
-                            return false;
-                        };
-                        let mut writing = snapshot.as_ref().clone();
-                        writing.codex_persist_intent = CodexPersistIntent::Configuration;
-                        let _ = manager.persist(
-                            &writing,
-                            epoch,
-                            writing.generation,
-                            discard_epoch,
-                            Save::Yes,
-                        );
-                        manager.policy_retry_pending(&retry_id, epoch, ticket)
-                    });
-                    drop(operation);
-                    if !task.await.unwrap_or(false) {
-                        return;
-                    }
-                }
-                {
-                    let Some(shared_now) = shared.upgrade() else {
-                        return;
-                    };
-                    let manager = Manager {
-                        shared: shared_now,
-                        _owner: None,
-                    };
-                    let mut state = manager.lock();
-                    let Some(policy) = state
-                        .auths
-                        .get_mut(&id)
-                        .filter(|entry| entry.auth.registration_epoch == epoch)
-                        .and_then(|entry| entry.policy_save.as_mut())
-                        .filter(|policy| policy.retry_ticket == ticket)
-                    else {
-                        return;
-                    };
-                    policy.retry_at = Some(manager.now() + chrono::TimeDelta::seconds(30));
-                }
-                // Unlike the previous re-arm watermark, this is a real timer.
-                policy_retry_wait(&shared, std::time::Duration::from_secs(30)).await;
-            }
-        }));
-    }
-
-    fn policy_retry_pending(&self, id: &str, epoch: u64, ticket: u64) -> bool {
-        self.lock().auths.get(id).is_some_and(|entry| {
-            entry.auth.registration_epoch == epoch
-                && entry
-                    .policy_save
-                    .as_ref()
-                    .is_some_and(|policy| policy.retry_scheduled && policy.retry_ticket == ticket)
-        })
+        );
     }
 
     pub(super) fn reconcile_pending_save(
@@ -3486,13 +3014,6 @@ impl Manager {
                 );
             }
             let undurable = entry.protected();
-            if raw_origin
-                && store.binding_generation() == binding
-                && let Some(disk) = &disk
-            {
-                PolicySave::observe_file(&mut entry.policy_save, disk);
-            }
-            let policy = entry.policy_save.clone();
             let live = Arc::make_mut(&mut entry.auth);
             if same_record && let Some(disk) = disk {
                 let previous = live.clone();
@@ -3511,9 +3032,6 @@ impl Manager {
                 }
                 live.prefix = persisted.prefix;
                 live.proxy_url = persisted.proxy_url;
-                if let Some(policy) = &policy {
-                    policy.overlay(live);
-                }
                 if !same_observation_policy(&previous, live) {
                     live.policy_generation = live.generation.saturating_add(1);
                 }
@@ -3565,9 +3083,7 @@ impl Manager {
                 discard_epoch,
                 Save::Yes,
             ) {
-                Err(error) => {
-                    log_persist_failure(&snapshot, "failed to persist credential state", &error)
-                }
+                Err(_) => {}
                 Ok(super::Persisted::Written { requested })
                     if !snapshot.codex_pending_refresh.is_empty() =>
                 {
@@ -3581,7 +3097,6 @@ impl Manager {
             if deferred {
                 manager.flush_owed_save(&snapshot.id, snapshot.registration_epoch);
             }
-            manager.schedule_policy_retry(&snapshot.id, snapshot.registration_epoch);
         };
         if detach
             && tokio::runtime::Handle::try_current().is_ok()
@@ -4374,24 +3889,34 @@ fn same_record_identity(a: &Auth, b: &Auth) -> bool {
             == b.trimmed_attribute(crate::auth::classification::ATTRIBUTE_PATH)
 }
 
-/// Logs a credential save that failed. A save the gate refused is expected
-/// while a switch is under way, and every request's outcome would log one, so
-/// it is logged at debug.
+/// Logs every failed credential save with a masked file name and scrubbed cause,
+/// including saves refused while the gate is switching.
 fn log_persist_failure(auth: &Auth, what: &str, err: &ManagerError) {
+    use crate::observe::{
+        mask::mask_emails,
+        redact::{Policy, Secrets},
+    };
+    let mut secrets = Secrets::new();
+    secrets.add_auth(auth);
+    let error = secrets.text(err.to_string(), Policy::Disk);
+    let error = mask_emails(&error);
+    let id = secrets.text(auth.id.clone(), Policy::Disk);
+    let id = mask_emails(&id);
+    let file = if auth.file_name.is_empty() {
+        &auth.id
+    } else {
+        &auth.file_name
+    };
+    let file = secrets.text(file.clone(), Policy::Disk);
+    let file = mask_emails(&file);
     let refused = matches!(err, ManagerError::NotActive(_))
         || matches!(err, ManagerError::Store(io)
             if io.get_ref().is_some_and(|inner| inner.is::<crate::gate::NotActive>()));
     if refused {
-        tracing::debug!(auth_id = %auth.id, "{what} refused: the gate is not open");
+        tracing::warn!(auth_id = %id, file = %file, provider = %auth.provider,
+            "{what} refused: the gate is not open: {error}");
     } else {
-        let mut secrets = crate::observe::redact::Secrets::new();
-        secrets.add_auth(auth);
-        let error = secrets.text(err.to_string(), crate::observe::redact::Policy::Disk);
-        tracing::warn!(
-            auth_id = %auth.id,
-            provider = %auth.provider,
-            "{what}: {error}"
-        );
+        tracing::warn!(auth_id = %id, file = %file, provider = %auth.provider, "{what}: {error}");
     }
 }
 
@@ -4465,89 +3990,6 @@ pub(crate) fn pending_for_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn round4_protected_siwc_debt_is_not_covered_by_a_successful_file_write() {
-        use crate::auth::{AuthStore, FileStore, file_guard::FileGuard};
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        for remove_switch in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let fail = Arc::new(AtomicBool::new(false));
-            let failing = fail.clone();
-            let store =
-                FileStore::new(dir.path()).with_file_guard(Some(FileGuard::new(move |_| {
-                    if failing.load(Ordering::SeqCst) {
-                        Err("test save refusal".into())
-                    } else {
-                        Ok(())
-                    }
-                })));
-            let auth = Auth {
-                id: "coverage.json".into(),
-                file_name: "coverage.json".into(),
-                provider: "codex".into(),
-                metadata: serde_json::json!({
-                    "type":"codex", "access_token":"dummy", "refresh_token":"dummy-refresh",
-                    "siwc":{"access_token":"dummy-nested", "note":"before"}, "use_siwc":true
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-                ..Auth::default()
-            };
-            store.save(&auth).unwrap();
-            let before = store.read_back(&auth).unwrap().unwrap();
-            let mut submitted = before.clone();
-            if remove_switch {
-                submitted.metadata.remove("use_siwc");
-            } else {
-                submitted.metadata["siwc"]["note"] = serde_json::json!("operator");
-            }
-            // Exercise retained/in-flight debt separately from the public
-            // manager API, which now refuses these edits before publication.
-            let mut policy = PolicySave::default();
-            policy.extend(&before, &submitted, 1);
-            fail.store(true, Ordering::SeqCst);
-            assert!(
-                store
-                    .save_policy_guarded(
-                        &submitted,
-                        &mut |current, fresh| {
-                            if fresh {
-                                policy.observe(current);
-                            }
-                            policy.overlay(current);
-                        },
-                        &mut |_| Ok(Default::default())
-                    )
-                    .is_err()
-            );
-            fail.store(false, Ordering::SeqCst);
-            let (outcome, committed) = store
-                .save_policy_guarded(
-                    &submitted,
-                    &mut |current, fresh| {
-                        assert!(fresh);
-                        policy.observe(current);
-                        policy.overlay(current);
-                    },
-                    &mut |_| Ok(Default::default()),
-                )
-                .unwrap();
-            assert!(matches!(outcome, GuardedSave::Written(path) if !path.is_empty()));
-            let committed = committed.unwrap();
-            assert_eq!(committed.metadata, before.metadata);
-            policy.confirm(&committed);
-            assert!(
-                !policy.is_empty(),
-                "protected values did not reach the file"
-            );
-            let mut overlaid = committed.clone();
-            policy.overlay(&mut overlaid);
-            assert_eq!(overlaid.metadata, submitted.metadata);
-        }
-    }
 
     #[test]
     fn uuid_is_version_4() {

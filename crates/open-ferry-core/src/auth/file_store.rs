@@ -102,9 +102,6 @@ type RefusedFn<'a> = dyn FnMut(&CodexOrigin, OriginProof) + 'a;
 type SaveGuard<'a> =
     dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral> + 'a;
 
-/// A pure policy overlay, told whether the record was read inside the save.
-type PolicyOverlay<'a> = dyn FnMut(&mut Auth, bool) + 'a;
-
 /// What `save_with` did.
 enum SaveWith {
     /// Saved: the file's path, or empty for a disabled credential whose file is gone.
@@ -1074,14 +1071,14 @@ impl FileStore {
     /// path attributes. Returns the file's path, or an empty string when
     /// `auth` is disabled and its file is gone.
     pub fn save_auth(&self, auth: &mut Auth) -> io::Result<String> {
-        Ok(self.save_with(auth, false, None, None, None)?.into_path())
+        Ok(self.save_with(auth, false, None, None)?.into_path())
     }
 
     /// Saves a credential from a login or migration: as
     /// [`save_auth`](Self::save_auth), but creates the file even for a
     /// disabled credential.
     pub fn save_new_auth(&self, auth: &mut Auth) -> io::Result<String> {
-        Ok(self.save_with(auth, true, None, None, None)?.into_path())
+        Ok(self.save_with(auth, true, None, None)?.into_path())
     }
 
     /// Before a login saves `auth` over an existing file, copies that
@@ -1220,7 +1217,6 @@ impl FileStore {
         creation_intent: bool,
         bound: Option<(&CodexOrigin, &mut RefusedFn<'_>)>,
         mut guard: Option<&mut SaveGuard<'_>>,
-        mut policy: Option<&mut PolicyOverlay<'_>>,
     ) -> io::Result<SaveWith> {
         // A SIWC bind is saved only by bind_siwc_locked, whose strict
         // persistence refuses links, aliases and corrupt files.
@@ -1329,47 +1325,6 @@ impl FileStore {
                 }
             }
             locked_read = Some(Some(locked));
-        }
-
-        if let Some(apply) = policy.as_mut() {
-            // Policy retries never use memory as the baseline of an existing
-            // file. Read and patch under the same permits and save/credential
-            // locks as the write, keeping even unobserved outside rotations.
-            let disk = match read_capped(&path) {
-                Ok(bytes) => Some(
-                    unmarshal_object(&bytes)
-                        .map_err(|_| invalid("auth filestore: invalid policy destination"))?
-                        .filter(|map| !map.is_empty())
-                        .ok_or_else(|| invalid("auth filestore: empty policy destination"))?,
-                ),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error),
-            };
-            if let Some(metadata) = disk {
-                if metadata
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|provider| {
-                        !provider.trim().is_empty()
-                            && !equal_fold(provider.trim(), auth.provider.trim())
-                    })
-                {
-                    return Ok(SaveWith::Deferred(SaveDeferral::Stale));
-                }
-                if codex {
-                    locked_read = Some(Some(metadata.clone()));
-                }
-                let mut current = policy_record(&path, &self.base_dir(), metadata)?;
-                // Runtime refresh operations still carry their own scoped,
-                // baseline-checked intents; they are never whole-record deltas.
-                current.codex_persist_intent = auth.codex_persist_intent.clone();
-                current.codex_pending_refresh = auth.codex_pending_refresh.clone();
-                apply(&mut current, true);
-                auth.metadata = current.metadata;
-                auth.disabled = current.disabled;
-            } else {
-                apply(auth, false);
-            }
         }
 
         if let Some(parent) = path.parent() {
@@ -1482,9 +1437,6 @@ impl FileStore {
         );
         if auth.file_name.trim().is_empty() {
             auth.file_name = auth.id.clone();
-        }
-        if policy.is_some() {
-            *auth = policy_record(&path, &self.base_dir(), auth.metadata.clone())?;
         }
         Ok(SaveWith::Written(path_str))
     }
@@ -1697,13 +1649,7 @@ impl AuthStore for FileStore {
         refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
     ) -> io::Result<Option<String>> {
         Ok(
-            match self.save_with(
-                &mut auth.clone(),
-                false,
-                Some((origin, refused)),
-                None,
-                None,
-            )? {
+            match self.save_with(&mut auth.clone(), false, Some((origin, refused)), None)? {
                 SaveWith::Written(path) => Some(path),
                 SaveWith::OriginRefused | SaveWith::Deferred(_) => None,
             },
@@ -1716,53 +1662,13 @@ impl AuthStore for FileStore {
         guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
     ) -> io::Result<GuardedSave> {
         Ok(
-            match self.save_with(&mut auth.clone(), false, None, Some(guard), None)? {
+            match self.save_with(&mut auth.clone(), false, None, Some(guard))? {
                 SaveWith::Written(path) => GuardedSave::Written(path),
                 SaveWith::Deferred(reason) => GuardedSave::Deferred(reason),
                 // Only a bound save is refused by its origin.
                 SaveWith::OriginRefused => GuardedSave::Written(String::new()),
             },
         )
-    }
-
-    fn save_policy_guarded(
-        &self,
-        auth: &Auth,
-        apply: &mut dyn FnMut(&mut Auth, bool),
-        guard: &mut dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral>,
-    ) -> io::Result<(GuardedSave, Option<Auth>)> {
-        let mut committed = auth.clone();
-        let saved = self.save_with(&mut committed, false, None, Some(guard), Some(apply))?;
-        Ok(match saved {
-            SaveWith::Written(path) if !path.is_empty() => {
-                (GuardedSave::Written(path), Some(committed))
-            }
-            SaveWith::Written(path) => (GuardedSave::Written(path), None),
-            SaveWith::Deferred(reason) => (GuardedSave::Deferred(reason), None),
-            SaveWith::OriginRefused => (GuardedSave::Written(String::new()), None),
-        })
-    }
-
-    fn save_policy_bound(
-        &self,
-        auth: &Auth,
-        origin: &CodexOrigin,
-        apply: &mut dyn FnMut(&mut Auth, bool),
-        refused: &mut dyn FnMut(&CodexOrigin, OriginProof),
-    ) -> io::Result<(Option<String>, Option<Auth>)> {
-        let mut committed = auth.clone();
-        let saved = self.save_with(
-            &mut committed,
-            false,
-            Some((origin, refused)),
-            None,
-            Some(apply),
-        )?;
-        Ok(match saved {
-            SaveWith::Written(path) if !path.is_empty() => (Some(path), Some(committed)),
-            SaveWith::Written(path) => (Some(path), None),
-            SaveWith::Deferred(_) | SaveWith::OriginRefused => (None, None),
-        })
     }
 
     fn delete(&self, id: &str) -> io::Result<()> {
@@ -2010,7 +1916,6 @@ fn read_auth_file_classified(
         base_dir,
         metadata.unwrap_or_default(),
         adoption,
-        false,
         || {
             Ok(fs::metadata(path)
                 .map_err(|err| wrap(err, "stat file"))?
@@ -2029,21 +1934,10 @@ fn auth_from_metadata(
     metadata: Map<String, Value>,
     modified: Option<chrono::DateTime<chrono::Utc>>,
 ) -> io::Result<Option<Auth>> {
-    record_from_metadata(path, base_dir, metadata, false, false, || Ok(modified)).map(|read| {
-        match read {
-            super::AdoptionRead::Record(auth) => Some(auth),
-            _ => None,
-        }
+    record_from_metadata(path, base_dir, metadata, false, || Ok(modified)).map(|read| match read {
+        super::AdoptionRead::Record(auth) => Some(auth),
+        _ => None,
     })
-}
-
-/// Decode the representation written by a policy transaction, including
-/// providers whose normal watcher synthesis is handled elsewhere.
-fn policy_record(path: &Path, base_dir: &Path, metadata: Map<String, Value>) -> io::Result<Auth> {
-    match record_from_metadata(path, base_dir, metadata, false, true, || Ok(None))? {
-        super::AdoptionRead::Record(auth) => Ok(auth),
-        _ => Err(invalid("auth filestore: invalid policy record")),
-    }
 }
 
 /// Classifies credential metadata. `modified` runs only once the provider
@@ -2053,7 +1947,6 @@ fn record_from_metadata(
     base_dir: &Path,
     mut metadata: Map<String, Value>,
     adoption: bool,
-    all_providers: bool,
     modified: impl FnOnce() -> io::Result<Option<chrono::DateTime<chrono::Utc>>>,
 ) -> io::Result<super::AdoptionRead> {
     use super::AdoptionRead;
@@ -2072,7 +1965,7 @@ fn record_from_metadata(
     if adoption && !equal_fold(&provider, "codex") {
         return Ok(AdoptionRead::Invalid);
     }
-    if !all_providers && equal_fold(&provider, "gemini") {
+    if equal_fold(&provider, "gemini") {
         return Ok(AdoptionRead::Unsupported);
     }
     let provider = if provider.is_empty() {

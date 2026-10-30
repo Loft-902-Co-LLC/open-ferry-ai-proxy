@@ -84,11 +84,8 @@ fn round2_observation_racing_disable_preserves_memory_and_disk() {
         "the disable and its save must win"
     );
     assert!(matches!(result, AdoptionResult::Retry));
-    assert!(matches!(retry, AdoptionResult::Published { .. }));
-    assert!(
-        reread,
-        "pending policy must merge around a real file read, not defer it"
-    );
+    assert!(matches!(retry, AdoptionResult::Retry));
+    assert!(!reread, "an in-flight policy save defers the next read");
 }
 
 #[test]
