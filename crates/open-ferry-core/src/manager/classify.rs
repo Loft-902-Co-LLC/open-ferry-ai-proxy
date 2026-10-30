@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cooldown.go (the error
-// classifiers) and the error codes in sdk/cliproxy/auth/errors.go (v8.0.38,
+// classifiers) and the error codes in sdk/cliproxy/auth/errors.go (v8.0.42,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

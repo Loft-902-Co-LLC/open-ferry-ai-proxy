@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/gemini_stream_terminal.go
-// (IsGeminiTerminalStreamChunk) (v8.0.38, MIT).
+// (IsGeminiTerminalStreamChunk) (v8.0.42, MIT).
 // Extended for Interactions completion, including native SSE event names
 // and the legacy finish event accepted by the Interactions translators.
 // https://github.com/router-for-me/CLIProxyAPI

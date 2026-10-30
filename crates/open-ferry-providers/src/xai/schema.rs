@@ -3,7 +3,7 @@
 // mergeHint) and internal/runtime/executor/xai_executor_response.go
 // (normalizeXAIObjectRootUnionBranchTypes, xaiSchemaTypeIsObjectOnly,
 // isXAICodexAppAutomationUpdate, xaiFunctionParametersNeedSimplification)
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Function parameter schemas made acceptable to xAI, which wants a

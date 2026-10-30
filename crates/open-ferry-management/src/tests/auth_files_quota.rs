@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI
-// internal/api/handlers/management/auth_files_quota_test.go (v8.0.38, MIT).
+// internal/api/handlers/management/auth_files_quota_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What `quota` and `model_quotas` show in the credential list.

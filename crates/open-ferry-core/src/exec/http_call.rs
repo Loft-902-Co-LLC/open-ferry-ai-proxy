@@ -1,6 +1,6 @@
 // Ported from the HttpRequest methods of CLIProxyAPI sdk/cliproxy/auth's
 // ProviderExecutor and Manager (conductor.go, conductor_execution.go)
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Plain HTTP calls made with a credential, outside the translated calls:

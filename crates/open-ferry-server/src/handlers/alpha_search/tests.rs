@@ -7,7 +7,7 @@
 // TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias,
 // TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed,
 // TestCodexAlphaSearchRecordsRequestLog,
-// TestCodexAlphaSearchUsesRequestIDForSessionAffinity) (v8.0.38, MIT).
+// TestCodexAlphaSearchUsesRequestIDForSessionAffinity) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search through the whole router: the client key, the

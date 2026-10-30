@@ -2683,7 +2683,7 @@ async fn invalid_split_event_stays_invalid() {
     assert!(error.is_some());
 }
 
-// Ported from codex_executor_claude_effort_test.go (v8.0.38, MIT).
+// Ported from codex_executor_claude_effort_test.go (v8.0.42, MIT).
 #[tokio::test]
 async fn claude_standalone_effort_survives_final_payload_preparation() {
     for (rules, expected) in [

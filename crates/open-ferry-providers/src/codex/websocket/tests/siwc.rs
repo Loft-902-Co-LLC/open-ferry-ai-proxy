@@ -2,7 +2,7 @@
 // (TestCodexWebsocketsExecutorUseSIWCExecuteAndStream) and
 // codex_executor_siwc_configuration_update_test.go
 // (TestCodexWebsocketsExecuteUseSIWCStripsConfigurationUpdates,
-// TestCodexWebsocketsPrepareStreamUseSIWCKeepsSuffixEffort) (v8.0.38, MIT).
+// TestCodexWebsocketsPrepareStreamUseSIWCKeepsSuffixEffort) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

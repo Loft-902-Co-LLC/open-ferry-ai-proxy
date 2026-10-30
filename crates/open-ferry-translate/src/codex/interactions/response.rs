@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_response.go
-// (v8.0.38, MIT).
+// (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) response → Gemini Interactions response, streamed

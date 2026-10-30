@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
-// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.38, MIT), and
-// codex_claude_user_turn_test.go (v8.0.38, MIT).
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.42, MIT), and
+// codex_claude_user_turn_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

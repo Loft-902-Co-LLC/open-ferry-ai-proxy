@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/
 // gemini_executor_terminal_disconnect_test.go
-// (TestGeminiStream_TerminalDisconnectUsage) (v8.0.38, MIT).
+// (TestGeminiStream_TerminalDisconnectUsage) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Usage outcomes through the real translator and the manager's report.

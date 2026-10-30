@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/client/codex/apply-patch/tool.go (v8.0.38, MIT).
+// Ported from CLIProxyAPI internal/client/codex/apply-patch/tool.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's `apply_patch` tool, carried through APIs that only know functions.

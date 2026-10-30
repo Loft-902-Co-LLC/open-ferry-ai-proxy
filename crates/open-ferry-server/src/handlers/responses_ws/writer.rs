@@ -4,7 +4,7 @@
 // readResponsesWebsocketInput in
 // sdk/api/handlers/openai/openai_responses_websocket_input.go, and
 // writeResponsesWebsocketPayload in
-// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.38,
+// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.42,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

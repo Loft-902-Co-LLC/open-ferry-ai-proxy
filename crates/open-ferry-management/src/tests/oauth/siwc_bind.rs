@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/cmd/siwc_bind_test.go and
-// internal/api/handlers/management/oauth_siwc_test.go (v8.0.38, MIT).
+// internal/api/handlers/management/oauth_siwc_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

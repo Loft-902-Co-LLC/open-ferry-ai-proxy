@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (the v8 path tables,
 // flattenV8, normalizeV8PrivateIPAlias, expandV8Groups), weight.go
 // (validateCredentialWeightYAML and its helpers) and
-// internal/credentialweight/weight.go (Normalize) (v8.0.38, MIT).
+// internal/credentialweight/weight.go (Normalize) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reads the v8 config layout by moving it into the legacy one.

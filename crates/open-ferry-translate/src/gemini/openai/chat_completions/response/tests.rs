@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/translator/gemini/openai/chat-completions/gemini_openai_response_test.go
-// and the response tests in noop_optimization_test.go (v8.0.38, MIT).
+// and the response tests in noop_optimization_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All upstream tests are ported. Tests without an upstream name are new; their expected output

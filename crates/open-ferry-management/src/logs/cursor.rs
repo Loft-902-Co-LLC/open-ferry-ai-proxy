@@ -4,7 +4,7 @@
 // logFileChangedAfterCursor, logFileMatchesCursor, encodeLogCursor,
 // decodeLogCursor, validateLogCursor, newLogCursor,
 // cursorFingerprintBoundary, cursorModTimeUnixNano, logFileFingerprint,
-// writeFileRange) (v8.0.38, MIT).
+// writeFileRange) (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The cursor `GET /v0/management/logs` answers with, and reading on from

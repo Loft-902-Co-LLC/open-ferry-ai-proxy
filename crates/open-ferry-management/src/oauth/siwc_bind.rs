@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/cmd/siwc_bind.go and
-// internal/api/handlers/management/oauth_siwc.go (v8.0.38, MIT).
+// internal/api/handlers/management/oauth_siwc.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Management binding uses the same leaf-link refusal and save-time identity

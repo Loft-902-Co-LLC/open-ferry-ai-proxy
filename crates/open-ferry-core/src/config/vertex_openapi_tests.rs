@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/config/vertex_openapi_test.go and
-// internal/watcher/diff/vertex_openapi_test.go (v8.0.38, MIT).
+// internal/watcher/diff/vertex_openapi_test.go (v8.0.42, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 use super::testing::TempDir;
 use super::*;
