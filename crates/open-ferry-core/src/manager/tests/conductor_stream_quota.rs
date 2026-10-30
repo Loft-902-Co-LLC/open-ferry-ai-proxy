@@ -91,7 +91,13 @@ impl ProviderExecutor for CanceledBootstrapExecutor {
     }
 
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
-        Box::pin(async move { Ok((*auth).clone()) })
+        Box::pin(async move {
+            let mut refreshed = (*auth).clone();
+            refreshed
+                .metadata
+                .insert("access_token".into(), serde_json::json!("rotated"));
+            Ok(refreshed)
+        })
     }
 }
 

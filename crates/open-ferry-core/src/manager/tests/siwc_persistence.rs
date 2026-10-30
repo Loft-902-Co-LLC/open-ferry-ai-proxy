@@ -3931,13 +3931,10 @@ fn adoption_load_and_save_complete_with_owned_threads() {
     let saving = manager.clone();
     let done = done_tx.clone();
     let save = std::thread::spawn(move || {
-        let ok = saving
-            .edit("codex.json", |auth| {
-                auth.metadata.insert("note".into(), json!("saved"));
-                Ok::<_, ()>(true)
-            })
-            .is_ok();
-        done.send(ok).unwrap();
+        // Policy saves defer file observations; a counter save still admits
+        // this read and exercises the nested reload-admission ordering.
+        saving.mark_result(&success(&saving));
+        done.send(true).unwrap();
     });
     save_entered_rx
         .recv_timeout(Duration::from_secs(5))
