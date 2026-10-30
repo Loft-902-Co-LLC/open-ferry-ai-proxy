@@ -297,11 +297,7 @@ pub(super) fn schedule_unauthorized_refresh(
     now: Timestamp,
     was_terminal: bool,
 ) -> bool {
-    let unauthorized = !result.success
-        && !super::classify::should_skip_credential_cooldown(result.error.as_ref())
-        && result.error.as_ref().is_some_and(|error| {
-            error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
-        });
+    let unauthorized = super::scoped::rejects_access_token(result);
     if unauthorized {
         let token = if result.access_token.is_empty() {
             match result.credential_partition {
@@ -315,14 +311,7 @@ pub(super) fn schedule_unauthorized_refresh(
         };
         auth.record_rejected_token(&token);
     }
-    if was_terminal
-        || result.success
-        || !has_refresh_credential(auth)
-        || super::classify::should_skip_credential_cooldown(result.error.as_ref())
-        || !result.error.as_ref().is_some_and(|error| {
-            error.http_status == 401 || is_unauthorized_error(ErrView::Auth(error))
-        })
-    {
+    if was_terminal || !has_refresh_credential(auth) || !unauthorized {
         return false;
     }
     if non_zero(auth.next_refresh_after).is_none() {
@@ -1062,6 +1051,9 @@ impl Manager {
             return None;
         }
         if !is_unauthorized_error(ErrView::Exec(err)) {
+            return None;
+        }
+        if super::scoped::match_request_scoped_error_action(auth, err, &self.settings()).is_some() {
             return None;
         }
         let failed_token = auth.access_token_for_request(headers).to_owned();

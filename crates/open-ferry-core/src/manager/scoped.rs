@@ -23,6 +23,19 @@ use crate::auth::json::{decode_field, remarshaled_fold_values as go_values};
 use crate::auth::{Auth, AuthError};
 use crate::exec::ExecError;
 
+/// A configured cooldown is temporary; it never condemns the bearer.
+pub(super) fn rejects_access_token(result: &super::CallResult) -> bool {
+    !result.success
+        && !result
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == CODE_FORCE_COOLDOWN)
+        && !super::classify::should_skip_credential_cooldown(result.error.as_ref())
+        && result.error.as_ref().is_some_and(|error| {
+            error.http_status == 401 || super::classify::is_unauthorized_error(ErrView::Auth(error))
+        })
+}
+
 /// What a matching rule asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopedAction {
