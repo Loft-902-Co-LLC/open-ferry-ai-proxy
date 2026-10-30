@@ -186,8 +186,8 @@ struct Duplex {
     secrets: Secrets,
 
     initial: Arc<Settings>,
-    /// The first request's `model`, as the client sent it.
-    initial_model: String,
+    /// The requested client model, before any payload rewrite or routing.
+    bound_model: String,
     /// The settings of the response running, or last run.
     current: Arc<Settings>,
     /// The explicit creates sent and not yet started.
@@ -242,13 +242,23 @@ pub(super) fn start(
     } = call;
     let original = original_request(&request, &options);
     let initial = Arc::new(Settings::new(prepared, &original));
+    let original_model = str_at(&original, "model");
+    let bound_model = [
+        options.metadata.requested_model.trim(),
+        original_model.trim(),
+        request.model.as_str(),
+    ]
+    .into_iter()
+    .find(|model| !model.is_empty())
+    .unwrap_or_default()
+    .to_owned();
     let duplex = Duplex {
         config: executor.shared_config(),
         models: executor.shared_models(),
         base_url: executor.base_url().to_owned(),
         model_level_cooling: executor.model_level_cooling(),
         auth: auth.clone(),
-        initial_model: str_at(&original, "model"),
+        bound_model,
         request,
         options,
         input,
@@ -600,13 +610,13 @@ impl Duplex {
             return;
         }
         let model = str_at(&payload, "model").trim().to_owned();
-        if !model.is_empty() && model != self.request.model && model != self.initial_model {
+        if !model.is_empty() && model != self.request.model && model != self.bound_model {
             self.fail_connection(ExecError::replay_required());
             return;
         }
         if model.is_empty() {
             let model = if self.request.model.is_empty() {
-                self.initial_model.trim().to_owned()
+                self.bound_model.trim().to_owned()
             } else {
                 self.request.model.clone()
             };
@@ -681,7 +691,7 @@ impl Duplex {
     /// this is a continuation of the bound request. Only the access check
     /// sees the adjusted copy; steering keeps its own payload defaults.
     fn authorize(&mut self, payload: &Value, force_bound_model: bool) -> bool {
-        let bound = match self.initial_model.trim() {
+        let bound = match self.bound_model.trim() {
             "" => self.request.model.as_str(),
             model => model,
         };

@@ -52,6 +52,8 @@ use crate::json::{exists, str_at};
 
 const MODEL: &str = "gpt-6-astra";
 
+mod binding;
+
 /// An executor with `codex.response-steering` on.
 fn steering() -> CodexExecutor {
     let mut config = Config::default();
