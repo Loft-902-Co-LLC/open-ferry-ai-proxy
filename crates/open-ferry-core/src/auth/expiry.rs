@@ -44,29 +44,37 @@ const EXPIRE_KEYS: [&str; 6] = [
 
 /// Whether a user agent identifies one of the Codex clients.
 pub fn is_codex_client_user_agent(user_agent: &str) -> bool {
-    let ua = user_agent.trim().to_ascii_lowercase();
-    [
-        "codex-desktop",
-        "codex desktop",
-        "codex-rs",
-        "codex_cli_rs",
-        "codex-tui",
-        "codex_exec",
-    ]
-    .iter()
-    .any(|name| ua.contains(name))
+    is_codex_client_user_agent_bytes(user_agent.as_bytes())
+}
+
+fn is_codex_client_user_agent_bytes(user_agent: &[u8]) -> bool {
+    let patterns: &[&[u8]] = &[
+        b"codex-desktop",
+        b"codex desktop",
+        b"codex-rs",
+        b"codex_cli_rs",
+        b"codex-tui",
+        b"codex_exec",
+    ];
+    patterns.iter().any(|pattern| {
+        user_agent
+            .windows(pattern.len())
+            .any(|part| part.eq_ignore_ascii_case(pattern))
+    })
+}
+
+pub(crate) fn is_codex_client_headers(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(http::header::USER_AGENT)
+        .iter()
+        .find(|value| !String::from_utf8_lossy(value.as_bytes()).trim().is_empty())
+        .is_some_and(|value| is_codex_client_user_agent_bytes(value.as_bytes()))
 }
 
 impl Auth {
     /// Request-local selection only. Never write this decision to metadata.
     pub fn use_siwc_for_request(&self, headers: &http::HeaderMap) -> bool {
-        self.use_siwc()
-            && !headers
-                .get_all(http::header::USER_AGENT)
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .find(|value| !value.trim().is_empty())
-                .is_some_and(is_codex_client_user_agent)
+        self.use_siwc() && !is_codex_client_headers(headers)
     }
 
     /// The bearer this request uses; a missing selected bearer has no fallback.

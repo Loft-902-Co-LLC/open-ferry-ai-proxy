@@ -52,8 +52,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 pub use classification::{AuthKind, AuthSource};
+pub(crate) use expiry::{is_codex_client_headers, parse_time_value, zero_time};
 pub use expiry::{is_codex_client_user_agent, parse_go_rfc3339};
-pub(crate) use expiry::{parse_time_value, zero_time};
 pub use file_store::{CodexPersisted, FileStore};
 pub(crate) use go::{atoi, equal_fold, parse_bool};
 pub(crate) use metadata::{parse_bool_any, parse_int_any};
