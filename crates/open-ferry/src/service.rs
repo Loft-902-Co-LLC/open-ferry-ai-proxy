@@ -8948,6 +8948,55 @@ self-update:
     }
 
     #[tokio::test]
+    async fn p47_delayed_persist_after_disable_survives_invalid_scan_and_reset() {
+        for provider in ["claude", "codex"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("delayed.json");
+            std::fs::write(&path, format!(r#"{{"type":"{provider}","access_token":"dummy-before","refresh_token":"dummy-refresh"}}"#)).unwrap();
+            let mut service = service(dir.path(), "");
+            service.handle_and_drain(added(&path), Path::new("")).await;
+            let stale = service.manager.list()[0].as_ref().clone();
+            service
+                .manager
+                .edit_at_epoch(&stale.id, stale.registration_epoch, |auth| {
+                    auth.disabled = true;
+                    auth.status = open_ferry_core::auth::Status::Disabled;
+                    auth.metadata
+                        .insert("disabled".into(), serde_json::json!(true));
+                    Ok::<_, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+            let saved = std::fs::read(&path).unwrap();
+            deliver_command(
+                &mut service,
+                SyncChange::Upsert(Box::new(stale.clone())),
+                next_revision(),
+            )
+            .await;
+            assert!(
+                service.manager.get(&stale.id).unwrap().disabled,
+                "delayed persisted snapshot undid disable"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            // The next scan cannot fall back to the discarded login payload.
+            std::fs::write(&path, b"{").unwrap();
+            service
+                .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+                .await;
+            service.manager.reset_quota(&stale.id).unwrap();
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
+            assert!(!service.dirty_reads.is_empty());
+            std::fs::write(&path, &saved).unwrap();
+            service
+                .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+                .await;
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+        }
+    }
+
+    #[tokio::test]
     async fn watched_file_edit_keeps_live_nonquota_cooldown() {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "cooling.json", "");
