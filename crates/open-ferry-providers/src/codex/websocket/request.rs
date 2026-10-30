@@ -127,7 +127,7 @@ pub(super) fn prepare(
     request: &Request,
     options: &Options,
 ) -> Result<Prepared, ExecError> {
-    crate::codex::siwc_request::ensure_credentials(auth)?;
+    crate::codex::siwc_request::ensure_credentials(auth, &options.headers)?;
     let base = base_model(&request.model);
     let payload = parse_object(&request.payload);
     let native = is_native(&payload, options);
@@ -161,7 +161,7 @@ pub(super) fn prepare(
         delete(&mut body, "safety_identifier");
     }
     crate::codex::request::ensure_web_search_tool_for_history(&mut body, &options.headers);
-    if !auth.use_siwc() {
+    if !auth.use_siwc_for_request(&options.headers) {
         normalize_instructions(&mut body, native);
         ensure_image_generation_tool(&mut body, base, context, &options.headers);
     }
@@ -183,14 +183,14 @@ pub(super) fn prepare(
     );
     let optimize = turn.multi_agent_v2_optimized();
 
-    let url = websocket_url(&endpoint(auth, default_base, false))?;
+    let url = websocket_url(&endpoint(auth, &options.headers, default_base, false))?;
     if format_is(&options.source_format, &Format::OPENAI_RESPONSE)
         && let Some(key) = client_prompt_cache_key(&options.source_format, &payload)
     {
         set_string_if_different(&mut body, "prompt_cache_key", &key);
     }
     sanitize_input_item_ids(&mut body);
-    if auth.use_siwc() {
+    if auth.use_siwc_for_request(&options.headers) {
         crate::codex::siwc_request::apply_websocket_body(
             &mut body,
             crate::codex::siwc_request::explicit_instructions(&payload),
@@ -314,9 +314,9 @@ pub(super) fn build_headers(
     client: &HeaderMap,
     native: bool,
 ) -> Result<HeaderMap, ExecError> {
-    crate::codex::siwc_request::ensure_credentials(auth)?;
+    crate::codex::siwc_request::ensure_credentials(auth, client)?;
     let mut headers = HeaderMap::new();
-    if auth.use_siwc() {
+    if auth.use_siwc_for_request(client) {
         let beta = client_value(client, "openai-beta")
             .filter(|beta| beta.contains("responses_websockets="))
             .and_then(|beta| HeaderValue::from_str(&beta).ok())
@@ -327,7 +327,7 @@ pub(super) fn build_headers(
         crate::codex::siwc_request::enforce_headers(&mut headers, auth, client)?;
         return Ok(headers);
     }
-    let (token, _) = credentials(auth);
+    let (token, _) = credentials(auth, client);
     if !token.trim().is_empty() {
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             ExecError::new(
@@ -368,7 +368,7 @@ pub(super) fn build_headers(
     }
 
     ensure_header(&mut headers, client, HeaderName::from_static("originator"));
-    if !uses_api_key(auth)
+    if !uses_api_key(auth, client)
         && let Some(account) = auth
             .metadata_str("account_id")
             .map(str::trim)

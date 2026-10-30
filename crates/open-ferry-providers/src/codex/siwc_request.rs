@@ -17,13 +17,22 @@ use crate::json::{delete, get, set};
 pub(crate) const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Fail closed, without falling back to the outer credential or API key.
-pub(crate) fn ensure_credentials(auth: &Auth) -> Result<(), ExecError> {
+pub(crate) fn ensure_credentials(auth: &Auth, caller: &HeaderMap) -> Result<(), ExecError> {
     // As upstream, SIWC ID-token signatures and nonces aren't verified,
     // and the SIWC account isn't matched to the outer account.
-    if auth.use_siwc() && auth.access_token().is_empty() {
+    let use_siwc = auth.use_siwc_for_request(caller);
+    let api_key = auth.attribute("api_key").unwrap_or_default();
+    if auth.use_siwc()
+        && (use_siwc || api_key.is_empty())
+        && auth.access_token_for_request(caller).is_empty()
+    {
         return Err(ExecError::new(
             ErrorKind::Upstream,
-            "codex executor: use_siwc is enabled but siwc access_token is missing",
+            if use_siwc {
+                "codex executor: use_siwc is enabled but siwc access_token is missing"
+            } else {
+                "codex executor: original OAuth access_token is required for Codex client requests"
+            },
         )
         .with_status(401));
     }
@@ -88,7 +97,7 @@ pub(crate) fn enforce_headers(
     auth: &Auth,
     caller: &HeaderMap,
 ) -> Result<(), ExecError> {
-    ensure_credentials(auth)?;
+    ensure_credentials(auth, caller)?;
     let forbidden: Vec<_> = headers
         .keys()
         .filter(|name| {
@@ -119,12 +128,13 @@ pub(crate) fn enforce_headers(
         .expect("open-ferry SIWC user agent is a header value");
     headers.insert(header::USER_AGENT, ua);
     let mut token =
-        HeaderValue::from_str(&format!("Bearer {}", auth.access_token())).map_err(|_| {
-            ExecError::new(
-                ErrorKind::Upstream,
-                "codex executor: the credential's token isn't a valid header value",
-            )
-        })?;
+        HeaderValue::from_str(&format!("Bearer {}", auth.access_token_for_request(caller)))
+            .map_err(|_| {
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    "codex executor: the credential's token isn't a valid header value",
+                )
+            })?;
     token.set_sensitive(true);
     headers.insert(header::AUTHORIZATION, token);
     let session_name = "session_id".parse().unwrap();
