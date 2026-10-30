@@ -261,6 +261,8 @@ impl CodexToGeminiStream {
                 if kind == "response.incomplete" {
                     let reason = str_of(path(response, "incomplete_details.reason"));
                     set_finish_reason(&mut template, incomplete_finish_reason(&reason));
+                } else {
+                    set_finish_reason(&mut template, "STOP");
                 }
             }
             _ => return Vec::new(),

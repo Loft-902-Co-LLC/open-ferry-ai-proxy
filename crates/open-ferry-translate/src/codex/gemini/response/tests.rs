@@ -24,6 +24,19 @@ fn non_stream(original_request: &str, event: &str) -> Value {
 }
 
 #[test]
+fn completed_terminal_sets_stop() {
+    let terminal = r#"{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}"#;
+    let out = stream("null").translate_line(format!("data: {terminal}").as_bytes());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["candidates"][0]["finishReason"], "STOP");
+    assert_eq!(out[0]["usageMetadata"]["totalTokenCount"], 4);
+    assert_eq!(
+        non_stream("null", terminal)["candidates"][0]["finishReason"],
+        "STOP"
+    );
+}
+
+#[test]
 fn incomplete_terminal() {
     let terminal = r#"{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#;
     let out = stream("null").translate_line(format!("data: {terminal}").as_bytes());
