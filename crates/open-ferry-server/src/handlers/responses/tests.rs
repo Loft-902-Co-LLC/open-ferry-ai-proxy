@@ -72,11 +72,10 @@ async fn http_metadata_visibility_follows_official_client_classification() {
     }
 }
 
-// Blocked by exec.rs/SseCheck, outside group D's owned paths. Enable when the
-// shared validation layer preserves fragmented JSON strings before this handler.
+// Upstream also validates JSON before framing. Its validator inserts a newline
+// before data:/event: even inside an open JSON string, rejecting this stream.
 #[tokio::test]
-#[ignore = "requires the shared exec/SseCheck framing integration"]
-async fn http_fragmented_metadata_reaches_framer() {
+async fn http_fragmented_metadata_string_is_rejected_before_framing() {
     let (app, _) = app(
         ServerConfig::default(),
         vec![Outcome::chunks(&[
@@ -86,8 +85,27 @@ async fn http_fragmented_metadata_reaches_framer() {
         ])],
     );
     let (status, _, body) = send(&app, post("/v1/responses", STREAM, Some(CODEX_DESKTOP))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("data: private"), "{body}");
+}
+
+#[tokio::test]
+async fn http_fragmented_metadata_json_colon_is_joined_then_filtered() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[
+            "data: {\"type\"",
+            ":\"response.metadata\",\"metadata\":{\"marker\":\"private\"}}\n\n",
+            COMPLETED,
+        ])],
+    );
+    let (status, _, body) = send(&app, post("/v1/responses", STREAM, None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("data: private"), "{body}");
+    assert!(
+        !body.contains("response.metadata") && !body.contains("private"),
+        "{body}"
+    );
+    assert!(body.contains("response.completed"), "{body}");
 }
 
 // Rust cancellation drops the owning future/stream; it is not a second ready

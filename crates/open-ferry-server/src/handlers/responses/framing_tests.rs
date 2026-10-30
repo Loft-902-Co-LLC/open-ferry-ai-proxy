@@ -203,15 +203,137 @@ fn fragmented_standard_data_field_preserves_malformed_payload() {
     }
 }
 
+// Exact expected differences from the literal v8.0.47 oracle. No catch-all
+// exception: each retained difference has a concrete corrupted/lost event.
 #[test]
-fn data_first_completion_waits_for_fragmented_event_name() {
+fn upstream_expected_framing_differences() {
+    struct Difference {
+        name: &'static str,
+        reason: &'static str,
+        chunks: &'static [&'static [u8]],
+        upstream: &'static [&'static [u8]],
+        retained: &'static [&'static [u8]],
+    }
+    let differences = [
+        Difference {
+            name: "responses-sse-split-standard-field",
+            reason: "upstream turns the data-field colon into a comment, losing the data event",
+            chunks: &[b"data", b": not-json\n\n"],
+            upstream: &[b"data\n: not-json\n\n"],
+            retained: &[b"data: not-json\n\n"],
+        },
+        Difference {
+            name: "responses-sse-bare-word-data-continuation",
+            reason: "upstream emits empty custom data and separates its malformed payload into a no-data frame",
+            chunks: &[b"event: custom\ndata:", b"bad\n\n"],
+            upstream: &[b"event: custom\ndata:", b"bad\n\n"],
+            retained: &[b"event: custom\ndata:bad\n\n"],
+        },
+        Difference {
+            name: "responses-sse-malformed-private-recovery",
+            reason: "upstream inserts a comment before the type value and leaks private metadata; Codex receives corrupted bytes",
+            chunks: &[b"data: {\"type\"", b":\"response.metadata\",\"bad\":}\n\n"],
+            upstream: &[b"data: {\"type\"\n:\"response.metadata\",\"bad\":}\n\n"],
+            retained: &[b"data: {\"type\":\"response.metadata\",\"bad\":}\n\n"],
+        },
+    ];
+    for difference in differences {
+        for codex in [false, true] {
+            let mut oracle = upstream::Upstream::new(codex);
+            for chunk in difference.chunks {
+                oracle.write_chunk(chunk);
+            }
+            oracle.flush();
+            let (out, framer) = run(codex, difference.chunks);
+            assert_eq!(
+                oracle.frames, difference.upstream,
+                "{}: {}",
+                difference.name, difference.reason
+            );
+            assert_eq!(
+                framer.frames, difference.retained,
+                "{}: {}",
+                difference.name, difference.reason
+            );
+            assert_ne!(oracle.frames, framer.frames, "{}", difference.name);
+            if difference.name == "responses-sse-malformed-private-recovery" {
+                assert_eq!(out.is_empty(), !codex);
+                if codex {
+                    assert_eq!(out.as_bytes(), difference.retained[0]);
+                }
+                assert!(
+                    String::from_utf8_lossy(&upstream::wire(&oracle.frames))
+                        .contains("response.metadata")
+                );
+            } else {
+                assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
+            }
+        }
+    }
+}
+
+#[test]
+fn data_first_events_without_delimiters_do_not_merge() {
+    let chunks: &[&[u8]] = &[
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}",
+        b"event: response.output_text.delta",
+        b"data: {\"type\":\"response.completed\",\"response\":{}}",
+        b"event: response.completed",
+    ];
+    for codex in [false, true] {
+        let (got, framer) = run(codex, chunks);
+        assert_eq!(framer.data_frames, 2, "{got}");
+        assert_eq!(framer.terminal_event, "response.completed", "{got}");
+        assert_eq!(got.matches("\n\n").count(), 2, "{got}");
+    }
+}
+
+#[test]
+fn custom_data_first_event_does_not_swallow_completion() {
+    for codex in [false, true] {
+        let (got, framer) = run(
+            codex,
+            &[
+                b"data: {}\nevent: custom",
+                b"data: {\"type\":\"response.completed\"}\n\n",
+            ],
+        );
+        assert_eq!(
+            got,
+            "data: {}\nevent: custom\n\ndata: {\"type\":\"response.completed\"}\n\n"
+        );
+        assert_eq!(framer.terminal_event, "response.completed");
+        assert_eq!(framer.data_frames, 2);
+    }
+}
+
+#[test]
+fn repeated_custom_data_first_events_are_emitted_at_each_chunk() {
+    let chunk = b"data: {}\nevent: custom";
+    let mut framer = Framer::new(false);
+    let mut out = BytesMut::new();
+    for n in 1..=2000 {
+        framer.write_chunk(&mut out, chunk).unwrap();
+        assert_eq!(framer.data_frames, n);
+        assert_eq!(framer.held(), 0);
+        assert!(framer.work() <= 3 * n as usize * chunk.len());
+    }
+    framer.flush(&mut out);
+    assert_eq!(out.as_ref(), b"data: {}\nevent: custom\n\n".repeat(2000));
+}
+
+#[test]
+fn data_first_fragmented_event_name_matches_upstream_early_emit() {
     for codex in [false, true] {
         let (got, framer) = run(
             codex,
             &[DATA_FIRST.as_bytes(), b"event: respon", b"se.completed\n\n"],
         );
-        assert_eq!(got, format!("{DATA_FIRST}\nevent: response.completed\n\n"));
-        assert_eq!(framer.terminal_event, "response.completed");
+        assert_eq!(
+            got,
+            format!("{DATA_FIRST}\nevent: respon\n\nse.completed\n\n")
+        );
+        assert_eq!(framer.terminal_event, "");
     }
 }
 
@@ -376,8 +498,9 @@ fn recovered_terminal_output_is_rebuilt_exactly_once() {
     }
 }
 
-// The invariant: transport chunk boundaries do not change the ordered SSE events
-// received by either client class (event names and joined data, not wire formatting).
+// The desired invariant includes no-data frames, id, retry and comments, not
+// merely event names/data. Upstream early emission violates this invariant;
+// collecting all mismatches keeps the limitation measurable without a new hold.
 // Boundary-dependent repair fixtures above are also represented by their recovered
 // wire form here; a synthetic newline is not a genuine byte in that wire form.
 #[test]
@@ -400,32 +523,56 @@ fn every_byte_partition_preserves_client_events() {
         b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"failed\"}}}\n\n".to_vec(),
         b"event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n".to_vec(),
         b"data: {\"type\":\"response.metadata\",\"bad\":\n\n".to_vec(),
+        b"event: response.completed\ndata: {\"type\":\"response.completed\"}\nid: terminal\nretry: 1000\n\n".to_vec(),
     ];
     for fixture in recovery_fixtures() {
         let bytes: Vec<_> = fixture.iter().map(|chunk| chunk.as_bytes()).collect();
         streams.push(run(true, &bytes).0.into_bytes());
     }
-    fn events(out: &str) -> Vec<(String, Vec<u8>)> {
+    fn events(out: &str) -> Vec<(String, Option<Vec<u8>>, Vec<String>)> {
         out.replace("\r\n", "\n")
             .split("\n\n")
-            .filter_map(|frame| {
-                let data = data_payload(frame.as_bytes())?;
-                Some((event_name(frame.as_bytes()), data))
+            .filter(|frame| !frame.trim().is_empty())
+            .map(|frame| {
+                let fields = frame
+                    .lines()
+                    .filter(|line| {
+                        !line.starts_with("event:")
+                            && !line.starts_with("data:")
+                            && !line.is_empty()
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                (
+                    event_name(frame.as_bytes()),
+                    data_payload(frame.as_bytes()),
+                    fields,
+                )
             })
             .collect()
     }
     let mut splits = 0;
+    let mut mismatches = Vec::new();
     for (i, wire) in streams.iter().enumerate() {
         for codex in [false, true] {
             let want = events(&run(codex, &[wire]).0);
+            let bytes: Vec<_> = wire.chunks(1).collect();
+            if events(&run(codex, &bytes).0) != want {
+                mismatches.push(format!("stream={i} codex={codex} bytewise"));
+            }
+            splits += 1;
             for a in 0..=wire.len() {
                 let got = events(&run(codex, &[&wire[..a], &wire[a..]]).0);
-                assert_eq!(got, want, "stream={i} codex={codex} split={a}");
+                if got != want {
+                    mismatches.push(format!("stream={i} codex={codex} split={a}"));
+                }
                 splits += 1;
                 if wire.len() <= 60 {
                     for b in a..=wire.len() {
                         let got = events(&run(codex, &[&wire[..a], &wire[a..b], &wire[b..]]).0);
-                        assert_eq!(got, want, "stream={i} codex={codex} splits={a},{b}");
+                        if got != want {
+                            mismatches.push(format!("stream={i} codex={codex} splits={a},{b}"));
+                        }
                         splits += 1;
                     }
                 }
@@ -433,8 +580,14 @@ fn every_byte_partition_preserves_client_events() {
         }
     }
     eprintln!(
-        "partition invariant: {} streams, {splits} partitions, {:?}",
+        "partition invariant: {} streams, {splits} partitions, {} mismatches, {:?}",
         streams.len(),
+        mismatches.len(),
         started.elapsed()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "first mismatches: {:?}",
+        &mismatches[..mismatches.len().min(8)]
     );
 }

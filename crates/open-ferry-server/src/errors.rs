@@ -91,10 +91,7 @@ impl ErrorMessage {
     /// deadline outranks raw add-ons even after it has expired.
     pub(crate) fn response_headers(&self, passthrough: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        let retry_after = match &self.source {
-            Some(source) => source.retry_after_header(),
-            None => self.retry_after.clone(),
-        };
+        let retry_after = self.source.as_ref().and_then(ExecError::retry_after_header);
         if let Some(value) = retry_after {
             headers.append(header::RETRY_AFTER, value);
         }
@@ -609,18 +606,24 @@ mod tests {
     }
 
     #[test]
-    fn retry_headers_without_source_keep_addon_replacement() {
+    fn retry_headers_without_source_ignore_the_cached_hint() {
         let mut message = ErrorMessage::new(503, "busy");
         message.retry_after = Some(HeaderValue::from_static("5"));
         message
             .addon
             .insert(header::RETRY_AFTER, HeaderValue::from_static("888"));
-        for (passthrough, expected) in [(false, "5"), (true, "888")] {
+        for (passthrough, expected) in [(false, None), (true, Some("888"))] {
             for response in [
                 openai_error_response(&message, passthrough),
                 claude_error_response(&message, passthrough),
             ] {
-                assert_eq!(response.headers()[header::RETRY_AFTER], expected);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .map(|value| value.to_str().unwrap()),
+                    expected
+                );
             }
         }
     }
@@ -682,10 +685,10 @@ mod tests {
         }
     }
 
-    // Group A owns the pinned core's zero-wait override bug. This direct-error
-    // contract test must be enabled after their next round; no manager path is used.
+    // Only auth-unavailable zero waits are untrusted; model cooldowns retain
+    // their safe Retry-After: 0, matching upstream.
     #[test]
-    #[ignore = "requires group A's positive-only has_retry_after_override contract"]
+    #[ignore = "group A's zero-wait auth-unavailable fix landed on p47-auth after this base; integration unignores it"]
     fn retry_headers_zero_unavailable_wait_allows_raw_passthrough() {
         let mut error = ExecError::auth_unavailable(Duration::ZERO);
         error
