@@ -111,6 +111,21 @@ async fn http_fragmented_metadata_json_colon_is_joined_then_filtered() {
 // Rust cancellation drops the owning future/stream; it is not a second ready
 // channel competing with EOF as in Go's select. Verify both HTTP ownership points.
 #[tokio::test]
+async fn dropping_http_bootstrap_releases_the_provider_before_first_payload() {
+    for _ in 0..200 {
+        let (app, dispatcher) = app(
+            ServerConfig::default(),
+            vec![Outcome::Hang(HeaderMap::new(), vec![])],
+        );
+        let mut request = Box::pin(app.oneshot(post("/v1/responses", STREAM, None)));
+        assert!(futures_util::poll!(&mut request).is_pending());
+        assert_eq!(dispatcher.live_streams(), 1);
+        drop(request);
+        assert_eq!(dispatcher.live_streams(), 0);
+    }
+}
+
+#[tokio::test]
 async fn dropping_http_body_releases_the_provider_after_first_payload() {
     for _ in 0..200 {
         let (app, dispatcher) = app(
