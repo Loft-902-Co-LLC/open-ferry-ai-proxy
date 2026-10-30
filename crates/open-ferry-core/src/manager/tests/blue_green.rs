@@ -1317,9 +1317,9 @@ async fn assert_next_401_adopts_disk_tokens(env: &Env) {
     );
 }
 
-// L27 is Codex-only: an admitted non-Codex save still replaces disk tokens.
+// Round 4: a non-Codex policy save also merges only owed fields into fresh disk.
 #[tokio::test(start_paused = true)]
-async fn an_admitted_non_codex_save_overwrites_the_tokens_on_disk() {
+async fn an_admitted_non_codex_policy_save_keeps_unobserved_disk_tokens() {
     let dir = tempfile::tempdir().expect("temp dir");
     let files = Arc::new(FileStore::new(dir.path()));
     let gate = ActiveGate::open();
@@ -1356,8 +1356,8 @@ async fn an_admitted_non_codex_save_overwrites_the_tokens_on_disk() {
         .expect("credential");
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("file")).expect("json");
-    assert_eq!(saved["access_token"], "access-0");
-    assert_eq!(saved["refresh_token"], "refresh-0");
+    assert_eq!(saved["access_token"], "access-9");
+    assert_eq!(saved["refresh_token"], "refresh-9");
     assert_eq!(saved["note"], "kept");
     assert_eq!(
         access_token(&manager.get(&registered.id).unwrap()),

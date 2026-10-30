@@ -31,7 +31,7 @@ fn round3_failed_policy_save_keeps_only_owed_fields_for_every_provider() {
             json!({
                 "access_token":"dummy-before", "disabled":false,
                 "siwc":{"access_token":"dummy-sibling", "note":"before"},
-                "removed-by-operator":"before"
+                "removed-by-operator":"before", "operator-note":"before"
             }),
         );
         if typed {
@@ -43,7 +43,10 @@ fn round3_failed_policy_save_keeps_only_owed_fields_for_every_provider() {
             .manager
             .edit_at_epoch("policy", initial.registration_epoch, |auth| {
                 disable(auth)?;
-                auth.metadata["siwc"]["note"] = json!("operator");
+                if provider != "codex" {
+                    auth.metadata["siwc"]["note"] = json!("operator");
+                }
+                auth.metadata["operator-note"] = json!("operator");
                 auth.metadata.remove("removed-by-operator");
                 Ok::<_, ()>(true)
             })
@@ -72,7 +75,15 @@ fn round3_failed_policy_save_keeps_only_owed_fields_for_every_provider() {
                 live.metadata["siwc"]["access_token"],
                 "dummy-sibling-external"
             );
-            assert_eq!(live.metadata["siwc"]["note"], "operator");
+            assert_eq!(live.metadata["operator-note"], "operator");
+            assert_eq!(
+                live.metadata["siwc"]["note"],
+                if provider == "codex" {
+                    "before"
+                } else {
+                    "operator"
+                }
+            );
             assert_eq!(live.metadata["unrelated"], "outside");
             assert!(!live.metadata.contains_key("removed-by-operator"));
         }
@@ -468,4 +479,381 @@ fn round3_token_command_reads_through_pending_policy_debt() {
     let disk = store.read_back(&live).unwrap().unwrap();
     assert!(disk.disabled);
     assert_eq!(disk.outer_access_token(), "dummy-login");
+}
+
+// Round 4 uses a real FileStore, with a reversible file-authorization failure
+// as the initial I/O failure. No watcher observation runs before retry_now().
+struct FilePolicyRig {
+    _dir: tempfile::TempDir,
+    store: Arc<FileStore>,
+    refuse: Arc<AtomicBool>,
+    manager: Manager,
+    initial: Arc<Auth>,
+}
+
+impl FilePolicyRig {
+    fn new(provider: &str, typed: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let failure = refuse.clone();
+        let store = Arc::new(FileStore::new(dir.path()).with_file_guard(Some(
+            crate::auth::file_guard::FileGuard::new(move |_| {
+                if failure.load(Ordering::SeqCst) {
+                    Err("test save refusal".into())
+                } else {
+                    Ok(())
+                }
+            }),
+        )));
+        let mut auth = auth_with_metadata(
+            "policy.json",
+            provider,
+            json!({
+                "access_token":"dummy-before", "refresh_token":"dummy-refresh",
+                "siwc":{"access_token":"dummy-nested", "refresh_token":"dummy-nested-refresh", "note":"before"},
+                "use_siwc":true, "disabled":false, "note":"before", "keep":"before", "remove":"before"
+            }),
+        );
+        if typed {
+            auth.metadata.insert("type".into(), json!(provider));
+        }
+        auth.file_name = auth.id.clone();
+        // A fixture with an existing SIWC partition, rather than an outer login.
+        store.save(&auth).unwrap();
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(store.clone()),
+        );
+        let initial = manager.register_unsaved(auth).unwrap();
+        Self {
+            _dir: dir,
+            store,
+            refuse,
+            manager,
+            initial,
+        }
+    }
+
+    fn disk(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self._dir.path().join("policy.json")).unwrap())
+            .unwrap()
+    }
+
+    fn outside_write(&self, edit: impl FnOnce(&mut serde_json::Value)) {
+        let mut disk = self.disk();
+        edit(&mut disk);
+        std::fs::write(
+            self._dir.path().join("policy.json"),
+            serde_json::to_vec(&disk).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn retry_now(&self) {
+        self.refuse.store(false, Ordering::SeqCst);
+        let live = self.manager.get("policy.json").unwrap();
+        let discard = self.manager.lock().auths["policy.json"].discard_epoch;
+        assert!(matches!(
+            self.manager
+                .persist(
+                    &live,
+                    live.registration_epoch,
+                    live.generation,
+                    discard,
+                    crate::manager::lifecycle::Save::Yes
+                )
+                .unwrap(),
+            crate::manager::Persisted::Written { .. }
+        ));
+    }
+
+    fn observe(&self) {
+        // Gemini and untyped credentials are synthesized by service watchers;
+        // supply the equivalent record directly, keeping real file bytes.
+        let mut observed = self.initial.as_ref().clone();
+        observed.metadata = self.disk().as_object().unwrap().clone();
+        observed.disabled = observed.metadata["disabled"].as_bool().unwrap();
+        observed.status = if observed.disabled {
+            Status::Disabled
+        } else {
+            Status::Active
+        };
+        assert!(matches!(
+            self.manager
+                .adopt_observed(&self.initial, None, |_| Ok(AdoptionRead::Record(observed)))
+                .unwrap(),
+            AdoptionResult::Published { .. }
+        ));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_retry_preserves_an_unobserved_outside_rotation_and_settings() {
+    for (provider, typed) in [
+        ("claude", true),
+        ("codex", true),
+        ("gemini", true),
+        ("claude", false),
+    ] {
+        let rig = FilePolicyRig::new(provider, typed);
+        rig.refuse.store(true, Ordering::SeqCst);
+        rig.manager
+            .edit("policy.json", |auth| {
+                disable(auth)?;
+                auth.metadata["note"] = json!("operator");
+                Ok::<_, ()>(true)
+            })
+            .unwrap();
+        assert!(
+            rig.manager.lock().auths["policy.json"]
+                .policy_save
+                .is_some()
+        );
+        rig.outside_write(|disk| {
+            disk["access_token"] = json!("dummy-outside");
+            disk["refresh_token"] = json!("dummy-outside-refresh");
+            disk["siwc"]["access_token"] = json!("dummy-outside-nested");
+            disk["note"] = json!("outside");
+            disk["unrelated-setting"] = json!({"new":true});
+            disk["proxy_url"] = json!("http://example.invalid:80");
+        });
+        assert_eq!(
+            rig.manager.get("policy.json").unwrap().metadata["access_token"],
+            "dummy-before",
+            "the watcher observation is deliberately held back"
+        );
+        rig.retry_now();
+        let disk = rig.disk();
+        assert_eq!(disk["access_token"], "dummy-outside", "{provider}");
+        assert_eq!(disk["refresh_token"], "dummy-outside-refresh", "{provider}");
+        assert_eq!(
+            disk["siwc"]["access_token"], "dummy-outside-nested",
+            "{provider}"
+        );
+        assert_eq!(
+            disk["note"], "outside",
+            "a conflicting file field also wins before observation"
+        );
+        assert_eq!(disk["unrelated-setting"], json!({"new":true}));
+        assert_eq!(disk["proxy_url"], "http://example.invalid:80");
+        assert_eq!(disk["disabled"], true);
+        assert!(
+            rig.manager.lock().auths["policy.json"]
+                .policy_save
+                .is_none()
+        );
+        rig.observe();
+        let live = rig.manager.get("policy.json").unwrap();
+        assert!(live.disabled);
+        assert_eq!(live.metadata["access_token"], "dummy-outside");
+        assert_eq!(live.metadata["note"], "outside");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_coverage_uses_the_real_codex_commit_not_the_submission() {
+    let rig = FilePolicyRig::new("codex", true);
+    rig.refuse.store(true, Ordering::SeqCst);
+    // Configuration saves protect the file's OAuth partition. Even an
+    // accepted token edit must not be falsely acknowledged as durable.
+    rig.manager
+        .edit("policy.json", |auth| {
+            disable(auth)?;
+            auth.metadata["access_token"] = json!("dummy-submitted");
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+    rig.retry_now();
+    assert_eq!(rig.disk()["access_token"], "dummy-before");
+    assert_eq!(
+        rig.disk()["disabled"],
+        true,
+        "the supported policy leaf was written"
+    );
+    assert!(
+        rig.manager.lock().auths["policy.json"]
+            .policy_save
+            .is_some(),
+        "a successful transaction does not cover a value FileStore protected instead"
+    );
+    assert_eq!(
+        rig.manager.get("policy.json").unwrap().metadata["access_token"],
+        "dummy-submitted"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_unwritable_codex_siwc_edits_are_refused_before_publication() {
+    for field in ["siwc-note", "siwc-delete", "use-siwc-delete"] {
+        let rig = FilePolicyRig::new("codex", true);
+        let before = rig.disk();
+        let live = rig.manager.get("policy.json").unwrap();
+        let result = rig.manager.edit("policy.json", |auth| {
+            match field {
+                "siwc-note" => {
+                    auth.metadata["siwc"]["note"] = json!("operator");
+                }
+                "siwc-delete" => {
+                    auth.metadata.remove("siwc");
+                }
+                _ => {
+                    auth.metadata.remove("use_siwc");
+                }
+            }
+            Ok::<_, ()>(true)
+        });
+        assert!(result.is_err(), "{field}");
+        let after = rig.manager.get("policy.json").unwrap();
+        assert_eq!(after.generation, live.generation);
+        assert_eq!(after.metadata, live.metadata);
+        assert_eq!(rig.disk(), before);
+        assert!(
+            rig.manager.lock().auths["policy.json"]
+                .policy_save
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_a_hand_edit_wins_only_the_conflicting_owed_leaves() {
+    let rig = FilePolicyRig::new("claude", true);
+    rig.refuse.store(true, Ordering::SeqCst);
+    rig.manager
+        .edit("policy.json", |auth| {
+            disable(auth)?;
+            auth.metadata["note"] = json!("operator");
+            auth.metadata["keep"] = json!("operator");
+            auth.metadata.remove("remove");
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+    // A second operator edit must still compare to the original file baseline.
+    rig.manager
+        .edit("policy.json", |auth| {
+            auth.metadata["note"] = json!("second-operator");
+            Ok::<_, ()>(true)
+        })
+        .unwrap();
+    rig.outside_write(|disk| {
+        disk["note"] = json!("hand-edited");
+        disk["remove"] = json!("manually-restored");
+        disk["access_token"] = json!("dummy-manual-rotation");
+    });
+    rig.observe();
+    let live = rig.manager.get("policy.json").unwrap();
+    assert_eq!(live.metadata["note"], "hand-edited");
+    assert_eq!(live.metadata["remove"], "manually-restored");
+    assert_eq!(
+        live.metadata["keep"], "operator",
+        "unchanged baseline still owes the edit"
+    );
+    assert!(live.disabled);
+    assert!(
+        rig.manager.lock().auths["policy.json"]
+            .policy_save
+            .is_some()
+    );
+    rig.retry_now();
+    let disk = rig.disk();
+    assert_eq!(disk["note"], "hand-edited");
+    assert_eq!(disk["remove"], "manually-restored");
+    assert_eq!(disk["keep"], "operator");
+    assert_eq!(disk["access_token"], "dummy-manual-rotation");
+    assert_eq!(disk["disabled"], true);
+    assert!(
+        rig.manager.lock().auths["policy.json"]
+            .policy_save
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_policy_transaction_returns_the_protected_siwc_representation() {
+    for bound in [false, true] {
+        let rig = FilePolicyRig::new("codex", true);
+        let before = rig.disk();
+        let mut submitted = rig.initial.as_ref().clone();
+        submitted.metadata["siwc"]["note"] = json!("submitted");
+        submitted.metadata.remove("use_siwc");
+        let mut apply = |current: &mut Auth, fresh: bool| {
+            assert!(fresh);
+            current.metadata["siwc"]["note"] = json!("submitted");
+            current.metadata.remove("use_siwc");
+            current.disabled = true;
+        };
+        // Direct store callers can still submit protected values. Its result
+        // must describe what landed, never claim these unsupported values did.
+        let committed = if bound {
+            let origin = CodexOrigin::of(&rig._dir.path().join("policy.json")).unwrap();
+            let (path, committed) = rig
+                .store
+                .save_policy_bound(&submitted, &origin, &mut apply, &mut |_, _| {
+                    panic!("same-file save was refused")
+                })
+                .unwrap();
+            assert!(path.is_some_and(|path| !path.is_empty()));
+            committed.unwrap()
+        } else {
+            let (outcome, committed) = rig
+                .store
+                .save_policy_guarded(&submitted, &mut apply, &mut |_| Ok(Default::default()))
+                .unwrap();
+            assert!(matches!(outcome, crate::auth::GuardedSave::Written(path) if !path.is_empty()));
+            committed.unwrap()
+        };
+        assert_eq!(committed.metadata["siwc"], before["siwc"]);
+        assert_eq!(committed.metadata["use_siwc"], before["use_siwc"]);
+        assert_eq!(
+            serde_json::Value::Object(committed.metadata.clone()),
+            rig.disk()
+        );
+        assert!(committed.disabled);
+        assert_eq!(committed.status, Status::Disabled);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_policy_transaction_keeps_guard_and_origin_refusals() {
+    let rig = FilePolicyRig::new("codex", true);
+    let before = rig.disk();
+    let mut applied = false;
+    let mut apply = |_: &mut Auth, _: bool| {
+        applied = true;
+    };
+    let (outcome, committed) = rig
+        .store
+        .save_policy_guarded(&rig.initial, &mut apply, &mut |_| {
+            Err(crate::auth::SaveDeferral::Stale)
+        })
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::auth::GuardedSave::Deferred(crate::auth::SaveDeferral::Stale)
+    ));
+    assert!(committed.is_none());
+    assert!(!applied, "policy application must follow admission");
+    let other = tempfile::tempdir().unwrap();
+    let origin = CodexOrigin::of(&other.path().join("policy.json")).unwrap();
+    let mut refused = false;
+    let mut applied = false;
+    let (path, committed) = rig
+        .store
+        .save_policy_bound(
+            &rig.initial,
+            &origin,
+            &mut |_, _| {
+                applied = true;
+            },
+            &mut |_, _| {
+                refused = true;
+            },
+        )
+        .unwrap();
+    assert!(refused);
+    assert!(!applied);
+    assert!(path.is_none());
+    assert!(committed.is_none());
+    assert_eq!(rig.disk(), before);
 }
