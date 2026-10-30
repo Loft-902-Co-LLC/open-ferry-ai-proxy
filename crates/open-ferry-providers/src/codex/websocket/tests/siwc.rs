@@ -72,7 +72,7 @@ fn attempted_options(session: &str, ids: bool) -> Options {
     }
     opts.headers.insert(
         "user-agent",
-        HeaderValue::from_static("codex_cli_rs/1 (Mac OS)"),
+        HeaderValue::from_static("ordinary-client/1 (Mac OS)"),
     );
     opts.headers.insert(
         "x-responsesapi-include-timing-metrics",
@@ -594,4 +594,66 @@ async fn siwc_websocket_collapses_updates_and_preserves_suffix_effort() {
             assert_eq!(body["prompt_cache_key"], "siwc-update-session");
         }
     }
+}
+
+#[tokio::test]
+async fn r2_request_mode_is_part_of_reuse_identity_even_when_bearers_are_equal() {
+    let server = Server::turns(&[COMPLETED]).await;
+    let executor = executor_with(Config::default());
+    let mut auth = credential(&format!("{}/v1", server.url));
+    auth.attributes.remove("api_key");
+    auth.attributes.remove("header:authorization");
+    auth.metadata.insert("access_token".into(), json!(TOKEN));
+    let auth = Arc::new(auth);
+    let before = auth.metadata.clone();
+    for (i, agent) in [
+        "ordinary-client/1",
+        "codex_cli_rs/1",
+        "codex-rs/1",
+        "ordinary-client/1",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut opts = attempted_options("request-mode-reuse", false);
+        opts.headers
+            .insert("user-agent", HeaderValue::from_str(agent).unwrap());
+        let response = executor
+            .execute_stream(auth.clone(), request("gpt-5-codex", BODY), opts)
+            .await
+            .unwrap();
+        assert!(collect(response).await.1.is_none());
+        assert_eq!(server.record().handshakes.len(), [1, 2, 2, 3][i]);
+    }
+    assert_eq!(auth.metadata, before);
+    executor.close_execution_session("request-mode-reuse");
+}
+
+#[tokio::test]
+async fn r2_native_websocket_missing_outer_fails_before_dialing() {
+    let server = Server::turns(&[COMPLETED]).await;
+    let mut auth = credential(&format!("{}/v1", server.url));
+    auth.attributes.remove("api_key");
+    auth.metadata.remove("access_token");
+    for agent in [
+        "codex-desktop",
+        "Codex Desktop",
+        "codex-rs",
+        "codex_cli_rs",
+        "codex-tui",
+        "codex_exec",
+        " CODEX-RS ",
+    ] {
+        let mut opts = attempted_options("missing-outer-ws", false);
+        opts.headers
+            .insert("user-agent", HeaderValue::from_str(agent).unwrap());
+        let result = executor_with(Config::default())
+            .execute_stream(Arc::new(auth.clone()), request("gpt-5-codex", BODY), opts)
+            .await;
+        match result {
+            Err(error) => assert_eq!(error.status, 401),
+            Ok(_) => panic!("nested bearer substituted for missing outer"),
+        }
+    }
+    assert!(server.record().handshakes.is_empty());
 }

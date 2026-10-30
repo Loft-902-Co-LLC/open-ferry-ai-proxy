@@ -340,3 +340,48 @@ async fn siwc_live_queued_create_rechecks_after_rotation() {
     );
     executor.close_execution_session("live-messages");
 }
+
+#[tokio::test]
+async fn r2_native_duplex_turns_ignore_persisted_mode_changes_and_nested_rotation() {
+    for kind in ["response.create", "response.append", "response.steer"] {
+        let server = Server::start(|_| {
+            Answer::accept(|mut peer| async move {
+                if peer.recv().await.is_none() {
+                    return;
+                }
+                peer.send(CREATED).await;
+                if peer.recv().await.is_some() {
+                    peer.send(ACCEPTED).await;
+                }
+                peer.hold().await;
+            })
+        })
+        .await;
+        let executor = steering_executor();
+        let auth = equal_token_auth(&format!("{}/v1", server.url), true);
+        let live = Arc::new(RwLock::new(Arc::new(auth.clone())));
+        let (tx, mut opts) = options(&live);
+        opts.headers
+            .insert("user-agent", HeaderValue::from_static("codex-rs/1"));
+        let mut chunks = executor
+            .execute_stream(Arc::new(auth), request("gpt-5-codex", BODY), opts)
+            .await
+            .unwrap()
+            .chunks;
+        event(&mut chunks, "response.created").await;
+        let mut next = (**live.read().unwrap()).clone();
+        next.metadata.insert("use_siwc".into(), json!(false));
+        next.metadata["siwc"]["access_token"] = json!("rotated-unused-nested");
+        *live.write().unwrap() = Arc::new(next);
+        tx.send(InputFrame::Payload(Bytes::from(format!(
+            r#"{{"type":"{kind}","previous_response_id":"resp-1","input":[]}}"#
+        ))))
+        .await
+        .unwrap();
+        event(&mut chunks, "response.steer.accepted").await;
+        assert_eq!(server.record().messages.len(), 2);
+        drop(tx);
+        drop(chunks);
+        executor.close_execution_session("live-messages");
+    }
+}

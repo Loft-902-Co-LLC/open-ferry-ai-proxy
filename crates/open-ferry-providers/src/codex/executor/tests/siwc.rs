@@ -284,13 +284,13 @@ async fn siwc_websockets_enabled_routes_to_websocket_and_missing_token_sends_not
 fn siwc_ids_are_independent_and_the_default_base_is_openai() {
     let mut auth = siwc_auth("");
     assert_eq!(
-        endpoint(&auth, DEFAULT_BASE_URL, false),
+        endpoint(&auth, &HeaderMap::new(), DEFAULT_BASE_URL, false),
         "https://api.openai.com/v1/responses"
     );
     auth.attributes
         .insert("base_url".into(), "http://127.0.0.1:9/v1".into());
     assert_eq!(
-        endpoint(&auth, DEFAULT_BASE_URL, true),
+        endpoint(&auth, &HeaderMap::new(), DEFAULT_BASE_URL, true),
         "http://127.0.0.1:9/v1/responses/compact"
     );
     for name in ["session_id", "x-client-request-id"] {
