@@ -346,7 +346,14 @@ fn unwrap_dispatcher_arguments(
         return None;
     }
     if !namespace.is_empty() {
-        if refs
+        if let Some(reference) = refs
+            .get(namespace)
+            .filter(|reference| reference.is_dispatcher && !reference.children.is_empty())
+        {
+            if !reference.children.contains(&child) {
+                return None;
+            }
+        } else if refs
             .get(&tools::qualify(namespace, &child))
             .is_some_and(|reference| reference.is_dispatcher)
         {

@@ -384,7 +384,7 @@ fn simplifies_references_too_large_to_inline() {
     let namespace = json!({"type": "namespace", "name": "mcp__deep", "tools": [
         {"type": "function", "name": "deep", "parameters": doubling_parameters(40)},
     ]});
-    let tool = dispatcher(&namespace).expect("dispatcher");
+    let tool = dispatcher(&namespace, &[]).expect("dispatcher");
     let description = tool["description"].as_str().expect("description");
     assert!(
         description.ends_with(&format!(
@@ -504,7 +504,7 @@ fn dispatcher_lists_children() {
             {"type":"function","name":"  "}
         ]}"##,
     );
-    let tool = dispatcher(&namespace).expect("dispatcher");
+    let tool = dispatcher(&namespace, &[]).expect("dispatcher");
     assert_eq!(
         tool["description"],
         "Docs.\n\nAvailable tools in this namespace:\n\
@@ -521,16 +521,19 @@ fn dispatcher_lists_children() {
         )
     );
 
-    let empty = dispatcher(&json!({"type": "namespace", "name": "bare"})).expect("dispatcher");
+    let empty = dispatcher(&json!({"type": "namespace", "name": "bare"}), &[]).expect("dispatcher");
     assert_eq!(empty["description"], "Tools in namespace bare.");
     assert!(!exists(&empty, "parameters.properties.name.enum"));
     let undescribed =
-        dispatcher(&json!({"name": "ns", "tools": [{"name": "a"}]})).expect("dispatcher");
+        dispatcher(&json!({"name": "ns", "tools": [{"name": "a"}]}), &[]).expect("dispatcher");
     assert_eq!(
         undescribed["description"],
         "Tools in namespace ns.\n\nAvailable tools in this namespace:\n- a"
     );
-    assert_eq!(dispatcher(&json!({"type": "namespace", "name": " "})), None);
+    assert_eq!(
+        dispatcher(&json!({"type": "namespace", "name": " "}), &[]),
+        None
+    );
 }
 
 // TestNormalizeXAINamespaceToolChoice_WhenFolding.
@@ -581,6 +584,7 @@ fn clamp_keeps_dispatchers_over_regular_tools() {
                 namespace: name.clone(),
                 name: String::new(),
                 is_dispatcher: true,
+                children: HashSet::new(),
             },
         );
         tools.push(json!({"type": "function", "name": name, "parameters": {"type": "object"}}));
