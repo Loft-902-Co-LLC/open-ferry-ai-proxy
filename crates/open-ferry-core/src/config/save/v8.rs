@@ -794,8 +794,16 @@ pub(crate) fn restore_v8_layout(
         yaml_path_mut(root, "upstream.codex"),
     ) && original.kind == Kind::Mapping
         && current.kind == Kind::Mapping
+        && current.pairs().any(|(key, _)| {
+            matches!(
+                key.value.as_str(),
+                "websocket-compression"
+                    | "upstream-request-compression"
+                    | "upstream-request-compression-min-bytes"
+            )
+        })
     {
-        // Existing keys keep their order; newly migrated keys follow V8_PATHS.
+        // Compression migration keeps existing keys in place; new keys follow V8_PATHS.
         let mut pairs = current.content.as_chunks::<2>().0.to_vec();
         pairs
             .sort_by_key(|[key, _]| find_map_key_index(original, &key.value).unwrap_or(usize::MAX));
