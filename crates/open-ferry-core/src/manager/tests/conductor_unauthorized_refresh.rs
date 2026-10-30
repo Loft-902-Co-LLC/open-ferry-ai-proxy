@@ -356,6 +356,7 @@ async fn stream_401_preserves_failure_backoff_and_throttles_recent_refreshes() {
         h.manager.mark_result(&CallResult {
             auth_id: PRIMARY.into(),
             model: MODEL.into(),
+            access_token: h.get(PRIMARY).access_token().to_owned(),
             error: Some(AuthError {
                 http_status: 401,
                 message: INVALIDATED.into(),
