@@ -937,9 +937,11 @@ Deviations, each also noted in its module:
 
 A status or field change attempts to save the credential's file, then is applied by the service, which registers the credential's models again, so a credential turned back on gets its models back. The credential lock is never held while the service applies a change. A refresh refreshes one credential at a time per ID, and refreshing all of them runs at most the manager's `refresh_workers` at once. As upstream, the refresh answer holds the refreshed credential's tokens; the route is behind the management key.
 
-**Failed credential-file saves behave the same as upstream.** An ordinary save failure is logged with its cause, while otherwise valid status and fields edits return HTTP 200. The change stays in memory only, and its own runtime sync keeps that memory change. A later genuine read of the file, for example after an outside edit or a restart, restores the file's contents. A disable reported as successful can therefore come back enabled if saving failed. Fix file permissions or locks and repeat the ordinary change.
+**Failed credential-file saves behave as upstream.** The failure is logged with its cause, and a status or fields change still returns success. The change stays in memory only, so a later read of the file, for example after an outside edit or a restart, brings back the file's contents. A disable reported as successful can therefore come back enabled if its save failed. Fix the file's permissions or locks and repeat the change.
 
-If saving a rotated OAuth refresh token fails, the next read of the file can bring back the old, already-used token. The account then needs signing in again. This is upstream behavior too.
+Except for Codex, if saving a refreshed OAuth token fails, the next read of the file can bring back the old, already-used token, and the account then needs signing in again. Upstream behaves the same. Codex keeps a failed token update and applies it again when the file is next read.
+
+Open Ferry rereads a credential file when it changes. The reread waits while a status or fields change, or a refresh that got new tokens, is being saved. It doesn't wait for saves after requests, or for cooldown and quota saves; upstream waits for every save. A hand edit made during traffic can therefore be overwritten in the file by an older save, while memory keeps your values, until the next save writes them back or a restart loads the older file. Edit credential files while the account is idle, and check the file afterwards.
 
 Deviations, each also noted in its module:
 
