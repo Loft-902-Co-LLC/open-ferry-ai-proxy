@@ -3,6 +3,7 @@ use serde_json::json;
 
 mod closure;
 mod followups;
+mod paths;
 mod relabel;
 mod review_r13;
 

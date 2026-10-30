@@ -420,7 +420,7 @@ impl Baseline {
         }
         let mut markdown = format!(
             "\n### Config-save baseline ratchet\n\nBaseline: `{}`. Different remains Different; this budget grants no certification.\n\n",
-            path.display()
+            repository_path(path)
         );
         let _ = writeln!(
             markdown,
@@ -641,6 +641,36 @@ fn relabel_with_sources(
     );
     baseline.validate(current)?;
     write(path, &baseline)
+}
+
+/// Keep machine-specific paths out of generated repository documents.
+fn repository_path(path: &Path) -> String {
+    fn root(path: &Path) -> Option<&Path> {
+        path.ancestors().find(|parent| parent.join(".git").exists())
+    }
+
+    // Accept either separator even on Unix, and resolve symlinks and `..`
+    // before deciding whether the file is inside the repository.
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let path = Path::new(&normalized);
+    if let Ok(canonical) = path.canonicalize() {
+        let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
+        let repository = cwd
+            .as_deref()
+            .ok()
+            .and_then(root)
+            .or_else(|| root(&canonical));
+        if let Some(relative) = repository.and_then(|root| canonical.strip_prefix(root).ok()) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+    }
+    // Missing/unresolvable paths must also fail closed, never exposing a drive
+    // or a parent directory. Splitting ':' covers foreign Windows drive paths.
+    normalized
+        .rsplit(['/', ':'])
+        .find(|part| !part.is_empty() && *part != "." && *part != "..")
+        .unwrap_or("baseline")
+        .to_owned()
 }
 
 pub fn observations(paths: &[PathBuf]) -> Result<Vec<Observation>> {
