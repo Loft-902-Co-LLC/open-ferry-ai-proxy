@@ -219,6 +219,7 @@ pub fn stepwise(
             return Ok(None);
         }
         let (certified_go, proof) = match original.outcome {
+            Outcome::KnownDifference(_) => return Ok(None),
             Outcome::Identical => (go.clone(), evidence(&single, &single, &go, &go, rust, rust)),
             Outcome::Equivalent(found) => {
                 deviations.extend(found);

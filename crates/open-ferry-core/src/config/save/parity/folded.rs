@@ -244,6 +244,73 @@ pub fn folded_scalar_reencode(
     prove(sources, go, rust, configs, paths, passes) == Some(true)
 }
 
+/// A separate known difference, never an equivalence: only extra trailing LF
+/// bytes in keep-chomped scalars may differ from the source-preserving output.
+pub fn extra_keep_chomped_newlines(source: &str, go: &str, rust: &str) -> bool {
+    fn prove(source: &str, go: &str, rust: &str) -> Option<bool> {
+        let source_node = root(source)?;
+        let rust_node = root(rust)?;
+        let mut source_values = Vec::new();
+        let mut rust_values = Vec::new();
+        at_path(&source_node, &[], &mut source_values);
+        at_path(&rust_node, &[], &mut rust_values);
+        let (ss, gs, rs) = (scalars(source)?, scalars(go)?, scalars(rust)?);
+        if gs.len() != rs.len() {
+            return None;
+        }
+        let mut fixed = String::new();
+        let mut last = 0;
+        let mut changed = false;
+        for (g, r) in gs.iter().zip(&rs) {
+            let (graw, rraw) = (go.get(g.start..g.end)?, rust.get(r.start..r.end)?);
+            if graw == rraw {
+                continue;
+            }
+            let (path, value) = rust_values
+                .iter()
+                .find(|(_, n)| n.line == r.line && n.column == r.column)?;
+            let original = source_values.iter().find(|(p, _)| p == path)?.1;
+            let source_scalar = ss
+                .iter()
+                .find(|s| s.line == original.line && s.column == original.column)?;
+            let keep = |text: &str| {
+                text.lines().next().is_some_and(|header| {
+                    let indicator = header
+                        .bytes()
+                        .take_while(|b| matches!(b, b'>' | b'|' | b'+' | b'-' | b'1'..=b'9'))
+                        .collect::<Vec<_>>();
+                    indicator.contains(&b'+')
+                })
+            };
+            let extra = g.value.strip_prefix(&original.value)?;
+            let raw_extra = graw.strip_prefix(rraw)?;
+            if original.tag != STR_TAG
+                || value.tag != STR_TAG
+                || original.value != r.value
+                || !matches!(g.style, ScalarStyle::Literal | ScalarStyle::Folded)
+                || g.style != r.style
+                || source_scalar.style != r.style
+                || !keep(source.get(source_scalar.start..source_scalar.end)?)
+                || !keep(graw)
+                || !keep(rraw)
+                || extra.is_empty()
+                || !extra.bytes().all(|b| b == b'\n')
+                || raw_extra != extra
+                || g.start < last
+            {
+                return None;
+            }
+            fixed.push_str(go.get(last..g.start)?);
+            fixed.push_str(rraw);
+            last = g.end;
+            changed = true;
+        }
+        fixed.push_str(go.get(last..)?);
+        Some(changed && fixed == rust)
+    }
+    prove(source, go, rust) == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

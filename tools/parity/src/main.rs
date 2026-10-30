@@ -1129,6 +1129,7 @@ fn check(
                         ("equivalent", found.iter().map(|d| d.describe()).collect())
                     }
                     Outcome::Different(_) => ("different", Vec::new()),
+                    Outcome::KnownDifference(_) => ("known", Vec::new()),
                 };
                 let certificate =
                     if translator == Translator::ConfigSave && safe_case_name(&case.name) {
@@ -1258,6 +1259,7 @@ fn run_live(
                 format!("equivalent ({})", names.join(", "))
             }
             Outcome::Different(_) => "DIFFERENT".to_owned(),
+            Outcome::KnownDifference(reason) => format!("known ({reason})"),
         };
         let GoResult::Output(go_body) = go else {
             return Err(format!("upstream panicked on {}", case.name).into());
@@ -1445,6 +1447,7 @@ enum Outcome {
     Identical,
     Equivalent(BTreeSet<Deviation>),
     Different(Vec<Difference>),
+    KnownDifference(&'static str),
 }
 
 struct Evaluated {
@@ -1580,6 +1583,11 @@ fn evaluate_with_whole_counterfactual(
     let Ok(rust) = &evaluated.rust_output else {
         return Ok(evaluated);
     };
+    if let Some(proof) = config_save::keep_chomped::evidence(case, &original_go, rust) {
+        save_counterfactual(work_dir, case, &proof)?;
+        evaluated.outcome = Outcome::KnownDifference(config_save::keep_chomped::REASON);
+        return Ok(evaluated);
+    }
     if let Some(proof) = config_save::folded::evidence(case, &original_go, rust) {
         save_counterfactual(work_dir, case, &proof)?;
         evaluated.outcome =
@@ -1822,6 +1830,10 @@ impl Tally {
                 None
             }
             Outcome::Different(differences) => Some(differences),
+            Outcome::KnownDifference(reason) => {
+                self.known.push((case.name.clone(), reason));
+                return Ok(());
+            }
         };
 
         match (differences, case.known_difference) {

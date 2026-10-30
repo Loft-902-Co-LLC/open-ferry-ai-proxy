@@ -522,6 +522,13 @@ const PLUGINS_REWRITTEN: &str = "upstream writes the plugins section from the co
 
 pub fn steps(upstream: &Path) -> Vec<Case> {
     let mut cases = vec![
+        Case::new("keep-chomped-plugin-text-write-history", "", "").with_options(
+            serde_json::from_str::<Value>(include_str!(
+                "testdata/config-save-keep-chomped-history.json"
+            ))
+            .unwrap()["options"]
+                .clone(),
+        ),
         case(
             "vertex-openapi-roundtrip",
             VERTEX_OPENAPI,
