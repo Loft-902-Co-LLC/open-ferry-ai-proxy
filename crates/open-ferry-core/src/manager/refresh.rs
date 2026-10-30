@@ -1294,6 +1294,9 @@ impl Manager {
                 if protected.contains(failed_partition) {
                     return None;
                 }
+                if let Some(policy) = &entry.policy_save {
+                    policy.overlay(&mut disk);
+                }
                 super::lifecycle::overlay_undurable(&mut disk, &entry.auth, protected);
                 disk.rebase_pending_refreshes_with_origin(
                     &entry.auth,
@@ -1313,6 +1316,9 @@ impl Manager {
                 let auth = Arc::make_mut(&mut entry.auth);
                 let previous = auth.clone();
                 auth.metadata = disk.metadata;
+                if !super::lifecycle::same_observation_policy(&previous, auth) {
+                    auth.policy_generation = auth.generation.saturating_add(1);
+                }
                 auth.codex_pending_refresh = pending;
                 auth.codex_persist_intent = Default::default();
                 auth.preserve_rejected_tokens_from(&previous, false);

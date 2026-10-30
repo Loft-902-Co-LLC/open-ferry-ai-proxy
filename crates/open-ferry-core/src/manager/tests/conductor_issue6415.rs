@@ -304,3 +304,29 @@ async fn refresh_canceled_reschedules_refresh() {
         "next refresh should be scheduled after refresh cancellation"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn round3_non_codex_refresh_with_unchanged_token_clears_rejection() {
+    let h = Harness::new(Default::default());
+    let executor = FakeExecutor::new("claude");
+    executor.set_refresh(|auth| Ok(auth.clone()));
+    h.executor(&executor);
+    h.add(
+        auth_with_metadata(
+            "ordinary",
+            "claude",
+            json!({
+                "type":"claude", "access_token":"dummy-unchanged", "refresh_token":"dummy-refresh"
+            }),
+        ),
+        &[MODEL],
+    );
+    h.manager
+        .mark_rejected_access_token("ordinary", "dummy-unchanged");
+    assert!(!h.get("ordinary").has_valid_access_token(h.now()));
+    let refreshed = h.manager.force_refresh("ordinary").await.unwrap();
+    assert_eq!(refreshed.access_token(), "dummy-unchanged");
+    assert!(refreshed.rejected_access_token.is_empty());
+    assert!(h.get("ordinary").has_valid_access_token(h.now()));
+    assert!(!is_auth_blocked_for_model(&h.get("ordinary"), MODEL, h.now()).0);
+}
