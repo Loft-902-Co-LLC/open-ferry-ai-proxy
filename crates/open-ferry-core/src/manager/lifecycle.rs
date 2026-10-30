@@ -387,6 +387,46 @@ impl Drop for PendingSave {
     }
 }
 
+fn policy_retry_runtime() -> Option<tokio::runtime::Handle> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return Some(handle);
+    }
+    static TIMER: std::sync::OnceLock<Option<tokio::runtime::Handle>> = std::sync::OnceLock::new();
+    TIMER
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .ok()?;
+            let handle = runtime.handle().clone();
+            let worker = std::thread::Builder::new()
+                .name("open-ferry-policy-timer".into())
+                .spawn(move || runtime.block_on(std::future::pending::<()>()))
+                .ok()?;
+            drop(worker);
+            Some(handle)
+        })
+        .clone()
+}
+
+async fn policy_retry_wait(shared: &std::sync::Weak<Shared>, delay: std::time::Duration) {
+    #[cfg(test)]
+    {
+        let test_wait = shared
+            .upgrade()
+            .and_then(|shared| lock(&shared.policy_retry_wait).clone());
+        if let Some((waiting, release)) = test_wait {
+            let _ = waiting.send(delay);
+            if let Ok(permit) = release.acquire().await {
+                permit.forget();
+            }
+            return;
+        }
+    }
+    let _ = shared;
+    tokio::time::sleep(delay).await;
+}
+
 impl Manager {
     /// Counts the snapshot of `id` the caller just published, to be saved
     /// with `save`, as pending until the returned guard drops. Called under
@@ -3236,10 +3276,7 @@ impl Manager {
     }
 
     fn schedule_policy_retry(&self, id: &str, epoch: u64) {
-        let Some(operation) = self.gate().begin_operation().ok() else {
-            return;
-        };
-        let ticket = {
+        let (ticket, first_wait) = {
             let mut state = self.lock();
             let Some(entry) = state.auths.get_mut(id) else {
                 return;
@@ -3250,92 +3287,133 @@ impl Manager {
             let Some(policy) = entry.policy_save.as_mut() else {
                 return;
             };
-            if policy.retry_scheduled || policy.retry_at.is_none_or(|at| at > self.now()) {
+            let Some(at) = policy.retry_at else {
+                return;
+            };
+            if policy.retry_scheduled {
                 return;
             }
             policy.retry_scheduled = true;
             policy.retry_ticket = policy.generation;
-            policy.retry_ticket
+            (
+                policy.retry_ticket,
+                (at - self.now()).to_std().unwrap_or_default(),
+            )
         };
-        let manager = self.clone();
-        let id = id.to_owned();
-        let retry_id = id.clone();
-        let retry = move || {
-            for delay in [100, 500, 2000] {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-                let gate = manager.mutation_gate();
-                let snapshot = {
-                    let state = manager.lock();
-                    state
-                        .auths
-                        .get(&id)
-                        .filter(|entry| {
-                            entry.auth.registration_epoch == epoch
-                                && entry.policy_save.as_ref().is_some_and(|policy| {
-                                    policy.retry_scheduled && policy.retry_ticket == ticket
-                                })
-                        })
-                        .map(|entry| (entry.auth.clone(), entry.discard_epoch))
-                };
-                let Some((snapshot, discard_epoch)) = snapshot else {
-                    return;
-                };
-                // A whole-record/configuration save, using current disk-adopted tokens.
-                let mut writing = snapshot.as_ref().clone();
-                writing.codex_persist_intent = CodexPersistIntent::Configuration;
-                let _ = manager.persist(
-                    &writing,
-                    epoch,
-                    writing.generation,
-                    discard_epoch,
-                    Save::Yes,
-                );
-                drop(gate);
-                if manager.lock().auths.get(&id).is_none_or(|entry| {
-                    entry.auth.registration_epoch != epoch
-                        || entry
-                            .policy_save
-                            .as_ref()
-                            .is_none_or(|policy| policy.retry_ticket != ticket)
-                }) {
-                    return;
-                }
-            }
-            let mut state = manager.lock();
-            if let Some(entry) = state.auths.get_mut(&id)
-                && entry.auth.registration_epoch == epoch
-                && let Some(policy) = entry.policy_save.as_mut()
-                && policy.retry_ticket == ticket
+        let Some(runtime) = policy_retry_runtime() else {
+            let mut state = self.lock();
+            if let Some(policy) = state
+                .auths
+                .get_mut(id)
+                .filter(|entry| entry.auth.registration_epoch == epoch)
+                .and_then(|entry| entry.policy_save.as_mut())
+                .filter(|policy| policy.retry_ticket == ticket)
             {
                 policy.retry_scheduled = false;
-                policy.retry_at = Some(manager.now() + chrono::TimeDelta::seconds(30));
             }
+            drop(state);
+            tracing::warn!("policy-save retry timer could not start");
+            return;
         };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            drop(operation.run_blocking(retry));
-        } else {
-            // No Tokio runtime exists here. The dedicated worker still carries
-            // its admission through scope_blocking; failure leaves the debt owed.
-            match std::thread::Builder::new()
-                .name("open-ferry-policy-retry".into())
-                .spawn(move || operation.scope_blocking(retry))
-            {
-                Ok(worker) => drop(worker),
-                Err(_) => {
-                    let mut state = self.lock();
-                    if let Some(entry) = state.auths.get_mut(&retry_id)
-                        && entry.auth.registration_epoch == epoch
-                        && let Some(policy) = entry.policy_save.as_mut()
-                        && policy.retry_ticket == ticket
-                    {
-                        policy.retry_scheduled = false;
-                        policy.retry_at = Some(self.now() + chrono::TimeDelta::seconds(30));
-                    }
-                    drop(state);
-                    tracing::warn!("policy-save retry worker could not start");
-                }
+        // The timer owns only a weak manager and no operation. A quiesce or
+        // handoff never waits for backoff, and sleeping credentials consume no
+        // blocking workers. Reacquire admission for each individual attempt.
+        let shared = Arc::downgrade(&self.shared);
+        let id = id.to_owned();
+        // ActiveGate::spawn would hold admission across timer waits; each
+        // awakened save must take its own operation instead.
+        #[allow(clippy::disallowed_methods)]
+        drop(runtime.spawn(async move {
+            if !first_wait.is_zero() {
+                policy_retry_wait(&shared, first_wait).await;
             }
-        }
+            loop {
+                for millis in [100, 500, 2000] {
+                    policy_retry_wait(&shared, std::time::Duration::from_millis(millis)).await;
+                    let Some(shared_now) = shared.upgrade() else {
+                        return;
+                    };
+                    let manager = Manager {
+                        shared: shared_now,
+                        _owner: None,
+                    };
+                    if !manager.policy_retry_pending(&id, epoch, ticket) {
+                        return;
+                    }
+                    let Ok(operation) = manager.gate().begin_operation() else {
+                        // A closed gate cannot write. Keep the bounded schedule
+                        // so reopening needs no unrelated credential operation.
+                        continue;
+                    };
+                    let retry_id = id.clone();
+                    let task = operation.run_blocking(move || {
+                        let _gate = manager.mutation_gate();
+                        let snapshot = {
+                            let state = manager.lock();
+                            state
+                                .auths
+                                .get(&retry_id)
+                                .filter(|entry| {
+                                    entry.auth.registration_epoch == epoch
+                                        && entry.policy_save.as_ref().is_some_and(|policy| {
+                                            policy.retry_scheduled && policy.retry_ticket == ticket
+                                        })
+                                })
+                                .map(|entry| (entry.auth.clone(), entry.discard_epoch))
+                        };
+                        let Some((snapshot, discard_epoch)) = snapshot else {
+                            return false;
+                        };
+                        let mut writing = snapshot.as_ref().clone();
+                        writing.codex_persist_intent = CodexPersistIntent::Configuration;
+                        let _ = manager.persist(
+                            &writing,
+                            epoch,
+                            writing.generation,
+                            discard_epoch,
+                            Save::Yes,
+                        );
+                        manager.policy_retry_pending(&retry_id, epoch, ticket)
+                    });
+                    drop(operation);
+                    if !task.await.unwrap_or(false) {
+                        return;
+                    }
+                }
+                {
+                    let Some(shared_now) = shared.upgrade() else {
+                        return;
+                    };
+                    let manager = Manager {
+                        shared: shared_now,
+                        _owner: None,
+                    };
+                    let mut state = manager.lock();
+                    let Some(policy) = state
+                        .auths
+                        .get_mut(&id)
+                        .filter(|entry| entry.auth.registration_epoch == epoch)
+                        .and_then(|entry| entry.policy_save.as_mut())
+                        .filter(|policy| policy.retry_ticket == ticket)
+                    else {
+                        return;
+                    };
+                    policy.retry_at = Some(manager.now() + chrono::TimeDelta::seconds(30));
+                }
+                // Unlike the previous re-arm watermark, this is a real timer.
+                policy_retry_wait(&shared, std::time::Duration::from_secs(30)).await;
+            }
+        }));
+    }
+
+    fn policy_retry_pending(&self, id: &str, epoch: u64, ticket: u64) -> bool {
+        self.lock().auths.get(id).is_some_and(|entry| {
+            entry.auth.registration_epoch == epoch
+                && entry
+                    .policy_save
+                    .as_ref()
+                    .is_some_and(|policy| policy.retry_scheduled && policy.retry_ticket == ticket)
+        })
     }
 
     pub(super) fn reconcile_pending_save(

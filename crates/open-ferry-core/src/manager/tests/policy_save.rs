@@ -7,7 +7,7 @@ use crate::manager::{AdoptionResult, CallResult, Manager, Settings, lock};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn disable(auth: &mut Auth) -> Result<bool, ()> {
     auth.disabled = true;
@@ -234,7 +234,8 @@ fn round3_load_initializes_policy_generation() {
 
 struct CountingFailure {
     inner: FakeStore,
-    events: Mutex<Option<mpsc::Sender<()>>>,
+    calls: AtomicU64,
+    success: tokio::sync::Notify,
     fail: AtomicBool,
 }
 impl AuthStore for CountingFailure {
@@ -245,23 +246,23 @@ impl AuthStore for CountingFailure {
         self.inner.delete(id)
     }
     fn save(&self, auth: &Auth) -> std::io::Result<String> {
-        if let Some(events) = &*lock(&self.events) {
-            events.send(()).unwrap();
-        }
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail.load(Ordering::SeqCst) {
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
         } else {
-            self.inner.save(auth)
+            let saved = self.inner.save(auth);
+            self.success.notify_waiters();
+            saved
         }
     }
 }
 
-#[test]
-fn round3_policy_io_retry_is_bounded_and_backed_off() {
-    let (events, observed) = mpsc::channel();
+#[tokio::test(flavor = "current_thread")]
+async fn round4_policy_io_retry_is_bounded_and_self_rearms() {
     let store = Arc::new(CountingFailure {
         inner: FakeStore::default(),
-        events: Mutex::new(None),
+        calls: AtomicU64::new(0),
+        success: tokio::sync::Notify::new(),
         fail: AtomicBool::new(false),
     });
     let manager = Manager::new(
@@ -276,37 +277,82 @@ fn round3_policy_io_retry_is_bounded_and_backed_off() {
             json!({"type":"claude", "access_token":"dummy"}),
         ))
         .unwrap();
-    *lock(&store.events) = Some(events);
+    let (mut waiting, release) = retry_waits(&manager);
+    store.calls.store(0, Ordering::SeqCst);
     store.fail.store(true, Ordering::SeqCst);
     manager.edit("retry", disable).unwrap();
-    // Initial failure plus three bounded attempts; channels order the test.
-    for _ in 0..4 {
-        observed.recv_timeout(Duration::from_secs(10)).unwrap();
+    for (index, millis) in [100, 500, 2000].into_iter().enumerate() {
+        expect_wait(&mut waiting, Duration::from_millis(millis)).await;
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1 + index as u64);
+        // Sleeping retries have no admission and cannot delay handoff.
+        let gate = manager.gate();
+        tokio::time::timeout(Duration::from_secs(2), gate.close(gate.epoch()))
+            .await
+            .unwrap()
+            .unwrap();
+        gate.reopen();
+        release.add_permits(1);
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let state = manager.lock();
-        let policy = state.auths["retry"].policy_save.as_ref().unwrap();
-        if !policy.retry_scheduled {
-            assert!(policy.retry_at.unwrap() > manager.now());
-            break;
-        }
-        drop(state);
-        assert!(Instant::now() < deadline, "retry worker finished");
-        std::thread::yield_now();
-    }
-    assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Empty));
+    expect_wait(&mut waiting, Duration::from_secs(30)).await;
+    assert_eq!(store.calls.load(Ordering::SeqCst), 4);
+    assert!(
+        waiting.try_recv().is_err(),
+        "no busy retry while backoff is held"
+    );
+    assert!(
+        manager.lock().auths["retry"]
+            .policy_save
+            .as_ref()
+            .unwrap()
+            .retry_at
+            .unwrap()
+            > manager.now()
+    );
     store.fail.store(false, Ordering::SeqCst);
-    let before_save = manager.get("retry").unwrap();
-    manager.mark_result(&CallResult {
-        credential_version: before_save.credential_version,
-        registration_epoch: before_save.registration_epoch,
-        auth_id: "retry".into(),
-        provider: "claude".into(),
-        success: true,
-        ..Default::default()
-    });
+    release.add_permits(1); // Re-arm without any unrelated manager operation.
+    expect_wait(&mut waiting, Duration::from_millis(100)).await;
+    assert_eq!(store.calls.load(Ordering::SeqCst), 4);
+    let completed = store.success.notified();
+    tokio::pin!(completed);
+    completed.as_mut().enable();
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), completed)
+        .await
+        .unwrap();
+    // save() signals before returning; serialize with the completed transaction
+    // instead of spinning until the coverage bookkeeping happens.
+    wait_for_policy_save(&manager, "retry");
+    assert_eq!(store.calls.load(Ordering::SeqCst), 5);
     assert!(manager.lock().auths["retry"].policy_save.is_none());
+}
+
+fn wait_for_policy_save(manager: &Manager, id: &str) {
+    let save_lock = lock(&manager.shared.persist_save_locks)[id].clone();
+    drop(lock(&save_lock));
+}
+
+fn retry_waits(
+    manager: &Manager,
+) -> (
+    tokio::sync::mpsc::UnboundedReceiver<Duration>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let (waiting, observed) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    *lock(&manager.shared.policy_retry_wait) = Some((waiting, release.clone()));
+    (observed, release)
+}
+
+async fn expect_wait(
+    waiting: &mut tokio::sync::mpsc::UnboundedReceiver<Duration>,
+    expected: Duration,
+) {
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), waiting.recv())
+            .await
+            .unwrap(),
+        Some(expected)
+    );
 }
 
 #[test]
@@ -762,6 +808,52 @@ async fn round4_a_hand_edit_wins_only_the_conflicting_owed_leaves() {
     assert_eq!(disk["keep"], "operator");
     assert_eq!(disk["access_token"], "dummy-manual-rotation");
     assert_eq!(disk["disabled"], true);
+    assert!(
+        rig.manager.lock().auths["policy.json"]
+            .policy_save
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round4_retry_rechecks_admission_after_waiting() {
+    let rig = FilePolicyRig::new("claude", true);
+    let (mut waiting, release) = retry_waits(&rig.manager);
+    rig.refuse.store(true, Ordering::SeqCst);
+    rig.manager.edit("policy.json", disable).unwrap();
+    expect_wait(&mut waiting, Duration::from_millis(100)).await;
+    let gate = rig.manager.gate();
+    tokio::time::timeout(Duration::from_secs(2), gate.close(gate.epoch()))
+        .await
+        .unwrap()
+        .unwrap();
+    rig.refuse.store(false, Ordering::SeqCst);
+    release.add_permits(1);
+    expect_wait(&mut waiting, Duration::from_millis(500)).await;
+    assert_eq!(
+        rig.disk()["disabled"],
+        false,
+        "the closed gate prevented a write"
+    );
+    let saved = Arc::new(tokio::sync::Notify::new());
+    let notify = saved.clone();
+    *lock(&rig.manager.shared.unleased_saved_hook) =
+        Some(Arc::new(move |_| notify.notify_waiters()));
+    let completed = saved.notified();
+    tokio::pin!(completed);
+    completed.as_mut().enable();
+    gate.reopen();
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), completed)
+        .await
+        .unwrap();
+    wait_for_policy_save(&rig.manager, "policy.json");
+    *lock(&rig.manager.shared.unleased_saved_hook) = None;
+    assert_eq!(
+        rig.disk()["disabled"],
+        true,
+        "a fresh admission saved after reopening"
+    );
     assert!(
         rig.manager.lock().auths["policy.json"]
             .policy_save

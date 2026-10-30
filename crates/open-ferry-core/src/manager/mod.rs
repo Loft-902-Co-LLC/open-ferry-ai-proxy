@@ -484,6 +484,9 @@ pub(crate) struct Shared {
     /// including for no-store and unsaved updates.
     #[cfg(test)]
     persist_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: each retry wait announces its delay, then consumes one permit.
+    #[cfg(test)]
+    policy_retry_wait: Mutex<Option<PolicyRetryWait>>,
     /// Test seam: after final write admission, with save mutex held and no state lock.
     #[cfg(test)]
     persist_admitted_hook: Mutex<Option<PersistHook>>,
@@ -521,6 +524,12 @@ pub(crate) struct Shared {
     #[cfg(test)]
     unleased_saved_hook: Mutex<Option<PersistHook>>,
 }
+
+#[cfg(test)]
+type PolicyRetryWait = (
+    tokio::sync::mpsc::UnboundedSender<std::time::Duration>,
+    Arc<tokio::sync::Semaphore>,
+);
 
 /// What a test runs after each proof of a leased origin check.
 #[cfg(test)]
@@ -673,6 +682,8 @@ impl Manager {
             execution_seq: AtomicU64::new(0),
             #[cfg(test)]
             persist_hook: Mutex::new(None),
+            #[cfg(test)]
+            policy_retry_wait: Mutex::new(None),
             #[cfg(test)]
             persist_admitted_hook: Mutex::new(None),
             #[cfg(test)]

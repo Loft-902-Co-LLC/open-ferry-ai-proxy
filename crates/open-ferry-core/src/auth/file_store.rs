@@ -102,6 +102,9 @@ type RefusedFn<'a> = dyn FnMut(&CodexOrigin, OriginProof) + 'a;
 type SaveGuard<'a> =
     dyn FnMut(Option<&CodexOrigin>) -> Result<WithheldPartitions, SaveDeferral> + 'a;
 
+/// A pure policy overlay, told whether the record was read inside the save.
+type PolicyOverlay<'a> = dyn FnMut(&mut Auth, bool) + 'a;
+
 /// What `save_with` did.
 enum SaveWith {
     /// Saved: the file's path, or empty for a disabled credential whose file is gone.
@@ -1217,7 +1220,7 @@ impl FileStore {
         creation_intent: bool,
         bound: Option<(&CodexOrigin, &mut RefusedFn<'_>)>,
         mut guard: Option<&mut SaveGuard<'_>>,
-        mut policy: Option<&mut dyn FnMut(&mut Auth, bool)>,
+        mut policy: Option<&mut PolicyOverlay<'_>>,
     ) -> io::Result<SaveWith> {
         // A SIWC bind is saved only by bind_siwc_locked, whose strict
         // persistence refuses links, aliases and corrupt files.
