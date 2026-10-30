@@ -299,17 +299,7 @@ pub(super) fn schedule_unauthorized_refresh(
 ) -> bool {
     let unauthorized = super::scoped::rejects_access_token(result);
     if unauthorized {
-        let token = if result.access_token.is_empty() {
-            match result.credential_partition {
-                Some(CodexCredentialPartition::Outer) => auth.outer_access_token(),
-                Some(CodexCredentialPartition::Siwc) => auth.siwc_access_token(),
-                None => auth.access_token(),
-            }
-            .to_owned()
-        } else {
-            result.access_token.clone()
-        };
-        auth.record_rejected_token(&token);
+        auth.record_rejected_token(&result.access_token);
     }
     if was_terminal || !has_refresh_credential(auth) || !unauthorized {
         return false;
