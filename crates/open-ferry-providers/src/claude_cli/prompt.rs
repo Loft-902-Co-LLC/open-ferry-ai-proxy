@@ -23,6 +23,7 @@
 //! its own, and empty text blocks are left out.
 
 use open_ferry_core::exec::ExecError;
+use open_ferry_translate::signature::is_empty_codex_commentary_message;
 use serde_json::{Map, Value, json};
 
 use crate::json::{int_at, str_at};
@@ -179,6 +180,7 @@ fn tools_error(what: &str) -> ExecError {
 /// empty text; the last must be the user's.
 fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
     let mut turns = Vec::with_capacity(messages.len());
+    let mut empty_last_user_turn = false;
     for message in messages {
         let role = str_at(message, "role");
         if role != "user" && role != "assistant" {
@@ -187,22 +189,15 @@ fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
             )));
         }
         let content = blocks(message.get("content"));
-        if content.is_empty()
-            && message
-                .get("content")
-                .and_then(Value::as_array)
-                .is_some_and(|parts| {
-                    !parts.is_empty()
-                        && parts.iter().all(|part| {
-                            str_at(part, "type") == "thinking"
-                                && str_at(part, "signature").trim() == "cpa:commentary:v1"
-                                && str_at(part, "thinking").trim().is_empty()
-                        })
-                })
-        {
+        if content.is_empty() && is_empty_codex_commentary_message(message, true) {
+            empty_last_user_turn |= role == "user";
             continue;
         }
+        empty_last_user_turn = false;
         turns.push((role, content));
+    }
+    if empty_last_user_turn {
+        return Err(invalid("claude-cli: the last user turn is empty"));
     }
     if turns.last().is_some_and(|(role, _)| role != "user") {
         return Err(invalid(
@@ -538,5 +533,34 @@ mod commentary_tests {
                 .unwrap()
                 .contains("cpa:commentary:v1")
         );
+    }
+}
+
+#[cfg(test)]
+mod empty_commentary_error_tests {
+    use super::*;
+
+    #[test]
+    fn r3_cli_reports_an_empty_last_user_turn_after_blank_commentary_removal() {
+        for text in ["", " "] {
+            for count in [1, 2] {
+                let mut messages = vec![
+                    json!({"role":"user","content":"First"}),
+                    json!({"role":"assistant","content":"Answer"}),
+                    json!({"role":"user","content":vec![json!({"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"});count]}),
+                ];
+                let error = prepare(&json!({"messages":messages})).unwrap_err();
+                assert_eq!(error.status, 400);
+                let error: Value = serde_json::from_str(&error.message).unwrap();
+                assert_eq!(error["error"]["type"], "invalid_request_error");
+                assert_eq!(
+                    error["error"]["message"],
+                    "claude-cli: the last user turn is empty"
+                );
+                // An omitted middle turn must not reject a later real user turn.
+                messages.push(json!({"role":"user","content":"Continue"}));
+                prepare(&json!({"messages":messages})).unwrap();
+            }
+        }
     }
 }

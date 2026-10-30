@@ -45,8 +45,9 @@ pub use claude::{
 };
 pub use claude_antigravity_validation::inspect_antigravity_claude_caqs_signature;
 pub use claude_messages_sanitize::{
-    ClaudeMessagesSanitizeOptions, SanitizeReport, sanitize_claude_messages_for_claude_upstream,
-    sanitize_claude_messages_signatures_for_model, sanitize_claude_messages_signatures_for_target,
+    ClaudeMessagesSanitizeOptions, SanitizeReport, is_empty_codex_commentary_message,
+    sanitize_claude_messages_for_claude_upstream, sanitize_claude_messages_signatures_for_model,
+    sanitize_claude_messages_signatures_for_target,
 };
 pub use claude_validation::{
     ClaudeCaisSignatureInfo, ClaudeSignatureTree, ClaudeValidationOptions,
