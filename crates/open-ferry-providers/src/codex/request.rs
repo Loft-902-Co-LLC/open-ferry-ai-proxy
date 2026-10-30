@@ -192,11 +192,11 @@ pub(crate) fn original_request(request: &Request, options: &Options) -> Value {
 /// The credential's token and base URL (`codexCreds`): the `api_key`
 /// attribute, or else the OAuth access token. SIWC instead selects only its
 /// nested token, and defaults its base to the direct OpenAI API.
-pub(crate) fn credentials(auth: &Auth) -> (&str, &str) {
-    if auth.use_siwc() {
+pub(crate) fn credentials<'a>(auth: &'a Auth, client: &HeaderMap) -> (&'a str, &'a str) {
+    if auth.use_siwc_for_request(client) {
         let base = auth.attribute("base_url").unwrap_or_default();
         return (
-            auth.access_token(),
+            auth.access_token_for_request(client),
             if base.trim().is_empty() {
                 super::siwc_request::DEFAULT_BASE_URL
             } else {
@@ -206,15 +206,15 @@ pub(crate) fn credentials(auth: &Auth) -> (&str, &str) {
     }
     let mut token = auth.attribute("api_key").unwrap_or_default();
     if token.is_empty() {
-        token = auth.metadata_str("access_token").unwrap_or_default();
+        token = auth.access_token_for_request(client);
     }
     (token, auth.attribute("base_url").unwrap_or_default())
 }
 
 /// Whether the credential is an API key rather than a ChatGPT sign-in
 /// (`codexAuthUsesAPIKey`).
-pub(crate) fn uses_api_key(auth: &Auth) -> bool {
-    if auth.use_siwc() {
+pub(crate) fn uses_api_key(auth: &Auth, client: &HeaderMap) -> bool {
+    if auth.use_siwc_for_request(client) {
         return false;
     }
     let kind = [
@@ -244,8 +244,13 @@ fn normalize_auth_kind(kind: &str) -> &'static str {
 
 /// The URL to call: the credential's `base_url`, or `default_base`, then
 /// `/responses` or `/responses/compact`.
-pub(crate) fn endpoint(auth: &Auth, default_base: &str, compact: bool) -> String {
-    let (_, base) = credentials(auth);
+pub(crate) fn endpoint(
+    auth: &Auth,
+    client: &HeaderMap,
+    default_base: &str,
+    compact: bool,
+) -> String {
+    let (_, base) = credentials(auth, client);
     let base = if base.is_empty() { default_base } else { base };
     let base = base.strip_suffix('/').unwrap_or(base);
     if compact {
@@ -512,7 +517,11 @@ pub(crate) fn prepare_body(
     if matches!(kind, Kind::Execute | Kind::Stream) {
         ensure_web_search_tool_for_history(&mut body, &options.headers);
     }
-    if kind != Kind::CountTokens && context.auth.is_some_and(Auth::use_siwc) {
+    if kind != Kind::CountTokens
+        && context
+            .auth
+            .is_some_and(|auth| auth.use_siwc_for_request(&options.headers))
+    {
         super::siwc_request::apply_body(
             &mut body,
             super::siwc_request::explicit_instructions(&payload),
@@ -522,7 +531,11 @@ pub(crate) fn prepare_body(
     } else {
         normalize_instructions(&mut body, native);
     }
-    if matches!(kind, Kind::Execute | Kind::Stream) && !context.auth.is_some_and(Auth::use_siwc) {
+    if matches!(kind, Kind::Execute | Kind::Stream)
+        && !context
+            .auth
+            .is_some_and(|auth| auth.use_siwc_for_request(&options.headers))
+    {
         ensure_image_generation_tool(&mut body, base, context, &options.headers);
     }
     if kind == Kind::CountTokens {
@@ -598,7 +611,7 @@ pub(crate) fn build_headers(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let (token, _) = credentials(auth);
+    let (token, _) = credentials(auth, client);
     if !token.trim().is_empty() {
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             ExecError::new(
@@ -635,7 +648,7 @@ pub(crate) fn build_headers(
     );
     ensure_header(&mut headers, client, HeaderName::from_static("originator"));
 
-    if !uses_api_key(auth)
+    if !uses_api_key(auth, client)
         && let Some(account) = auth
             .metadata_str("account_id")
             .map(str::trim)
@@ -651,7 +664,7 @@ pub(crate) fn build_headers(
         }
     }
     custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
-    if auth.use_siwc() {
+    if auth.use_siwc_for_request(client) {
         super::siwc_request::enforce_headers(&mut headers, auth, client)?;
     }
     Ok(headers)
@@ -817,29 +830,32 @@ mod tests {
     #[test]
     fn detects_api_keys() {
         let mut auth = Auth::default();
-        assert!(!uses_api_key(&auth));
+        assert!(!uses_api_key(&auth, &HeaderMap::new()));
         auth.attributes.insert("api_key".into(), " sk-test ".into());
-        assert!(uses_api_key(&auth));
+        assert!(uses_api_key(&auth, &HeaderMap::new()));
         auth.attributes.insert("auth_kind".into(), "oauth".into());
-        assert!(uses_api_key(&auth), "a set api_key still counts");
+        assert!(
+            uses_api_key(&auth, &HeaderMap::new()),
+            "a set api_key still counts"
+        );
         let mut auth = Auth::default();
         auth.metadata.insert("auth_kind".into(), json!("API-Key"));
-        assert!(uses_api_key(&auth));
+        assert!(uses_api_key(&auth, &HeaderMap::new()));
         auth.attributes.insert("auth_kind".into(), "oauth2".into());
-        assert!(!uses_api_key(&auth));
+        assert!(!uses_api_key(&auth, &HeaderMap::new()));
     }
 
     #[test]
     fn builds_endpoints() {
         let mut auth = Auth::default();
         assert_eq!(
-            endpoint(&auth, DEFAULT_BASE_URL, false),
+            endpoint(&auth, &HeaderMap::new(), DEFAULT_BASE_URL, false),
             "https://chatgpt.com/backend-api/codex/responses"
         );
         auth.attributes
             .insert("base_url".into(), "http://127.0.0.1:9/v1/".into());
         assert_eq!(
-            endpoint(&auth, DEFAULT_BASE_URL, true),
+            endpoint(&auth, &HeaderMap::new(), DEFAULT_BASE_URL, true),
             "http://127.0.0.1:9/v1/responses/compact"
         );
     }
@@ -874,9 +890,9 @@ mod tests {
         let mut auth = Auth::default();
         auth.metadata
             .insert("access_token".into(), json!("oauth-token"));
-        assert_eq!(credentials(&auth).0, "oauth-token");
+        assert_eq!(credentials(&auth, &HeaderMap::new()).0, "oauth-token");
         auth.attributes.insert("api_key".into(), "key".into());
-        assert_eq!(credentials(&auth).0, "key");
+        assert_eq!(credentials(&auth, &HeaderMap::new()).0, "key");
     }
 
     #[test]

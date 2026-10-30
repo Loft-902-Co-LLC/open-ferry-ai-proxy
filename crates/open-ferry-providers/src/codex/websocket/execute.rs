@@ -109,7 +109,7 @@ pub(super) async fn open(
     prepared: &mut Prepared,
     options: &Options,
 ) -> Result<Opened, ExecError> {
-    crate::codex::siwc_request::ensure_credentials(auth)?;
+    crate::codex::siwc_request::ensure_credentials(auth, &options.headers)?;
     let store = executor.websockets();
     let session_id = options
         .metadata
@@ -128,13 +128,13 @@ pub(super) async fn open(
     let mut secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
     // As upstream, SIWC ID-token signatures and nonces aren't verified,
     // and the SIWC account isn't matched to the outer account.
-    let token = crate::codex::request::credentials(auth).0;
+    let token = crate::codex::request::credentials(auth, &options.headers).0;
     let target = Target::new(&auth.id, &prepared.url, &proxy, token)
-        .with_siwc(auth.use_siwc())
+        .with_siwc(auth.use_siwc_for_request(&options.headers))
         .with_secrets(&secrets)
         .with_global_proxy(executor.global_proxy());
-    let reuse_target =
-        Target::new(&auth.id, &prepared.url, &reuse_proxy, token).with_siwc(auth.use_siwc());
+    let reuse_target = Target::new(&auth.id, &prepared.url, &reuse_proxy, token)
+        .with_siwc(auth.use_siwc_for_request(&options.headers));
     // A connection kept for the call was opened with the secrets of an
     // earlier one, which Codex may quote back too.
     if let Some(kept) = session.kept_secrets(&reuse_target) {
