@@ -47,7 +47,7 @@ fn opts(path: &str, agent: &str) -> Options {
 }
 
 #[tokio::test]
-async fn r2_native_agents_select_outer_on_http_compact_and_images_without_persisting_mode() {
+async fn r3_dispatched_user_agent_selects_http_compact_and_image_credentials() {
     for agent in AGENTS.iter().copied().chain(["ordinary-client/1"]) {
         for path in ["execute", "stream", "compact", "image"] {
             let native = agent != "ordinary-client/1";
@@ -60,13 +60,10 @@ async fn r2_native_agents_select_outer_on_http_compact_and_images_without_persis
             })
             .await;
             let auth = Arc::new(dual(&mock.url));
-            let original = auth.metadata.clone();
-            let mut options = opts(path, agent);
-            let sent = options.clone();
-            options.headers.insert(
-                "user-agent",
-                HeaderValue::from_static("changed-after-snapshot"),
-            );
+            let mut options = opts(path, "before-dispatch");
+            options
+                .headers
+                .insert("user-agent", HeaderValue::from_str(agent).unwrap());
             let req = request(
                 if path == "image" {
                     "gpt-image-2"
@@ -78,14 +75,17 @@ async fn r2_native_agents_select_outer_on_http_compact_and_images_without_persis
             if path == "stream" {
                 let (_, error) = collect(
                     executor()
-                        .execute_stream(auth.clone(), req, sent)
+                        .execute_stream(auth.clone(), req, options)
                         .await
                         .unwrap(),
                 )
                 .await;
                 assert!(error.is_none());
             } else {
-                executor().execute(auth.clone(), req, sent).await.unwrap();
+                executor()
+                    .execute(auth.clone(), req, options)
+                    .await
+                    .unwrap();
             }
             let seen = mock.last();
             assert_eq!(
@@ -106,7 +106,6 @@ async fn r2_native_agents_select_outer_on_http_compact_and_images_without_persis
                     "/responses"
                 }
             );
-            assert_eq!(auth.metadata, original);
         }
     }
 }
@@ -311,5 +310,273 @@ async fn r2_native_passthrough_keeps_exact_destination_guard_and_outer_bearer() 
             .unwrap_err()
             .status,
         401
+    );
+}
+
+#[tokio::test]
+async fn r3_passthrough_selects_request_mode_and_preserves_api_key_precedence() {
+    let mock = Mock::start(Reply::json("{}")).await;
+    let mut exec = executor();
+    exec.http_mock_url = Some(mock.url.clone());
+    for native in [true, false] {
+        for enabled in [true, false] {
+            for keyed in [true, false] {
+                let mut auth = dual("");
+                auth.metadata.insert("use_siwc".into(), json!(enabled));
+                if keyed {
+                    auth.attributes
+                        .insert("api_key".into(), "passthrough-api-dummy".into());
+                }
+                let call = HttpCall {
+                    method: http::Method::POST,
+                    target: HttpTarget::Url(
+                        "https://chatgpt.com/backend-api/codex/alpha/search".into(),
+                    ),
+                    headers: HeaderMap::new(),
+                    body: Bytes::from_static(b"{}"),
+                    client_headers: opts(
+                        "execute",
+                        if native {
+                            "codex-rs/1"
+                        } else {
+                            "ordinary-client/1"
+                        },
+                    )
+                    .headers,
+                    response_limit: 1024,
+                    observation: None,
+                };
+                exec.http_request_inner(&auth, call).await.unwrap();
+                let expected = if keyed && (native || !enabled) {
+                    "Bearer passthrough-api-dummy"
+                } else {
+                    "Bearer outer-transport-dummy"
+                };
+                assert_eq!(mock.last().header("authorization"), Some(expected));
+            }
+        }
+    }
+    let mut auth = dual("");
+    auth.metadata.remove("access_token");
+    auth.attributes
+        .insert("api_key".into(), "passthrough-api-dummy".into());
+    let call = HttpCall {
+        method: http::Method::POST,
+        target: HttpTarget::Url("https://chatgpt.com/backend-api/codex/alpha/search".into()),
+        headers: HeaderMap::new(),
+        body: Bytes::from_static(b"{}"),
+        client_headers: opts("execute", "codex-rs/1").headers,
+        response_limit: 1024,
+        observation: None,
+    };
+    exec.http_request_inner(&auth, call).await.unwrap();
+    assert_eq!(
+        mock.last().header("authorization"),
+        Some("Bearer passthrough-api-dummy")
+    );
+}
+
+#[tokio::test]
+async fn r3_missing_native_outer_does_not_reject_or_cool_the_usable_siwc_credential() {
+    let mock = Mock::start(Reply::sse(COMPLETED)).await;
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Manager::new(
+        Settings {
+            disable_cooling: false,
+            ..Settings::default()
+        },
+        registry.clone(),
+        None,
+    );
+    manager.register_executor(Arc::new(executor()));
+    let mut auth = dual(&mock.url);
+    auth.id = "missing-native-outer".into();
+    auth.status = Status::Active;
+    auth.metadata.remove("access_token");
+    auth.metadata.insert("disable_cooling".into(), json!(false));
+    registry.register_client(
+        &auth.id,
+        "codex",
+        &[ModelInfo {
+            id: "gpt-5".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    manager.register(auth).unwrap();
+    for streaming in [false, true] {
+        let req = request("gpt-5", r#"{"input":[]}"#);
+        let error = if streaming {
+            match manager
+                .execute_stream(&["codex".into()], req, opts("stream", "codex-rs/1"))
+                .await
+            {
+                Err(e) => e,
+                Ok(_) => panic!("missing outer was allowed"),
+            }
+        } else {
+            manager
+                .execute(&["codex".into()], req, opts("execute", "codex-rs/1"))
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.status, 401);
+        let current = manager.get("missing-native-outer").unwrap();
+        assert!(!current.unavailable);
+        assert!(
+            current
+                .model_states
+                .values()
+                .all(|model| !model.unavailable && model.next_retry_after.is_none())
+        );
+        assert!(current.rejected_siwc_access_token.is_empty());
+        assert!(current.rejected_access_token.is_empty());
+        assert!(error.request_scoped);
+    }
+    assert!(mock.requests().is_empty());
+    manager
+        .execute(
+            &["codex".into()],
+            request("gpt-5", r#"{"input":[]}"#),
+            opts("execute", "ordinary-client/1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.last().header("authorization"),
+        Some("Bearer nested-transport-dummy")
+    );
+}
+
+#[tokio::test]
+async fn r3_direct_images_remove_user_agent_before_custom_header_substitution() {
+    let mock = Mock::start(Reply::json(r#"{"created":1,"data":[{"b64_json":"QUJD"}]}"#)).await;
+    let mut auth = dual(&mock.url);
+    auth.attributes
+        .insert("api_key".into(), "image-api-dummy".into());
+    auth.attributes
+        .insert("header:X-From-UA".into(), "$User-Agent".into());
+    auth.attributes
+        .insert("header:X-From-Tenant".into(), "$X-Tenant".into());
+    let mut options = opts("image", "codex-rs/1 caller-private-agent");
+    options
+        .headers
+        .insert("x-tenant", HeaderValue::from_static("caller-team"));
+    executor()
+        .execute(
+            Arc::new(auth),
+            request("gpt-image-2", r#"{"prompt":"draw a fox"}"#),
+            options,
+        )
+        .await
+        .unwrap();
+    let seen = mock.last();
+    assert_eq!(seen.path, "/images/generations");
+    assert_eq!(seen.header("authorization"), Some("Bearer image-api-dummy"));
+    assert!(seen.header("x-from-ua").is_none());
+    assert_eq!(seen.header("x-from-tenant"), Some("caller-team"));
+    assert_eq!(seen.header("user-agent"), Some(USER_AGENT));
+}
+
+#[tokio::test]
+async fn r3_whitespace_api_key_cannot_bypass_missing_credential_validation() {
+    let mock = Mock::start(Reply::sse(COMPLETED)).await;
+    for key in [" ", "\t  "] {
+        for has_outer in [false, true] {
+            let mut auth = dual(&mock.url);
+            if !has_outer {
+                auth.metadata.remove("access_token");
+            }
+            auth.attributes.insert("api_key".into(), key.into());
+            let error = executor()
+                .execute(
+                    Arc::new(auth),
+                    request("gpt-5", r#"{"input":[]}"#),
+                    opts("execute", "codex-rs/1"),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 401);
+            assert!(error.request_scoped);
+        }
+    }
+    assert!(mock.requests().is_empty());
+}
+
+#[tokio::test]
+async fn r3_native_requests_do_not_persist_a_request_specific_siwc_switch() {
+    use open_ferry_core::auth::{AuthStore, FileStore};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileStore::new(directory.path()));
+    let mock = Mock::start(Reply::sse(COMPLETED)).await;
+    // Seed an already-bound credential: a new outer login deliberately strips SIWC.
+    std::fs::write(
+        directory.path().join("native-persist.json"),
+        serde_json::to_vec(&dual(&mock.url).metadata).unwrap(),
+    )
+    .unwrap();
+    let mut auth = store.list().unwrap().pop().unwrap();
+    auth.attributes.insert("base_url".into(), mock.url.clone());
+    store.save_auth(&mut auth).unwrap();
+    let before = store.list().unwrap().pop().unwrap().metadata;
+    assert_eq!(before["use_siwc"], true);
+    let registry = Arc::new(ModelRegistry::new());
+    let manager = Manager::new(Settings::default(), registry.clone(), Some(store.clone()));
+    manager.register_executor(Arc::new(executor()));
+    registry.register_client(
+        &auth.id,
+        "codex",
+        &[ModelInfo {
+            id: "gpt-5".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    manager.register(auth).unwrap();
+    manager
+        .execute(
+            &["codex".into()],
+            request("gpt-5", r#"{"input":[]}"#),
+            opts("execute", "codex-rs/1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.last().header("authorization"),
+        Some("Bearer outer-transport-dummy")
+    );
+    // Exercise a real manager save and a fresh disk reload, not the caller's immutable Arc.
+    let live = (*manager.get("native-persist.json").unwrap()).clone();
+    manager.update(live).unwrap();
+    store
+        .save(&manager.get("native-persist.json").unwrap())
+        .unwrap();
+    let mut saved = store.list().unwrap().pop().unwrap();
+    assert_eq!(saved.metadata, before);
+    assert!(saved.use_siwc());
+    // FileStore lists raw credentials; synthesis normally attaches this route.
+    // Inject only the loopback route, never a production SIWC default.
+    saved.attributes.insert("base_url".into(), mock.url.clone());
+    let reloaded_registry = Arc::new(ModelRegistry::new());
+    reloaded_registry.register_client(
+        &saved.id,
+        "codex",
+        &[ModelInfo {
+            id: "gpt-5".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    let reloaded = Manager::new(Settings::default(), reloaded_registry, Some(store));
+    reloaded.register_executor(Arc::new(executor()));
+    reloaded.register_unsaved(saved).unwrap();
+    reloaded
+        .execute(
+            &["codex".into()],
+            request("gpt-5", r#"{"input":[]}"#),
+            opts("execute", "ordinary-client/1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.last().header("authorization"),
+        Some("Bearer nested-transport-dummy")
     );
 }

@@ -21,12 +21,9 @@ pub(crate) fn ensure_credentials(auth: &Auth, caller: &HeaderMap) -> Result<(), 
     // As upstream, SIWC ID-token signatures and nonces aren't verified,
     // and the SIWC account isn't matched to the outer account.
     let use_siwc = auth.use_siwc_for_request(caller);
-    let api_key = auth.attribute("api_key").unwrap_or_default();
-    if auth.use_siwc()
-        && (use_siwc || api_key.is_empty())
-        && auth.access_token_for_request(caller).is_empty()
-    {
-        return Err(ExecError::new(
+    let token = super::request::credentials(auth, caller).0;
+    if auth.use_siwc() && token.trim().is_empty() {
+        let mut error = ExecError::new(
             ErrorKind::Upstream,
             if use_siwc {
                 "codex executor: use_siwc is enabled but siwc access_token is missing"
@@ -34,7 +31,11 @@ pub(crate) fn ensure_credentials(auth: &Auth, caller: &HeaderMap) -> Result<(), 
                 "codex executor: original OAuth access_token is required for Codex client requests"
             },
         )
-        .with_status(401));
+        .with_status(401);
+        // An unavailable outer credential is local to this native request;
+        // ordinary callers may still use the healthy SIWC partition.
+        error.request_scoped = !use_siwc;
+        return Err(error);
     }
     Ok(())
 }
