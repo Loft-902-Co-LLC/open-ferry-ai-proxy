@@ -952,7 +952,7 @@ impl State {
                         .or_default() += 1;
                 }
             }
-            self.refresh_web_search(id);
+            self.refresh_web_search(id, provider);
         }
     }
 
@@ -1009,22 +1009,19 @@ impl State {
         // Metadata is discarded before aggregate flags are recomputed.
         self.client_model_infos.remove(client);
         for (id, _) in ids {
-            self.refresh_web_search(&id);
+            self.refresh_web_search(&id, &provider);
         }
     }
 
-    fn refresh_web_search(&mut self, id: &str) {
+    fn refresh_web_search(&mut self, id: &str, provider: &str) {
         let supported = self.has_web_search(id, "", None);
+        let provider_supported = self.has_web_search(id, provider, None);
         let Some(registration) = self.models.get_mut(id) else {
             return;
         };
         registration.info.supports_web_search = supported;
-        for (provider, info) in &mut registration.info_by_provider {
-            info.supports_web_search = self
-                .web_search_provider_counts
-                .get(id)
-                .and_then(|counts| counts.get(provider))
-                .is_some_and(|count| *count > 0);
+        if let Some(info) = registration.info_by_provider.get_mut(provider) {
+            info.supports_web_search = provider_supported;
         }
     }
 }
