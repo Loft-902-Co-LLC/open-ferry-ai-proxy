@@ -173,6 +173,7 @@ struct Entry {
     bind_target: Option<BindMutationPath>,
     bind_redirect: String,
     committing: bool,
+    proxy_url: String,
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
     callback: Option<oneshot::Sender<Callback>>,
@@ -235,6 +236,15 @@ impl Store {
     /// needs (`Register`). `None`, registering nothing, when either is
     /// empty, or [`MAX_SESSIONS`] are already kept.
     pub(crate) fn register(&self, state: &str, provider: &str) -> Option<Registration> {
+        self.register_with_proxy(state, provider, "")
+    }
+
+    pub(crate) fn register_with_proxy(
+        &self,
+        state: &str,
+        provider: &str,
+        proxy_url: &str,
+    ) -> Option<Registration> {
         let state = state.trim();
         let provider = to_lower(provider.trim());
         if state.is_empty() || provider.is_empty() {
@@ -243,7 +253,12 @@ impl Store {
         let now = Instant::now();
         let mut inner = self.lock();
         inner.purge(now);
-        if inner.sessions.len() >= MAX_SESSIONS && !inner.sessions.contains_key(state) {
+        if inner
+            .sessions
+            .get(state)
+            .is_some_and(|entry| entry.committing)
+            || (inner.sessions.len() >= MAX_SESSIONS && !inner.sessions.contains_key(state))
+        {
             return None;
         }
         let (sender, callback) = oneshot::channel();
@@ -263,6 +278,7 @@ impl Store {
                 bind_target: None,
                 bind_redirect: String::new(),
                 committing: false,
+                proxy_url: proxy_url.trim().to_owned(),
                 session,
                 callback: Some(sender),
                 changes,
@@ -280,15 +296,20 @@ impl Store {
     /// when it is empty, unless the session is unknown or completed
     /// (`SetError`). The session then lasts the full time again.
     pub(crate) fn set_error(&self, state: &str, message: &str) {
-        self.fail(state, message, false);
+        self.fail(state, message, false, false);
+    }
+
+    /// The owner of a claimed save may fail it; polls and callbacks may not.
+    pub(super) fn fail_commit(&self, state: &str, message: &str) {
+        self.fail(state, message, false, true);
     }
 
     /// Fails a pending session; returns whether its status changed.
     pub(super) fn set_pending_error(&self, state: &str, message: &str) -> bool {
-        self.fail(state, message, true)
+        self.fail(state, message, true, false)
     }
 
-    fn fail(&self, state: &str, message: &str, only_pending: bool) -> bool {
+    fn fail(&self, state: &str, message: &str, only_pending: bool, allow_committing: bool) -> bool {
         let state = state.trim();
         let message = match message.trim() {
             "" => "Authentication failed",
@@ -304,10 +325,14 @@ impl Store {
         let Some(entry) = inner.sessions.get_mut(state) else {
             return false;
         };
-        if entry.session.completed || (only_pending && !entry.session.is_pending()) {
+        if entry.session.completed
+            || (entry.committing && !allow_committing)
+            || (only_pending && !entry.session.is_pending())
+        {
             return false;
         }
-        message.clone_into(&mut entry.session.status);
+        entry.session.status = redact_session_proxy(message, &entry.proxy_url);
+        entry.proxy_url.clear();
         entry.session.expires_at = later(now, ttl);
         entry.callback = None;
         entry.committing = false;
@@ -333,6 +358,7 @@ impl Store {
             return;
         }
         entry.session.status.clear();
+        entry.proxy_url.clear();
         entry.session.completed = true;
         entry.session.expires_at = later(now, completed_ttl);
         entry.callback = None;
@@ -440,6 +466,25 @@ impl Store {
         true
     }
 
+    /// Claims an ordinary login's save under the same lock as cancellation.
+    /// The registration fence prevents a replaced login claiming its successor.
+    pub(super) fn claim_commit(&self, state: &str, provider: &str, id: u64) -> bool {
+        let mut inner = self.lock();
+        inner.purge(Instant::now());
+        let Some(entry) = inner.sessions.get_mut(state) else {
+            return false;
+        };
+        if entry.id != id
+            || entry.bind
+            || entry.committing
+            || !pending_for(&entry.session, provider)
+        {
+            return false;
+        }
+        entry.committing = true;
+        true
+    }
+
     /// Whether the session for `state` is pending, for `provider` unless it
     /// is empty, in any case (`IsPending`, and
     /// `guardOAuthSessionPendingForSave`).
@@ -453,7 +498,7 @@ impl Store {
             .is_some_and(|entry| pending_for(&entry.session, provider))
     }
 
-    pub(super) fn is_committing(&self, state: &str) -> bool {
+    pub(crate) fn is_committing(&self, state: &str) -> bool {
         self.lock()
             .sessions
             .get(state)
@@ -488,15 +533,15 @@ impl Store {
         pending
     }
 
-    /// Drops the session for `state` if it is the pending session of
-    /// registration `id`: its login ended without completing or failing,
-    /// so nothing will.
+    /// Drops the unclaimed pending session of registration `id` when its
+    /// login ends. A claimed save retains its session until its gate-owned
+    /// finalizer records the durable outcome.
     pub(crate) fn release(&self, state: &str, id: u64) {
         let mut inner = self.lock();
         let ours = inner
             .sessions
             .get(state)
-            .is_some_and(|entry| entry.id == id && entry.session.is_pending());
+            .is_some_and(|entry| entry.id == id && entry.session.is_pending() && !entry.committing);
         if ours {
             inner.sessions.remove(state);
         }
@@ -584,6 +629,72 @@ impl Inner {
     }
 }
 
+/// Provider and transport errors may quote a proxy or just its credentials.
+/// Hide the encoded and decoded forms before retaining a terminal status.
+fn redact_session_proxy(text: &str, proxy_url: &str) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    if proxy_url.is_empty() {
+        return text.to_owned();
+    }
+    let Some(url) = crate::go_url::parse(proxy_url.as_bytes()) else {
+        return text.to_owned();
+    };
+    let Some((user, password)) = url.user else {
+        return text.to_owned();
+    };
+    let sanitized = format!(
+        "{}://[redacted]@{}",
+        url.scheme,
+        String::from_utf8_lossy(&url.host)
+    );
+    let mut secrets = Vec::new();
+    if let Some((_, authority)) = proxy_url.split_once("://")
+        && let Some((userinfo, _)) = authority.split('/').next().unwrap_or("").rsplit_once('@')
+        && let Some((_, password)) = userinfo.split_once(':')
+    {
+        secrets.push(userinfo.to_owned());
+        secrets.push(password.to_owned());
+    }
+    if let Some(password) = password {
+        let user = String::from_utf8_lossy(&user);
+        let password = String::from_utf8_lossy(&password).into_owned();
+        secrets.push(STANDARD.encode(format!("{user}:{password}")));
+        secrets.push(format!("{user}:{password}"));
+        secrets.push(password);
+    }
+    secrets.retain(|secret| !secret.is_empty());
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets.dedup();
+    // Match only the original text, longest first at each position. In
+    // particular a password must never match inside an inserted marker or
+    // the sanitized URL, whose host remains useful for diagnosing failures.
+    let mut redacted = String::with_capacity(text.len());
+    let mut from = 0;
+    for (index, _) in text.char_indices() {
+        if index < from {
+            continue;
+        }
+        let rest = &text[index..];
+        let (length, replacement) = if rest.starts_with(proxy_url) {
+            (proxy_url.len(), sanitized.as_str())
+        } else if let Some(secret) = secrets
+            .iter()
+            .find(|secret| rest.starts_with(secret.as_str()))
+        {
+            (secret.len(), "[redacted]")
+        } else {
+            continue;
+        };
+        redacted.push_str(&text[from..index]);
+        redacted.push_str(replacement);
+        from = index + length;
+    }
+    redacted.push_str(&text[from..]);
+    redacted
+}
+
 /// Whether `session` is pending, for `provider` unless it is empty after
 /// trimming.
 fn pending_for(session: &Session, provider: &str) -> bool {
@@ -659,6 +770,200 @@ mod bind_tests {
     use super::*;
 
     #[test]
+    fn session_proxy_commit_claim_is_registration_and_provider_fenced() {
+        let store = Store::default();
+        let old = store.register("session-test", "codex").unwrap();
+        let current = store.register("session-test", "codex").unwrap();
+        assert!(!store.claim_commit("session-test", "codex", old.id));
+        assert!(!store.claim_commit("session-test", "anthropic", current.id));
+        assert!(store.claim_commit("session-test", "CODEX", current.id));
+        assert!(!store.claim_commit("session-test", "codex", current.id));
+        assert!(!store.cancel("session-test"));
+        assert!(store.register("session-test", "codex").is_none());
+        store.set_error("session-test", "late error");
+        assert!(!store.set_pending_error("session-test", "late poll"));
+        assert!(store.get("session-test").unwrap().status.is_empty());
+        store.fail_commit("session-test", "save failed");
+        assert!(store.get("session-test").unwrap().status == "save failed");
+        assert!(!store.is_committing("session-test"));
+        let cancelled = store.register("cancel-test", "codex").unwrap();
+        assert!(store.cancel("cancel-test"));
+        assert!(!store.claim_commit("cancel-test", "codex", cancelled.id));
+        let bound = store.register("bind-test", "codex").unwrap();
+        store.mark_bind("bind-test");
+        assert!(!store.claim_commit("bind-test", "codex", bound.id));
+        assert!(store.admit_bind("bind-test", bound.id));
+    }
+
+    #[test]
+    fn session_proxy_release_retains_claimed_saves_until_their_real_outcome() {
+        for failed in [false, true] {
+            let store = Store::default();
+            let registration = store.register("save-test", "codex").unwrap();
+            assert!(store.claim_commit("save-test", "codex", registration.id));
+            store.release("save-test", registration.id);
+            assert!(store.is_committing("save-test"));
+            assert!(store.get("save-test").unwrap().is_pending());
+            if failed {
+                store.fail_commit("save-test", "save failed");
+            } else {
+                store.complete("save-test");
+            }
+            store.release("save-test", registration.id);
+            let session = store.get("save-test").unwrap();
+            assert_eq!(session.completed, !failed);
+            assert_eq!(session.status, if failed { "save failed" } else { "" });
+            assert!(!store.is_committing("save-test"));
+        }
+        let store = Store::default();
+        let registration = store.register("unsaved-test", "codex").unwrap();
+        store.release("unsaved-test", registration.id);
+        assert!(store.get("unsaved-test").is_none());
+    }
+
+    #[test]
+    fn session_proxy_native_commit_claim_is_fenced_by_shutdown() {
+        let sessions = super::super::Sessions::default();
+        let before = sessions.store.register("before-shutdown", "codex").unwrap();
+        let during = sessions.store.register("during-grace", "codex").unwrap();
+        let after = sessions.store.register("after-shutdown", "codex").unwrap();
+        assert!(sessions.claim_login_commit("before-shutdown", "codex", before.id));
+        sessions.logins().shut_down = true;
+        assert!(sessions.claim_login_commit("during-grace", "codex", during.id));
+        sessions.logins().aborting = true;
+        assert!(!sessions.claim_login_commit("after-shutdown", "codex", after.id));
+        assert!(!sessions.store.is_committing("after-shutdown"));
+        sessions.store.release("after-shutdown", after.id);
+        assert!(sessions.store.get("after-shutdown").is_none());
+        assert!(sessions.store.is_committing("before-shutdown"));
+        sessions.store.complete("before-shutdown");
+        assert!(sessions.store.get("before-shutdown").unwrap().completed);
+    }
+
+    #[test]
+    fn session_proxy_terminal_state_redacts_and_releases_transient_proxy() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        let user = "proxy user-test";
+        let password = "proxy@password-test";
+        let proxy = "http://proxy%20user-test:proxy%40password-test@127.0.0.1:12345";
+        let basic = STANDARD.encode(format!("{user}:{password}"));
+        for terminal in ["error", "poll", "save", "complete"] {
+            let store = Store::default();
+            let registration = store
+                .register_with_proxy("state-test", "codex", proxy)
+                .unwrap();
+            assert!(store.lock().sessions["state-test"].proxy_url == proxy);
+            let message = format!(
+                "failed {proxy} {user} {password} {basic} proxy%20user-test proxy%40password-test"
+            );
+            match terminal {
+                "error" => store.set_error("state-test", &message),
+                "poll" => assert!(store.set_pending_error("state-test", &message)),
+                "save" => {
+                    assert!(store.claim_commit("state-test", "codex", registration.id));
+                    store.fail_commit("state-test", &message);
+                }
+                _ => {
+                    assert!(store.claim_commit("state-test", "codex", registration.id));
+                    store.complete("state-test");
+                }
+            }
+            let session = store.get("state-test").unwrap();
+            for secret in [proxy, password, &basic, "proxy%40password-test"] {
+                assert!(!session.status.contains(secret));
+                assert!(!format!("{session:?} {store:?}").contains(secret));
+            }
+            if terminal != "complete" {
+                assert!(session.status.contains("http://[redacted]@127.0.0.1:12345"));
+                assert!(session.status.contains(user));
+                assert!(session.status.contains("proxy%20user-test"));
+            }
+            assert!(store.lock().sessions["state-test"].proxy_url.is_empty());
+            assert!(!store.is_committing("state-test"));
+            assert!(!store.set_pending_error("state-test", "late poll"));
+        }
+    }
+
+    #[test]
+    fn session_proxy_redaction_is_single_pass_for_short_and_overlapping_credentials() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        for (proxy, user, password, host) in [
+            ("http://u:d@bridge.test:8080", "u", "d", "bridge.test:8080"),
+            (
+                "http://redacted:acted@redacted.test:8080",
+                "redacted",
+                "acted",
+                "redacted.test:8080",
+            ),
+        ] {
+            let basic = STANDARD.encode(format!("{user}:{password}"));
+            let text =
+                format!("unable to connect {proxy} {user}:{password} {password} Basic {basic}");
+            let expected = format!(
+                "unable to connect http://[redacted]@{host} [redacted] [redacted] Basic [redacted]"
+            );
+            assert!(redact_session_proxy(&text, proxy) == expected);
+        }
+        assert!(
+            redact_session_proxy("unable to connect u", "http://u:d@bridge.test:8080")
+                == "unable to connect u"
+        );
+        assert!(
+            redact_session_proxy("http://user@proxy.test user", "http://user@proxy.test")
+                == "http://[redacted]@proxy.test user"
+        );
+        assert!(
+            redact_session_proxy("http://proxy.test", "http://proxy.test") == "http://proxy.test"
+        );
+    }
+
+    #[test]
+    fn session_proxy_redacts_encoded_and_decoded_userinfo_and_passwords() {
+        let proxy = "http://proxy%20user-test:proxy%40password-test@127.0.0.1:12345";
+        let text = "failed proxy%20user-test:proxy%40password-test proxy user-test:proxy@password-test proxy%40password-test proxy@password-test";
+        assert!(
+            redact_session_proxy(text, proxy)
+                == "failed [redacted] [redacted] [redacted] [redacted]"
+        );
+    }
+
+    #[test]
+    fn session_proxy_claimed_sessions_survive_expiry_until_finalization() {
+        for failed in [false, true] {
+            let store = Store::default();
+            let registration = store
+                .register_with_proxy("state-test", "codex", "http://127.0.0.1:12345")
+                .unwrap();
+            assert!(store.claim_commit("state-test", "codex", registration.id));
+            store
+                .lock()
+                .sessions
+                .get_mut("state-test")
+                .unwrap()
+                .session
+                .expires_at = Instant::now() - Duration::from_secs(1);
+            assert!(store.get("state-test").is_some());
+            assert!(!store.cancel("state-test"));
+            if failed {
+                store.fail_commit("state-test", "save failed");
+            } else {
+                store.complete("state-test");
+            }
+            assert!(store.lock().sessions["state-test"].proxy_url.is_empty());
+            store
+                .lock()
+                .sessions
+                .get_mut("state-test")
+                .unwrap()
+                .session
+                .expires_at = Instant::now() - Duration::from_secs(1);
+            assert!(store.get("state-test").is_none());
+        }
+    }
+
+    #[test]
     fn admitted_sessions_expire_after_completion_or_failure() {
         for failed in [false, true] {
             let store = Store::new(Duration::from_nanos(1));
@@ -677,7 +982,7 @@ mod bind_tests {
                 .expires_at = Instant::now() - Duration::from_secs(1);
             assert_eq!(store.count(), 1);
             if failed {
-                store.set_error("bind-expiry-test", "test failure");
+                store.fail_commit("bind-expiry-test", "test failure");
             } else {
                 store.complete("bind-expiry-test");
             }

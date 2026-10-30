@@ -11,18 +11,20 @@
 //! A login started here answers `{"state":...,"status":"ok","url":...}`
 //! at once, and then waits up to 5 minutes for its callback, which a
 //! callback route hands it. It then exchanges the code for tokens with the
-//! provider's official OAuth endpoints, through the config's `proxy-url`,
-//! within 60 seconds, and saves the credential in the auth directory,
+//! provider's official OAuth endpoints, through its explicit session proxy
+//! or the existing client defaults when none was supplied, within 60 seconds,
+//! and saves the credential in the auth directory,
 //! where the running service takes it up; the session then completes. A
 //! login that fails sets the session's status to say why.
 //!
 //! Cancelling the session stops its login at once, wherever it is, except
 //! while it saves: a login cancelled before its exchange sends no token
 //! request, and one cancelled during it drops the request and saves
-//! nothing. Shutdown stops logins after a bounded grace for saving binds.
-//! A post-fence bind collector can outlive that grace. However a
-//! login ends, its forwarder stops, and its session is dropped unless the
-//! login completed or failed it.
+//! nothing. Shutdown stops login owners after a bounded grace for saving
+//! binds. Claimed saves and their finalizers remain gate-owned until they
+//! record their durable outcome, while the process stays alive. However a
+//! login owner ends, its forwarder stops; only an unclaimed pending session
+//! is dropped.
 //!
 //! No log or answer holds a login's code, PKCE verifier or tokens. A
 //! failed exchange is logged with a fixed message and the token endpoint's
@@ -79,7 +81,7 @@ use std::time::Duration;
 
 use axum::extract::{RawQuery, State};
 use axum::response::Response;
-use http::StatusCode;
+use http::{Method, StatusCode};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_providers::claude::oauth::{self as claude, ClaudeAuth};
@@ -94,7 +96,7 @@ use crate::go::lossy;
 use crate::json::{self, Json};
 use crate::query::Query;
 use crate::state::ManagementState;
-use crate::token_record::save_token_record;
+use crate::token_record::{apply_session_proxy, save_token_record};
 
 /// How long a login waits for its callback.
 pub(super) const WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -130,14 +132,30 @@ pub(super) async fn codex_auth_url(
     start(&state, Provider::Codex, &Query::parse(query.as_deref())).await
 }
 
-/// `GET /v8/management/oauth/auth-url?provider=...` (`StartOAuthV8`): a
-/// `claude` or `codex` login.
-pub(super) async fn auth_url(
+/// `GET` or `POST /v8/management/oauth/auth-url` (`StartOAuthV8`): a
+/// `claude` or `codex` login. A session proxy is accepted only in a POST body.
+pub(crate) async fn auth_url(
     State(state): State<ManagementState>,
     RawQuery(query): RawQuery,
+    method: Method,
+    body: axum::body::Body,
 ) -> Response {
     let query = Query::parse(query.as_deref());
-    let provider = to_lower(&lossy(trim_space(query.value("provider"))));
+    if query.get("proxy_url").is_some() || query.get("proxy-url").is_some() {
+        return json::error(
+            StatusCode::BAD_REQUEST,
+            "proxy_url must be provided in the request body",
+        );
+    }
+    let body = match crate::bind::read_body(body).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let options = match StartOptions::parse(&method, &query, &body) {
+        Ok(options) => options,
+        Err(error) => return json::error(StatusCode::BAD_REQUEST, error),
+    };
+    let provider = to_lower(&options.provider);
     let mode = query.value("mode");
     if !mode.is_empty() && mode != b"siwc-bind" {
         return json::error(StatusCode::BAD_REQUEST, "unsupported oauth mode");
@@ -145,9 +163,15 @@ pub(super) async fn auth_url(
     if mode == b"siwc-bind" && provider != "codex" {
         return json::error(StatusCode::BAD_REQUEST, "SIWC bind requires codex");
     }
+    if mode == b"siwc-bind" && !options.proxy_url.is_empty() {
+        return json::error(
+            StatusCode::BAD_REQUEST,
+            "session proxy is not supported for SIWC bind",
+        );
+    }
     match provider.as_str() {
         "" => json::error(StatusCode::BAD_REQUEST, "provider is required"),
-        "claude" => start(&state, Provider::Claude, &query).await,
+        "claude" => start_with_options(&state, Provider::Claude, options, None).await,
         "codex" if query.value("mode") == b"siwc-bind" => {
             if state.credential_store().is_err() {
                 return json::error(
@@ -158,11 +182,11 @@ pub(super) async fn auth_url(
             let name = lossy(query.value("name"));
             let _mutation = state.credential_lock().lock().await;
             match super::siwc_bind::prepare(&state, &name).await {
-                Ok(bind) => start_with_bind(&state, Provider::Codex, &query, Some(bind)).await,
+                Ok(bind) => start_with_options(&state, Provider::Codex, options, Some(bind)).await,
                 Err(_) => json::error(StatusCode::BAD_REQUEST, "invalid SIWC bind target"),
             }
         }
-        "codex" => start(&state, Provider::Codex, &query).await,
+        "codex" => start_with_options(&state, Provider::Codex, options, None).await,
         _ => json::error(StatusCode::NOT_FOUND, "provider_not_found"),
     }
 }
@@ -220,13 +244,30 @@ async fn start_with_bind(
     query: &Query,
     bind: Option<super::siwc_bind::Bind>,
 ) -> Response {
+    start_with_options(state, provider, StartOptions::from_query(query), bind).await
+}
+
+async fn start_with_options(
+    state: &ManagementState,
+    provider: Provider,
+    options: StartOptions,
+    bind: Option<super::siwc_bind::Bind>,
+) -> Response {
     let sessions = state.oauth_sessions();
     let config = state.config();
     let pkce = Pkce::generate();
     let oauth_state = generate_state();
     let client = match bind {
         Some(bind) => Client::Siwc(Box::new(bind)),
-        None => Client::new(state, provider, &config),
+        None => match Client::for_session(state, provider, &config, &options.proxy_url) {
+            Ok(client) => client,
+            Err(()) => {
+                return json::error(
+                    StatusCode::BAD_GATEWAY,
+                    "failed to create OAuth proxy transport",
+                );
+            }
+        },
     };
     let redirect = match provider {
         Provider::Codex => {
@@ -250,7 +291,14 @@ async fn start_with_bind(
         },
     };
 
-    let Some(registration) = sessions.store().register(&oauth_state, provider.name()) else {
+    let registration = if options.proxy_url.is_empty() {
+        sessions.store().register(&oauth_state, provider.name())
+    } else {
+        sessions
+            .store()
+            .register_with_proxy(&oauth_state, provider.name(), &options.proxy_url)
+    };
+    let Some(registration) = registration else {
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
     };
     if let Client::Siwc(bind) = &client
@@ -271,6 +319,7 @@ async fn start_with_bind(
         state: oauth_state.clone(),
         pkce,
         redirect,
+        proxy_url: options.proxy_url,
         _lease: Lease {
             management: state.clone(),
             state: oauth_state.clone(),
@@ -279,7 +328,7 @@ async fn start_with_bind(
     };
 
     let mut forwarder = None;
-    if is_web_ui(query) {
+    if options.is_webui {
         let Some(target) = callback_url(
             &config,
             if is_bind {
@@ -324,6 +373,123 @@ async fn start_with_bind(
     json::response(StatusCode::OK, &Json::Struct(response))
 }
 
+/// Native login options; deliberately no `Debug`, as a proxy can carry credentials.
+struct StartOptions {
+    provider: String,
+    proxy_url: String,
+    is_webui: bool,
+}
+
+impl StartOptions {
+    fn from_query(query: &Query) -> Self {
+        Self {
+            provider: lossy(trim_space(query.value("provider"))),
+            proxy_url: String::new(),
+            is_webui: is_web_ui(query),
+        }
+    }
+
+    fn parse(method: &Method, query: &Query, body: &[u8]) -> Result<Self, &'static str> {
+        let mut options = Self::from_query(query);
+        if trim_space(body).is_empty() {
+            return Ok(options);
+        }
+        if method != Method::POST {
+            return Err("request body requires POST");
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(body).map_err(|_| "invalid request body")?;
+        let object = value.as_object().ok_or("invalid request body")?;
+        let string = |key, error| -> Result<&str, &'static str> {
+            match object.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(""),
+                Some(serde_json::Value::String(value)) => Ok(value.trim()),
+                _ => Err(error),
+            }
+        };
+        let provider = string("provider", "invalid provider")?;
+        if !options.provider.is_empty()
+            && !provider.is_empty()
+            && !crate::go::equal_fold(&options.provider, provider)
+        {
+            return Err("conflicting provider parameter");
+        }
+        if options.provider.is_empty() {
+            provider.clone_into(&mut options.provider);
+        }
+        let snake = string("proxy_url", "invalid proxy_url")?;
+        let kebab = string("proxy-url", "invalid proxy_url")?;
+        if !snake.is_empty() && !kebab.is_empty() && snake != kebab {
+            return Err("invalid proxy_url");
+        }
+        let proxy = if snake.is_empty() { kebab } else { snake };
+        validate_session_proxy(proxy)?;
+        proxy.clone_into(&mut options.proxy_url);
+        // These aliases are unused by native providers, but their types are
+        // checked before dispatch, with domain taking precedence upstream.
+        if object.get("domain").is_some_and(|value| !value.is_null()) {
+            string("domain", "invalid domain")?;
+        } else {
+            string("channel", "invalid channel")?;
+        }
+        let body_webui = match object.get("is_webui") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Bool(value)) => Some(*value),
+            Some(serde_json::Value::String(value)) => match to_lower(value.trim()).as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" | "" => Some(false),
+                _ => return Err("invalid is_webui"),
+            },
+            _ => return Err("invalid is_webui"),
+        };
+        if trim_space(query.value("is_webui")).is_empty()
+            && let Some(webui) = body_webui
+        {
+            options.is_webui = webui;
+        }
+        Ok(options)
+    }
+}
+
+/// Accepts only proxy endpoints, not direct selectors or URLs with routing data.
+fn validate_session_proxy(raw: &str) -> Result<(), &'static str> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let invalid = "invalid proxy_url";
+    let go = crate::go_url::parse(raw.as_bytes()).ok_or(invalid)?;
+    let url = url::Url::parse(raw).map_err(|_| invalid)?;
+    if !matches!(go.scheme.as_str(), "http" | "https" | "socks5" | "socks5h")
+        || url.host_str().is_none_or(str::is_empty)
+        || go.host.ends_with(b":")
+        || (go.path != b"/" && !go.path.is_empty())
+        || url.query().is_some_and(|query| !query.is_empty())
+        || url.fragment().is_some_and(|fragment| !fragment.is_empty())
+    {
+        return Err(invalid);
+    }
+    // Check the original authority: WHATWG parsing drops default ports.
+    let host = lossy(&go.host);
+    let port = if host.starts_with('[') {
+        host.split_once(']')
+            .and_then(|(_, tail)| tail.strip_prefix(':'))
+    } else {
+        host.rsplit_once(':').map(|(_, port)| port)
+    };
+    if port.is_some_and(|port| port.parse::<u16>().map_or(true, |port| port == 0))
+        || (matches!(go.scheme.as_str(), "socks5" | "socks5h") && port.is_none())
+    {
+        return Err(invalid);
+    }
+    // This build has no SOCKS transport. Reqwest accepts its URLs even without
+    // that feature, so reject it here rather than misroute an explicit override.
+    if !matches!(go.scheme.as_str(), "http" | "https") {
+        return Err(invalid);
+    }
+    reqwest::Proxy::all(raw).map_err(|_| invalid)?;
+    Ok(())
+}
+
 /// Whether the login was started from the web UI: `is_webui` is `1`,
 /// `true`, `yes` or `on`, after trimming and in any case
 /// (`isWebUIRequest`).
@@ -349,6 +515,7 @@ struct Login {
     state: String,
     pkce: Pkce,
     redirect: String,
+    proxy_url: String,
     _lease: Lease,
 }
 
@@ -398,6 +565,51 @@ impl Client {
                     .with_endpoints(sessions.codex_endpoints()),
             ),
         }
+    }
+
+    /// An explicit session proxy gets a fallible, isolated transport. Unlike
+    /// the default constructors, this path never falls back to another route.
+    fn for_session(
+        state: &ManagementState,
+        provider: Provider,
+        config: &Config,
+        proxy_url: &str,
+    ) -> Result<Self, ()> {
+        if proxy_url.is_empty() {
+            return Ok(Self::new(state, provider, config));
+        }
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| ())?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(proxy)
+            .user_agent(concat!("open-ferry/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many OAuth redirects")
+                } else if attempt
+                    .previous()
+                    .first()
+                    .is_some_and(|first| first.origin() == attempt.url().origin())
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .build()
+            .map_err(|_| ())?;
+        let sessions = state.oauth_sessions();
+        Ok(match provider {
+            Provider::Claude => {
+                Self::Claude(ClaudeAuth::new(client).with_endpoints(sessions.claude_endpoints()))
+            }
+            Provider::Codex => {
+                Self::Codex(CodexAuth::new(client).with_endpoints(sessions.codex_endpoints()))
+            }
+        })
     }
 
     fn provider(&self) -> Provider {
@@ -520,37 +732,38 @@ async fn run(
         store.set_error(&login.state, crate::config_write::SWITCHING);
         return;
     };
-    let bind =
-        matches!(login.client, Client::Siwc(_)).then(|| (state.clone(), login.state.clone()));
+    let session = login.state.clone();
     let work = complete(state.clone(), login, callback, lifeline);
     let Ok(task) = gate.spawn(&operation, work) else {
         return;
     };
     drop(operation);
-    // A login stopped here (shut down, or its session replaced) stops its
-    // task, as when the exchange and the save ran in this one.
-    let mut task = StopOnDrop { task, bind };
+    // Stop unclaimed work with its owner, but keep a claimed save and its
+    // finalizer gate-owned after shutdown aborts that owner.
+    let mut task = StopOnDrop {
+        task,
+        management: state.clone(),
+        session,
+    };
     if let Err(error) = (&mut task.task).await {
         tracing::error!("The {provider} login's task failed: {error}");
     }
 }
 
-/// Abort with the login owner, except a post-fence bind during shutdown.
+/// Abort with the login owner, except a claimed save during shutdown.
 struct StopOnDrop {
     task: tokio::task::JoinHandle<()>,
-    bind: Option<(ManagementState, String)>,
+    management: ManagementState,
+    session: String,
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        // After the bounded shutdown grace, a committed bind's collector
-        // remains gate-owned. If the process stays alive, it can still finish.
-        // The shutdown cutoff and admit_bind use the same login mutex, so no
-        // new final fence can pass after this check during shutdown.
-        if self.bind.as_ref().is_some_and(|(state, session)| {
-            state.oauth_sessions().is_shut_down()
-                && state.oauth_sessions().store().is_committing(session)
-        }) {
+        // Claimed saves and their finalizers remain gate-owned while the
+        // process stays alive. The shutdown cutoff, claim_login_commit and
+        // admit_bind share the login mutex: no new claim can follow this check.
+        let sessions = self.management.oauth_sessions();
+        if sessions.is_shut_down() && sessions.store().is_committing(&self.session) {
             return;
         }
         self.task.abort();
@@ -625,14 +838,22 @@ async fn complete(
         None
     };
     let saved = match (record, login.client) {
-        (Credential::Login(record), Client::Claude(_) | Client::Codex(_)) => {
+        (Credential::Login(mut record), Client::Claude(_) | Client::Codex(_)) => {
             use crate::token_record::SaveError;
+            apply_session_proxy(&mut record, &login.proxy_url);
+            if !sessions.claim_login_commit(&login.state, provider.name(), login._lease.id) {
+                return;
+            }
+            #[cfg(test)]
+            if let Some(claimed) = sessions.overrides().login_commit_claimed.clone() {
+                claimed.notify_one();
+            }
             match save_token_record(&state, *record).await {
                 Ok(path) => Ok((path, true)),
                 Err(SaveError::Sync { path, .. }) => Ok((path, false)),
                 Err(error) => {
                     tracing::error!("{SAVE_FAILED}: {error}");
-                    store.set_error(&login.state, SAVE_FAILED);
+                    store.fail_commit(&login.state, SAVE_FAILED);
                     return;
                 }
             }
@@ -726,7 +947,7 @@ fn bind_error(store: &super::sessions::Store, session: &str, error: super::siwc_
                 error.kind(),
                 error.raw_os_error()
             );
-            store.set_error(session, SAVE_FAILED);
+            store.fail_commit(session, SAVE_FAILED);
         }
     }
 }

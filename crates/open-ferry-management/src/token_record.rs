@@ -102,6 +102,20 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
+/// Applies only an explicit session override, before merging older settings.
+/// The metadata copy is what survives saving, restart and token refresh.
+pub(crate) fn apply_session_proxy(record: &mut Auth, proxy_url: &str) {
+    let proxy_url = proxy_url.trim();
+    if proxy_url.is_empty() {
+        return;
+    }
+    record.proxy_url = proxy_url.to_owned();
+    record.metadata.insert(
+        "proxy_url".to_owned(),
+        serde_json::Value::String(proxy_url.to_owned()),
+    );
+}
+
 /// Saves `record`, a credential a login or an import made, in the auth
 /// directory, and returns the file's path (upstream's `saveTokenRecord`):
 ///
