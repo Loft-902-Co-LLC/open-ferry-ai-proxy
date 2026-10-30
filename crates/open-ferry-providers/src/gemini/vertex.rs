@@ -413,7 +413,7 @@ impl VertexExecutor {
             PROVIDER,
         )?;
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
-        prepare_count_body(&mut body, base);
+        prepare_count_body(&mut body, base, false);
         self.apply_payload_rules(request, options, false, None, &mut body);
         let url = self.url(&target, base, "countTokens");
         let headers = self.headers(auth, options, &target).await?;
