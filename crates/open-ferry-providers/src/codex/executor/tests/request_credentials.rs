@@ -729,3 +729,128 @@ async fn r3_native_requests_do_not_persist_a_request_specific_siwc_switch() {
         Some("Bearer nested-transport-dummy")
     );
 }
+
+#[tokio::test]
+async fn pin_concurrent_outer_and_siwc_refusals_survive_both_completion_orders() {
+    use std::time::Duration;
+    use tokio::sync::{Notify, mpsc};
+
+    for first_native in [false, true] {
+        let outer_gate = Arc::new(Notify::new());
+        let siwc_gate = Arc::new(Notify::new());
+        let (arrived, mut arrivals) = mpsc::unbounded_channel();
+        let outer = outer_gate.clone();
+        let siwc = siwc_gate.clone();
+        let app = axum::Router::new().fallback(move |headers: HeaderMap| {
+            let outer = outer.clone();
+            let siwc = siwc.clone();
+            let arrived = arrived.clone();
+            async move {
+                let native = headers["authorization"] == "Bearer outer-transport-dummy";
+                assert!(native || headers["authorization"] == "Bearer nested-transport-dummy");
+                arrived.send(native).unwrap();
+                if native {
+                    outer.notified().await;
+                } else {
+                    siwc.notified().await;
+                }
+                (
+                    http::StatusCode::UNAUTHORIZED,
+                    r#"{"error":{"message":"invalid credential"}}"#,
+                )
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let registry = Arc::new(ModelRegistry::new());
+        let manager = Manager::new(
+            Settings {
+                disable_cooling: true,
+                ..Settings::default()
+            },
+            registry.clone(),
+            None,
+        );
+        manager.register_executor(Arc::new(executor()));
+        let mut auth = dual(&base);
+        auth.id = "concurrent-refusals".into();
+        auth.status = Status::Active;
+        let metadata = auth.metadata.clone();
+        registry.register_client(
+            &auth.id,
+            "codex",
+            &[ModelInfo {
+                id: "gpt-5".into(),
+                ..ModelInfo::default()
+            }],
+        );
+        manager.register(auth).unwrap();
+        let (finished, mut completions) = mpsc::unbounded_channel();
+        let call = |native| {
+            let finished = finished.clone();
+            let manager = &manager;
+            async move {
+                let error = manager
+                    .execute(
+                        &["codex".into()],
+                        request("gpt-5", r#"{"input":[]}"#),
+                        opts(
+                            "execute",
+                            if native {
+                                "codex-rs/1"
+                            } else {
+                                "ordinary-client/1"
+                            },
+                        ),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status, 401);
+                finished.send(native).unwrap();
+            }
+        };
+        let order = async {
+            let mut seen = [
+                arrivals.recv().await.unwrap(),
+                arrivals.recv().await.unwrap(),
+            ];
+            seen.sort();
+            assert_eq!(seen, [false, true]);
+            if first_native {
+                outer_gate.notify_one();
+            } else {
+                siwc_gate.notify_one();
+            }
+            assert_eq!(completions.recv().await, Some(first_native));
+            let live = manager.get("concurrent-refusals").unwrap();
+            assert_eq!(
+                live.rejected_access_token == live.outer_access_token(),
+                first_native
+            );
+            assert_eq!(
+                live.rejected_siwc_access_token == live.siwc_access_token(),
+                !first_native
+            );
+            if first_native {
+                siwc_gate.notify_one();
+            } else {
+                outer_gate.notify_one();
+            }
+            assert_eq!(completions.recv().await, Some(!first_native));
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(call(first_native), call(!first_native), order);
+        })
+        .await;
+        server.abort();
+        let _ = server.await;
+        result.expect("both real transport failures must complete in the gated order");
+        let live = manager.get("concurrent-refusals").unwrap();
+        assert!(!live.rejected_access_token.is_empty());
+        assert!(!live.rejected_siwc_access_token.is_empty());
+        assert!(live.rejected_access_token == live.outer_access_token());
+        assert!(live.rejected_siwc_access_token == live.siwc_access_token());
+        assert_eq!(live.metadata, metadata);
+    }
+}
