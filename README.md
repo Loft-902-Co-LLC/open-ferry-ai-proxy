@@ -418,7 +418,7 @@ Against CLIProxyAPI v8.0.32 (commit `911f49cbd49f`), built with go1.26.4, with `
 </details>
 <!-- parity-summary:end -->
 
-To rerun it and update the summary above, use Go 1.26 ([UPSTREAM.md](UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one:
+To rerun it and update the summary above, use Go 1.26.10 or later ([UPSTREAM.md](UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one:
 
 ```sh
 git clone --branch v8.0.42 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI

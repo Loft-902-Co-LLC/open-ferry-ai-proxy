@@ -38,7 +38,7 @@
 //!
 //! Deviations from upstream:
 //! - The tables of v8 sections and the fields they hold are fixed tables,
-//!   checked against v8.0.38; upstream builds them by reflecting over its
+//!   checked against v8.0.42; upstream builds them by reflecting over its
 //!   `Config` struct.
 //! - Upstream comments out the sections it drops, and logs a warning for
 //!   each; they are dropped here without a trace, as a [`V8Document`] is

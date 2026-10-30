@@ -213,7 +213,7 @@ async fn every_body_route_rejects_chunked_oversize_in_the_upstream_shape() {
                     "code": "invalid_request_error", "message": "Invalid request: http: request body too large"
                 }})
             }
-            // internal/api/server_routes.go:362-366 (v8.0.42, both aliases).
+            // internal/api/server_routes.go:363-367 (v8.0.42, both aliases).
             "/v1/alpha/search" | "/backend-api/codex/alpha/search" => {
                 serde_json::json!({"error": "Failed to read search request"})
             }
