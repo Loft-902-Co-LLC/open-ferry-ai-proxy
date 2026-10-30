@@ -76,7 +76,9 @@ impl CodexExecutor {
         } = call;
         let url = self.target_url(target);
         refuse_control_characters(&url)?;
-        let token = if auth.use_siwc() {
+        // Keep the exact-destination protection for stored SIWC credentials,
+        // independently of this request's selected bearer and API-key precedence.
+        if auth.use_siwc() {
             let destination = url::Url::parse(&url).map_err(|_| {
                 ExecError::new(
                     ErrorKind::Upstream,
@@ -93,6 +95,8 @@ impl CodexExecutor {
             {
                 return Err(ExecError::new(ErrorKind::Upstream, "codex executor: plain HTTP passthrough is not supported with use_siwc outside ChatGPT HTTPS Alpha Search").with_status(400));
             }
+        }
+        let token = if auth.use_siwc_for_request(&client_headers) {
             let token = auth.outer_access_token();
             if token.is_empty() {
                 return Err(ExecError::new(ErrorKind::Upstream, "codex executor: original OAuth access_token is required for ChatGPT Alpha Search").with_status(401));
