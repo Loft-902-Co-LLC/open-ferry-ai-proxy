@@ -57,10 +57,8 @@ pub(super) fn inspect_unprefixed_antigravity_caqs(
         .map_err(|err| error!("invalid Antigravity CAQS inner encoding: {err}"))?;
     let info = inspect_claude_cais_payload(&decoded, true)
         .map_err(|err| error!("invalid Antigravity CAQS payload: {err}"))?;
-    // Only the observed Google thinking channel. Other versions and channels
-    // need their own capture and replay checks.
+    // Channel IDs rotate; the Google thinking envelope schema stays fixed.
     if info.envelope_version != 4
-        || info.channel_id != 18
         || info.infrastructure != Some(2)
         || info.block_kind != "thinking"
         || !info.signature_in_container

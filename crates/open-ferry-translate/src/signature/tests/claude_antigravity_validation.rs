@@ -106,8 +106,6 @@ fn antigravity_caqs_rejects_malformed_wrappers() {
     bad_field[index + 2] = 18;
     let mut future_version = raw.clone();
     future_version[1] = 5;
-    let mut wrong_channel = raw.clone();
-    wrong_channel[index + 1] = 16;
 
     // An otherwise valid CAQS with its signature in the old channel slot.
     let mut misplaced = ClaudeCaisParts::new("claude-opus-5-5");
@@ -179,7 +177,6 @@ fn antigravity_caqs_rejects_malformed_wrappers() {
         ("infra", wrap(&wrong_infra)),
         ("infra wire type", wrap(&bad_field)),
         ("future version", wrap(&future_version)),
-        ("channel", wrap(&wrong_channel)),
         ("narration", wrap(&narration_payload)),
         ("signature location", wrap(&misplaced_payload)),
         (
@@ -273,4 +270,22 @@ fn antigravity_caqs_is_not_claude_native() {
             .map_err(|err| err.to_string()),
         Err("invalid signature: expected 'E', 'R' or 'Q' prefix, got \"X\"".to_owned())
     );
+}
+
+#[test]
+fn caqs_rotated_channels_keep_schema_and_native_replay_fences() {
+    let inner = STANDARD.decode(antigravity_caqs()).unwrap();
+    let raw = STANDARD.decode(inner).unwrap();
+    let index = raw.windows(6).position(|w| w == [8, 18, 16, 2, 24, 2]).unwrap();
+    for channel in [1, 16, 18, 19, 20, 127] {
+        let mut rotated = raw.clone();
+        rotated[index + 1] = channel;
+        let sig = STANDARD.encode(STANDARD.encode(rotated));
+        let info = inspect_antigravity_claude_caqs_signature(&sig).unwrap();
+        assert_eq!(info.channel_id, u64::from(channel));
+        assert_eq!(detect_signature_provider(&sig), Provider::Claude);
+        for target in [Provider::Claude, Provider::Gemini, Provider::Gpt] {
+            assert!(!decide_signature_compatibility(target, &sig, BlockKind::ClaudeThinking).compatible);
+        }
+    }
 }
