@@ -52,8 +52,10 @@ pub struct GeminiValidationOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GeminiEnvelope {
     Unknown,
-    /// Field 2 holding field 1: the only replay-safe envelope.
+    /// Field 2 holding field 1.
     ProtobufField2,
+    /// Vertex-only unwrapped Tink output, with an observed key ID.
+    BareTink,
     AsciiUuid,
 }
 
@@ -63,6 +65,7 @@ impl GeminiEnvelope {
         match self {
             GeminiEnvelope::Unknown => "unknown",
             GeminiEnvelope::ProtobufField2 => "protobuf_field_2",
+            GeminiEnvelope::BareTink => "bare_tink",
             GeminiEnvelope::AsciiUuid => "ascii_uuid",
         }
     }
@@ -134,6 +137,7 @@ pub fn inspect_gemini_thought_signature(
     let (envelope, known_envelope) = classify_envelope(&decoded);
     let opaque_payload_len = match envelope {
         GeminiEnvelope::ProtobufField2 => field2_envelope_payload_len(&decoded).unwrap_or(0),
+        GeminiEnvelope::BareTink => decoded.len(),
         _ => 0,
     };
     let info = GeminiThoughtSignatureInfo {
@@ -375,6 +379,8 @@ fn classify_envelope(decoded: &[u8]) -> (GeminiEnvelope, bool) {
         (GeminiEnvelope::AsciiUuid, false)
     } else if field2_envelope_payload_len(decoded).is_some() {
         (GeminiEnvelope::ProtobufField2, true)
+    } else if decoded.len() >= 21 && decoded.starts_with(&[0x01, 0x8f, 0x3d, 0x6b, 0x5f]) {
+        (GeminiEnvelope::BareTink, true)
     } else {
         (GeminiEnvelope::Unknown, false)
     }
@@ -448,4 +454,13 @@ fn gemini_contents(payload: &Value) -> (Option<&Value>, &'static str) {
         Some(contents) => (Some(contents), "contents"),
         None => (json::path(payload, "request.contents"), "request.contents"),
     }
+}
+
+/// Whether a signature uses Vertex's pinned bare-Tink envelope. Other Gemini
+/// endpoints must treat this as incompatible, even though its family is Gemini.
+pub fn is_gemini_vertex_bare_tink_signature(raw: &str) -> bool {
+    inspect_gemini_thought_signature(
+        super::signature_payload_without_provider_prefix(raw),
+        GeminiValidationOptions { require_known_envelope: true, ..Default::default() },
+    ).is_ok_and(|info| info.envelope == Some(GeminiEnvelope::BareTink))
 }
