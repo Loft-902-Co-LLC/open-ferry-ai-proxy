@@ -62,8 +62,8 @@ use crate::codex::stream::Bootstrap;
 use crate::codex::terminal::{
     MAX_BOOTSTRAP_BYTES, MAX_BOOTSTRAP_FRAMES, OutputItems, bootstrap_overload_error,
     empty_incomplete_stream_error, has_meaningful_output_delta, is_bootstrap_bufferable_event,
-    is_overload_bootstrap_failure, is_terminal_empty_incomplete, normalize_completion,
-    terminal_failure,
+    is_overload_bootstrap_failure, is_terminal_empty_incomplete, is_usage_limit,
+    normalize_completion, terminal_failure,
 };
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::json::str_at;
@@ -283,8 +283,8 @@ impl State {
     /// - a broken connection is the call's error;
     /// - an error event within the time limit is the call's error, and
     ///   after it ends the stream after the held events;
-    /// - an overload ([`is_overload_bootstrap_failure`]) within the time
-    ///   limit is the call's error, a 503 or 429; another terminal failure,
+    /// - an overload ([`is_overload_bootstrap_failure`]) or usage-limit rejection
+    ///   within the time limit is the call's error, a 503 or 429; another terminal failure,
     ///   or an overload after the time limit, ends the stream after the held
     ///   events, as does an empty `response.incomplete`.
     async fn bootstrap(&mut self, bootstrap: &Bootstrap) -> Result<(), ExecError> {
@@ -332,8 +332,14 @@ impl State {
                 }
                 Err(Fault::Terminal(error, body)) => {
                     self.end();
-                    if is_overload_bootstrap_failure(body.as_bytes()) {
+                    let overload = is_overload_bootstrap_failure(body.as_bytes());
+                    let usage_limit =
+                        is_usage_limit(&serde_json::from_str(&body).unwrap_or(Value::Null));
+                    if overload || usage_limit {
                         if !timed_out {
+                            if usage_limit && !overload {
+                                return Err(error);
+                            }
                             tracing::debug!(
                                 "codex websockets executor: bootstrap overload rejection after {frames} messages read, failing over"
                             );

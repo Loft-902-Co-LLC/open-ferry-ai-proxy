@@ -255,6 +255,17 @@ async fn overload_fails_attempt() {
     assert_eq!(record.messages.len(), 1);
 }
 
+// 86a1aabf: a quota rejection while created/in_progress are still buffered
+// must fail the attempt, not emit those buffered frames before its error.
+#[tokio::test]
+async fn bootstrap_usage_limit_fails_attempt_before_output() {
+    let quota = r#"{"type":"response.failed","response":{"id":"r1","status":"failed","error":{"type":"usage_limit_reached","message":"quota exhausted","resets_in_seconds":120}}}"#;
+    let server = serve_frames(&[CREATED_EVENT, IN_PROGRESS_EVENT, quota]).await;
+    let error = failed_over(start_ws(&buffering(true), &server).await);
+    assert_eq!(error.status, 429);
+    assert_eq!(error.retry_after.unwrap().as_secs(), 120);
+}
+
 // TestCodexWebsocketsExecutor_BootstrapBuffering_CapacityFailsAttempt
 #[tokio::test]
 async fn capacity_fails_attempt() {

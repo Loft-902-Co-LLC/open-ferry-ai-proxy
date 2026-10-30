@@ -57,6 +57,8 @@ use crate::config::ServerConfig;
 use crate::state::AppState;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 
+mod invariants;
+
 /// How long the mock waits for a frame (upstream's read deadlines).
 const UPSTREAM_WAIT: Duration = Duration::from_secs(8);
 
