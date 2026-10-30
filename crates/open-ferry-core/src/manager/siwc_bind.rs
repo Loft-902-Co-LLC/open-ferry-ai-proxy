@@ -4,6 +4,9 @@
 
 //! Binds use global reload admission with FIFO turns and bounded drains.
 //! FIFO turns and reservations remain on one running, dedicated worker.
+//! After a bind commits, fresh-read adoption uses lifecycle's common credential
+//! replacement recovery: a changed SIWC bearer clears refresh failures; an
+//! unchanged bearer retains them. No recovery state is changed before commit.
 
 use super::{Manager, lock};
 use crate::auth::{Auth, AuthKind, AuthSource};
