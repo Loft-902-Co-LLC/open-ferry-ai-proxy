@@ -72,10 +72,7 @@ impl Framer {
                 self.next_frame_prefix.extend_from_slice(&chunk);
                 return None;
             }
-            // A bare word terminated by a real newline is data, not a new
-            // colon-bearing field (upstream mistakes malformed string data here).
-            let mut new_frame =
-                complete && field != b"data" && trimmed.get(field.len()) == Some(&b':');
+            let mut new_frame = complete && field != b"data";
             if complete && field == b"data" {
                 let payload = data_payload(trimmed).unwrap_or_default();
                 let valid = go::json_valid(&payload);
@@ -188,11 +185,7 @@ pub(super) fn consume_breaks(breaks: &mut Vec<usize>, consumed: usize) {
 
 /// Only synthetic newlines are candidates for recovery. Real SSE comments,
 /// newlines, escapes and string contents are never removed speculatively.
-pub(super) fn recover_json_frame<'a>(
-    frame: &'a [u8],
-    breaks: &[usize],
-    is_codex_client: bool,
-) -> Cow<'a, [u8]> {
+pub(super) fn recover_json_frame<'a>(frame: &'a [u8], breaks: &[usize]) -> Cow<'a, [u8]> {
     if breaks.is_empty() || data_payload(frame).is_some_and(|payload| go::json_valid(&payload)) {
         return Cow::Borrowed(frame);
     }
@@ -221,23 +214,6 @@ pub(super) fn recover_json_frame<'a>(
         candidate.extend_from_slice(&frame[start..]);
         if let Some(frame) = recover(&candidate) {
             return Cow::Owned(frame);
-        }
-        // Keep malformed private events classifiable across splits before JSON
-        // colons. Only remove recorded synthetic newlines, never real comments.
-        // Upstream recovers valid JSON only; its malformed type can be hidden
-        // behind an inserted SSE comment and escape the public-client filter.
-        let original_type = data_payload(frame)
-            .map(|payload| json::str_at(&payload, "type"))
-            .unwrap_or_default();
-        if !is_codex_client
-            && !private_type(&original_type)
-            && !private_type(&event_name(frame))
-            && let Some(payload) = data_payload(&candidate)
-        {
-            let kind = json::str_at(&payload, "type");
-            if private_type(&kind) {
-                return Cow::Owned(frame_with_data(&candidate, &payload));
-            }
         }
     }
     Cow::Borrowed(frame)
@@ -290,11 +266,4 @@ fn data_ends_inside_json_string(frame: &[u8]) -> bool {
         }
     }
     in_string
-}
-
-fn private_type(kind: &str) -> bool {
-    kind == "response.metadata"
-        || kind == "response.subscription_usage"
-        || kind.starts_with("codex.")
-        || kind.starts_with("responsesapi.")
 }

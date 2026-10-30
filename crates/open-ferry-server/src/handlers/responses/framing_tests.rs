@@ -8,8 +8,6 @@ use serde_json::{Value, json};
 const COMPLETED: &str = "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n";
 const EMPTY_METADATA: &str = "event: response.metadata\ndata:";
 const DATA_FIRST: &str = "data: {\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}";
-const BARE_WORD: &str = "responses-sse-bare-word-data-continuation";
-const PRIVATE_RECOVERY: &str = "responses-sse-malformed-private-recovery";
 
 fn run(codex: bool, chunks: &[&[u8]]) -> (String, Framer) {
     let mut framer = Framer::new(codex);
@@ -202,81 +200,6 @@ fn field_prefixes_in_json_strings_are_not_sse_fields() {
                     "marker={marker:?} split={split} codex={codex}: {got}"
                 );
                 assert!(got.contains(COMPLETED));
-            }
-        }
-    }
-}
-
-// Exact expected differences from the literal v8.0.47 oracle. No catch-all
-// exception: each retained difference has a concrete corrupted/lost event.
-#[test]
-fn upstream_expected_framing_differences() {
-    struct Difference {
-        name: &'static str,
-        reason: &'static str,
-        chunks: &'static [&'static [u8]],
-        upstream: &'static [&'static [u8]],
-        retained: &'static [&'static [u8]],
-    }
-    let differences = [
-        Difference {
-            name: "responses-sse-bare-word-data-continuation",
-            reason: "upstream emits empty custom data and separates its malformed payload into a no-data frame",
-            chunks: &[b"event: custom\ndata:", b"bad\n\n"],
-            upstream: &[b"event: custom\ndata:", b"bad\n\n"],
-            retained: &[b"event: custom\ndata:bad\n\n"],
-        },
-        Difference {
-            name: "responses-sse-malformed-private-recovery",
-            reason: "upstream hides the malformed private type behind a synthetic comment and leaks it to standard clients",
-            chunks: &[b"data: {\"type\"", b":\"response.metadata\",\"bad\":}\n\n"],
-            upstream: &[b"data: {\"type\"\n:\"response.metadata\",\"bad\":}\n\n"],
-            retained: &[b"data: {\"type\":\"response.metadata\",\"bad\":}\n\n"],
-        },
-    ];
-    for difference in differences {
-        for codex in [false, true] {
-            let mut oracle = upstream::Upstream::new(codex);
-            for chunk in difference.chunks {
-                oracle.write_chunk(chunk);
-            }
-            oracle.flush();
-            let (out, framer) = run(codex, difference.chunks);
-            assert_eq!(
-                oracle.frames, difference.upstream,
-                "{}: {}",
-                difference.name, difference.reason
-            );
-            assert_eq!(
-                framer.frames,
-                if codex && difference.name == PRIVATE_RECOVERY {
-                    difference.upstream
-                } else {
-                    difference.retained
-                },
-                "{}: {}",
-                difference.name,
-                difference.reason
-            );
-            if !codex || difference.name != PRIVATE_RECOVERY {
-                assert_ne!(oracle.frames, framer.frames, "{}", difference.name);
-            }
-            if difference.name == "responses-sse-malformed-private-recovery" {
-                assert_eq!(out.is_empty(), !codex);
-                if codex {
-                    assert_eq!(out.as_bytes(), upstream::wire(&oracle.frames).as_ref());
-                }
-                let mut upstream_sink = Framer::new(false);
-                let upstream_visible = upstream_sink.repair_frame(&oracle.frames[0]);
-                assert!(!upstream_visible.is_empty());
-                assert!(
-                    Framer::new(false)
-                        .repair_frame(&framer.frames[0])
-                        .is_empty()
-                        || codex
-                );
-            } else {
-                assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
             }
         }
     }
@@ -546,7 +469,7 @@ fn recovered_terminal_output_is_rebuilt_exactly_once() {
     }
 }
 
-const PARTITION_INVARIANT: &str = "Every partition matches the independent v8.0.47 oracle's recovered pre-repair frame bytes (including CR/LF, whitespace, field order and repeated fields) and terminal decision, except explicitly listed fixtures under the two named differences.";
+const PARTITION_INVARIANT: &str = "Every partition matches the independent v8.0.47 oracle's recovered pre-repair frame bytes (including CR/LF, whitespace, field order and repeated fields) and terminal decision. No exceptions or normalization.";
 
 fn partition_streams() -> Vec<Vec<u8>> {
     let mut streams: Vec<Vec<u8>> = vec![
@@ -568,6 +491,10 @@ fn partition_streams() -> Vec<Vec<u8>> {
         b"data: {\"type\":\"response.metadata\",\"bad\":\n\n".to_vec(),
         b"event: response.completed\ndata: {\"type\":\"response.completed\"}\nid: terminal\nretry: 1000\n\n".to_vec(),
     ];
+    streams.extend([
+        b"event: a\ndata:\nfoo\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n".to_vec(),
+        b"event: response.completed\ndata:1\n\n".to_vec(),
+    ]);
     // Literal recovered-wire forms of recovery_fixtures(), not inputs generated
     // by the production framer during the differential test.
     for wire in [
@@ -594,8 +521,8 @@ struct FrameFields {
     other: Vec<String>,
 }
 
-// A framing-level view only: no repair/filter helpers are called. Keep every
-// frame, including ones without data, and preserve id/retry/comments verbatim.
+// Client-level fields for terminal repair assertions. Differential comparisons
+// use the raw frame bytes and terminal decision instead.
 fn frame_fields(frames: &[Vec<u8>]) -> Vec<FrameFields> {
     frames
         .iter()
@@ -650,66 +577,6 @@ fn for_each_partition(wire: &[u8], mut check: impl FnMut(&[&[u8]])) {
             }
         }
     }
-}
-
-struct PartitionDifference {
-    names: &'static [&'static str],
-    fixture: String,
-    stream: usize,
-    upstream: Vec<Vec<u8>>,
-    retained: Vec<Vec<u8>>,
-}
-
-// Exact trace pairs, scoped to individual family fixtures. This is not a list
-// of streams to skip: every exceptional partition must match both snapshots
-// and both independently calculated terminal decisions. No oracle mode changes.
-fn partition_differences(streams: &[Vec<u8>]) -> Vec<PartitionDifference> {
-    let mut differences = Vec::new();
-    let mut add = |names: &'static [&'static str], stream, fixture: String, upstream, retained| {
-        differences.push(PartitionDifference {
-            names,
-            fixture,
-            stream,
-            upstream,
-            retained,
-        });
-    };
-    // Empty metadata data followed by a bare malformed word, with/without a
-    // leading space. Both are the existing bare-word-continuation difference.
-    for space in ["", " "] {
-        add(
-            &[BARE_WORD],
-            5,
-            format!("malformed-metadata/bare-word-space-{}", space.len()),
-            vec![
-                format!("event: response.metadata\ndata:{space}").into_bytes(),
-                format!("{}malformed\n\n", if space.is_empty() { " " } else { "" }).into_bytes(),
-            ],
-            vec![streams[5].clone()],
-        );
-    }
-    // Only a hidden private type changes standard-client filtering. A split
-    // after an already visible type is byte-identical to upstream.
-    for mask in [1, 2, 3, 5, 6, 7] {
-        let mut broken = String::from_utf8(streams[15].clone()).unwrap();
-        for (bit, from, to) in [
-            (1, "data:", "data\n:"),
-            (2, "\"type\":", "\"type\"\n:"),
-            (4, "\"bad\":", "\"bad\"\n:"),
-        ] {
-            if mask & bit != 0 {
-                broken = broken.replacen(from, to, 1);
-            }
-        }
-        add(
-            &[PRIVATE_RECOVERY],
-            15,
-            format!("malformed-private/colon-mask-{mask}"),
-            vec![broken.into_bytes()],
-            vec![streams[15].clone()],
-        );
-    }
-    differences
 }
 
 // Post-repair client assertions, separate from the pre-repair differential
@@ -863,34 +730,14 @@ fn complete_delta_streams_match_upstream_for_every_partition() {
     }
 }
 
-fn terminal_for_frames(codex: bool, frames: &[Vec<u8>]) -> String {
-    let mut oracle = upstream::Upstream::new(codex);
-    oracle.write_chunk(&upstream::wire(frames));
-    oracle.flush();
-    oracle.terminal_event
-}
-
 fn framing_matches(framer: &Framer, oracle: &upstream::Upstream) -> bool {
     framer.frames == oracle.frames && framer.terminal_event == oracle.terminal_event
 }
 
 #[test]
-fn every_partition_matches_upstream_framing_except_named_fixtures() {
+fn every_partition_matches_upstream_framing_exactly() {
     let started = std::time::Instant::now();
     let streams = partition_streams();
-    let differences = partition_differences(&streams);
-    let mut fixture_names = std::collections::HashSet::new();
-    for difference in &differences {
-        assert!(fixture_names.insert(&difference.fixture));
-        assert!(!difference.names.is_empty());
-        assert!(
-            difference
-                .names
-                .iter()
-                .all(|name| { [BARE_WORD, PRIVATE_RECOVERY].contains(name) })
-        );
-    }
-    let mut hits = vec![0; differences.len()];
     let mut partitions = 0;
     let mut mismatches = Vec::new();
     for (i, wire) in streams.iter().enumerate() {
@@ -903,37 +750,22 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
                 }
                 oracle.flush();
                 if !framing_matches(&framer, &oracle) {
-                    let expected = differences.iter().position(|difference| {
-                        (!codex || !difference.names.contains(&PRIVATE_RECOVERY))
-                            && difference.stream == i
-                            && difference.upstream == oracle.frames
-                            && difference.retained == framer.frames
-                            && terminal_for_frames(codex, &difference.upstream)
-                                == oracle.terminal_event
-                            && terminal_for_frames(codex, &difference.retained)
-                                == framer.terminal_event
-                    });
-                    if let Some(index) = expected {
-                        hits[index] += 1;
-                    } else {
-                        mismatches.push((wire.len(), format!(
+                    mismatches.push((wire.len(), format!(
                             "stream={i} codex={codex} lengths={:?} chunks={:?}\ngot={:?} terminal={:?}\nwant={:?} terminal={:?}",
                             chunks.iter().map(|c| c.len()).collect::<Vec<_>>(),
                             chunks.iter().map(|c| String::from_utf8_lossy(c)).collect::<Vec<_>>(),
                             framer.frames.iter().map(|c| String::from_utf8_lossy(c)).collect::<Vec<_>>(), framer.terminal_event,
                             oracle.frames.iter().map(|c| String::from_utf8_lossy(c)).collect::<Vec<_>>(), oracle.terminal_event
                         )));
-                    }
                 }
                 partitions += 1;
             });
         }
     }
     eprintln!(
-        "differential invariant: {} streams, {partitions} partitions, {} mismatches, {} named-exception partitions, {:?}",
+        "differential invariant: {} streams, {partitions} cases, {} mismatches, {:?}",
         streams.len(),
         mismatches.len(),
-        hits.iter().sum::<usize>(),
         started.elapsed()
     );
     mismatches.sort();
@@ -941,22 +773,6 @@ fn every_partition_matches_upstream_framing_except_named_fixtures() {
         mismatches.is_empty(),
         "{PARTITION_INVARIANT}\nsmallest mismatches: {:#?}",
         &mismatches[..mismatches.len().min(8)]
-    );
-    for (difference, count) in differences.iter().zip(&hits) {
-        eprintln!(
-            "exception {} {:?}: {count} partitions",
-            difference.fixture, difference.names
-        );
-    }
-    let unused: Vec<_> = differences
-        .iter()
-        .zip(&hits)
-        .filter(|(_, hits)| **hits == 0)
-        .map(|(difference, _)| &difference.fixture)
-        .collect();
-    assert!(
-        unused.is_empty(),
-        "unexercised exception fixtures: {unused:?}"
     );
 }
 
@@ -1011,19 +827,13 @@ fn r3_already_visible_malformed_private_type_matches_upstream() {
 }
 
 #[test]
-fn r3_hidden_malformed_private_type_preserves_codex_bytes() {
+fn malformed_private_type_keeps_upstream_bytes_for_both_clients() {
     let chunks: &[&[u8]] = &[b"data: {\"type\"", b":\"response.metadata\",\"bad\":}\n\n"];
-    let (out, framer) = run(true, chunks);
-    assert_upstream_frames(true, chunks, &framer);
-    assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
-}
-
-#[test]
-fn r3_comparison_distinguishes_repeated_event_fields() {
-    let a = vec![b"event: a\nevent: b\ndata: {}\n\n".to_vec()];
-    let b = vec![b"event: a\nevent: c\ndata: {}\n\n".to_vec()];
-    assert_ne!(frame_fields(&a), frame_fields(&b));
-    assert_ne!(a, b);
+    for codex in [false, true] {
+        let (out, framer) = run(codex, chunks);
+        assert_upstream_frames(codex, chunks, &framer);
+        assert_eq!(out.as_bytes(), upstream::wire(&framer.frames).as_ref());
+    }
 }
 
 #[test]
@@ -1087,4 +897,30 @@ fn r3_split_terminal_trailing_fields_matches_upstream() {
 #[test]
 fn r3_split_crlf_matches_upstream() {
     assert_r3_split_fields(4);
+}
+
+#[test]
+fn empty_data_before_bare_word_matches_upstream_frame_split() {
+    let chunks: &[&[u8]] = &[
+        b"event: a\ndata:",
+        b"\nfoo\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+    ];
+    for codex in [false, true] {
+        let (_, framer) = run(codex, chunks);
+        assert_upstream_frames(codex, chunks, &framer);
+        assert_eq!(framer.frames.len(), 2);
+        assert_eq!(framer.frames[0], b"event: a\ndata:");
+        assert_eq!(framer.terminal_event, "response.completed");
+    }
+}
+
+#[test]
+fn empty_completed_data_before_scalar_matches_upstream_no_terminal() {
+    let chunks: &[&[u8]] = &[b"event: response.completed\ndata:", b"1\n\n"];
+    for codex in [false, true] {
+        let (_, framer) = run(codex, chunks);
+        assert_upstream_frames(codex, chunks, &framer);
+        assert_eq!(framer.frames.len(), 2);
+        assert!(framer.terminal_event.is_empty());
+    }
 }
