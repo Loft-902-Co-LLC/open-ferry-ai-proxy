@@ -15,9 +15,9 @@ When we move the pin, we update this table, bring every ported file's header to 
 ### Changes ported ahead of the pin
 
 - **Request-log file names** (`observe::request_log::names`) follow upstream `179d43dc` from v8.0.42 ahead of the v8.0.38 pin: both path separators are replaced, dot runs are normalized and unsafe names are rejected before creation. Each file is checked to stay directly inside the log directory, and NUL is refused before opening. Server-generated request ID tails are sanitized as extra care, where Go applies `filepath.Base` to the complete name. Open Ferry keeps its 120-character path bound, redaction and Unix mode 0600.
-### Ports prepared for v8.0.42 ahead of the pin
+### Ports prepared through v8.0.47 ahead of the pin
 
-The reference above stays at v8.0.38. These ports include native behavior from v8.0.39 through v8.0.42; the auth and Codex transport changes and the pin move remain separate work. This is not the complete accounting for that move.
+The reference above stays at v8.0.38. These ports include native behavior from v8.0.39 through v8.0.47; the auth and Codex transport changes and the pin move remain separate work. This is not the complete accounting for that move.
 
 | Upstream commits | What isn't ported | Why |
 |---|---|---|
@@ -44,13 +44,13 @@ Pending v8.0.47 slice:
 
 | Upstream commits | What isn't ported | Why |
 |---|---|---|
-| 90c447d3 | Codex input-item ID updates in SanitizeCodexInputItemIDs | Tracked by the separate Codex port (group B); the Gemini Responses tsc_ item-ID prefix is ported |
+| 90c447d3 | Codex input-item ID updates in SanitizeCodexInputItemIDs | Legacy tool-search ID normalization and duplicate/collision handling in Codex input items remain pending; the Gemini Responses tsc_ item-ID prefix is ported |
 
 Differences retained in these ports:
 
 | Upstream commits | What differs | Why |
 |---|---|---|
-| 64316127 | Vertex partial arguments retain a 65,536-node limit and a shared 64 MiB work allowance per call, including compatibility checks, assembly and Claude schema cleaning. Upstream has neither limit. Hitting either limit ends the call incomplete. Work uses byte/node overhead estimates for traversals and copies; a truncated re-clean projection charges its private allowance (8 MiB plus 100,000 nodes at 32 bytes each). Probe-path copies count toward work, not the 4 MiB argument-size limit | Prevent pathological tool-call streams from exhausting the proxy's memory or CPU while preserving an explicit incomplete outcome instead of reporting success |
+| 64316127 | Vertex partial arguments retain a 65,536-node limit and a shared 64 MiB work allowance per call, including compatibility checks, assembly and Claude schema cleaning. Upstream has neither limit. Hitting either limit ends the call incomplete. Work uses byte/node overhead estimates for traversals and copies; a truncated re-clean projection charges its private allowance (8 MiB plus 100,000 nodes at 32 bytes each). Both ports exclude probe-path copies from the 4 MiB argument-size count; only Open Ferry charges their work | Prevent pathological tool-call streams from exhausting the proxy's memory or CPU while preserving an explicit incomplete outcome instead of reporting success |
 | 64316127 | Non-finite numeric fallbacks are rejected; upstream can write invalid JSON such as {"x":NaN} or +Inf | Keep emitted arguments valid JSON; valid JSON number spellings, including large exponents, remain exact |
 | c9af5290 | Exact selected-credential high-intent mapping and source-setting priority: aliased or force-prefixed compatibility models looked up by upstream name can miss their alias registration and pass xhigh/max through where Go gives high; this predates these ports. Codex OAuth and API-key models Go binds and maps remain strict or pass through here. On these unbound Chat/Responses lookup paths, configured Gemini, Claude, xAI, Vertex and Meta API-key models pass through as user-defined. Conversely, target-scoped mapping on Chat/Responses also maps registry-fallback compatibility registrations reached by Codex or Meta executors where unbound Go returns 400; the target scoping predates these ports. The bound model's extractSourceThinkingConfig priority is not applied | The per-attempt binding was left out in d44f8682, as recorded in the v8.0.36-to-v8.0.38 table. Registry/static lookup remains the capability source; these ports do not introduce a binding snapshot |
 | 29150a22 | Generated conjunctions pay the existing reference, depth, copied-byte/node and path-work costs; exhaustion uses bounded hint fallback. When adding missing array items after reference expansion would exceed the escaped-path depth bound, keep the original array declaration; upstream may add items:{"type":"string"} there | Retain bounded allocation, depth and literal preservation instead of unbounded copying or path construction |

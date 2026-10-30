@@ -279,3 +279,5 @@ fn cleaner_probes_hold_placeholders_but_preserve_declared_values() {
     assert!(done);
     assert_eq!(first + &last, r#"{"reason":"kept"}"#);
 }
+
+mod round5_tests;

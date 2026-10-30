@@ -39,6 +39,25 @@ pub(super) fn value(value: &Value) -> bool {
     copies(value, 1)
 }
 
+// The recursive cleaner visits children itself. Charging their complete
+// subtrees again at each ancestor would make even a probe's own path quadratic.
+pub(super) fn node(value: &Value) -> bool {
+    if !enabled() {
+        return true;
+    }
+    let bytes = match value {
+        Value::String(text) => text.len(),
+        Value::Number(number) => number.as_str().len(),
+        _ => 1,
+    };
+    charge(bytes.saturating_add(32))
+        && match value {
+            Value::Object(map) => map.keys().all(|key| charge(key.len().saturating_add(32))),
+            Value::Array(values) => charge(values.len().saturating_mul(32)),
+            _ => true,
+        }
+}
+
 // Include container entries, key comparisons, scalar coercions, and copied
 // strings. Charge before pushing children, so even the preflight stack is bounded.
 pub(super) fn copies(value: &Value, passes: usize) -> bool {

@@ -13,6 +13,9 @@ use serde_json::Value;
 const MAX_DEPTH: usize = 64;
 const MAX_INDEX: usize = 1024;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
+// A single buffered raw string can expand sixfold when quoted. Emitted output
+// is still limited to MAX_BYTES; pre-clean snapshots spend the work allowance.
+const MAX_QUOTED_BYTES: usize = 6 * MAX_BYTES + 2;
 const MAX_NODES: usize = 65_536;
 const MAX_WORK: usize = 64 * 1024 * 1024;
 
@@ -97,7 +100,7 @@ impl Assembler {
             return Err(ArgumentError("Vertex arguments received after completion"));
         }
         // Bound malformed typed values too, before coercion or cleaner copies.
-        self.charge_work(bounded_json(call)?.len())?;
+        charge_json_work(call, &self.work)?;
         let start = self.full.len();
         let final_chunk = !will_continue(call);
         if let Some(parts) = field(call, "partialArgs", "partial_args") {
@@ -115,17 +118,15 @@ impl Assembler {
                 .filter(|args| args.is_object())
                 .unwrap_or(&empty);
             // Check the borrowed input before the cleaner can copy it.
-            let raw = bounded_json(args)?;
-            self.charge_work(raw.len())?;
+            charge_json_work(args, &self.work)?;
             self.full = match cleaner {
                 Some(clean) => bounded_json(&self.clean(clean, args)?)?,
-                None => raw,
+                None => bounded_json(args)?,
             };
         } else if let Some(root) = self.root {
             if final_chunk && let Some(clean) = cleaner {
                 let mut raw = String::new();
                 self.serialize(root, &mut raw)?;
-                self.charge_work(raw.len())?;
                 let value = crate::json::exact::from_str(&raw)
                     .map_err(|_| ArgumentError("invalid assembled Vertex arguments"))?;
                 let cleaned = self.clean(clean, &value)?;
@@ -177,7 +178,6 @@ impl Assembler {
         if self.nodes.len() >= MAX_NODES {
             return Err(ArgumentError("Vertex argument node limit exceeded"));
         }
-        self.reserve(4)?;
         let index = self.nodes.len();
         self.nodes.push(Node {
             kind,
@@ -278,6 +278,7 @@ impl Assembler {
                         Segment::Index(_) => false,
                     };
                     let kind = segments.get(at + 1).map_or(Kind::Unset, container);
+                    self.reserve(4)?;
                     let child = self.alloc(kind, held)?;
                     let next = self.nodes[current].next;
                     if let Kind::Object(children) = &self.nodes[current].kind {
@@ -319,9 +320,9 @@ impl Assembler {
             if value.len() > MAX_BYTES {
                 return Err(ArgumentError("Vertex argument size limit exceeded"));
             }
+            self.reserve(value.len())?;
             let quoted = bounded_quoted(&value)?;
             let escaped = &quoted[1..quoted.len() - 1];
-            self.reserve(escaped.len())?;
             let leaf = &mut self.nodes[current];
             if matches!(leaf.kind, Kind::Unset) {
                 leaf.kind = Kind::String {
@@ -343,13 +344,14 @@ impl Assembler {
                 return Err(ArgumentError("cannot overwrite completed Vertex value"));
             }
             let scalar = if let Some(number) = number {
-                number_text(number)?
+                let raw = number_text(number)?;
+                self.reserve(raw.len())?;
+                raw
             } else if let Some(boolean) = boolean {
                 crate::json::bool_of(boolean).to_string()
             } else {
                 "null".to_owned()
             };
-            self.reserve(scalar.len())?;
             self.nodes[current].kind = Kind::Scalar(scalar);
         }
         Ok(())
@@ -397,7 +399,7 @@ impl Assembler {
                 Segment::Index(_) => Value::Array(vec![probe]),
             };
         }
-        self.charge_work(bounded_json(&probe)?.len())?;
+        charge_json_work(&probe, &self.work)?;
         let cleaned = self.clean(clean, &probe)?;
         let mut current = Some(&cleaned);
         for segment in path {
@@ -412,6 +414,14 @@ impl Assembler {
     }
 
     fn serialize(&self, index: usize, out: &mut String) -> Result<()> {
+        // Upstream does not apply its emitted-output limit to the pre-clean
+        // snapshot. Meter every copied byte before allocating it instead; this
+        // also covers sparse-array padding not present in buffered raw bytes.
+        let append = |out: &mut String, text: &str| -> Result<()> {
+            self.charge_work(text.len())?;
+            out.push_str(text);
+            Ok(())
+        };
         match &self.nodes[index].kind {
             Kind::Object(children) => {
                 append(out, "{")?;
@@ -648,8 +658,8 @@ impl StreamingCall {
         }
         // Account before coercion and identity comparisons, including the paths
         // that can bypass can_accept (matching IDs or omitted names).
-        let checked = bounded_json(call)
-            .and_then(|raw| self.assembler.charge_work(raw.len().saturating_add(1)));
+        let checked = charge_json_work(call, &self.assembler.work)
+            .and_then(|()| self.assembler.charge_work(1));
         if checked.is_err() {
             // Keep this attached to the old call so push poisons it, rather than
             // treating budget exhaustion as the start of a fresh call.
@@ -703,9 +713,6 @@ fn number_text(value: &Value) -> Result<String> {
     if value.is_number() {
         return bounded_json(value);
     }
-    if value.as_str().is_some_and(|text| text.len() > MAX_BYTES) {
-        return Err(ArgumentError("Vertex argument size limit exceeded"));
-    }
     if let Some(text) = value.as_str()
         && let Ok(number) = serde_json::from_str::<Value>(text.trim())
         && number.is_number()
@@ -725,11 +732,51 @@ fn append(out: &mut String, text: &str) -> Result<()> {
     Ok(())
 }
 
-struct BoundedWriter(Vec<u8>);
+// Incoming frames and pre-clean snapshots are not emitted arguments. Meter
+// their actual serialized bytes without allocating a second copy or imposing
+// the output limit before a placeholder can be removed. Structure stays bounded.
+fn charge_json_work(value: &Value, work: &WorkBudget) -> Result<()> {
+    let mut stack = vec![(value, 0)];
+    let mut nodes = 0;
+    while let Some((value, depth)) = stack.pop() {
+        nodes += 1;
+        if depth > MAX_DEPTH || nodes > MAX_NODES {
+            return Err(ArgumentError("Vertex argument structure limit exceeded"));
+        }
+        work.charge(32)?;
+        match value {
+            Value::Object(values) => {
+                for (key, value) in values {
+                    work.charge(key.len().saturating_add(32))?;
+                    stack.push((value, depth + 1));
+                }
+            }
+            Value::Array(values) => {
+                work.charge(values.len().saturating_mul(32))?;
+                stack.extend(values.iter().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    struct Writer<'a>(&'a WorkBudget);
+    impl io::Write for Writer<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.charge(bytes.len()).map_err(io::Error::other)?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Writer(work), value)
+        .map_err(|_| ArgumentError("Vertex argument work limit exceeded"))
+}
+
+struct BoundedWriter(Vec<u8>, usize);
 
 impl io::Write for BoundedWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_BYTES.saturating_sub(self.0.len()) {
+        if bytes.len() > self.1.saturating_sub(self.0.len()) {
             return Err(io::Error::other("Vertex argument size limit exceeded"));
         }
         self.0.extend_from_slice(bytes);
@@ -741,7 +788,7 @@ impl io::Write for BoundedWriter {
 }
 
 fn bounded_quoted(value: &str) -> Result<String> {
-    let mut writer = BoundedWriter(Vec::new());
+    let mut writer = BoundedWriter(Vec::new(), MAX_QUOTED_BYTES);
     serde_json::to_writer(&mut writer, value)
         .map_err(|_| ArgumentError("Vertex argument size limit exceeded"))?;
     String::from_utf8(writer.0).map_err(|_| ArgumentError("invalid Vertex argument UTF-8"))
@@ -777,7 +824,7 @@ fn bounded_json(value: &Value) -> Result<String> {
         Ok(())
     }
     check(value, 0, &mut 0, &mut 0)?;
-    let mut writer = BoundedWriter(Vec::new());
+    let mut writer = BoundedWriter(Vec::new(), MAX_BYTES);
     serde_json::to_writer(&mut writer, value)
         .map_err(|_| ArgumentError("Vertex argument size limit exceeded"))?;
     String::from_utf8(writer.0).map_err(|_| ArgumentError("invalid Vertex argument UTF-8"))
@@ -785,9 +832,6 @@ fn bounded_json(value: &Value) -> Result<String> {
 
 fn parse_path(raw: &str) -> Result<Vec<Segment>> {
     let invalid = ArgumentError("invalid Vertex argument JSON path");
-    if raw.len() > MAX_BYTES {
-        return Err(invalid);
-    }
     let path = raw.trim();
     if path.is_empty() || path == "$" {
         return Ok(Vec::new());

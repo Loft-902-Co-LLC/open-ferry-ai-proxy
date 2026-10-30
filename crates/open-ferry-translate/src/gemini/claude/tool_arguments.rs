@@ -886,7 +886,7 @@ fn clean_value(
     depth: usize,
     analyses: &mut CallAnalysis,
 ) {
-    if !budget::value(value) || depth > 128 || originals.is_empty() {
+    if !budget::node(value) || depth > 128 || originals.is_empty() {
         return;
     }
     let analysis = analyses.resolve(originals, root);
@@ -896,27 +896,14 @@ fn clean_value(
         return;
     }
     if let Some(values) = value.as_array_mut() {
-        let mut original_items = Schemas::default();
-        let mut translated_items = Schemas::default();
-        for schema in originals {
-            let Some(resolved) = items(schema, root, 0, &mut BTreeSet::new()) else {
-                return;
-            };
-            if resolved.is_empty() {
-                unique(&mut original_items, schema);
-            }
-            for item in resolved {
-                unique(&mut original_items, item);
-            }
-        }
-        for schema in translated {
-            let Some(resolved) = items(schema, schema, 0, &mut BTreeSet::new()) else {
-                return;
-            };
-            for item in resolved {
-                unique(&mut translated_items, item);
-            }
-        }
+        let Some(original_items) = analyses.items(originals, Some(root)) else {
+            return;
+        };
+        let Some(translated_items) = analyses.items(translated, None) else {
+            return;
+        };
+        let original_items: Vec<_> = original_items.iter().collect();
+        let translated_items: Vec<_> = translated_items.iter().collect();
         if !translated.is_empty() && translated_items.is_empty() {
             return;
         }
@@ -948,10 +935,6 @@ fn clean_value(
     {
         return;
     }
-    let translated_infos: Vec<_> = translated
-        .iter()
-        .map(|schema| analyses.resolve(&[schema], schema))
-        .collect();
     // A probe contains only its path. Do not copy/check every unrelated schema
     // child on every probe, even when the analyses themselves are cached.
     let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
@@ -965,14 +948,8 @@ fn clean_value(
         if info.parent_accepts(&key, value) || candidate_accepts(infos, Some(&key), value) {
             continue;
         }
-        let mut translated_children = Schemas::default();
-        for translated_info in &translated_infos {
-            if let Some(children) = translated_info.merged.properties.get(&key) {
-                for child in children {
-                    unique(&mut translated_children, child);
-                }
-            }
-        }
+        let translated_children = analyses.translated_children(translated, &key);
+        let translated_children: Vec<_> = translated_children.iter().collect();
         if !translated.is_empty() && translated_children.is_empty() {
             continue;
         }

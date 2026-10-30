@@ -2,6 +2,7 @@
 use super::*;
 
 mod review_tests;
+mod round5_tests;
 
 fn frame(parts: Value, finish: bool) -> Value {
     let mut frame = json!({"candidates":[{"content":{"parts":parts}}]});
