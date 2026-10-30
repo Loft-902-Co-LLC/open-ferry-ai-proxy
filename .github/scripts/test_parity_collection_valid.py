@@ -1,14 +1,51 @@
 """CLI tests using real temporary git histories; no Rust or Go builds."""
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 
 
 SCRIPT = Path(__file__).with_name("parity-collection-valid.py").resolve()
+REPO = SCRIPT.parents[2]
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("parity_collection_valid", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ClosureTests(unittest.TestCase):
+    def test_closure_matches_the_parity_tool_manifests(self):
+        # Every workspace crate the parity tool links, read from the real manifests.
+        def manifest(path):
+            with (REPO / path / "Cargo.toml").open("rb") as stream:
+                return tomllib.load(stream)
+
+        workspace = manifest(".")["workspace"]["dependencies"]
+        paths = {name: spec["path"] for name, spec in workspace.items()
+                 if isinstance(spec, dict) and "path" in spec}
+
+        def links(path):
+            data = manifest(path)
+            tables = [data.get("dependencies", {}), data.get("build-dependencies", {})]
+            tables += [target.get(kind, {}) for target in data.get("target", {}).values()
+                       for kind in ("dependencies", "build-dependencies")]
+            return {paths[name] for table in tables for name in table if name in paths}
+
+        closure, pending = set(), list(links("tools/parity"))
+        while pending:
+            path = pending.pop()
+            if path not in closure:
+                closure.add(path)
+                pending.extend(links(path))
+        self.assertEqual(set(load_script().CLOSURE), closure)
 
 
 class CollectionTests(unittest.TestCase):
@@ -68,7 +105,9 @@ class CollectionTests(unittest.TestCase):
     def test_valid_and_excluded_changes(self):
         self.assertEqual(self.check()["status"], "valid")
         for path in ("tools/parity/baseline/config-save.json", "tools/parity/README.md",
-                     "tools/parity/docs/guide.json", "tools/parity/src/notes.rst", "other.rs"):
+                     "tools/parity/docs/guide.json", "other.rs",
+                     "crates/open-ferry-core/README.md", "crates/open-ferry-translate/docs/guide.json",
+                     "crates/open-ferry-server/src/lib.rs", "dashboard/package.json"):
             self.write(path, "irrelevant\n")
         self.save()
         self.assertEqual(self.check()["status"], "valid")
@@ -79,6 +118,14 @@ class CollectionTests(unittest.TestCase):
             ("parity", "tools/parity/src/main.rs"),
             ("build", "Cargo.toml"), ("build", "Cargo.lock"),
             ("build", "rust-toolchain.toml"),
+            ("config", "config.example.yaml"),
+            ("parity", "tools/parity/Cargo.toml"), ("parity", "tools/parity/src/notes.txt"),
+            ("build", "crates/open-ferry-core/Cargo.toml"),
+            ("build", "crates/open-ferry-server/Cargo.toml"),
+            ("build", ".cargo/config.toml"),
+            ("crates", "crates/open-ferry-translate/src/go.rs"),
+            ("crates", "crates/open-ferry-core/src/auth/mod.rs"),
+            ("crates", "crates/open-ferry-providers/src/lib.rs"),
         ):
             with self.subTest(path=path):
                 self.git("reset", "--hard", self.producer)
