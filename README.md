@@ -448,7 +448,7 @@ Upstream config version comment loss: 555 cases (included in Equivalent).
 
 ### Config-save baseline ratchet
 
-Baseline: `C:\Users\MattLoft\AppData\Local\Temp\p42-auth-r7-integration\tools\parity\baseline\config-save.json`. Different remains Different; this budget grants no certification.
+Baseline: `tools/parity/baseline/config-save.json`. Different remains Different; this budget grants no certification.
 
 | Kind | Cases | Per 1,000 | Baseline |
 |---|---:|---:|---|
