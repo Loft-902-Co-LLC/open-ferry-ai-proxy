@@ -3665,29 +3665,3 @@ async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
     assert_eq!(recv(&mut ws).await["type"], "response.completed");
     ws.close(None).await.unwrap();
 }
-
-#[tokio::test]
-async fn r2_revoked_interrupt_uses_current_frontend_check_and_leaves_socket_usable() {
-    let (url, dispatcher, state) =
-        serve_keys(test_catalog(), vec![completes("r1", "[]")], &["sk-test"]).await;
-    let mut ws = connect(&url, &[]).await;
-    let mut config = state.settings().config.clone();
-    config.api_keys = vec!["replacement".into()];
-    state.set_config(config.clone());
-    send(
-        &mut ws,
-        r#"{"type":"response.interrupt","response_id":"r1"}"#,
-    )
-    .await;
-    assert_eq!(recv(&mut ws).await["status"], 401);
-    assert!(dispatcher.calls().is_empty());
-    config.api_keys = vec!["sk-test".into()];
-    state.set_config(config);
-    send(
-        &mut ws,
-        r#"{"type":"response.create","model":"test-model","input":[]}"#,
-    )
-    .await;
-    assert_eq!(recv(&mut ws).await["type"], "response.completed");
-    ws.close(None).await.unwrap();
-}

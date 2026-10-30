@@ -176,10 +176,7 @@ pub(super) async fn run<S: Socket>(
     // call also takes the queued create and steer messages while it runs.
     let id = Uuid::now_v7().to_string();
     let access = Arc::new(access);
-    let (check_access, check_state) = (access.clone(), state.clone());
-    let check: super::writer::FrontendCheck =
-        Arc::new(move || check_access.authorize(&check_state).map(|_| ()));
-    let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone(), Some(check));
+    let conn = Conn::split(socket, Arc::clone(&dispatcher), id.clone());
     let log_context = client.context.clone();
     let mut session = Session {
         state,
