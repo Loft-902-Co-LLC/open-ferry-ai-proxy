@@ -202,6 +202,9 @@ fn error_reason(err: Option<&AuthError>) -> &'static str {
     if is_invalid_grant_result_error(err) {
         return "invalid_grant";
     }
+    if err.code == "transient_rate_limit" {
+        return "transient_rate_limit";
+    }
     match err.http_status {
         401 => "unauthorized",
         402 | 403 => "payment_required",
@@ -224,6 +227,7 @@ fn status_reason(message: &str) -> &'static str {
         "not_found" => "not_found",
         "model_not_supported" => "model_not_supported",
         "transient upstream error" => "transient_error",
+        "transient_rate_limit" => "transient_rate_limit",
         _ => "unknown",
     }
 }

@@ -928,6 +928,16 @@ fn apply_outcome(
                 ..QuotaState::default()
             },
         );
+    } else if err.is_some_and(is_transient_capacity) {
+        state.next_retry_after = capacity_deadline(
+            settings,
+            &state.quota,
+            now,
+            result.retry_after,
+            disable_cooling,
+        );
+        state.unavailable = state.next_retry_after.is_some()
+            || (state.quota.exceeded && state.quota.next_recover_at.is_none());
     } else if err.is_some_and(is_invalid_grant_result_error) {
         state.next_retry_after = (!disable_cooling).then(|| add(now, THIRTY_MINUTES));
     } else {
@@ -1159,6 +1169,32 @@ fn apply_outcome(
     own
 }
 
+/// A capacity hint has no quota floor. Preserve live quota (including an
+/// unknown end), without advancing its backoff or borrowing a sibling's.
+fn capacity_deadline(
+    settings: &Settings,
+    quota: &QuotaState,
+    now: Timestamp,
+    hint: Option<Duration>,
+    disabled: bool,
+) -> Option<Timestamp> {
+    let next = if hint == Some(Duration::ZERO) {
+        None
+    } else {
+        recoverable_failure_retry_after(settings, now, hint, disabled)
+    };
+    if quota.exceeded && quota.next_recover_at.is_none_or(|at| at > now) {
+        return quota
+            .next_recover_at
+            .map(|at| next.map_or(at, |next| next.max(at)));
+    }
+    next
+}
+
+fn is_transient_capacity(err: &AuthError) -> bool {
+    err.http_status == 429 && err.code == "transient_rate_limit"
+}
+
 /// Cools the whole credential down after a failure with no model (upstream's
 /// `applyAuthFailureState`); application itself goes through
 /// [`apply_failure_to_credential`], so only the tests call this.
@@ -1199,7 +1235,12 @@ fn apply_failure_to_credential(
     }
     let status = err.map_or(0, |e| e.http_status);
     let retry_hint = retry_after.filter(|d| !d.is_zero());
-    if err.is_some_and(is_cloudflare_challenge_result_error) {
+    if err.is_some_and(is_transient_capacity) {
+        auth.next_retry_after =
+            capacity_deadline(settings, &auth.quota, now, retry_after, disable_cooling);
+        auth.unavailable = auth.next_retry_after.is_some()
+            || (auth.quota.exceeded && auth.quota.next_recover_at.is_none());
+    } else if err.is_some_and(is_cloudflare_challenge_result_error) {
         auth.status_message = "cloudflare challenge".into();
         let (next, level) =
             next_cloudflare_cooldown(auth.quota.backoff_level, disable_cooling, now);
