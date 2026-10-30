@@ -8,7 +8,9 @@
 //! message. Fields it has no use for, such as sampling settings and
 //! metadata, are dropped, with a debug line.
 //!
-//! One user turn goes as it is. A conversation of several goes as a
+//! Internal commentary markers become plain text in either path; blank
+//! marked commentary is dropped. One user turn otherwise goes as it is.
+//! A conversation of several goes as a
 //! transcript in one message: a note saying what follows, then each turn
 //! as a label (`[user]` or `[assistant]`) and its blocks (images and
 //! documents where they stood, earlier thinking left out), then an end
@@ -184,7 +186,23 @@ fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
                 "claude-cli: a message has the role {role:?}; only user and assistant are taken"
             )));
         }
-        turns.push((role, blocks(message.get("content"))));
+        let content = blocks(message.get("content"));
+        if content.is_empty()
+            && message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    !parts.is_empty()
+                        && parts.iter().all(|part| {
+                            str_at(part, "type") == "thinking"
+                                && str_at(part, "signature").trim() == "cpa:commentary:v1"
+                                && str_at(part, "thinking").trim().is_empty()
+                        })
+                })
+        {
+            continue;
+        }
+        turns.push((role, content));
     }
     if turns.last().is_some_and(|(role, _)| role != "user") {
         return Err(invalid(
@@ -203,12 +221,18 @@ fn blocks(content: Option<&Value>) -> Vec<Value> {
         Some(Value::Array(blocks)) => blocks
             .iter()
             .filter(|block| !(str_at(block, "type") == "text" && str_at(block, "text").is_empty()))
-            .map(|block| {
+            .filter_map(|block| {
+                if str_at(block, "type") == "thinking"
+                    && str_at(block, "signature").trim() == "cpa:commentary:v1"
+                {
+                    let text = str_at(block, "thinking");
+                    return (!text.trim().is_empty()).then(|| text_block(&text));
+                }
                 let mut block = block.clone();
                 if let Some(block) = block.as_object_mut() {
                     block.remove("cache_control");
                 }
-                block
+                Some(block)
             })
             .collect(),
         _ => Vec::new(),
@@ -454,5 +478,65 @@ mod tests {
         ] {
             prepare(&json!({"messages": [user], "tool_choice": choice, "tools": []})).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod commentary_tests {
+    use super::*;
+
+    #[test]
+    fn r2_cli_single_turn_restores_commentary_without_a_marker() {
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"thinking","thinking":"Checking.","signature":" cpa:commentary:v1 "},
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"},
+            {"type":"thinking","thinking":" ","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"Continue."}]}]});
+        let prepared = prepare(&body).unwrap();
+        let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+        assert_eq!(
+            input["message"]["content"],
+            json!([
+            {"type":"text","text":"Checking."},{"type":"text","text":"Continue."}])
+        );
+        assert!(
+            !String::from_utf8(prepared.input)
+                .unwrap()
+                .contains("cpa:commentary:v1")
+        );
+        for text in ["", " "] {
+            let body = json!({"messages":[{"role":"user","content":[
+                {"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"}]}]});
+            assert_eq!(prepare(&body).unwrap_err().status, 400);
+        }
+    }
+
+    #[test]
+    fn r2_cli_transcript_restores_commentary_in_place() {
+        let body = json!({"messages":[{"role":"user","content":"First"},
+            {"role":"assistant","content":[
+                {"type":"text","text":"Before"},
+                {"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"},
+                {"type":"thinking","thinking":"private reason","signature":"opaque"},
+                {"type":"text","text":"Final"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]},
+            {"role":"user","content":"Next"}]});
+        let prepared = prepare(&body).unwrap();
+        let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+        assert_eq!(
+            input["message"]["content"],
+            json!([
+            {"type":"text","text":TRANSCRIPT_NOTE},
+            {"type":"text","text":"[user]"},{"type":"text","text":"First"},
+            {"type":"text","text":"[assistant]"},{"type":"text","text":"Before"},
+            {"type":"text","text":"Checking."},{"type":"text","text":"Final"},
+            {"type":"text","text":"[user]"},{"type":"text","text":"Next"},
+            {"type":"text","text":TRANSCRIPT_END}])
+        );
+        assert!(
+            !String::from_utf8(prepared.input)
+                .unwrap()
+                .contains("cpa:commentary:v1")
+        );
     }
 }
