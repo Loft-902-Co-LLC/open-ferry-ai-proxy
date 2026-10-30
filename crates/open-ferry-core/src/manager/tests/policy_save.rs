@@ -1,4 +1,4 @@
-// Round 3: explicit policy debt survives failed saves without blocking disk observations.
+// Failed saves follow upstream; independent publication fences still apply.
 use super::support::*;
 use crate::auth::codex_refresh::CredentialRefreshPatch;
 use crate::auth::{AdoptionRead, Auth, AuthStore, CodexOrigin, FileStore, Status};
@@ -7,100 +7,13 @@ use crate::manager::{AdoptionResult, CallResult, Manager, Settings, lock};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn disable(auth: &mut Auth) -> Result<bool, ()> {
     auth.disabled = true;
     auth.status = Status::Disabled;
     auth.metadata.insert("disabled".into(), json!(true));
     Ok(true)
-}
-
-#[test]
-fn round3_failed_policy_save_keeps_only_owed_fields_for_every_provider() {
-    for (provider, typed) in [
-        ("claude", true),
-        ("codex", true),
-        ("gemini", true),
-        ("claude", false),
-    ] {
-        let h = Harness::with_store(Settings::default());
-        let mut candidate = auth_with_metadata(
-            "policy",
-            provider,
-            json!({
-                "access_token":"dummy-before", "disabled":false,
-                "siwc":{"access_token":"dummy-sibling", "note":"before"},
-                "removed-by-operator":"before"
-            }),
-        );
-        if typed {
-            candidate.metadata.insert("type".into(), json!(provider));
-        }
-        let initial = h.manager.register(candidate).unwrap();
-        h.store.set_fail_saves(true);
-        let edited = h
-            .manager
-            .edit_at_epoch("policy", initial.registration_epoch, |auth| {
-                disable(auth)?;
-                auth.metadata["siwc"]["note"] = json!("operator");
-                auth.metadata.remove("removed-by-operator");
-                Ok::<_, ()>(true)
-            })
-            .unwrap()
-            .unwrap();
-        assert!(
-            edited.disabled,
-            "failed ordinary saves still report the published edit"
-        );
-        assert!(h.manager.lock().auths["policy"].policy_save.is_some());
-        for _ in 0..3 {
-            let mut disk = initial.as_ref().clone();
-            disk.metadata["access_token"] = json!("dummy-external");
-            disk.metadata["siwc"]["access_token"] = json!("dummy-sibling-external");
-            disk.metadata.insert("unrelated".into(), json!("outside"));
-            assert!(matches!(
-                h.manager
-                    .adopt_observed(&initial, None, |_| { Ok(AdoptionRead::Record(disk)) })
-                    .unwrap(),
-                AdoptionResult::Published { .. }
-            ));
-            let live = h.manager.get("policy").unwrap();
-            assert!(live.disabled);
-            assert_eq!(live.metadata["access_token"], "dummy-external");
-            assert_eq!(
-                live.metadata["siwc"]["access_token"],
-                "dummy-sibling-external"
-            );
-            assert_eq!(live.metadata["siwc"]["note"], "operator");
-            assert_eq!(live.metadata["unrelated"], "outside");
-            assert!(!live.metadata.contains_key("removed-by-operator"));
-        }
-        h.store.set_fail_saves(false);
-        let before_save = h.manager.get("policy").unwrap();
-        h.manager.mark_result(&CallResult {
-            credential_version: before_save.credential_version,
-            registration_epoch: before_save.registration_epoch,
-            auth_id: "policy".into(),
-            provider: provider.into(),
-            success: true,
-            ..Default::default()
-        });
-        assert!(
-            h.manager.lock().auths["policy"].policy_save.is_none(),
-            "a covering actual save clears debt"
-        );
-        assert!(h.store.stored("policy").unwrap().disabled);
-        let mut later = initial.as_ref().clone();
-        later.metadata["access_token"] = json!("dummy-later");
-        h.manager
-            .adopt_observed(&initial, None, |_| Ok(AdoptionRead::Record(later)))
-            .unwrap();
-        assert!(
-            !h.manager.get("policy").unwrap().disabled,
-            "after durability, a real external enable is adopted"
-        );
-    }
 }
 
 #[test]
@@ -180,17 +93,6 @@ fn round3_unsaved_publications_do_not_cover_a_waiting_policy_save() {
             }
         }
         assert_eq!(*lock(&mark), saved_before, "{action} is not a disk save");
-        let disk_after_observation = store.read_back(&live).unwrap().unwrap();
-        let mut observed = disk_after_observation;
-        observed.metadata["access_token"] = json!("dummy-external-while-save-waits");
-        std::fs::write(
-            dir.path().join("waiting.json"),
-            serde_json::to_vec(&observed.metadata).unwrap(),
-        )
-        .unwrap();
-        manager
-            .adopt_observed(&live, None, |_| Ok(AdoptionRead::Record(observed)))
-            .unwrap();
         release_tx.send(()).unwrap();
         worker.join().unwrap();
         *lock(&manager.shared.persist_hook) = None;
@@ -199,11 +101,6 @@ fn round3_unsaved_publications_do_not_cover_a_waiting_policy_save() {
             "{action} must not skip the pending disable save"
         );
         assert!(manager.get("waiting.json").unwrap().disabled);
-        assert_eq!(
-            store.read_back(&live).unwrap().unwrap().access_token(),
-            "dummy-external-while-save-waits",
-            "{action} must save the adopted token"
-        );
     }
 }
 
@@ -219,83 +116,6 @@ fn round3_load_initializes_policy_generation() {
     h.store.put(stored);
     h.manager.load().unwrap();
     assert_eq!(h.manager.get("loaded").unwrap().policy_generation, 1);
-}
-
-struct CountingFailure {
-    inner: FakeStore,
-    events: Mutex<Option<mpsc::Sender<()>>>,
-    fail: AtomicBool,
-}
-impl AuthStore for CountingFailure {
-    fn list(&self) -> std::io::Result<Vec<Auth>> {
-        self.inner.list()
-    }
-    fn delete(&self, id: &str) -> std::io::Result<()> {
-        self.inner.delete(id)
-    }
-    fn save(&self, auth: &Auth) -> std::io::Result<String> {
-        if let Some(events) = &*lock(&self.events) {
-            events.send(()).unwrap();
-        }
-        if self.fail.load(Ordering::SeqCst) {
-            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-        } else {
-            self.inner.save(auth)
-        }
-    }
-}
-
-#[test]
-fn round3_policy_io_retry_is_bounded_and_backed_off() {
-    let (events, observed) = mpsc::channel();
-    let store = Arc::new(CountingFailure {
-        inner: FakeStore::default(),
-        events: Mutex::new(None),
-        fail: AtomicBool::new(false),
-    });
-    let manager = Manager::new(
-        Settings::default(),
-        Arc::new(FakeModels::default()),
-        Some(store.clone()),
-    );
-    manager
-        .register(auth_with_metadata(
-            "retry",
-            "claude",
-            json!({"type":"claude", "access_token":"dummy"}),
-        ))
-        .unwrap();
-    *lock(&store.events) = Some(events);
-    store.fail.store(true, Ordering::SeqCst);
-    manager.edit("retry", disable).unwrap();
-    // Initial failure plus three bounded attempts; channels order the test.
-    for _ in 0..4 {
-        observed.recv_timeout(Duration::from_secs(10)).unwrap();
-    }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let state = manager.lock();
-        let policy = state.auths["retry"].policy_save.as_ref().unwrap();
-        if !policy.retry_scheduled {
-            assert!(policy.retry_at.unwrap() > manager.now());
-            break;
-        }
-        drop(state);
-        assert!(Instant::now() < deadline, "retry worker finished");
-        std::thread::yield_now();
-    }
-    assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Empty));
-    store.fail.store(false, Ordering::SeqCst);
-    let before_save = manager.get("retry").unwrap();
-    manager.mark_result(&CallResult {
-        credential_version: before_save.credential_version,
-        registration_epoch: before_save.registration_epoch,
-        auth_id: "retry".into(),
-        provider: "claude".into(),
-        success: true,
-        ..Default::default()
-    });
-    assert!(manager.lock().auths["retry"].policy_save.is_none());
 }
 
 #[test]
@@ -411,61 +231,236 @@ fn round3_update_save_reconcile_advances_policy_generation() {
     assert!(live.policy_generation > captured.load(Ordering::SeqCst));
 }
 
-#[test]
-fn round3_token_command_reads_through_pending_policy_debt() {
-    use crate::auth::CodexCredentialPartition;
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(FileStore::new(dir.path()));
-    let mut auth = auth_with_metadata(
-        "command.json",
-        "codex",
-        json!({
-            "type":"codex", "access_token":"dummy-before", "refresh_token":"dummy-refresh", "disabled":false
-        }),
-    );
-    auth.file_name = auth.id.clone();
-    store.save_new(&auth).unwrap();
-    let manager = Manager::new(
-        Settings::default(),
-        Arc::new(FakeModels::default()),
-        Some(store.clone()),
-    );
-    let initial = manager.register_unsaved(auth).unwrap();
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
-    let once = AtomicBool::new(true);
-    *lock(&manager.shared.persist_hook) = Some(Arc::new(move |auth| {
-        if auth.disabled && once.swap(false, Ordering::SeqCst) {
-            entered_tx.send(()).unwrap();
-            lock(&release_rx)
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap();
+struct FileSaveRig {
+    dir: tempfile::TempDir,
+    fail: Arc<AtomicBool>,
+    manager: Manager,
+    initial: Arc<Auth>,
+}
+
+impl FileSaveRig {
+    fn new(provider: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let fail = Arc::new(AtomicBool::new(false));
+        let failing = fail.clone();
+        let files = Arc::new(FileStore::new(dir.path()).with_file_guard(Some(
+            crate::auth::file_guard::FileGuard::new(move |_| {
+                if failing.load(Ordering::SeqCst) {
+                    Err("test save refusal".into())
+                } else {
+                    Ok(())
+                }
+            }),
+        )));
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(files),
+        );
+        let mut auth = auth_with_metadata(
+            "ordinary.json",
+            provider,
+            json!({
+                "type":provider, "access_token":"dummy-r1", "disabled":false, "note":"before"
+            }),
+        );
+        auth.file_name = auth.id.clone();
+        let initial = manager.register(auth).unwrap();
+        Self {
+            dir,
+            fail,
+            manager,
+            initial,
         }
-    }));
-    let editor = manager.clone();
-    let epoch = initial.registration_epoch;
-    let worker = std::thread::spawn(move || {
-        editor
-            .edit_at_epoch("command.json", epoch, disable)
+    }
+
+    fn disk(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.dir.path().join(&self.initial.id)).unwrap())
             .unwrap()
-    });
-    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    let command = manager
-        .capture_token_command("command.json", CodexCredentialPartition::Outer)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round5_failed_edit_is_replaced_by_the_next_file_observation() {
+    let h = Harness::with_store(Settings::default());
+    let initial = h
+        .manager
+        .register(auth_with_metadata(
+            "failed",
+            "claude",
+            json!({"type":"claude", "access_token":"dummy", "disabled":false, "note":"before"}),
+        ))
         .unwrap();
-    std::fs::write(dir.path().join("command.json"), br#"{"type":"codex","access_token":"dummy-login","refresh_token":"dummy-login-refresh","disabled":false}"#).unwrap();
-    let adopted = manager
-        .adopt_completed_token_command(&initial, command)
+    h.store.set_fail_saves(true);
+    let edited = h
+        .manager
+        .edit("failed", |auth| {
+            disable(auth)?;
+            auth.status_message = "disabled via management API".into();
+            auth.metadata["note"] = json!("operator");
+            Ok::<_, ()>(true)
+        })
+        .unwrap()
         .unwrap();
-    release_tx.send(()).unwrap();
-    worker.join().unwrap();
-    *lock(&manager.shared.persist_hook) = None;
-    assert!(matches!(adopted, AdoptionResult::Published { .. }));
-    let live = manager.get("command.json").unwrap();
-    assert!(live.disabled);
-    assert_eq!(live.outer_access_token(), "dummy-login");
-    let disk = store.read_back(&live).unwrap().unwrap();
-    assert!(disk.disabled);
-    assert_eq!(disk.outer_access_token(), "dummy-login");
+    assert!(edited.disabled, "an ordinary save error is nonfatal");
+    assert_eq!(edited.metadata["note"], "operator");
+    let file = h.store.stored("failed").unwrap();
+    assert!(!file.disabled);
+    assert_eq!(file.metadata["note"], "before");
+    assert!(matches!(
+        h.manager
+            .adopt_observed(&initial, None, |_| Ok(AdoptionRead::Record(file)))
+            .unwrap(),
+        AdoptionResult::Published { .. }
+    ));
+    let observed = h.manager.get("failed").unwrap();
+    assert!(!observed.disabled, "the next genuine file read wins");
+    assert_eq!(observed.metadata["note"], "before");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round5_ordinary_refresh_after_failed_save_writes_memory_fields() {
+    for provider in ["claude", "gemini"] {
+        let rig = FileSaveRig::new(provider);
+        rig.fail.store(true, Ordering::SeqCst);
+        let edited = rig.manager.edit(&rig.initial.id, disable).unwrap().unwrap();
+        assert!(edited.disabled);
+        assert_eq!(rig.disk()["access_token"], "dummy-r1");
+        rig.fail.store(false, Ordering::SeqCst);
+        let mut refreshed = edited.as_ref().clone();
+        refreshed.metadata["access_token"] = json!("dummy-r2");
+        refreshed
+            .metadata
+            .insert("refresh_token".into(), json!("dummy-r2-refresh"));
+        let (saved, _) = rig
+            .manager
+            .update_refreshed(&edited, edited.registration_epoch, refreshed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.metadata["access_token"], "dummy-r2", "{provider}");
+        assert_eq!(rig.disk()["access_token"], "dummy-r2", "{provider}");
+        assert_eq!(
+            rig.disk()["refresh_token"],
+            "dummy-r2-refresh",
+            "{provider}"
+        );
+        rig.manager.mark_result(&CallResult {
+            auth_id: saved.id.clone(),
+            provider: provider.into(),
+            success: true,
+            registration_epoch: saved.registration_epoch,
+            credential_version: saved.credential_version,
+            ..Default::default()
+        });
+        assert_eq!(
+            rig.disk()["access_token"],
+            "dummy-r2",
+            "an ordinary result save writes memory"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn round5_first_edit_writes_memory_over_an_unobserved_hand_edit() {
+    for provider in ["claude", "gemini", "codex"] {
+        let rig = FileSaveRig::new(provider);
+        let mut disk = rig.disk();
+        disk["note"] = json!("unobserved-hand-edit");
+        std::fs::write(
+            rig.dir.path().join(&rig.initial.id),
+            serde_json::to_vec(&disk).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rig.manager.get(&rig.initial.id).unwrap().metadata["note"],
+            "before"
+        );
+        let edited = rig
+            .manager
+            .edit(&rig.initial.id, |auth| {
+                auth.metadata["note"] = json!("api-edit");
+                Ok::<_, ()>(true)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.metadata["note"], "api-edit");
+        assert_eq!(
+            rig.disk()["note"],
+            "api-edit",
+            "the first explicit edit is saved for {provider}"
+        );
+    }
+}
+
+struct CountSaves {
+    files: Arc<FileStore>,
+    fail: AtomicBool,
+    calls: AtomicU64,
+}
+
+impl AuthStore for CountSaves {
+    fn list(&self) -> std::io::Result<Vec<Auth>> {
+        self.files.list()
+    }
+    fn delete(&self, id: &str) -> std::io::Result<()> {
+        self.files.delete(id)
+    }
+    fn read_back(&self, auth: &Auth) -> std::io::Result<Option<Auth>> {
+        self.files.read_back(auth)
+    }
+    fn save(&self, auth: &Auth) -> std::io::Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        } else {
+            self.files.save(auth)
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn round5_an_unsavable_status_message_starts_no_retry_task() {
+    for failed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(CountSaves {
+            files: Arc::new(FileStore::new(dir.path())),
+            fail: AtomicBool::new(false),
+            calls: AtomicU64::new(0),
+        });
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(store.clone()),
+        );
+        let mut auth = auth_with_metadata(
+            "no-timer.json",
+            "claude",
+            json!({"type":"claude", "access_token":"dummy", "disabled":false}),
+        );
+        auth.file_name = auth.id.clone();
+        manager.register(auth).unwrap();
+        store.calls.store(0, Ordering::SeqCst);
+        store.fail.store(failed, Ordering::SeqCst);
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let tasks = metrics.num_alive_tasks();
+        let edited = manager
+            .edit("no-timer.json", |auth| {
+                disable(auth)?;
+                auth.status_message = "disabled via management API".into();
+                Ok::<_, ()>(true)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.status_message, "disabled via management API");
+        assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.num_alive_tasks(), tasks, "no retry task exists");
+        tokio::time::advance(Duration::from_secs(86_400)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(metrics.num_alive_tasks(), tasks);
+        assert_eq!(
+            store.calls.load(Ordering::SeqCst),
+            1,
+            "elapsed time does not retry a save"
+        );
+    }
 }

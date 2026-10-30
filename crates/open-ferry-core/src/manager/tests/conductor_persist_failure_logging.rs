@@ -5,8 +5,8 @@
 //! change still lands in memory.
 //!
 //! Deviations from upstream:
-//! - The warn-log assertions are logging-only and dropped; the outcome of
-//!   each call is kept.
+//! - The original call outcomes are retained. Round 5 also captures the
+//!   common save warning, file-name masking and secret scrubbing.
 //! - `TestMetaRefreshPersistFailureLogsWarn` is dropped: the Meta key mint
 //!   save inside the lock isn't ported (lifecycle.rs).
 
@@ -93,4 +93,168 @@ async fn refresh_persist_failure_logs_warn() {
         Some(&Value::from("refreshed-access-token"))
     );
     assert!(h.store.stored("auth-refresh-persist-1").is_none());
+}
+
+#[test]
+fn round5_every_failed_save_logs_warn_with_cause_and_masked_file() {
+    use crate::auth::{Auth, AuthStore};
+    use crate::manager::{CallResult, Manager, lock};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct Store(AtomicBool);
+    impl AuthStore for Store {
+        fn list(&self) -> std::io::Result<Vec<Auth>> {
+            Ok(Vec::new())
+        }
+        fn delete(&self, _: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn save(&self, auth: &Auth) -> std::io::Result<String> {
+            if !self.0.load(Ordering::SeqCst) {
+                return Ok(auth.file_name.clone());
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "permission denied saving {}: {} {} {} {}",
+                    auth.file_name,
+                    auth.metadata["access_token"],
+                    auth.metadata["refresh_token"],
+                    auth.metadata["siwc"]["access_token"],
+                    auth.metadata["siwc"]["refresh_token"],
+                ),
+            ))
+        }
+    }
+    struct Fields(String);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!("{}={value:?} ", field.name()));
+        }
+    }
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            lock(&self.0).push((*event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    crate::test_tracing::keep_every_callsite_open();
+    for action in [
+        "register",
+        "status",
+        "fields",
+        "refresh",
+        "result",
+        "direct-save",
+    ] {
+        let store = Arc::new(Store(AtomicBool::new(false)));
+        let manager = Manager::new(
+            Settings::default(),
+            Arc::new(FakeModels::default()),
+            Some(store.clone()),
+        );
+        let mut auth = auth_with_metadata(
+            "runtime-credential",
+            "claude",
+            json!({
+                "access_token":"dummy-outer-access", "refresh_token":"dummy-outer-refresh",
+                "siwc":{"access_token":"dummy-siwc-access", "refresh_token":"dummy-siwc-refresh"}
+            }),
+        );
+        auth.file_name = "claude-1a2b3c4d-john.doe@example.com-plus.json".into();
+        let before = manager.register(auth.clone()).unwrap();
+        store.0.store(true, Ordering::SeqCst);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Capture(events.clone()), || match action {
+            "register" => {
+                manager.register(auth).unwrap();
+            }
+            "status" => {
+                manager
+                    .edit(&before.id, |auth| {
+                        auth.disabled = true;
+                        auth.status = crate::auth::Status::Disabled;
+                        auth.metadata.insert("disabled".into(), json!(true));
+                        Ok::<_, ()>(true)
+                    })
+                    .unwrap();
+            }
+            "fields" => {
+                manager
+                    .edit(&before.id, |auth| {
+                        auth.metadata.insert("note".into(), json!("api-edit"));
+                        Ok::<_, ()>(true)
+                    })
+                    .unwrap();
+            }
+            "refresh" => {
+                let mut refreshed = before.as_ref().clone();
+                refreshed.metadata["access_token"] = json!("dummy-refreshed-access");
+                manager
+                    .update_refreshed(&before, before.registration_epoch, refreshed)
+                    .unwrap();
+            }
+            "result" => manager.mark_result(&CallResult {
+                auth_id: before.id.clone(),
+                provider: "claude".into(),
+                success: true,
+                registration_epoch: before.registration_epoch,
+                credential_version: before.credential_version,
+                ..Default::default()
+            }),
+            _ => {
+                assert!(
+                    manager
+                        .persist(
+                            &before,
+                            before.registration_epoch,
+                            before.generation,
+                            0,
+                            crate::manager::lifecycle::Save::Yes
+                        )
+                        .is_err()
+                );
+            }
+        });
+        let events = lock(&events);
+        let failures: Vec<_> = events
+            .iter()
+            .filter(|(_, text)| text.contains("failed to persist credential"))
+            .collect();
+        assert_eq!(failures.len(), 1, "one warning for {action}");
+        let (level, line) = failures[0];
+        assert_eq!(*level, tracing::Level::WARN);
+        assert!(
+            line.contains("permission denied"),
+            "the cause is visible for {action}"
+        );
+        assert!(
+            line.contains("file=claude-1a2b3c4d-j***@e***.com-plus.json"),
+            "the masked file is identified for {action}"
+        );
+        assert!(line.contains("auth_id=runtime-credential"));
+        assert!(!line.contains("john.doe@example.com"));
+        for secret in [
+            "dummy-outer-access",
+            "dummy-outer-refresh",
+            "dummy-siwc-access",
+            "dummy-siwc-refresh",
+            "dummy-refreshed-access",
+        ] {
+            assert!(!line.contains(secret), "secret scrubbed for {action}");
+        }
+    }
 }

@@ -153,7 +153,7 @@ The first release, 0.1.0, isn't out yet. The releases below are candidates for i
 ### Fixed
 
 - **Credential-file updates keep live cooldowns and refresh backoff.** Delayed file events reread the current file and preserve concurrent user edits. Updating the running credential cannot hide a waiting file change.
-- **A credential setting whose save fails stays in effect**, and the API still returns success, as upstream does. Open Ferry remembers the unsaved setting and retries with backoff. File changes still load fresh tokens and other settings around it; restarting reloads what is on disk.
+- Failed credential-file saves now behave as upstream: the failure is logged, and a status or fields edit still returns success. The change is kept in memory only, so a later read of the file, or a restart, brings back what's on disk. That can re-enable a credential you disabled. If saving a refreshed OAuth token fails, the next read can bring back the old, already-used token, and the account then needs signing in again.
 - **Failed credential-file checks are retried without waiting for another file event.** Until a check proves the file exists, ordinary saves cannot recreate it. Failed scans keep existing credentials.
 - **A matching `request-scoped-errors` 401 rule no longer rejects or refreshes a provider login.** Actions ending in `-and-cooldown` still apply a cooldown.
 - **Codex and Sign in with ChatGPT login refusals stay independent** until each token changes. Like upstream, a healthy saved Sign in with ChatGPT login still allows a Codex request to try the refused outer token again; its refresh and retry keep the ChatGPT token healthy. A Codex request missing its own login returns 401 while the ChatGPT login stays usable by other clients.
