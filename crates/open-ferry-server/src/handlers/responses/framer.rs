@@ -17,6 +17,10 @@
 //!
 //! [`MAX_EVENT_BYTES`]: crate::sse_check::MAX_EVENT_BYTES
 
+#[path = "framing_recovery.rs"]
+mod recovery;
+
+use recovery::{consume_breaks, has_empty_event_data, needs_line_break, recover_json_frame};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -35,6 +39,11 @@ use crate::sse_check::{EventLimit, EventScan, Work, data_payload, too_large};
 pub(super) struct Framer {
     /// The event held back.
     pending: Vec<u8>,
+    /// A possible new frame after an empty data field, and a split field name.
+    next_frame_prefix: Vec<u8>,
+    next_field_suffix: Vec<u8>,
+    /// Only these inserted newlines may be removed to recover JSON.
+    synthetic_breaks: Vec<usize>,
     /// Where a blank line ending the held-back event may start: no sooner
     /// than three bytes before the end of the last chunk.
     search: usize,
@@ -103,6 +112,17 @@ impl Framer {
         if chunk.is_empty() || !self.terminal_event.is_empty() {
             return Ok(());
         }
+        let chunk = self.prepare_chunk(out, chunk);
+        if self.pending.len() + self.next_frame_prefix.len() + self.next_field_suffix.len()
+            > self.limit.0 && chunk.is_none()
+        {
+            self.reset();
+            self.next_frame_prefix.clear();
+            self.next_field_suffix.clear();
+            return Err(ErrorMessage::new(502, too_large(self.limit)));
+        }
+        let Some(chunk) = chunk else { return Ok(()); };
+        let chunk = chunk.as_ref();
         if starts_new_data_frame(&self.scan, chunk) {
             let frame = self.take_pending();
             self.write_frame(out, &frame);
@@ -111,6 +131,7 @@ impl Framer {
             }
         }
         if needs_line_break(&self.pending, chunk) {
+            self.synthetic_breaks.push(self.pending.len());
             self.pending.push(b'\n');
         }
         self.pending.extend_from_slice(chunk);
@@ -120,6 +141,7 @@ impl Framer {
         let mut start = 0;
         while let Some(end) = frame_end(&pending, self.search.max(start), &mut self.work) {
             self.write_frame(out, pending.get(start..end).unwrap_or_default());
+            consume_breaks(&mut self.synthetic_breaks, end - start);
             start = end;
             if !self.terminal_event.is_empty() {
                 self.reset();
@@ -137,7 +159,11 @@ impl Framer {
             self.reset();
             return Ok(());
         }
-        if self.pending.is_empty() || !can_emit_without_delimiter(&self.scan) {
+        if self.pending.is_empty()
+            || has_empty_event_data(&self.pending, &self.scan)
+            || !can_emit_without_delimiter(&self.scan)
+            || !event_name_complete(&self.pending)
+        {
             if self.pending.len() > self.limit.0 {
                 self.reset();
                 return Err(ErrorMessage::new(502, too_large(self.limit)));
@@ -152,20 +178,29 @@ impl Framer {
     /// Writes what is held back when the stream ends, if it is a whole
     /// event, and drops it otherwise (`Flush`).
     pub(super) fn flush(&mut self, out: &mut BytesMut) {
+        self.flush_prefix(out);
         if self.pending.is_empty() || !self.terminal_event.is_empty() {
             return;
         }
-        if self.scan.is_blank() || !can_flush_without_delimiter(&self.scan) {
+        if self.scan.is_blank() {
             self.reset();
             return;
         }
         let frame = self.take_pending();
-        self.write_frame(out, &frame);
+        let mut scan = EventScan::default();
+        scan.advance(&frame);
+        if can_flush_without_delimiter(&scan) {
+            self.write_frame(out, &frame);
+        }
     }
 
     /// Takes what is held back.
     fn take_pending(&mut self) -> Vec<u8> {
         let pending = std::mem::take(&mut self.pending);
+        let pending = match recover_json_frame(&pending, &self.synthetic_breaks) {
+            Cow::Borrowed(_) => pending,
+            Cow::Owned(recovered) => recovered,
+        };
         self.reset();
         pending
     }
@@ -173,13 +208,15 @@ impl Framer {
     /// Drops what is held back.
     fn reset(&mut self) {
         self.pending.clear();
+        self.synthetic_breaks.clear();
         self.search = 0;
         self.scan = EventScan::default();
     }
 
     /// `writeFrame`.
     fn write_frame(&mut self, out: &mut BytesMut, frame: &[u8]) {
-        let frame = self.repair_frame(frame);
+        let recovered = recover_json_frame(frame, &self.synthetic_breaks);
+        let frame = self.repair_frame(&recovered);
         write_sse_chunk(out, &frame);
     }
 
@@ -198,7 +235,7 @@ impl Framer {
             if self.is_codex_client {
                 return name == "codex.rate_limits";
             }
-            name.starts_with("codex.")
+            name.starts_with("codex.") || name == "response.metadata"
         };
         check(stream_event) || check(payload_type)
     }
@@ -217,13 +254,12 @@ impl Framer {
             self.data_frames += 1;
             return Cow::Borrowed(frame);
         }
-        if !go::json_valid(&payload) {
-            return Cow::Borrowed(frame);
-        }
-
         let payload_type = json::str_at(&payload, "type");
         if self.should_filter_private_event(&stream_event, &payload_type) {
             return Cow::Borrowed(&[]);
+        }
+        if !go::json_valid(&payload) {
+            return Cow::Borrowed(frame);
         }
 
         self.data_frames += 1;
@@ -515,28 +551,19 @@ fn event_name(frame: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a newline has to go between held-back text and a chunk that
-/// starts a field (`responsesSSENeedsLineBreak`).
-fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
-    if pending.is_empty() || chunk.is_empty() {
-        return false;
-    }
-    if pending.ends_with(b"\n") || pending.ends_with(b"\r") {
-        return false;
-    }
-    if chunk[0] == b'\n' || chunk[0] == b'\r' {
-        return false;
-    }
-    let start = chunk
-        .iter()
-        .position(|b| !matches!(b, b' ' | b'\t'))
-        .unwrap_or(chunk.len());
-    let trimmed = &chunk[start..];
-    !trimmed.is_empty()
-        && [&b"data:"[..], b"event:", b"id:", b"retry:", b":"]
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix))
+/// A data-first event's name may itself be split. Do not emit a prefix of
+/// it just because its data is already valid (upstream emits too early).
+fn event_name_complete(frame: &[u8]) -> bool {
+    let last = frame.rsplit(|&b| b == b'\n').next().unwrap_or_default();
+    let Some(name) = go::trim_space(last).strip_prefix(b"event:") else {
+        return true;
+    };
+    is_terminal_event(&String::from_utf8_lossy(go::trim_space(name)))
 }
+
+#[cfg(test)]
+#[path = "framing_tests.rs"]
+mod framing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -746,14 +773,12 @@ mod tests {
 
         pub(super) struct Upstream {
             pub(super) framer: Framer,
-            pending: Vec<u8>,
         }
 
         impl Upstream {
             pub(super) fn new(is_codex_client: bool) -> Self {
                 Self {
                     framer: Framer::new(is_codex_client),
-                    pending: Vec::new(),
                 }
             }
 
@@ -762,52 +787,60 @@ mod tests {
                 if chunk.is_empty() || !framer.terminal_event.is_empty() {
                     return;
                 }
-                if starts_new_data_frame(&self.pending, chunk) {
-                    let frame = std::mem::take(&mut self.pending);
+                let Some(chunk) = framer.prepare_chunk(out, chunk) else { return; };
+                let chunk = chunk.as_ref();
+                if starts_new_data_frame(&framer.pending, chunk) {
+                    let frame = framer.take_pending();
                     framer.write_frame(out, &frame);
                     if !framer.terminal_event.is_empty() {
                         return;
                     }
                 }
-                if needs_line_break(&self.pending, chunk) {
-                    self.pending.push(b'\n');
+                if needs_line_break(&framer.pending, chunk) {
+                    framer.synthetic_breaks.push(framer.pending.len());
+                    framer.pending.push(b'\n');
                 }
-                self.pending.extend_from_slice(chunk);
+                framer.pending.extend_from_slice(chunk);
                 loop {
-                    let len = frame_len(&self.pending);
+                    let len = frame_len(&framer.pending);
                     if len == 0 {
                         break;
                     }
-                    let frame: Vec<u8> = self.pending.drain(..len).collect();
+                    let frame: Vec<u8> = framer.pending.drain(..len).collect();
                     framer.write_frame(out, &frame);
+                    super::super::consume_breaks(&mut framer.synthetic_breaks, len);
                     if !framer.terminal_event.is_empty() {
-                        self.pending.clear();
+                        framer.reset();
                         return;
                     }
                 }
-                if go::trim_space(&self.pending).is_empty() {
-                    self.pending.clear();
+                // This oracle deliberately rescans the entire pending event.
+                framer.scan = super::super::EventScan::default();
+                framer.scan.advance(&framer.pending);
+                if go::trim_space(&framer.pending).is_empty() {
+                    framer.reset();
                     return;
                 }
-                if self.pending.is_empty() || !can_emit_without_delimiter(&self.pending) {
+                if framer.pending.is_empty()
+                    || super::super::has_empty_event_data(&framer.pending, &framer.scan)
+                    || !can_emit_without_delimiter(&framer.pending)
+                    || !super::super::event_name_complete(&framer.pending)
+                {
                     return;
                 }
-                let frame = std::mem::take(&mut self.pending);
+                let frame = framer.take_pending();
                 framer.write_frame(out, &frame);
             }
 
             pub(super) fn flush(&mut self, out: &mut BytesMut) {
-                if self.pending.is_empty() || !self.framer.terminal_event.is_empty() {
+                self.framer.flush_prefix(out);
+                if self.framer.pending.is_empty() || !self.framer.terminal_event.is_empty() {
                     return;
                 }
-                if go::trim_space(&self.pending).is_empty()
-                    || !can_flush_without_delimiter(&self.pending)
-                {
-                    self.pending.clear();
-                    return;
+                let frame = self.framer.take_pending();
+                if can_flush_without_delimiter(&frame) {
+                    self.framer.write_frame(out, &frame);
                 }
-                let frame = std::mem::take(&mut self.pending);
-                self.framer.write_frame(out, &frame);
             }
         }
 
