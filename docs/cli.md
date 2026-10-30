@@ -25,6 +25,8 @@ To keep the proxy running in the background instead, run `open-ferry service ins
 
 ## Binding Sign in with ChatGPT to a Codex credential
 
+Codex clients use the outer Codex login even when `use_siwc` is enabled; other clients keep the saved mode. A missing selected outer login returns 401 without cooling or rejecting a healthy SIWC login. Requests never change the saved switch.
+
 ```sh
 open-ferry -config PATH -siwc-bind codex-existing.json -no-browser
 ```
