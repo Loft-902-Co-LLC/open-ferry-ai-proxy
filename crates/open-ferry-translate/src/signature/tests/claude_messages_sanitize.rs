@@ -53,3 +53,34 @@ fn sanitize_claude_messages_for_claude_upstream_preserves_opaque_thinking_signat
         "compat sanitizer dropped opaque signature: {with_compat}"
     );
 }
+
+#[test]
+fn commentary_markers_restore_text_before_signature_policy() {
+    for model in [
+        "claude-sonnet-5",
+        "gpt-5.4",
+        "gemini-3.5-flash",
+        "unknown-model",
+    ] {
+        for compat in [false, true] {
+            let mut payload = json(
+                r#"{"messages":[{"role":"assistant","content":[
+                {"type":"thinking","thinking":"commentary","signature":" cpa:commentary:v1 "},
+                {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"},
+                {"type":"text","text":"final"}]},
+                {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}]}"#,
+            );
+            if compat {
+                sanitize_claude_messages_for_claude_upstream(&mut payload, model, true);
+            } else {
+                sanitize_claude_messages_signatures_for_model(&mut payload, model);
+            }
+            assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                payload["messages"][0]["content"],
+                json(r#"[{"type":"text","text":"commentary"},{"type":"text","text":"final"}]"#)
+            );
+            assert!(!payload.to_string().contains("cpa:commentary:v1"));
+        }
+    }
+}

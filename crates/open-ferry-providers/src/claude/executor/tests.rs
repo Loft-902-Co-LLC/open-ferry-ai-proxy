@@ -3067,3 +3067,24 @@ async fn paused_search_continuation_restores_finished_results_without_completing
         assert_eq!(blocks[2]["input"]["query"], "paused query");
     }
 }
+
+#[test]
+fn commentary_cleanup_ignores_model_family_gate() {
+    for model in ["claude-sonnet-5", "deepseek-v4", "unknown-model"] {
+        let mut body = json!({"messages":[{"role":"assistant","content":[
+            {"type":"thinking","thinking":"commentary","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"final"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}]});
+        sanitize_for_upstream(&mut body, model);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type":"text","text":"commentary"},{"type":"text","text":"final"}])
+        );
+        assert!(!body.to_string().contains("cpa:commentary:v1"));
+    }
+    let mut body = json!({"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque"}]}]});
+    let before = body.clone();
+    sanitize_for_upstream(&mut body, "deepseek-v4");
+    assert_eq!(body, before);
+}

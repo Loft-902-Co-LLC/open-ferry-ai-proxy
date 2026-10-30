@@ -254,6 +254,30 @@ pub(crate) fn extract_and_remove_betas(body: &mut Value) -> Vec<String> {
 /// signatures a Claude model can replay and drops the rest, then removes
 /// empty web-search domain lists and repairs tool IDs with `tool_call_ids::normalize`.
 pub(crate) fn sanitize_for_upstream(body: &mut Value, base_model: &str) {
+    // Restore internal commentary even when the model skips signature policy.
+    if let Some(Value::Array(messages)) = body.get_mut("messages") {
+        messages.retain_mut(|message| {
+            let Some(Value::Array(content)) = message.get_mut("content") else {
+                return true;
+            };
+            let mut restored = false;
+            content.retain_mut(|part| {
+                if json::str_at(part, "type") != "thinking"
+                    || json::str_at(part, "signature").trim() != "cpa:commentary:v1"
+                {
+                    return true;
+                }
+                restored = true;
+                let text = json::str_at(part, "thinking");
+                if text.is_empty() {
+                    return false;
+                }
+                *part = json!({"type":"text","text":text});
+                true
+            });
+            !restored || !content.is_empty()
+        });
+    }
     if Provider::from_model_name(base_model) == Provider::Claude {
         let report = sanitize_claude_messages_for_claude_upstream(body, base_model, false);
         if report.dropped_blocks > 0

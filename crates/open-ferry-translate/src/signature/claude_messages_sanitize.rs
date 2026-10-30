@@ -180,6 +180,17 @@ fn sanitize_block(
         return Outcome::Unchanged;
     }
 
+    // This internal marker relays commentary, never provider reasoning.
+    if str_of(part.get("signature")).trim() == "cpa:commentary:v1" {
+        let text = str_of(part.get("thinking")).into_owned();
+        if text.is_empty() {
+            report.dropped_blocks += 1;
+            return Outcome::Dropped;
+        }
+        *part = serde_json::json!({"type":"text","text":text});
+        report.dropped_signatures += 1;
+        return Outcome::Changed;
+    }
     if opts.preserve_empty_thinking_blocks {
         report.preserved += 1;
         return Outcome::Unchanged;

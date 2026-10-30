@@ -269,6 +269,12 @@ fn convert_block(
                 parts.push(json!({ "text": text }));
             }
         }
+        "thinking" if str_of(block.get("signature")).trim() == "cpa:commentary:v1" => {
+            let text = str_of(block.get("thinking"));
+            if !text.is_empty() {
+                parts.push(json!({"text":text}));
+            }
+        }
         "thinking" if keep_thinking => {
             let signature = gemini_replay_signature_or_bypass(
                 &str_of(block.get("signature")),

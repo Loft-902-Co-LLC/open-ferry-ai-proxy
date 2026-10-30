@@ -270,6 +270,12 @@ impl Messages {
         let mut relayed_images = Vec::new();
         for part in parts.iter() {
             match &*str_of(part.get("type")) {
+                "thinking" if str_of(part.get("signature")).trim() == "cpa:commentary:v1" => {
+                    let text = str_of(part.get("thinking"));
+                    if !text.is_empty() {
+                        content.push(text_part(&text));
+                    }
+                }
                 "thinking" => {
                     if role == "assistant" && self.maps_thinking(part) {
                         let text = thinking_text(part);

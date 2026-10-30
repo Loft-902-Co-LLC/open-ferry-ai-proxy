@@ -449,14 +449,18 @@ impl CodexToClaudeStream {
         if !self.thinking_open {
             return;
         }
-        if !self.commentary_message_open && !self.thinking_signature.is_empty() {
+        let signature = if self.commentary_message_open {
+            "cpa:commentary:v1".to_owned()
+        } else {
+            std::mem::take(&mut self.thinking_signature)
+        };
+        if !signature.is_empty() {
             let delta = json!({
                 "type": "content_block_delta",
                 "index": self.block_index,
-                "delta": { "type": "signature_delta", "signature": self.thinking_signature }
+                "delta": { "type": "signature_delta", "signature": signature }
             });
             push_event(out, "content_block_delta", &delta);
-            self.thinking_signature.clear();
         }
         push_block_stop(out, self.block_index);
         self.block_index += 1;
@@ -1091,7 +1095,7 @@ fn push_input_json_delta(out: &mut String, index: usize, partial_json: &str) {
 
 fn message_text_block(item: &Value, text: &str) -> Value {
     if str_of(item.get("phase")) == "commentary" {
-        json!({"type":"thinking","thinking":text})
+        json!({"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"})
     } else {
         json!({"type":"text","text":text})
     }
