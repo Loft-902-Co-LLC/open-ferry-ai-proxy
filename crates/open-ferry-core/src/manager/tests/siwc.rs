@@ -121,7 +121,7 @@ fn active_access_token_validity_and_outer_interval_are_independent() {
     assert_eq!(auth.access_token(), "siwc-old-token");
     assert_eq!(auth.expiration_time(), Some(at("2026-10-13T12:20:00Z")));
     assert!(auth.has_valid_access_token(now));
-    auth.rejected_access_token = "siwc-old-token".into();
+    auth.rejected_siwc_access_token = "siwc-old-token".into();
     assert!(!auth.has_valid_access_token(now));
     assert_eq!(
         auth.outer_expiration_time(),

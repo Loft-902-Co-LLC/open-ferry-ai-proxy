@@ -472,8 +472,7 @@ pub(crate) fn merge_refreshed_auth_with(
             merged.status = current.status;
             merged.status_message = current.status_message.clone();
         } else if matches!(updated.status, Status::Active | Status::Unknown)
-            && (merged.rejected_access_token.is_empty()
-                || merged.access_token() != merged.rejected_access_token)
+            && !merged.is_active_access_token_rejected()
         {
             merged.status = Status::Active;
             merged.unavailable = false;
