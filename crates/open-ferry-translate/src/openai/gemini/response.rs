@@ -116,7 +116,12 @@ impl OpenAIToGeminiStream {
             }
             if !outputs.is_empty() {
                 results.extend(outputs);
-                if delta.and_then(|delta| delta.get("tool_calls")).is_none() {
+                if delta.and_then(|delta| delta.get("tool_calls")).is_none()
+                    && choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                {
                     continue;
                 }
             }
