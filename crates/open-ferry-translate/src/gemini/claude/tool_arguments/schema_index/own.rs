@@ -10,11 +10,13 @@ pub(super) struct Own {
     pub(super) union: Option<Arc<Vec<Id>>>,
     pub(super) all: Option<Option<Arc<Vec<Id>>>>,
     pub(super) reference: Option<usize>,
+    pub(super) deep: Arc<deep::Program>,
 }
 #[derive(Clone, Copy)]
 pub(super) struct Shape {
     pub(super) depth: usize,
     pub(super) references: Map,
+    pub(super) items_safe: bool,
 }
 impl SchemaIndex {
     pub(super) fn own(&mut self, node: Id, _origin: Id) -> Arc<Own> {
@@ -31,6 +33,7 @@ impl SchemaIndex {
             union: None,
             all: None,
             reference: None,
+            deep: Arc::new(self.build_deep_program(node)),
         };
         if let Some(fields) = self.object(node) {
             own.valid = true;
@@ -110,6 +113,7 @@ impl SchemaIndex {
             let mut result = Shape {
                 depth: 0,
                 references: 0,
+                items_safe: !own.head.unsafe_complex,
             };
             if !own.valid || own.head.unsafe_complex || (own.has_union && own.union.is_none()) {
                 return Some(result);
@@ -130,6 +134,7 @@ impl SchemaIndex {
             }
             for child in children {
                 let next = self.shape(child, scope, visiting)?;
+                result.items_safe &= next.items_safe;
                 result.depth = result.depth.max(next.depth + 1);
                 result.references = self
                     .maps

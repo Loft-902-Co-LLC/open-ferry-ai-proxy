@@ -3,7 +3,7 @@
 use super::*;
 pub(super) type Map = usize;
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
-enum Kind {
+pub(super) enum Kind {
     Empty,
     Leaf(usize, usize),
     Fork(u32, Map, Map),
@@ -91,6 +91,9 @@ impl Maps {
             }
         }
         None
+    }
+    pub(super) fn kind(&self, map: Map) -> Kind {
+        self.nodes[map].kind
     }
     pub(super) fn len(&self, map: Map) -> usize {
         self.nodes[map].len

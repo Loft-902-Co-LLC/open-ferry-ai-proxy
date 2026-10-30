@@ -1,6 +1,7 @@
 //! A call-owned, shallow schema graph and shared decision index.
 use super::*;
 mod clean;
+mod deep;
 mod info;
 mod own;
 mod probe;
@@ -45,6 +46,12 @@ struct Info {
     parent_static: Option<Keys>,
     branch_static: Option<Keys>,
 }
+#[derive(Clone, Copy)]
+struct BranchSummary {
+    dynamic: bool,
+    parent: Keys,
+    static_parent: Option<Keys>,
+}
 #[derive(Clone, Copy, Default)]
 struct SetInfo {
     merged: usize,
@@ -77,12 +84,13 @@ pub(super) struct SchemaIndex {
     own_nodes: HashMap<Id, Arc<own::Own>>,
     graph_shapes: HashMap<(Id, Id), Option<own::Shape>>,
     info_intern: HashMap<Info, usize>,
+    branch_summaries: HashMap<Map, BranchSummary>,
     required_cache: HashMap<Id, Map>,
     references: HashMap<(Id, usize), Option<Id>>,
     sets: HashMap<(Map, Id), SetInfo>,
     items: HashMap<(Id, Id, usize, Map), Option<Map>>,
     item_sets: HashMap<(Map, Id), Option<Map>>,
-    deep: HashMap<(Id, Id, usize, Map, usize), bool>,
+    deep: HashMap<(Id, Id), [u8; 2]>,
     injected: HashMap<(Id, usize, bool), bool>,
     reclean: HashMap<(Id, usize), bool>,
     original: Id,
@@ -115,6 +123,7 @@ impl SchemaIndex {
             own_nodes: HashMap::new(),
             graph_shapes: HashMap::new(),
             info_intern: HashMap::new(),
+            branch_summaries: HashMap::new(),
             required_cache: HashMap::new(),
             references: HashMap::new(),
             sets: HashMap::new(),
@@ -407,37 +416,55 @@ impl SchemaIndex {
             _ => Keys::NONE,
         }
     }
-    fn complete_info(&mut self, mut info: Info) -> Info {
-        let mut parent = Keys::NONE;
-        let mut parent_static = Some(Keys::NONE);
-        let mut dynamic = info.pattern || (info.allows && !info.forbids);
-        for (branch, _) in self.maps.entries(info.branches) {
-            let child = self.infos[branch];
-            dynamic |= child.dynamic;
-            let mask = self.maps.mask(child.properties);
-            let domain = child.branch_probe.and(
-                Keys {
+    // Fold each persistent branch-map subtrie once. Parents that share a wide
+    // target reuse its fold, including when they add their own constraints.
+    fn branch_summary(&mut self, branches: Map) -> BranchSummary {
+        if let Some(summary) = self.branch_summaries.get(&branches) {
+            return *summary;
+        }
+        budget::charge(8);
+        let result = match self.maps.kind(branches) {
+            trie::Kind::Empty => BranchSummary {
+                dynamic: false,
+                parent: Keys::NONE,
+                static_parent: Some(Keys::NONE),
+            },
+            trie::Kind::Leaf(branch, _) => {
+                let child = self.infos[branch];
+                let mask = self.maps.mask(child.properties);
+                let undeclared = Keys {
                     default: true,
                     exceptions: mask,
-                },
-                &mut self.maps,
-            );
-            parent = parent.or(domain, &mut self.maps);
-            parent_static = match (parent_static, child.branch_static) {
-                (Some(a), Some(b)) => Some(a.or(
-                    b.and(
-                        Keys {
-                            default: true,
-                            exceptions: mask,
-                        },
-                        &mut self.maps,
-                    ),
-                    &mut self.maps,
-                )),
-                _ => None,
-            };
-        }
-        info.dynamic = dynamic;
+                };
+                BranchSummary {
+                    dynamic: child.dynamic,
+                    parent: child.branch_probe.and(undeclared, &mut self.maps),
+                    static_parent: child
+                        .branch_static
+                        .map(|value| value.and(undeclared, &mut self.maps)),
+                }
+            }
+            trie::Kind::Fork(_, left, right) => {
+                let a = self.branch_summary(left);
+                let b = self.branch_summary(right);
+                BranchSummary {
+                    dynamic: a.dynamic || b.dynamic,
+                    parent: a.parent.or(b.parent, &mut self.maps),
+                    static_parent: match (a.static_parent, b.static_parent) {
+                        (Some(a), Some(b)) => Some(a.or(b, &mut self.maps)),
+                        _ => None,
+                    },
+                }
+            }
+        };
+        self.branch_summaries.insert(branches, result);
+        result
+    }
+    fn complete_info(&mut self, mut info: Info) -> Info {
+        let branches = self.branch_summary(info.branches);
+        let parent = branches.parent;
+        let parent_static = branches.static_parent;
+        info.dynamic = info.pattern || (info.allows && !info.forbids) || branches.dynamic;
         info.parent_probe = parent;
         info.parent_static = parent_static;
         let own = if info.pattern || (!info.forbids && info.allows) {

@@ -217,7 +217,7 @@ impl SchemaIndex {
         }
         let mut result = false;
         for (_, node) in self.maps.entries(group) {
-            if self.deep_declares(node, self.original, key, 0, 0) {
+            if self.deep_declares(node, self.original, key) {
                 result = true;
                 break;
             }

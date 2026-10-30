@@ -190,11 +190,41 @@ impl SchemaIndex {
         self.sets.insert((group, scope), result);
         result
     }
-    fn array_items(&mut self, node: Id, scope: Id, depth: usize, active: Map) -> Option<Map> {
+    fn array_items(
+        &mut self,
+        mut node: Id,
+        scope: Id,
+        mut depth: usize,
+        mut active: Map,
+    ) -> Option<Map> {
+        while depth <= 16 && self.alias(node) {
+            let raw = self.field(node, "$ref")?;
+            let name = self.spelling(raw);
+            if self.maps.get(active, name).is_some() {
+                return None;
+            }
+            node = self.reference(scope, name)?;
+            let one = self.maps.singleton(name, 1);
+            active = self.maps.merge(Op::Union, active, one);
+            depth += 1;
+        }
         if depth > 16 || !self.is_object(node) {
             return None;
         }
-        let key = (node, scope, depth, active);
+        let shape = self
+            .shape(node, scope, &mut HashSet::new())
+            .filter(|shape| shape.items_safe);
+        let cache_depth = if shape.is_some_and(|shape| depth + shape.depth <= 16) {
+            0
+        } else {
+            depth
+        };
+        let cache_active = if let Some(shape) = shape {
+            self.maps.merge(Op::Intersection, active, shape.references)
+        } else {
+            active
+        };
+        let key = (node, scope, cache_depth, cache_active);
         if let Some(result) = self.items.get(&key) {
             return *result;
         }
@@ -252,58 +282,6 @@ impl SchemaIndex {
             Some(out)
         })();
         self.item_sets.insert((group, scope), result);
-        result
-    }
-    pub(super) fn deep_declares(
-        &mut self,
-        node: Id,
-        scope: Id,
-        key: usize,
-        depth: usize,
-        active: Map,
-    ) -> bool {
-        if depth > 16 || !self.is_object(node) {
-            return false;
-        }
-        let cache = (node, scope, depth, active, key);
-        if let Some(found) = self.deep.get(&cache) {
-            return *found;
-        }
-        let result = (|| {
-            if let Some(raw) = self.field(node, "$ref") {
-                let name = self.spelling(raw);
-                if self.maps.get(active, name).is_none() {
-                    if let Some(target) = self.reference(scope, name) {
-                        let one = self.maps.singleton(name, 1);
-                        let visited = self.maps.merge(Op::Union, active, one);
-                        if self.deep_declares(target, scope, key, depth + 1, visited) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if self
-                .field(node, "properties")
-                .is_some_and(|id| self.records[&id].fields.contains_key(&key))
-            {
-                return true;
-            }
-            let required = self.own_required(node);
-            if self.maps.get(required, key).is_some() {
-                return true;
-            }
-            for keyword in ["allOf", "anyOf", "oneOf"] {
-                if let Some(branches) = self.field(node, keyword) {
-                    for branch in self.garray(branches) {
-                        if self.deep_declares(branch, scope, key, depth + 1, active) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        })();
-        self.deep.insert(cache, result);
         result
     }
     pub(super) fn injection(&mut self, node: Id, key: usize, top: bool) -> bool {

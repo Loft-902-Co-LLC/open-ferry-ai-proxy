@@ -11,6 +11,7 @@ enum Step {
     Index(usize),
 }
 use Step::{Index, Key};
+#[derive(Clone)]
 struct Case {
     name: String,
     schema: Value,
@@ -278,6 +279,15 @@ fn family() -> Vec<Case> {
         long_key(),
         predicates(),
     ];
+    let predicate = predicates();
+    cases.push(Case {
+        name: "predicate-multiple-objects".into(),
+        schema: json!({"type":"object","properties":{"rows":{"type":"array","items":predicate.schema}}}),
+        translated: true,
+        paths: (0..3).flat_map(|at|predicate.paths.iter().map(move |(steps,value)| {
+            let mut path=vec![Key("rows".into()),Index(at)];path.extend(steps.iter().cloned());(path,value.clone())
+        })).collect(),
+    });
     for translated in [false, true] {
         for depth in [1, 2, 8, 32, 64] {
             for width in [1, 100, 1000] {
@@ -376,7 +386,41 @@ fn family() -> Vec<Case> {
             spelled.schema["properties"][format!("k{i:03}")]["$ref"] =
                 json!(format!("#/$defs/A{i}"));
         }
+        let mut deep_alias = spelled.clone();
         cases.push(spelled);
+        deep_alias.name = format!("deep-declarations-alias-fanout-t{translated}");
+        deep_alias.schema["$defs"]["Big"] = json!({"type":"object","anyOf":[
+            {"type":"null","properties":{"reason":{"type":"string"}}},
+            {"type":"object","properties":{"f00":{"type":"string"}},"additionalProperties":false}
+        ]});
+        for (steps, _) in &mut deep_alias.paths {
+            *steps.last_mut().unwrap() = Key("reason".into());
+        }
+        cases.push(deep_alias);
+        for width in [1, 100, 500] {
+            let mut shared = reference(width, 100, 0, translated);
+            shared.name = format!("shared-union-siblings-w{width}-t{translated}");
+            shared.schema["$defs"]["Big"] = union(100, "anyOf", true, translated).schema;
+            for i in 0..width {
+                shared.schema["properties"][format!("k{i:03}")]["properties"] =
+                    json!({format!("own{i}"):{"type":"string"}});
+            }
+            for (steps, _) in &mut shared.paths {
+                steps.pop();
+                steps.push(Key("k000".into()));
+                steps.push(Key("value".into()));
+            }
+            cases.push(shared);
+        }
+        let mut arrays = reference(500, 100, 0, translated);
+        arrays.name = format!("shared-array-items-t{translated}");
+        let target = arrays.schema["$defs"]["Big"].take();
+        arrays.schema["$defs"]["Big"] =
+            json!({"type":"array","allOf":[{"type":"array","items":target}]});
+        for (steps, _) in &mut arrays.paths {
+            steps.insert(1, Index(0));
+        }
+        cases.push(arrays);
         cases.push(Case{name:format!("root-array-preserved-t{translated}"),translated,schema:json!({"type":"array","items":{"type":"object","properties":{},"additionalProperties":false}}),paths:vec![(vec![Index(2),Key("reason".into())],json!("x"))]});
         cases.push(Case{name:format!("empty-key-t{translated}"),translated,schema:json!({"type":"object","properties":{"":{"type":"object","properties":{},"additionalProperties":false}}}),paths:vec![(vec![Key("".into()),Key("reason".into())],json!("x"))]});
         for kind in ["self", "mutual", "deep"] {
@@ -408,22 +452,45 @@ fn family() -> Vec<Case> {
 }
 #[test]
 fn round6_whole_call_work_invariant() {
-    std::thread::Builder::new().stack_size(8<<20).spawn(|| {
-        let mut failures = Vec::new(); let mut maximum = 0f64;
-        let opus_only=std::env::var_os("R6_OPUS_ONLY").is_some();
-        let stop=std::env::var_os("R6_STOP_AFTER_FAILURE").is_some();
-        for case in family().into_iter().take(if opus_only {4}else{usize::MAX}) {
-            let (schema,paths,args) = input_sizes(&case); let size = schema+paths+args;
-            let actual = WorkBudget::with_index_audit(||run(&case));
-            let expected = WorkBudget::with_test_limit(usize::MAX, || run(&case));
-            let index_probe = actual.total.saturating_sub(actual.predicates);
-            let ratio = index_probe as f64 / size.max(1) as f64; maximum = maximum.max(ratio);
-            let predicate_proof=case.name!="predicate-lists" || (actual.predicates==32*129 && actual.allowance==32*129);
-            let ok = predicate_proof && actual.complete && expected.complete && actual.output==expected.output && index_probe<=K*size && actual.predicates<=K2*actual.allowance;
-            eprintln!("R6_CASE name={} schema={schema} paths={paths} args={args} total={} index_probe={index_probe} predicate={} allowance={} ratio={ratio:.6} complete={} equal={} ok={ok}",case.name,actual.total,actual.predicates,actual.allowance,actual.complete,actual.output==expected.output);
-            if !ok { failures.push(case.name); if stop {break;} }
-        }
-        eprintln!("R6_BOUND K={K} K2={K2} max_ratio={maximum:.6} failures={}",failures.len());
-        assert!(failures.is_empty(), "failed family members: {}",failures.join(", "));
-    }).unwrap().join().unwrap();
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            let mut failures = Vec::new();
+            let mut maximum = 0f64;
+            let mut maximum_total = 0f64;
+            let mut count = 0;
+            let opus_only = std::env::var_os("R6_OPUS_ONLY").is_some();
+            let stop = std::env::var_os("R6_STOP_AFTER_FAILURE").is_some();
+            for case in family().into_iter().take(if opus_only { 4 } else { usize::MAX }) {
+                count += 1;
+                let (schema, paths, args) = input_sizes(&case);
+                let size = schema + paths + args;
+                let actual = WorkBudget::with_index_audit(|| run(&case));
+                // The reference uses the pre-index cleaner, not the indexed
+                // implementation with its counters disabled.
+                let expected = WorkBudget::with_test_limit(usize::MAX, || run(&case));
+                let index_probe = actual.total.saturating_sub(actual.predicates);
+                let ratio = index_probe as f64 / size.max(1) as f64;
+                maximum = maximum.max(ratio);
+                maximum_total = maximum_total.max(actual.total as f64 / size.max(1) as f64);
+                let predicate_proof = case.name != "predicate-lists"
+                    || (actual.predicates == 32 * 129 && actual.allowance == 32 * 129);
+                let ok = predicate_proof
+                    && actual.complete
+                    && expected.complete
+                    && actual.output == expected.output
+                    && index_probe <= K * size
+                    && actual.predicates <= K2 * actual.allowance;
+                eprintln!("R6_CASE name={} schema={schema} paths={paths} args={args} total={} index_probe={index_probe} predicate={} allowance={} ratio={ratio:.6} complete={} equal={} ok={ok}", case.name, actual.total, actual.predicates, actual.allowance, actual.complete, actual.output == expected.output);
+                if !ok {
+                    failures.push(case.name);
+                    if stop { break; }
+                }
+            }
+            eprintln!("R6_BOUND K={K} K2={K2} max_ratio={maximum:.6} max_total_ratio={maximum_total:.6} members={count} failures={}", failures.len());
+            assert!(failures.is_empty(), "failed family members: {}", failures.join(", "));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
