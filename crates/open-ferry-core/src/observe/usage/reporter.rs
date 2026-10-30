@@ -655,6 +655,7 @@ fn is_done(line: &[u8]) -> bool {
 /// Why a call failed.
 #[derive(Clone, Default)]
 struct Failure {
+    code: &'static str,
     status: i64,
     body: String,
     /// Whether the answer's counts still count ([`ExecError::keeps_usage`]).
@@ -664,6 +665,7 @@ struct Failure {
 impl Failure {
     fn of(error: &ExecError) -> Self {
         Self {
+            code: error.failure_code().unwrap_or_default(),
             status: i64::from(error.http_status()),
             body: error.to_string().trim().to_owned(),
             keeps_usage: error.keeps_usage,
@@ -672,6 +674,7 @@ impl Failure {
 
     fn canceled() -> Self {
         Self {
+            code: "",
             status: CANCELED_STATUS,
             body: CANCELED_MESSAGE.to_owned(),
             keeps_usage: false,
@@ -1459,9 +1462,9 @@ impl UsageTap {
         let mut secrets = call.secrets.clone();
         secrets.add(self.client_key());
         let scrub = |body| secrets.text(body, Policy::Disk);
-        let (failed, fail_status, fail_body) = match publication.failure {
-            Some(failure) => (true, failure.status, scrub(failure.body)),
-            None => (false, 0, String::new()),
+        let (failed, fail_status, fail_body, fail_code) = match publication.failure {
+            Some(failure) => (true, failure.status, scrub(failure.body), failure.code),
+            None => (false, 0, String::new(), ""),
         };
         let context = &self.context;
         Record {
@@ -1489,6 +1492,7 @@ impl UsageTap {
             failed,
             fail_status,
             fail_body,
+            fail_code,
             detail: publication.detail,
             response_headers: call.headers.clone(),
             endpoint: context.endpoint.clone(),

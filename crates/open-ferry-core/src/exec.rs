@@ -67,6 +67,22 @@ pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
 pub use open_ferry_translate::registry::Format;
 pub use websocket_input::{AuthCheck, InputFrame, WebsocketInput};
 
+/// A provider-vouched failure whose status alone is ambiguous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    /// An accepted generation ended without its terminal frame. Never replay.
+    StreamTruncated,
+}
+
+impl FailureClass {
+    /// Stable code for credential and usage records.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::StreamTruncated => "stream_truncated",
+        }
+    }
+}
+
 /// The maximum stream line or event observation buffer, matching upstream's scanner limit.
 pub const MAX_STREAM_LINE: usize = 52_428_800;
 

@@ -549,3 +549,28 @@ fn truncated_streams_retain_usage_from_all_claude_upstream_protocols() {
         );
     }
 }
+
+#[test]
+fn p47_truncation_keeps_partial_usage_tier_and_classification() {
+    for provider in ["gemini", "vertex"] {
+        let h = Harness::new();
+        let driver = ClientCall::new("gemini-3.1-pro")
+            .stream()
+            .body(r#"{"service_tier":"priority"}"#)
+            .tap(&h);
+        driver.attempt(
+            AttemptKind::Stream,
+            provider,
+            "gemini-3.1-pro",
+            &auth("a", "0", provider),
+        );
+        driver.head(200, &[]);
+        driver.chunk("data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n");
+        driver.fail(&ExecError::stream_truncated("missing terminal frame"));
+        let record = h.record();
+        assert_eq!(int_at(&record, "/tokens/total_tokens"), 7);
+        assert_eq!(int_at(&record, "/fail/status_code"), 502);
+        assert_eq!(record["fail"]["code"], "stream_truncated");
+        assert_eq!(record["service_tier"], "priority");
+    }
+}

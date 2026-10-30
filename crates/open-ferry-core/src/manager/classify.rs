@@ -198,7 +198,11 @@ pub(crate) fn result_error_from_error(err: ErrView<'_>) -> AuthError {
     if result.http_status == 0 {
         result.http_status = err.status();
     }
-    if is_explicit_model_not_found_error(err, "") {
+    if let ErrView::Exec(error) = err
+        && let Some(code) = error.failure_code()
+    {
+        result.code = code.into();
+    } else if is_explicit_model_not_found_error(err, "") {
         if result.code.is_empty() || result.code == CODE_REQUEST_SCOPED {
             result.code = "model_not_found".into();
         }
@@ -233,7 +237,8 @@ pub(crate) fn should_skip_credential_cooldown(err: Option<&AuthError>) -> bool {
     if err.code == CODE_FORCE_COOLDOWN {
         return false;
     }
-    is_request_scoped_result_error(err)
+    err.code == "stream_truncated"
+        || is_request_scoped_result_error(err)
         || is_connection_lifecycle_result_error(err)
         || is_transient_transport_result_error(err)
 }
@@ -836,6 +841,10 @@ fn is_missing_model_phrase(value: &str) -> bool {
 /// or cool down for it (upstream's `isRequestInvalidError`). A model the
 /// credential can't serve isn't the request's fault.
 pub(crate) fn is_request_invalid_error(err: ErrView<'_>) -> bool {
+    if matches!(err, ErrView::Exec(error) if error.stops_replay()) {
+        return true;
+    }
+
     if is_request_scoped_error(err) {
         return true;
     }

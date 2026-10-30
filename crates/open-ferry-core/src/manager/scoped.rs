@@ -228,6 +228,9 @@ pub(crate) fn match_request_scoped_error_action(
     err: &ExecError,
     settings: &Settings,
 ) -> Option<ScopedAction> {
+    if err.stops_replay() {
+        return None;
+    }
     let rules = extract_request_scoped_error_rules(auth, settings);
     if rules.is_empty() {
         return None;

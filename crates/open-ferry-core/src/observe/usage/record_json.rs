@@ -88,6 +88,7 @@ pub(crate) struct Record {
     pub(crate) fail_status: i64,
     /// The failure's message, scrubbed of the call's secrets.
     pub(crate) fail_body: String,
+    pub(crate) fail_code: &'static str,
     pub(crate) detail: Detail,
     /// The latest upstream answer's headers: canonical names in order,
     /// credentials masked.
@@ -312,6 +313,9 @@ impl Record {
         let mut fail = Object::new();
         fail.int("status_code", fail_status);
         fail.str("body", fail_body);
+        if self.failed && !self.fail_code.is_empty() {
+            fail.str("code", self.fail_code);
+        }
 
         let mut object = Object::new();
         object.str("timestamp", &go_time(timestamp));
