@@ -416,7 +416,7 @@ impl QuotaChecks {
         } else if result
             .error
             .as_ref()
-            .is_some_and(|err| err.http_status == 429)
+            .is_some_and(|err| err.http_status == 429 && err.code != "transient_rate_limit")
         {
             // A check's answer is its rest's, whatever scope it gave.
             let mut scopes: Vec<String> = self

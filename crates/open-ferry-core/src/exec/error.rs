@@ -8,7 +8,7 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use http::{HeaderMap, HeaderValue, header};
 use open_ferry_translate::registry::UnsupportedPartError;
@@ -130,6 +130,9 @@ pub struct ExecError {
     pub keeps_usage: bool,
     /// An explicit provider classification; generic statuses never imply it.
     pub failure_class: Option<super::FailureClass>,
+    /// Locally trusted monotonic recovery instant. Its presence continues to
+    /// suppress raw Retry-After headers after expiry; clones keep the instant.
+    pub trusted_retry_deadline: Option<Instant>,
 }
 
 impl ExecError {
@@ -149,6 +152,7 @@ impl ExecError {
             request_scoped: false,
             keeps_usage: false,
             failure_class: None,
+            trusted_retry_deadline: None,
         }
     }
 
@@ -167,12 +171,54 @@ impl ExecError {
 
     /// Stable structured failure code for credential/usage accounting.
     pub fn failure_code(&self) -> Option<&'static str> {
-        self.failure_class.map(super::FailureClass::code)
+        self.failure_class
+            .filter(|class| {
+                !self.credential_scoped || *class != super::FailureClass::TransientCapacity
+            })
+            .map(super::FailureClass::code)
     }
 
     /// Whether retrying could duplicate an accepted generation.
     pub fn stops_replay(&self) -> bool {
         self.failure_class == Some(super::FailureClass::StreamTruncated)
+    }
+
+    /// Provider-vouched per-model capacity rejection, never inferred from a
+    /// generic 429. `None` uses the transient default; `Some(ZERO)` permits
+    /// immediate retry. Whole-credential scope always restores quota handling.
+    pub fn transient_capacity(message: impl Into<String>, hint: Option<Duration>) -> Self {
+        let mut error = Self::upstream(429, message);
+        error.failure_class = Some(super::FailureClass::TransientCapacity);
+        error.retry_after = hint;
+        error
+    }
+
+    /// Annotates a positive local wait once. Cloning or revisiting an error
+    /// must never restart its clock. Zero/absent hints remain unannotated.
+    pub fn with_trusted_retry_after(mut self, wait: Duration) -> Self {
+        if self.trusted_retry_deadline.is_none() && !wait.is_zero() {
+            self.trusted_retry_deadline = Instant::now().checked_add(wait);
+        }
+        self
+    }
+
+    /// Whether raw upstream Retry-After must be suppressed, even after expiry.
+    pub fn has_trusted_retry_deadline(&self) -> bool {
+        self.trusted_retry_deadline.is_some()
+            || matches!(
+                self.kind,
+                ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
+            ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
+    }
+
+    /// A live trusted deadline wins over the provider hint. After natural
+    /// expiry scheduling can consult that hint again, as upstream does;
+    /// header writers must still consult `has_trusted_retry_deadline`.
+    pub fn effective_retry_after(&self) -> Option<Duration> {
+        self.trusted_retry_deadline
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+            .or(self.retry_after)
     }
 
     /// No credential serves the model.
@@ -322,6 +368,12 @@ impl ExecError {
     /// trusts to set one (`SafeResponseHeaders`): a model cooldown, or every
     /// credential being unavailable for a while.
     pub fn retry_after_header(&self) -> Option<HeaderValue> {
+        if let Some(deadline) = self.trusted_retry_deadline {
+            let wait = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|wait| !wait.is_zero())?;
+            return Some(HeaderValue::from(ceil_seconds(wait).max(1)));
+        }
         match self.kind {
             ErrorKind::ModelCooldown => self.headers.get(header::RETRY_AFTER).cloned(),
             ErrorKind::AuthUnavailable => {

@@ -72,6 +72,8 @@ pub use websocket_input::{AuthCheck, InputFrame, WebsocketInput};
 pub enum FailureClass {
     /// An accepted generation ended without its terminal frame. Never replay.
     StreamTruncated,
+    /// A model's transient admission/capacity 429, without quota exhaustion.
+    TransientCapacity,
 }
 
 impl FailureClass {
@@ -79,6 +81,7 @@ impl FailureClass {
     pub fn code(self) -> &'static str {
         match self {
             Self::StreamTruncated => "stream_truncated",
+            Self::TransientCapacity => "transient_rate_limit",
         }
     }
 }

@@ -180,7 +180,7 @@ pub(crate) fn is_credential_scoped_error(err: ErrView<'_>) -> bool {
 /// executor's error carries one; the manager's errors don't offer theirs.
 pub(crate) fn retry_after_from_error(err: ErrView<'_>) -> Option<Duration> {
     match err {
-        ErrView::Exec(err) if err.kind == ErrorKind::Upstream => err.retry_after,
+        ErrView::Exec(err) if err.kind == ErrorKind::Upstream => err.effective_retry_after(),
         _ => None,
     }
 }

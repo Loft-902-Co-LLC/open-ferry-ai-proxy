@@ -4432,3 +4432,18 @@ async fn a_pending_file_observation_keeps_the_cooldown_a_usage_read_recovered() 
     assert!(!blocked(&h, OPUS));
     assert!(!h.get(ID).model_states[OPUS].quota.exceeded);
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47_capacity_hold_and_merge_fence_an_inflight_quota_recovery() {
+    let h=Harness::new(Settings::default());h.add(auth(ID,"claude"),&[OPUS,ROUTE]);
+    h.manager.mark_result(&quota_429(OPUS,opus_headers(),FIVE_DAYS));
+    let token=h.manager.quota_recovery_token(ID).unwrap();
+    let error=ExecError::transient_capacity("transient capacity",Some(2*HOUR));
+    let mut capacity=other_failure(ROUTE,429,2*HOUR);
+    capacity.error=Some(crate::manager::classify::result_error_from_error(crate::manager::classify::ErrView::Exec(&error)));
+    h.manager.mark_result(&capacity);h.clock.advance(Duration::from_secs(5));
+    merge_the_alias(&h);
+    let healthy=reading(h.now(),&[(UsageWindow::SevenDayOpus,2.0)]);
+    assert!(h.manager.apply_quota_usage_recovery(&token,&healthy).unwrap().is_empty());
+    assert!(!recover(&h,&healthy));assert!(blocked(&h,OPUS));
+}
