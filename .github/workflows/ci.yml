@@ -200,8 +200,8 @@ jobs:
         run: cargo test --workspace --locked --no-run
 
       # Overlap the long core/parity binaries without changing test selection.
-      # The default profile has no termination timeout; ci's process-test limits
-      # and timeout remain specific to the blue-green seam jobs below.
+      # The default profile has no termination timeout; its process binaries
+      # share ci's concurrency groups (.config/nextest.toml).
       - name: Test
         if: github.event_name != 'push'
         run: cargo nextest run --profile default --workspace --locked --no-fail-fast --retries 0

@@ -22,3 +22,15 @@ test-group = 'process-unix'
 platform = 'cfg(windows)'
 filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands)'
 test-group = 'process-windows'
+
+# The workspace test job runs the default profile, which has no termination
+# limit. The process binaries there keep the same concurrency groups.
+[[profile.default.overrides]]
+platform = 'cfg(unix)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands)'
+test-group = 'process-unix'
+
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary(/^process_/) | binary(=startup) | binary(=supervise) | binary(=fake_worker) | binary(=worker_channel) | binary(=unix_process) | binary(=windows_process) | binary(=windows_sockets) | binary(=endpoint) | binary(=migrate) | binary(=subcommands)'
+test-group = 'process-windows'
