@@ -321,7 +321,7 @@ fn stream_step_lifecycle() {
     ]);
     assert_eq!(
         event_types(&out),
-        "interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed"
+        "interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed,done"
     );
     assert_eq!(
         text(&nth_event(&out, "step.start", 0), "step.type"),
@@ -387,8 +387,9 @@ fn stream_emits_terminal_once() {
     assert_eq!(count(&usage, "step.stop"), 0);
     assert_eq!(count(&usage, "interaction.completed"), 1);
     assert_eq!(count(&done, "interaction.completed"), 0);
-    assert_eq!(count(&done, "done"), 1);
-    let done_event = done.iter().find(|event| event_name(event) == "done");
+    assert!(done.is_empty());
+    assert_eq!(count(&usage, "done"), 1);
+    let done_event = usage.iter().find(|event| event_name(event) == "done");
     assert_eq!(done_event.map(|event| sse_data(event)), Some("[DONE]"));
     assert_eq!(
         int(
@@ -429,7 +430,7 @@ fn stream_does_not_complete_on_non_terminal_usage() {
     );
     assert_eq!(
         event_types(&out),
-        "interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed"
+        "interaction.created,interaction.status_update,step.start,step.delta,step.stop,step.start,step.delta,step.stop,step.start,step.delta,step.stop,interaction.completed,done"
     );
     assert_eq!(
         int(
@@ -915,7 +916,9 @@ fn gemini_stream_bare_json_and_sse_are_byte_identical() {
             assert_eq!(bare, sse, "chunk {index}");
         }
         assert!(pairs[3].0.concat().contains("\"total_tokens\":15"));
-        assert!(pairs[4].0.concat().contains("data: [DONE]"));
+        assert!(pairs[3].0.concat().contains("data: [DONE]"));
+        assert!(pairs[4].0.is_empty());
+        assert!(pairs[5].0.is_empty());
         return;
     }
     panic!("clock crossed a second in every comparison");
@@ -932,4 +935,181 @@ fn gemini_stream_ignores_sse_noise_and_accepts_data_done() {
     assert_eq!(count(&events, "interaction.completed"), 1);
     assert_eq!(count(&events, "done"), 1);
     assert!(stream.translate(b"data: [DONE]").is_empty());
+}
+
+#[test]
+fn stream_emits_done_after_terminal_usage() {
+    let mut stream = GeminiToInteractionsStream::new(MODEL);
+    let out = stream.translate(br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}}"#);
+    assert_eq!(
+        event_types(&out),
+        "interaction.created,interaction.status_update,step.start,step.delta,step.stop,interaction.completed,done"
+    );
+    assert_eq!(
+        int(
+            &find_event(&out, "interaction.completed"),
+            "interaction.usage.total_tokens"
+        ),
+        5
+    );
+    assert!(stream.translate(b"[DONE]").is_empty());
+    assert!(
+        stream
+            .translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#)
+            .is_empty()
+    );
+}
+
+#[test]
+fn stream_waits_for_post_finish_usage() {
+    for key in ["usageMetadata", "usage_metadata", "cpaUsageMetadata"] {
+        let mut stream = GeminiToInteractionsStream::new(MODEL);
+        let early = stream.translate(br#"{"candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":1,"totalTokenCount":1}}"#);
+        let finish = stream.translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#);
+        for out in [&early, &finish] {
+            assert_eq!(count(out, "interaction.completed"), 0);
+            assert_eq!(count(out, "done"), 0);
+        }
+        assert_eq!(count(&finish, "step.stop"), 1);
+        assert!(
+            stream
+                .translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#)
+                .is_empty()
+        );
+        let frame =
+            json!({key:{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}});
+        let out = stream.translate(frame.to_string().as_bytes());
+        assert_eq!(event_types(&out), "interaction.completed,done");
+        assert_eq!(
+            int(
+                &find_event(&out, "interaction.completed"),
+                "interaction.usage.total_tokens"
+            ),
+            33,
+            "{key}"
+        );
+        assert!(stream.translate(frame.to_string().as_bytes()).is_empty());
+        assert!(stream.translate(b"[DONE]").is_empty());
+    }
+}
+
+#[test]
+fn stream_split_finish_and_filtered_usage() {
+    let mut stream = GeminiToInteractionsStream::new(MODEL);
+    let finish = stream.translate(
+        br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}"#,
+    );
+    assert_eq!(count(&finish, "interaction.completed"), 0);
+    let out = stream.translate(br#"{"candidates":[],"cpaUsageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}"#);
+    assert_eq!(event_types(&out), "interaction.completed,done");
+    assert_eq!(
+        int(
+            &find_event(&out, "interaction.completed"),
+            "interaction.usage.total_tokens"
+        ),
+        33
+    );
+}
+
+#[test]
+fn stream_done_falls_back_to_latest_usage() {
+    for key in ["usageMetadata", "usage_metadata", "cpaUsageMetadata"] {
+        for finish in [false, true] {
+            let mut stream = GeminiToInteractionsStream::new(MODEL);
+            for total in [5, 9] {
+                let frame = json!({key:{"prompt_token_count":3,"candidates_token_count":2,"total_token_count":total,"thoughts_token_count":4,"cached_content_token_count":1}});
+                let out = stream.translate(frame.to_string().as_bytes());
+                assert_eq!(count(&out, "interaction.completed"), 0);
+                assert_eq!(count(&out, "done"), 0);
+            }
+            // Traffic-only metadata must not erase a valid fallback.
+            stream.translate(br#"{"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"}}"#);
+            if finish {
+                let out = stream.translate(br#"{"candidates":[{"finishReason":"STOP"}]}"#);
+                assert_eq!(count(&out, "interaction.completed"), 0);
+            }
+            let out = stream.translate(b"[DONE]");
+            assert_eq!(event_types(&out), "interaction.completed,done");
+            let usage = find_event(&out, "interaction.completed")["interaction"]["usage"].clone();
+            assert_eq!(usage["total_tokens"], 9, "{key}, finish {finish}");
+            assert_eq!(usage["total_input_tokens"], 3);
+            assert_eq!(usage["total_output_tokens"], 2);
+            assert_eq!(usage["total_thought_tokens"], 4);
+            assert_eq!(usage["total_cached_tokens"], 1);
+            assert!(stream.translate(b"[DONE]").is_empty());
+        }
+    }
+}
+
+#[test]
+fn stream_ignores_empty_finish_reason() {
+    for reason in [json!(""), json!(" \t"), Value::Null] {
+        let mut stream = GeminiToInteractionsStream::new(MODEL);
+        let frame = json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":reason}],"usageMetadata":{"totalTokenCount":5}});
+        let out = stream.translate(frame.to_string().as_bytes());
+        assert!(!stream.finished);
+        assert_eq!(count(&out, "step.stop"), 0);
+        assert_eq!(count(&out, "interaction.completed"), 0);
+        assert_eq!(count(&out, "done"), 0);
+    }
+}
+
+#[test]
+fn stream_done_without_finish_or_usage() {
+    let mut stream = GeminiToInteractionsStream::new(MODEL);
+    stream.translate(br#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#);
+    let out = stream.translate(b"[DONE]");
+    assert_eq!(event_types(&out), "step.stop,interaction.completed,done");
+    assert_eq!(
+        find_event(&out, "interaction.completed")["interaction"]["usage"],
+        json!({})
+    );
+    assert!(stream.translate(b"[DONE]").is_empty());
+}
+
+#[test]
+fn filtered_usage_matches_native_usage_with_spelling_precedence() {
+    let usage = json!({"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5,"thoughtsTokenCount":4,"cachedContentTokenCount":1});
+    let mut native = None;
+    for key in ["usageMetadata", "usage_metadata", "cpaUsageMetadata"] {
+        let frame = json!({"responseId":"fixed","candidates":[{"finishReason":"STOP"}],key:usage});
+        let non_stream =
+            convert_gemini_response_to_interactions_non_stream(MODEL, frame.to_string().as_bytes());
+        assert_eq!(
+            non_stream["usage"],
+            json!({"input_tokens":3,"output_tokens":2,"reasoning_tokens":4,"total_tokens":5,"cached_tokens":1})
+        );
+        let out = gemini_stream(&[&frame.to_string()]);
+        assert_eq!(
+            event_types(&out),
+            "interaction.created,interaction.status_update,interaction.completed,done"
+        );
+        let translated = find_event(&out, "interaction.completed")["interaction"]["usage"].clone();
+        if let Some(native) = &native {
+            assert_eq!(&translated, native);
+        } else {
+            native = Some(translated);
+        }
+    }
+    for (frame, expected) in [
+        (
+            json!({"usageMetadata":{"totalTokenCount":7},"usage_metadata":{"total_token_count":8},"cpaUsageMetadata":{"totalTokenCount":9}}),
+            7,
+        ),
+        (
+            json!({"usage_metadata":{"total_token_count":8},"cpaUsageMetadata":{"totalTokenCount":9}}),
+            8,
+        ),
+    ] {
+        let out =
+            convert_gemini_response_to_interactions_non_stream(MODEL, frame.to_string().as_bytes());
+        assert_eq!(out["usage"]["total_tokens"], expected);
+        let mut stream = GeminiToInteractionsStream::new(MODEL);
+        stream.translate(frame.to_string().as_bytes());
+        let out = stream.translate(b"[DONE]");
+        assert_eq!(
+            find_event(&out, "interaction.completed")["interaction"]["usage"]["total_tokens"],
+            expected
+        );
+    }
 }
