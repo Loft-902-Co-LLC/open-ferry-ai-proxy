@@ -1,4 +1,17 @@
 //! A call-owned, shallow schema graph and shared decision index.
+//!
+//! Source addresses are stable identity labels, never dereferenced pointers.
+//! `Own` compiles immediate syntax once; guard-sensitive plans refer to those
+//! programs and shared persistent maps instead of copying schema subtrees.
+//! Pure aliases share their resolved target's program. Reference scopes and
+//! upstream's depth/cycle behavior remain explicit semantic inputs.
+//!
+//! The assembler carries `ProbeState` at each argument node. A singleton query
+//! reads key membership and a child transition, with bounded integer-map depth;
+//! branch, item and declaration summaries are shared across probes. Full-object
+//! required-set containment is separate: `ObjectState` evaluates each distinct
+//! list lazily once and updates the cached result after placeholder removal.
+//! Both categories spend the same work allowance; tests meter them separately.
 use super::*;
 mod clean;
 mod deep;
@@ -360,14 +373,13 @@ impl SchemaIndex {
         for keyword in ["anyOf", "oneOf"] {
             if let Some(id) = self.field(node, keyword) {
                 for branch in self.array(id)? {
-                    if let Some(kind) = self.field(branch, "type") {
-                        if self.is_string(kind, "null")
+                    if let Some(kind) = self.field(branch, "type")
+                        && (self.is_string(kind, "null")
                             || self
                                 .array(kind)
-                                .is_some_and(|v| v.len() == 1 && self.is_string(v[0], "null"))
-                        {
-                            continue;
-                        }
+                                .is_some_and(|v| v.len() == 1 && self.is_string(v[0], "null")))
+                    {
+                        continue;
                     }
                     if found.insert(self.records[&branch].canonical) {
                         out.push(branch);

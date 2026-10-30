@@ -1033,13 +1033,11 @@ impl CallSchemas {
             let use_index = !crate::common::vertex_partial_args::WorkBudget::test_unbounded();
             #[cfg(not(test))]
             let use_index = true;
-            if use_index {
-                if let Some(Some(schema)) = result.original.as_ref() {
-                    result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
-                        schema,
-                        &result.translated,
-                    )));
-                }
+            if use_index && let Some(Some(schema)) = result.original.as_ref() {
+                result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
+                    schema,
+                    &result.translated,
+                )));
             }
             result
         })

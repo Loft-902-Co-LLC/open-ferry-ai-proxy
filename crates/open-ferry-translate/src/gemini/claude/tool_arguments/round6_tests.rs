@@ -109,14 +109,13 @@ fn run(case: &Case) -> Run {
             Err(_) => break,
         }
     }
-    if work.check().is_ok() {
-        if let Ok((delta, done)) =
+    if work.check().is_ok()
+        && let Ok((delta, done)) =
             call.assembler
                 .push_indexed(&json!({}), Some(&clean), Some(&probe))
-        {
-            output.push_str(&delta);
-            complete = done;
-        }
+    {
+        output.push_str(&delta);
+        complete = done;
     }
     Run {
         total: work.used(),
