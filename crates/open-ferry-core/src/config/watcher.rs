@@ -863,15 +863,55 @@ impl Aliases {
     }
 }
 
+trait Clock {
+    fn now(&self) -> Instant;
+
+    fn wait(
+        &self,
+        messages: &std_mpsc::Receiver<Message>,
+        wake_at: Option<Instant>,
+    ) -> Result<Message, RecvTimeoutError>;
+}
+
+struct WallClock;
+
+impl Clock for WallClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wait(
+        &self,
+        messages: &std_mpsc::Receiver<Message>,
+        wake_at: Option<Instant>,
+    ) -> Result<Message, RecvTimeoutError> {
+        match wake_at {
+            Some(at) => messages.recv_timeout(at.saturating_duration_since(self.now())),
+            None => messages.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        }
+    }
+}
+
 /// The watcher thread: reports the auth files found at start, then handles
 /// events until stopped, reloading the config once it has been quiet for
 /// [`CONFIG_RELOAD_DEBOUNCE`].
 fn run(
+    state: WatchState,
+    aliases: &Aliases,
+    messages: &std_mpsc::Receiver<Message>,
+    events: &mpsc::Sender<WatchEvent>,
+    stopped: &AtomicBool,
+) {
+    run_with_clock(state, aliases, messages, events, stopped, &WallClock);
+}
+
+fn run_with_clock(
     mut state: WatchState,
     aliases: &Aliases,
     messages: &std_mpsc::Receiver<Message>,
     events: &mpsc::Sender<WatchEvent>,
     stopped: &AtomicBool,
+    clock: &impl Clock,
 ) {
     for event in state.initial_scan() {
         if !send(events, stopped, event) {
@@ -881,7 +921,7 @@ fn run(
     let mut reload_at: Option<Instant> = None;
     loop {
         if let Some(at) = reload_at
-            && at <= Instant::now()
+            && at <= clock.now()
         {
             reload_at = None;
             if let Some(event) = state.reload_config_if_changed()
@@ -890,7 +930,7 @@ fn run(
                 return;
             }
         }
-        for event in state.retry_probes(Instant::now()) {
+        for event in state.retry_probes(clock.now()) {
             if !send(events, stopped, event) {
                 return;
             }
@@ -899,16 +939,10 @@ fn run(
             .into_iter()
             .chain(state.probe_retries.values().map(|(_, at, _)| *at))
             .min();
-        let message = match wake_at {
-            Some(at) => match messages.recv_timeout(at.saturating_duration_since(Instant::now())) {
-                Ok(message) => message,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
-            },
-            None => match messages.recv() {
-                Ok(message) => message,
-                Err(_) => return,
-            },
+        let message = match clock.wait(messages, wake_at) {
+            Ok(message) => message,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
         };
         let event = match message {
             Message::Stop => return,
@@ -917,7 +951,7 @@ fn run(
                 if !send(events, stopped, WatchEvent::Reloaded(ticket)) {
                     return;
                 }
-                reload_at = Some(Instant::now());
+                reload_at = Some(clock.now());
                 continue;
             }
             Message::Reload { ticket, force } => {
@@ -944,10 +978,10 @@ fn run(
         };
         for path in &event.paths {
             let path = aliases.translate(path);
-            match state.handle_event(&path, op, Instant::now()) {
+            match state.handle_event(&path, op, clock.now()) {
                 Step::Nothing => {}
                 Step::ScheduleConfigReload => {
-                    reload_at = Some(Instant::now() + CONFIG_RELOAD_DEBOUNCE);
+                    reload_at = Some(clock.now() + CONFIG_RELOAD_DEBOUNCE);
                 }
                 Step::Send(event) => {
                     if !send(events, stopped, event) {
@@ -1890,104 +1924,192 @@ mod tests {
         Message::Fs(Ok(notify::Event::new(kind).add_path(path.to_path_buf())))
     }
 
+    struct TestClock {
+        now: Arc<std::sync::Mutex<Instant>>,
+        waiting: std_mpsc::Sender<Option<Instant>>,
+    }
+
+    impl Clock for TestClock {
+        fn now(&self) -> Instant {
+            *self.now.lock().unwrap()
+        }
+
+        fn wait(
+            &self,
+            messages: &std_mpsc::Receiver<Message>,
+            wake_at: Option<Instant>,
+        ) -> Result<Message, RecvTimeoutError> {
+            // Reaching this boundary proves the preceding scheduling step finished.
+            self.waiting.send(wake_at).unwrap();
+            messages.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        }
+    }
+
+    struct ClockRun {
+        now: Arc<std::sync::Mutex<Instant>>,
+        waiting: std_mpsc::Receiver<Option<Instant>>,
+        sender: std_mpsc::Sender<Message>,
+        receiver: mpsc::Receiver<WatchEvent>,
+        reads: Arc<AtomicU64>,
+        finished: std_mpsc::Receiver<()>,
+        thread: thread::JoinHandle<()>,
+    }
+
+    impl ClockRun {
+        fn start(mut state: WatchState) -> Self {
+            let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+            let (waiting_tx, waiting) = std_mpsc::channel();
+            let clock = TestClock {
+                now: Arc::clone(&now),
+                waiting: waiting_tx,
+            };
+            let reads = Arc::new(AtomicU64::new(0));
+            let count = Arc::clone(&reads);
+            state.config_reader = Arc::new(move |path| {
+                count.fetch_add(1, Ordering::SeqCst);
+                fs::read(path)
+            });
+            let (sender, messages) = std_mpsc::channel();
+            let (events, receiver) = mpsc::channel(8);
+            let (done, finished) = std_mpsc::channel();
+            let thread = thread::spawn(move || {
+                run_with_clock(
+                    state,
+                    &Aliases::default(),
+                    &messages,
+                    &events,
+                    &AtomicBool::new(false),
+                    &clock,
+                );
+                done.send(()).unwrap();
+            });
+            let run = Self {
+                now,
+                waiting,
+                sender,
+                receiver,
+                reads,
+                finished,
+                thread,
+            };
+            run.boundary(None, 0);
+            run
+        }
+
+        fn boundary(&self, deadline: Option<Instant>, reads: u64) {
+            // A timeout only bounds a broken test; elapsed wall time never passes it.
+            assert_eq!(
+                self.waiting.recv_timeout(Duration::from_secs(10)).unwrap(),
+                deadline
+            );
+            assert_eq!(self.reads.load(Ordering::SeqCst), reads);
+        }
+
+        fn advance(&self, now: Instant) {
+            *self.now.lock().unwrap() = now;
+            self.sender
+                .send(Message::Fs(Ok(notify::Event::new(EventKind::Any))))
+                .unwrap();
+        }
+
+        fn write(&self, path: &Path) {
+            self.sender
+                .send(fs_event(EventKind::Modify(ModifyKind::Any), path))
+                .unwrap();
+        }
+
+        fn stop(self) {
+            self.sender.send(Message::Stop).unwrap();
+            self.finished.recv_timeout(Duration::from_secs(10)).unwrap();
+            self.thread.join().unwrap();
+        }
+    }
+
     #[test]
     fn schedule_config_reload_debounces() {
         let fixture = Fixture::new();
-        let auth = fixture.write_auth("a.json", DEMO);
-        let (sender, messages) = std_mpsc::channel();
-        let (events, mut receiver) = mpsc::channel(8);
-        let state = fixture.state();
-        let thread = thread::spawn(move || {
-            run(
-                state,
-                &Aliases::default(),
-                &messages,
-                &events,
-                &AtomicBool::new(false),
-            )
-        });
-        assert_eq!(receiver.blocking_recv().map(unstamped), Some(added(&auth)));
-
+        let mut run = ClockRun::start(fixture.state());
         fixture.write_config("port: 7\n");
-        let write = EventKind::Modify(ModifyKind::Any);
-        // Taken before the first event, so the watcher schedules every
-        // reload after it. Wall time between the two events isn't asserted:
-        // a runner that stalls past the quiet period fires the first window
-        // before the second event arrives, as upstream's timer would.
-        let first = Instant::now();
-        sender
-            .send(fs_event(write, &fixture.config_path))
-            .expect("send");
-        thread::sleep(Duration::from_millis(50));
-        sender
-            .send(fs_event(write, &fixture.config_path))
-            .expect("send");
-        let config = config_of(receiver.blocking_recv());
-        assert!(first.elapsed() >= CONFIG_RELOAD_DEBOUNCE);
-        assert_eq!(config.port, 7);
-
-        sender.send(Message::Stop).expect("send stop");
-        thread.join().expect("watcher thread");
-        assert!(receiver.try_recv().is_err(), "a single reload");
+        let start = *run.now.lock().unwrap();
+        let tick = Duration::from_nanos(1);
+        run.write(&fixture.config_path);
+        run.boundary(Some(start + CONFIG_RELOAD_DEBOUNCE), 0);
+        run.advance(start + Duration::from_millis(50));
+        run.boundary(Some(start + CONFIG_RELOAD_DEBOUNCE), 0);
+        run.write(&fixture.config_path);
+        let deadline = start + Duration::from_millis(50) + CONFIG_RELOAD_DEBOUNCE;
+        run.boundary(Some(deadline), 0);
+        // The first deadline has passed, but the last event's has not.
+        run.advance(start + CONFIG_RELOAD_DEBOUNCE);
+        run.boundary(Some(deadline), 0);
+        run.advance(deadline - tick);
+        run.boundary(Some(deadline), 0);
+        run.advance(deadline);
+        run.boundary(None, 1);
+        assert_eq!(config_of(run.receiver.blocking_recv()).port, 7);
+        // Unchanged bytes would hide extra reads if we only counted events.
+        run.advance(deadline + CONFIG_RELOAD_DEBOUNCE * 2);
+        run.boundary(None, 1);
+        assert!(run.receiver.try_recv().is_err());
+        run.stop();
     }
 
-    // A later config event restarts the quiet period, even after the first
-    // window has run out. The watcher handles one event's paths without
-    // checking its timer in between, so the slow auth read orders the second
-    // config path after `read_done` however the threads are scheduled.
     #[test]
     fn a_later_config_event_restarts_an_expired_quiet_period() {
         let fixture = Fixture::new();
-        let sentinel = fixture.write_auth("sentinel.json", DEMO);
-        let (sender, messages) = std_mpsc::channel();
-        let (events, mut receiver) = mpsc::channel(8);
+        let (entered_tx, entered) = std_mpsc::channel();
+        let (release, released) = std_mpsc::channel();
+        let released = std::sync::Mutex::new(released);
         let mut state = fixture.state();
-        let read_done = Arc::new(std::sync::Mutex::new(None));
-        let done = Arc::clone(&read_done);
         state.auth_reader = Arc::new(move |path| {
-            thread::sleep(CONFIG_RELOAD_DEBOUNCE + Duration::from_millis(50));
-            *done.lock().unwrap() = Some(Instant::now());
+            entered_tx.send(()).unwrap();
+            released.lock().unwrap().recv().unwrap();
             read_capped(path)
         });
-        let config_read = Arc::new(std::sync::Mutex::new(None));
-        let read = Arc::clone(&config_read);
-        state.config_reader = Arc::new(move |path| {
-            read.lock().unwrap().get_or_insert(Instant::now());
-            fs::read(path)
-        });
-        let thread = thread::spawn(move || {
-            run(
-                state,
-                &Aliases::default(),
-                &messages,
-                &events,
-                &AtomicBool::new(false),
-            )
-        });
-        assert_eq!(
-            receiver.blocking_recv().map(unstamped),
-            Some(added(&sentinel))
-        );
-        *read_done.lock().unwrap() = None;
-        *config_read.lock().unwrap() = None;
-
+        let run = ClockRun::start(state);
+        let start = *run.now.lock().unwrap();
+        let sentinel = fixture.write_auth("sentinel.json", DEMO);
         fixture.write_config("port: 7\n");
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
             .add_path(fixture.config_path.clone())
-            .add_path(sentinel.clone())
+            .add_path(sentinel)
             .add_path(fixture.config_path.clone());
-        sender.send(Message::Fs(Ok(event))).expect("send");
-        assert_eq!(config_of(receiver.blocking_recv()).port, 7);
-        let read_done = read_done.lock().unwrap().expect("the auth file was read");
-        let config_read = config_read.lock().unwrap().expect("the config was read");
-        assert!(
-            config_read >= read_done + CONFIG_RELOAD_DEBOUNCE,
-            "reloaded {:?} after the second config event",
-            config_read.saturating_duration_since(read_done)
-        );
+        run.sender.send(Message::Fs(Ok(event))).unwrap();
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        let later = start + CONFIG_RELOAD_DEBOUNCE + Duration::from_nanos(1);
+        *run.now.lock().unwrap() = later;
+        release.send(()).unwrap();
+        let deadline = later + CONFIG_RELOAD_DEBOUNCE;
+        run.boundary(Some(deadline), 0);
+        run.advance(deadline - Duration::from_nanos(1));
+        run.boundary(Some(deadline), 0);
+        run.advance(deadline);
+        run.boundary(None, 1);
+        run.stop();
+    }
 
-        sender.send(Message::Stop).expect("send stop");
-        thread.join().expect("watcher thread");
+    #[test]
+    fn debounce_clock_stop_and_close_with_pending_reload() {
+        for close in [false, true] {
+            let fixture = Fixture::new();
+            let run = ClockRun::start(fixture.state());
+            let now = *run.now.lock().unwrap();
+            run.write(&fixture.config_path);
+            run.boundary(Some(now + CONFIG_RELOAD_DEBOUNCE), 0);
+            if close {
+                drop(run.receiver);
+                run.sender
+                    .send(fs_event(
+                        EventKind::Modify(ModifyKind::Any),
+                        &fixture.config_path,
+                    ))
+                    .unwrap();
+                run.finished.recv_timeout(Duration::from_secs(10)).unwrap();
+                run.thread.join().unwrap();
+            } else {
+                run.stop();
+            }
+        }
     }
 
     #[test]
