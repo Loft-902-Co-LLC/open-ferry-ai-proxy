@@ -236,7 +236,7 @@ async fn reverse_multiple_header_values_and_preallocation_window_limit() {
     assert_eq!(
         collect(
             std::io::Cursor::new(vec![]),
-            &vec!["identity"; MAX_ENCODING_LAYERS + 1].join(","),
+            &vec!["zstd"; MAX_ENCODING_LAYERS + 1].join(","),
             4096
         )
         .await,
@@ -323,4 +323,66 @@ async fn source_errors_are_forwarded_once() {
         io::ErrorKind::ConnectionReset
     );
     assert!(decoder.next().await.is_none());
+}
+#[tokio::test]
+async fn layer_budget_invariant_family_ignores_identity() {
+    for size in [0, 31, 1024] {
+        let plain = vec![b'x'; size];
+        for depth in 0..=10 {
+            let mut wire = plain.clone();
+            let mut names = Vec::new();
+            for layer in 0..depth {
+                let codec = if layer % 2 == 0 { "gzip" } else { "zstd" };
+                wire = encode(codec, &wire).await;
+                names.extend(["identity", codec, "identity"]);
+            }
+            let (got, errors) = collect(std::io::Cursor::new(wire), &names.join(","), 4096).await;
+            if depth <= 8 {
+                assert_eq!(
+                    (got, errors),
+                    (plain.clone(), 0),
+                    "{INVARIANT}: depth {depth}"
+                );
+            } else {
+                assert_eq!(errors, 1, "{INVARIANT}: depth {depth}");
+            }
+        }
+        assert_eq!(
+            collect(
+                std::io::Cursor::new(plain.clone()),
+                &vec!["identity"; 32].join(","),
+                4096
+            )
+            .await,
+            (plain, 0)
+        );
+    }
+}
+#[tokio::test]
+async fn window_budget_invariant_family() {
+    for log in 10..=30 {
+        let descriptor = ((log - 10) << 3) as u8;
+        let wire = vec![0x28, 0xb5, 0x2f, 0xfd, 0, descriptor, 1, 0, 0];
+        let (got, errors) = collect(std::io::Cursor::new(wire), "zstd", 4096).await;
+        assert!(got.is_empty(), "{INVARIANT}");
+        assert_eq!(
+            errors,
+            usize::from(log > 23),
+            "{INVARIANT}: window log {log}"
+        );
+    }
+}
+#[tokio::test]
+async fn brotli_window_budget_invariant_family() {
+    for log in 10u8..=30 {
+        // Large-window extension, followed by an empty last meta-block.
+        let wire = vec![0x11, 0xc0 | log];
+        let (got, errors) = collect(std::io::Cursor::new(wire), "br", 4096).await;
+        assert!(got.is_empty(), "{INVARIANT}");
+        assert_eq!(
+            errors,
+            usize::from(log > 24),
+            "{INVARIANT}: brotli window log {log}"
+        );
+    }
 }

@@ -16,13 +16,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 type Reader = Pin<Box<dyn AsyncRead + Send>>;
 const CHUNK: usize = 16 * 1024;
 const MAX_ZSTD_WINDOW_LOG: u32 = 23;
-/// Maximum number of declared codec layers (bounds decoder working memory).
+const MAX_BROTLI_WINDOW_LOG: u8 = 24;
+/// Maximum number of non-identity codec layers (bounds decoder working memory).
 pub const MAX_ENCODING_LAYERS: usize = 8;
 
 /// Decodes a Codex response reader, with `limit` bytes allowed at every stage.
 /// Construction never reads. Unsupported/invalid encodings, source errors and size
 /// violations produce exactly one `io::Error`, then EOF. Drop closes all readers;
-/// there are no background tasks. Zstd windows are capped at 8 MiB before allocation.
+/// there are no background tasks. Before allocation, zstd windows are capped at
+/// 8 MiB and Brotli windows at 16 MiB.
 /// Adapt `response.bytes_stream()` with `tokio_util::io::StreamReader` first.
 pub fn decode_response_body<R: AsyncRead + Send + 'static>(
     body: R,
@@ -71,8 +73,9 @@ async fn prefix(mut reader: Reader, count: usize) -> io::Result<(Vec<u8>, Reader
 async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result<Reader> {
     let mut names: Vec<String> = encoding
         .split(',')
-        .take(MAX_ENCODING_LAYERS + 1)
         .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty() && v != "identity")
+        .take(MAX_ENCODING_LAYERS + 1)
         .collect();
     if encoding.is_empty() {
         let (first, replay) = prefix(reader, 1).await?;
@@ -110,7 +113,23 @@ async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result
                 decoder.multiple_members(true);
                 Box::pin(decoder)
             }
-            "br" => Box::pin(BrotliDecoder::new(BufReader::new(reader))),
+            "br" => {
+                let (head, replay) = prefix(reader, 1).await?;
+                reader = replay;
+                // The Brotli library also accepts the large-window extension. Inspect
+                // its WBITS before it can reserve a window larger than standard Brotli.
+                if head.first() == Some(&0x11) {
+                    let (head, replay) = prefix(reader, 2).await?;
+                    reader = replay;
+                    if head
+                        .get(1)
+                        .is_some_and(|byte| byte & 63 > MAX_BROTLI_WINDOW_LOG)
+                    {
+                        return Err(io::Error::other("brotli response window exceeds limit"));
+                    }
+                }
+                Box::pin(BrotliDecoder::new(BufReader::new(reader)))
+            }
             "deflate" => {
                 let (head, replay) = prefix(reader, 2).await?;
                 let zlib = head.len() == 2
