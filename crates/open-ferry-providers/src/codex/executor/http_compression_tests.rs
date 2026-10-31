@@ -465,3 +465,17 @@ async fn oversized_whole_body_retains_limit_and_emits_one_error() {
     assert!(error.message.contains("limit"), "{}", error.message);
     server.abort();
 }
+
+#[test]
+fn content_encoding_alignment_only_sniffs_the_replay_prefix() {
+    for spaces in [511, 512, 513] {
+        let body = format!("{}{{}}", " ".repeat(spaces));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        crate::codex::request::align_content_encoding(&mut headers, body.as_bytes());
+        assert_eq!(
+            headers.contains_key(header::CONTENT_ENCODING),
+            spaces >= 512
+        );
+    }
+}

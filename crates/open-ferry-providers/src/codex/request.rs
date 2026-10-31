@@ -1173,7 +1173,8 @@ pub(super) async fn compress_request(
 
 /// Match declared encoding to replayable JSON/multipart and recognizable frames.
 pub(super) fn align_content_encoding(headers: &mut HeaderMap, body: &[u8]) {
-    let plain = open_ferry_translate::go::trim_space(body);
+    let prefix = &body[..body.len().min(512)];
+    let plain = open_ferry_translate::go::trim_space(prefix);
     let multipart = headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
