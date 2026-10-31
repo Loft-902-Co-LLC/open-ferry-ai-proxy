@@ -174,9 +174,6 @@ pub(super) async fn forward<S: Socket>(
             next = items.next() => next,
         };
         let chunk = match next {
-            None if options.duplex && conn.input().is_some_and(|input| input.epoch() > 0) => {
-                return Forwarded::Completed { output: completed_output, response_id: completed_id, pending_call_ids: pending.into_iter().collect() };
-            }
             None if options.duplex => {
                 // A duplex stream ends with its socket, not with a response.
                 conn.close_without_error();
@@ -199,10 +196,26 @@ pub(super) async fn forward<S: Socket>(
             Some(Err(error)) => {
                 tracing::debug!(status = error.status, error = %error.text, "responses websocket: upstream error");
                 request_log::record_api_error(options.context, &error);
-                if error.source.as_ref().is_some_and(|source| source.failure_class == Some(open_ferry_core::exec::FailureClass::UpstreamWebsocketTurn)) {
-                    if conn.write(&error_payload(&error)).await.is_err() { return Forwarded::Closed; }
-                    if options.duplex { continue; }
-                    return Forwarded::Completed { output: completed_output, response_id: completed_id, pending_call_ids: pending.into_iter().collect() };
+                if error.source.as_ref().is_some_and(|source| {
+                    source.failure_class
+                        == Some(open_ferry_core::exec::FailureClass::UpstreamWebsocketTurn)
+                }) {
+                    let body: serde_json::Value =
+                        serde_json::from_str(&error.text).unwrap_or_default();
+                    if let Some(events) = body["websocket_loss_events"].as_array() {
+                        for event in events {
+                            if conn.write(event.to_string().as_bytes()).await.is_err() {
+                                return Forwarded::Closed;
+                            }
+                        }
+                    } else if conn.write(&error_payload(&error)).await.is_err() {
+                        return Forwarded::Closed;
+                    }
+                    return Forwarded::Completed {
+                        output: completed_output,
+                        response_id: completed_id,
+                        pending_call_ids: pending.into_iter().collect(),
+                    };
                 }
                 if (options.suppress_error)(&error) {
                     return Forwarded::Suppressed(error);

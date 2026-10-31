@@ -1,6 +1,4 @@
-// Round-1 acceptance cases for f73e66ac, not a claim that loss is ported.
-// Explicitly ignored until provider loss/correlation and handler recovery land.
-// Run with `cargo test -p open-ferry-server round1_loss -- --ignored --test-threads 4`.
+// Local-router acceptance cases for upstream f73e66ac.
 // These local real-router cases intentionally assert the upstream contract rather
 // than accepting today's closing behavior. They include queued-input fencing,
 // but not a loss after the handler's epoch check, failed writes or late interrupts.
@@ -135,25 +133,21 @@ async fn active_loss(duplex: bool, accepted_output: bool) {
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_before_created_standard() {
     active_loss(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_before_created_duplex() {
     active_loss(true, false).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_after_accepted_output_standard() {
     active_loss(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_after_accepted_output_duplex() {
     active_loss(true, true).await;
 }
@@ -192,13 +186,11 @@ async fn idle_loss(duplex: bool) {
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_idle_eof_standard() {
     idle_loss(false).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_idle_eof_duplex() {
     idle_loss(true).await;
 }
@@ -264,19 +256,16 @@ async fn operation_loss(append: bool, accepted_steer: bool) {
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_unacknowledged_steer() {
     operation_loss(false, false).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_accepted_steer() {
     operation_loss(false, true).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_append() {
     operation_loss(true, false).await;
 }
@@ -345,13 +334,11 @@ async fn queued_loss(continuation: bool) {
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_queued_full_create_not_sent() {
     queued_loss(false).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_queued_continuation_requires_full_context() {
     queued_loss(true).await;
 }
@@ -408,13 +395,61 @@ async fn between_turns_loss(with_id: bool) {
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_between_turns_correlated_once() {
     between_turns_loss(true).await;
 }
 
 #[tokio::test]
-#[ignore = "f73e66ac loss recovery is not ported; known failing acceptance case"]
 async fn round1_loss_between_turns_does_not_inherit_event_id() {
     between_turns_loss(false).await;
+}
+
+#[tokio::test]
+async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
+    for completed in [false, true] {
+        let mut upstream = Upstream::start(move |mut peer| async move {
+            peer.read().await.unwrap();
+            peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
+            peer.read().await.unwrap();
+            peer.write(r#"{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}"#).await;
+            peer.write(r#"{"type":"response.incomplete","response":{"id":"r1","output":[]}}"#).await;
+            peer.write(r#"{"type":"response.created","response":{"id":"r2","previous_response_id":"r1"}}"#).await;
+            if completed {
+                peer.write(r#"{"type":"response.completed","response":{"id":"r2","output":[]}}"#).await;
+            }
+        }).await;
+        let sibling = unused_sibling().await;
+        let url = retry_proxy(&steering(true), &upstream.url, &sibling.url).await;
+        let mut ws = connect(&url, &[]).await;
+        send(&mut ws, &create("c1")).await;
+        assert_eq!(recv(&mut ws).await["type"], "response.created");
+        send(
+            &mut ws,
+            r#"{"type":"response.steer","previous_response_id":"r1","event_id":"op1","input":[]}"#,
+        )
+        .await;
+        for kind in [
+            "response.steer.accepted",
+            "response.incomplete",
+            "response.created",
+        ] {
+            assert_eq!(recv(&mut ws).await["type"], kind);
+        }
+        if completed {
+            assert_eq!(recv(&mut ws).await["type"], "response.completed");
+        } else {
+            expect_error(&mut ws, "upstream_websocket_lost", "c1").await;
+            expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+        }
+        upstream.finished().await;
+        send(
+            &mut ws,
+            r#"{"type":"response.create","previous_response_id":"r2","event_id":"c2","input":[]}"#,
+        )
+        .await;
+        expect_error(&mut ws, "previous_response_not_found", "c2").await;
+        assert_eq!(upstream.connections(), 1, "{ROUND1_INVARIANT}");
+        assert_eq!(sibling.connections(), 0, "{ROUND1_INVARIANT}");
+        ws.close(None).await.unwrap();
+    }
 }

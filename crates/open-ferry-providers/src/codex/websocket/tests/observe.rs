@@ -137,7 +137,7 @@ async fn the_request_is_told_sent_once_the_connection_is_up() {
 // up, so the time to first token counts from the first send (its first
 // start stays) and the taps are told no more than the sends made.
 #[tokio::test]
-async fn a_retried_send_is_told_again_once_its_connection_is_up() {
+async fn non_downstream_retried_send_is_told_again_once_its_connection_is_up() {
     let server = Arc::new(Server::once(&[COMPLETED]).await);
     let steps = Steps::new(&server);
     let executor = executor();
@@ -156,7 +156,10 @@ async fn a_retried_send_is_told_again_once_its_connection_is_up() {
         &executor,
         &auth,
         super::request("gpt-5-codex", HELLO),
-        steps.options("stale"),
+        Options {
+            downstream_websocket: false,
+            ..steps.options("stale")
+        },
     )
     .await
     .unwrap();

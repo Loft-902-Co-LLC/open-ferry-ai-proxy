@@ -254,7 +254,11 @@ async fn read_input<R, S: Socket>(
             }
             continue;
         }
-        if input.send(InputFrame::Stamped(payload, epoch)).await.is_err() {
+        if input
+            .send(InputFrame::Stamped(payload, epoch))
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -390,13 +394,17 @@ impl<S: Socket> Conn<S> {
     pub(super) async fn read(&mut self) -> Option<Bytes> {
         let socket = match self.writer.as_mut()? {
             Writer::Whole(socket) => socket,
-            Writer::Split(_) => {
-                loop {
-                    match self.reader.as_ref()?.next().await? {
-                        Ok(payload) => return Some(payload),
-                        Err(error) => {
-                            let error = ErrorMessage::from_exec(error);
-                            if self.write(&super::forward::error_payload(&error)).await.is_err() { return None; }
+            Writer::Split(_) => loop {
+                match self.reader.as_ref()?.next().await? {
+                    Ok(payload) => return Some(payload),
+                    Err(error) => {
+                        let error = ErrorMessage::from_exec(error);
+                        if self
+                            .write(&super::forward::error_payload(&error))
+                            .await
+                            .is_err()
+                        {
+                            return None;
                         }
                     }
                 }

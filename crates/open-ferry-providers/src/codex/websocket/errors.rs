@@ -55,6 +55,8 @@ pub(crate) enum Failure {
     /// Anything else, with its text; `transient` for a network failure that
     /// may clear on its own.
     Other { message: String, transient: bool },
+    /// EOF, reset, abort or a closed pipe, recoverable for a websocket turn.
+    Lost(String),
 }
 
 impl Failure {
@@ -77,10 +79,7 @@ impl Failure {
 
     /// The connection was closed on our side.
     pub(crate) fn closed() -> Self {
-        Self::Other {
-            message: "codex websockets executor: use of closed network connection".to_owned(),
-            transient: true,
-        }
+        Self::Lost("codex websockets executor: use of closed network connection".to_owned())
     }
 
     /// The session's reader stopped without a word.
@@ -109,6 +108,17 @@ impl Failure {
             tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
                 Self::eof()
             }
+            tungstenite::Error::Io(io)
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ) =>
+            {
+                Self::Lost(format!("codex websockets executor: {io}"))
+            }
             tungstenite::Error::Io(io) => Self::Other {
                 message: format!("codex websockets executor: {io}"),
                 transient: true,
@@ -132,6 +142,7 @@ impl Failure {
     /// Codex's close reason, or a network error, may quote the token.
     pub(crate) fn redacted(self, secrets: &Secrets) -> Self {
         match self {
+            Self::Lost(message) => Self::Lost(secrets.text(message, Policy::Client)),
             Self::Close { code, reason } => Self::Close {
                 code,
                 reason: secrets.text(reason, Policy::Client),
@@ -154,7 +165,7 @@ impl Failure {
                 }
                 text
             }
-            Self::Other { message, .. } => message.clone(),
+            Self::Other { message, .. } | Self::Lost(message) => message.clone(),
         }
     }
 }
@@ -178,6 +189,15 @@ fn close_description(code: u16) -> &'static str {
     }
 }
 
+/// Only abnormal closes and concrete transport loss recover a turn.
+/// Normal/policy closes, timeouts and status errors retain their close behavior.
+pub(crate) fn is_turn_loss(failure: &Failure) -> bool {
+    matches!(
+        failure,
+        Failure::Close { code: 1006, .. } | Failure::Lost(_)
+    )
+}
+
 /// The error for a failed read (`mapCodexWebsocketReadError`): close 1009
 /// is a message too big, anything else keeps its text.
 pub(crate) fn error(failure: &Failure) -> ExecError {
@@ -196,7 +216,8 @@ pub(crate) fn error(failure: &Failure) -> ExecError {
         } => error.with_transport(TransportFault::Lifecycle),
         Failure::Other {
             transient: true, ..
-        } => error.with_transport(TransportFault::Transient),
+        }
+        | Failure::Lost(_) => error.with_transport(TransportFault::Transient),
         _ => error,
     }
 }

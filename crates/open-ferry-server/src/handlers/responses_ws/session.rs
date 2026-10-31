@@ -505,7 +505,10 @@ impl<S: Socket> Session<S> {
             preserve_output = lite && codex;
             // Only a Codex credential on its upstream WebSocket steers; any
             // other turn of the session ends as usual.
-            duplex = self.state.settings().config.codex_response_steering && input.is_some() && attempted == Upstream::Websocket && codex;
+            duplex = self.state.settings().config.codex_response_steering
+                && input.is_some()
+                && attempted == Upstream::Websocket
+                && codex;
         }
         if !selection_observed {
             attempted = Upstream::Http;

@@ -165,6 +165,26 @@ pub(super) async fn open(
     });
     let model_level_cooling = executor.model_level_cooling();
 
+    if let Some(input) = &options.websocket_input {
+        if input.turn_is_stale() {
+            return Err(open_ferry_core::exec::WebsocketInput::not_sent(
+                &options.original_request,
+            ));
+        }
+        let previous = crate::json::str_at(&prepared.body, "previous_response_id");
+        let append = crate::json::str_at(
+            &crate::codex::request::parse_object(&options.original_request),
+            "type",
+        ) == "response.append";
+        if input.epoch() > 0
+            && (!previous.trim().is_empty() || append)
+            && session.conn().is_none_or(|conn| conn.is_closed())
+        {
+            return Err(open_ferry_core::exec::WebsocketInput::continuation_lost(
+                &options.original_request,
+            ));
+        }
+    }
     let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
     let (conn, mut headers) = match session
         .ensure_conn_with_reuse(target.clone(), &reuse_target, connect)
@@ -179,16 +199,15 @@ pub(super) async fn open(
     secrets.extend(conn.secrets());
 
     if let Some(input) = &options.websocket_input {
-        let body = prepared.body.to_string();
         if input.turn_is_stale() {
-            return Err(open_ferry_core::exec::WebsocketInput::not_sent(body.as_bytes()));
-        }
-        let continuation = crate::json::str_at(&prepared.body, "previous_response_id");
-        if input.epoch() > 0 && !continuation.is_empty() && headers.is_some() {
-            return Err(open_ferry_core::exec::WebsocketInput::continuation_lost(body.as_bytes()));
+            return Err(open_ferry_core::exec::WebsocketInput::not_sent(
+                &options.original_request,
+            ));
         }
         conn.bind_input(Some(input.clone()));
-        if conn.is_closed() { conn.lose_input(); }
+        if conn.is_closed() {
+            conn.lose_input();
+        }
     }
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
     let sender = tap.clone();
@@ -197,14 +216,30 @@ pub(super) async fn open(
         .turn
         .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
     observe_send::request_sent(sender.as_ref());
-    if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
+    if options.downstream_websocket {
+        if let Err(error) = hold
+            .conn()
+            .send_turn(
+                prepared.message.clone(),
+                options.websocket_input.as_ref(),
+                &options.original_request,
+            )
+            .await
+        {
+            hold.invalidate("send_error");
+            hold.release();
+            return Err(error);
+        }
+    } else if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
         let failure = failure.redacted(&secrets);
         let error = errors::write_error(hold.conn().disconnect_code(), &failure);
         hold.invalidate("send_error");
         if options.downstream_websocket && error.transport.is_some() {
             hold.conn().lose_input();
             hold.release();
-            return Err(open_ferry_core::exec::WebsocketInput::lost(prepared.body.to_string().as_bytes()));
+            return Err(open_ferry_core::exec::WebsocketInput::lost(
+                prepared.body.to_string().as_bytes(),
+            ));
         }
         if ephemeral || !errors::should_retry(&error) {
             hold.release();

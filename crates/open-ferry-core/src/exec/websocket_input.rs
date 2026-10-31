@@ -115,13 +115,20 @@ impl WebsocketInput {
     }
 
     /// Current transport generation, shared with the socket reader.
-    pub fn epoch(&self) -> u64 { self.epoch.load(Ordering::Acquire) }
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
 
     /// Advances once per lost connection, before delivering its failure.
-    pub fn lose(&self) { self.epoch.fetch_add(1, Ordering::AcqRel); }
+    pub fn lose(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
 
     /// Binds a handler-consumed frame across asynchronous dispatch and dialing.
-    pub fn for_turn(mut self) -> Self { self.turn_epoch = Some(self.received_epoch.load(Ordering::Acquire)); self }
+    pub fn for_turn(mut self) -> Self {
+        self.turn_epoch = Some(self.received_epoch.load(Ordering::Acquire));
+        self
+    }
 
     pub fn turn_is_stale(&self) -> bool {
         self.turn_epoch.is_some_and(|epoch| epoch != self.epoch())
@@ -136,8 +143,12 @@ impl WebsocketInput {
 
     pub fn not_sent(payload: &[u8]) -> ExecError {
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
-        if value["type"] == "response.append" || value["type"] == "response.steer"
-            || value["previous_response_id"].as_str().is_some_and(|id| !id.trim().is_empty()) {
+        if value["type"] == "response.append"
+            || value["type"] == "response.steer"
+            || value["previous_response_id"]
+                .as_str()
+                .is_some_and(|id| !id.trim().is_empty())
+        {
             return Self::continuation_lost(payload);
         }
         let mut error = ExecError::upstream(502, r#"{"error":{"message":"Upstream websocket disconnected before this request was sent. Send a new response.create with full conversation input.","type":"server_error","code":"upstream_websocket_not_sent"}}"#).with_websocket_turn();
@@ -154,7 +165,8 @@ impl WebsocketInput {
     fn correlate(error: &mut ExecError, payload: &[u8]) {
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
         if let Some(id) = value["event_id"].as_str().filter(|id| !id.is_empty()) {
-            let mut body: serde_json::Value = serde_json::from_str(&error.message).expect("static loss body");
+            let mut body: serde_json::Value =
+                serde_json::from_str(&error.message).expect("static loss body");
             body["error"]["event_id"] = id.into();
             error.message = body.to_string();
         }
@@ -170,7 +182,7 @@ impl WebsocketInput {
             Some(InputFrame::Stamped(payload, epoch)) => {
                 self.received_epoch.store(epoch, Ordering::Release);
                 Some(InputFrame::Payload(payload))
-            },
+            }
             frame => frame,
         }
     }
@@ -271,5 +283,63 @@ mod turn_tests {
         );
         assert!(input.authorize_turn(b"failed").is_err());
         assert!(!format!("{input:?}").contains("denial payload"));
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn loss_fences_frames_stamped_before_bounded_enqueue() {
+        let (tx, rx) = mpsc::channel(1);
+        let input = WebsocketInput::new(rx);
+        tx.send(InputFrame::Stamped(
+            Bytes::from_static(br#"{"type":"response.create","event_id":"first"}"#),
+            input.epoch(),
+        ))
+        .await
+        .unwrap();
+        let epoch = input.epoch();
+        let blocked = tokio::spawn(async move {
+            tx.send(InputFrame::Stamped(Bytes::from_static(br#"{"type":"response.create","previous_response_id":"lost","event_id":"second"}"#), epoch)).await.unwrap();
+        });
+        input.lose();
+        let Some(InputFrame::Err(first)) = input.recv().await else {
+            panic!("stale full create accepted")
+        };
+        assert!(first.message.contains("upstream_websocket_not_sent"));
+        assert!(first.message.contains("first"));
+        blocked.await.unwrap();
+        let Some(InputFrame::Err(second)) = input.recv().await else {
+            panic!("stale continuation accepted")
+        };
+        assert_eq!(second.http_status(), 409);
+        assert!(second.message.contains("second"));
+        assert!(second.stops_replay());
+        assert!(second.ws_close.is_none());
+    }
+
+    #[tokio::test]
+    async fn handler_epoch_survives_loss_between_receive_and_dispatch() {
+        let (tx, rx) = mpsc::channel(1);
+        let input = WebsocketInput::new(rx);
+        tx.send(InputFrame::Stamped(
+            Bytes::from_static(b"{}"),
+            input.epoch(),
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(input.recv().await, Some(InputFrame::Payload(_))));
+        input.lose();
+        assert!(input.clone().for_turn().turn_is_stale());
+        tx.send(InputFrame::Stamped(
+            Bytes::from_static(b"{}"),
+            input.epoch(),
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(input.recv().await, Some(InputFrame::Payload(_))));
+        assert!(!input.for_turn().turn_is_stale());
     }
 }

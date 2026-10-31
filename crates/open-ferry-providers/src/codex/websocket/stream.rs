@@ -182,16 +182,15 @@ struct State {
 impl State {
     /// Reads and checks Codex's next message; `None` for an empty one.
     async fn next(&mut self) -> Result<Option<Event>, Fault> {
-        let payload = self
-            .hold
-            .recv()
-            .await
-            .map_err(|failure| {
-                let error = errors::error(&failure.redacted(&self.secrets));
-                Fault::Read(if self.downstream && error.transport.is_some() {
-                    open_ferry_core::exec::WebsocketInput::lost(&self.original)
-                } else { error })
-            })?;
+        let payload = self.hold.recv().await.map_err(|failure| {
+            let lost = errors::is_turn_loss(&failure);
+            let error = errors::error(&failure.redacted(&self.secrets));
+            Fault::Read(if self.downstream && lost {
+                open_ferry_core::exec::WebsocketInput::lost(&self.original)
+            } else {
+                error
+            })
+        })?;
         if payload.is_empty() {
             return Ok(None);
         }

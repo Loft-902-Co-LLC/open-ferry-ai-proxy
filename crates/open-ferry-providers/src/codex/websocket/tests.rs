@@ -1833,7 +1833,7 @@ async fn error_event_or_close_has_the_next_call_connect_again() {
 // `TestWebsocketRetryBindFailureClearsActiveSessionState` without its
 // lifecycle; a connection without a socket stands in for a stale one).
 #[tokio::test]
-async fn send_on_a_stale_connection_is_tried_once_more() {
+async fn non_downstream_send_on_a_stale_connection_is_tried_once_more() {
     let server = Server::once(&[COMPLETED]).await;
     let executor = executor();
     let auth = auth(&server.url);
@@ -1851,7 +1851,10 @@ async fn send_on_a_stale_connection_is_tried_once_more() {
         &executor,
         &auth,
         request("gpt-5-codex", HELLO),
-        ws_options("stale"),
+        Options {
+            downstream_websocket: false,
+            ..ws_options("stale")
+        },
     )
     .await
     .unwrap();
@@ -1998,3 +2001,5 @@ fn websocket_search_history_tool_precedes_image_generation() {
         assert_eq!(tools, ["web_search", "image_generation"]);
     }
 }
+
+mod loss;

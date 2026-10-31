@@ -456,7 +456,9 @@ impl Conn {
     }
 
     pub(crate) fn lose_input(&self) {
-        if let Some(input) = lock(&self.input).take() { input.lose(); }
+        if let Some(input) = lock(&self.input).take() {
+            input.lose();
+        }
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -483,6 +485,28 @@ impl Conn {
         self.send_locked(&mut sink, text).await
     }
 
+    /// Rechecks the handler's epoch after acquiring the writer permit.
+    pub(crate) async fn send_turn(
+        &self,
+        text: String,
+        input: Option<&open_ferry_core::exec::WebsocketInput>,
+        original: &[u8],
+    ) -> Result<(), open_ferry_core::exec::ExecError> {
+        let mut sink = self.sink.lock().await;
+        if input.is_some_and(|input| input.turn_is_stale()) {
+            return Err(open_ferry_core::exec::WebsocketInput::not_sent(original));
+        }
+        self.send_locked(&mut sink, text).await.map_err(|failure| {
+            let error = errors::write_error(self.disconnect_code(), &failure);
+            if errors::is_turn_loss(&failure) && error.status != 413 {
+                self.lose_input();
+                open_ferry_core::exec::WebsocketInput::lost(original)
+            } else {
+                error
+            }
+        })
+    }
+
     async fn send_locked(
         &self,
         sink: &mut Option<SplitSink<WsStream, Message>>,
@@ -503,6 +527,9 @@ impl Conn {
 
     /// Closes the connection: the reader stops and drops it.
     pub(super) fn close(&self) {
+        // An intentional teardown (including early business rejection) is
+        // not a transport loss. The reader marks real loss before closing.
+        lock(&self.input).take();
         self.closing.send_replace(true);
     }
 
@@ -680,7 +707,6 @@ impl Session {
     }
 
     /// The session's connection.
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> Option<Arc<Conn>> {
         self.state().conn.clone()
     }
@@ -1138,7 +1164,9 @@ async fn read_loop(
         }
     };
 
-    if errors::error(&failure).transport.is_some() { conn.lose_input(); }
+    if errors::is_turn_loss(&failure) {
+        conn.lose_input();
+    }
     let failure = failure.redacted(&conn.target.secrets);
     // Remembered while the connection is still the session's, so a call
     // that becomes active on it from here on gets the failure at once.

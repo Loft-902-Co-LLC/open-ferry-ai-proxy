@@ -567,8 +567,8 @@ async fn idle_codex_disconnect_closes_socket() {
 // TestResponsesSteeringFullDuplexIntegration
 #[tokio::test]
 async fn full_duplex_integration() {
-    const CONTROL1: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"one"}"#;
-    const CONTROL2: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"two"}"#;
+    const CONTROL1: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"one","event_id":"control1"}"#;
+    const CONTROL2: &str = r#"{"type":"response.steer","previous_response_id":"r1","input":"two","event_id":"control2"}"#;
     for scenario in [
         "successor",
         "tool_pending",
@@ -625,6 +625,7 @@ async fn full_duplex_integration() {
         )
         .await;
         let (mut completed, mut accepted, mut pending_seen) = (false, 0, false);
+        let mut losses = 0;
         loop {
             let Some(text) = next_text(&mut ws).await else {
                 assert!(
@@ -635,6 +636,19 @@ async fn full_duplex_integration() {
             };
             let kind = at(&text, "/type");
             let id = at(&text, "/response/id");
+            if kind == "error" && at(&text, "/error/code") == "upstream_websocket_lost" {
+                losses += 1;
+                if losses
+                    == if scenario == "disconnect_accepted" {
+                        3
+                    } else {
+                        2
+                    }
+                {
+                    let _ = ws.close(None).await;
+                    break;
+                }
+            }
             if kind == "response.created" && id == "r1" {
                 send(&mut ws, CONTROL1).await;
                 send(&mut ws, CONTROL2).await;

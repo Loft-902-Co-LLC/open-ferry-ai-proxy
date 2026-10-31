@@ -162,7 +162,11 @@ impl Settings {
 /// A steering message waiting for the explicit creates sent before it to
 /// start.
 #[derive(Clone)]
-struct Submission { parent: String, event_id: String, successor: String }
+struct Submission {
+    parent: String,
+    event_id: String,
+    successor: String,
+}
 
 struct Steer {
     message: String,
@@ -212,6 +216,7 @@ struct Duplex {
     /// Whether a response Codex started on its own runs.
     automatic_active: bool,
     first_response: bool,
+    business_rejection: bool,
     response_active: bool,
     items: OutputItems,
 
@@ -281,6 +286,7 @@ pub(super) fn start(
         waiting_parent: String::new(),
         automatic_active: false,
         first_response: true,
+        business_rejection: false,
         response_active: false,
         items: OutputItems::default(),
         out: VecDeque::new(),
@@ -374,32 +380,43 @@ impl Duplex {
             }
         }
         for target in &self.unacknowledged {
-            if !target.event_id.is_empty() { self.out.push_back(Err(loss(&target.event_id))); }
+            if !target.event_id.is_empty() {
+                self.out.push_back(Err(loss(&target.event_id)));
+            }
         }
         let mut accepted: Vec<_> = self.accepted.iter().collect();
         accepted.sort_by_key(|(id, _)| *id);
         for (_, target) in accepted {
-            if !target.event_id.is_empty() { self.out.push_back(Err(loss(&target.event_id))); }
+            if !target.event_id.is_empty() {
+                self.out.push_back(Err(loss(&target.event_id)));
+            }
         }
         for payload in &self.queued_creates {
-            self.out.push_back(Err(WebsocketInput::not_sent(payload.to_string().as_bytes())));
+            self.out.push_back(Err(WebsocketInput::not_sent(
+                payload.to_string().as_bytes(),
+            )));
         }
         if let Some(steer) = &self.deferred {
-            self.out.push_back(Err(WebsocketInput::not_sent(steer.message.as_bytes())));
+            self.out
+                .push_back(Err(WebsocketInput::not_sent(steer.message.as_bytes())));
         }
-        // One Result error terminates the handler producer. Once output was
-        // accepted, loss events travel as data so every owned operation is
-        // reported before EOF; before acceptance the scoped error prevents
-        // manager replay.
+        // The manager must see one scoped failure, while the handler must
+        // answer every outstanding operation. Carry that bounded batch in
+        // the scoped error; it is unpacked only by the websocket handler.
         if !self.first_response {
-            for item in &mut self.out {
+            let mut events = Vec::new();
+            while let Some(item) = self.out.pop_front() {
                 if let Err(error) = item {
                     let mut event: Value = serde_json::from_str(&error.message).expect("loss JSON");
                     event["type"] = "error".into();
                     event["status"] = error.http_status().into();
-                    *item = Ok(Bytes::from(event.to_string()));
+                    events.push(event);
                 }
             }
+            let body = serde_json::json!({"error":{"type":"server_error","code":"upstream_websocket_lost","message":"Upstream websocket disconnected"}, "websocket_loss_events": events});
+            self.out.push_back(Err(
+                ExecError::upstream(502, body.to_string()).with_websocket_turn()
+            ));
         }
         self.finish();
     }
@@ -487,7 +504,11 @@ impl Duplex {
                 if let Err(failure) = result {
                     let failure = failure.redacted(&self.secrets);
                     let error = errors::write_error(self.hold.conn().disconnect_code(), &failure);
-                    if error.transport.is_some() { self.transport_lost(); } else { self.fail_connection(error); }
+                    if errors::is_turn_loss(&failure) && error.status != 413 {
+                        self.transport_lost();
+                    } else {
+                        self.fail_connection(error);
+                    }
                 }
             }
             Wake::Read(read) => self.on_read(read),
@@ -627,7 +648,10 @@ impl Duplex {
         let settings = self.response_settings.get(&steer.parent).cloned();
         self.unacknowledged.push(Submission {
             parent: steer.parent.clone(),
-            event_id: str_at(&crate::codex::request::parse_object(steer.message.as_bytes()), "event_id"),
+            event_id: str_at(
+                &crate::codex::request::parse_object(steer.message.as_bytes()),
+                "event_id",
+            ),
             successor: String::new(),
         });
         if let Some(settings) = settings {
@@ -778,8 +802,19 @@ impl Duplex {
         let payload = match read {
             Ok(payload) => payload,
             Err(failure) => {
-                let error = errors::error(&failure.redacted(&self.secrets));
-                if error.transport.is_some() { self.transport_lost(); } else { self.fail_connection(error); }
+                let error = errors::error(&failure.clone().redacted(&self.secrets));
+                let known = self.business_rejection
+                    && !self.response_active
+                    && self.pending.is_empty()
+                    && self.unacknowledged.is_empty()
+                    && self.accepted.is_empty()
+                    && self.queued_creates.is_empty()
+                    && self.deferred.is_none();
+                if errors::is_turn_loss(&failure) && error.status != 413 && !known {
+                    self.transport_lost();
+                } else {
+                    self.fail_connection(error);
+                }
                 return;
             }
         };
@@ -869,11 +904,12 @@ impl Duplex {
         } else {
             None
         };
-        if let Some(error) = terminal
-            && self.first_response
-        {
-            self.fail(error);
-            return;
+        if let Some(error) = terminal {
+            self.business_rejection = error.http_status() == 400;
+            if self.first_response {
+                self.fail(error);
+                return;
+            }
         }
 
         if event_type == "response.output_item.done" {
@@ -883,8 +919,10 @@ impl Duplex {
             event_type.as_str(),
             "response.completed" | "response.done" | "response.incomplete"
         ) {
+            self.business_rejection = false;
             let completed_id = str_at(&event, "response.id");
-            self.accepted.retain(|_, target| target.successor != completed_id);
+            self.accepted
+                .retain(|_, target| target.successor != completed_id);
             self.response_active = false;
             self.automatic_active = false;
             let mut completed = event;
@@ -931,7 +969,11 @@ impl Duplex {
             self.current = Arc::clone(settings);
         }
         let successor = str_at(event, "response.id");
-        for target in self.accepted.values_mut().filter(|target| target.parent == parent && target.successor.is_empty()) {
+        for target in self
+            .accepted
+            .values_mut()
+            .filter(|target| target.parent == parent && target.successor.is_empty())
+        {
             target.successor.clone_from(&successor);
         }
         self.waiting_parent.clear();
@@ -999,7 +1041,10 @@ impl Duplex {
 
     /// Drops `parent`'s steering settings once no steering waits on it.
     fn release_steering_settings(&mut self, parent: &str) {
-        let waiting = self.unacknowledged.iter().any(|target| target.parent == parent)
+        let waiting = self
+            .unacknowledged
+            .iter()
+            .any(|target| target.parent == parent)
             || self.accepted.values().any(|target| target.parent == parent);
         if !waiting {
             self.steering_settings.remove(parent);
