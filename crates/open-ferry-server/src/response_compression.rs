@@ -128,21 +128,20 @@ async fn compress(response: Response, encoding: Option<&'static str>, min: usize
         && !nonempty(&parts.headers, header::CONTENT_ENCODING)
         && parts.status.as_u16() >= 200
         && !matches!(parts.status.as_u16(), 204 | 206 | 304)
+        && let Some(first) = body.frame().await
     {
-        if let Some(first) = body.frame().await {
-            if let Ok(frame) = &first
-                && let Some(data) = frame.data_ref()
-                && !data.is_empty()
-            {
-                parts.headers.insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(open_ferry_core::multipart::detect_content_type(data)),
-                );
-            }
-            body = Body::new(http_body_util::StreamBody::new(
-                futures_util::stream::iter([first]).chain(body.into_stream()),
-            ));
+        if let Ok(frame) = &first
+            && let Some(data) = frame.data_ref()
+            && !data.is_empty()
+        {
+            parts.headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(open_ferry_core::multipart::detect_content_type(data)),
+            );
         }
+        body = Body::new(http_body_util::StreamBody::new(
+            futures_util::stream::iter([first]).chain(body.into_stream()),
+        ));
     }
     let media = parts
         .headers

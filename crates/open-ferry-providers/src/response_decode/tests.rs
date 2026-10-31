@@ -236,7 +236,7 @@ async fn reverse_multiple_header_values_and_preallocation_window_limit() {
     assert_eq!(
         collect(
             std::io::Cursor::new(vec![]),
-            &vec!["zstd"; MAX_ENCODING_LAYERS + 1].join(","),
+            &["zstd"; MAX_ENCODING_LAYERS + 1].join(","),
             4096
         )
         .await,
@@ -350,7 +350,7 @@ async fn layer_budget_invariant_family_ignores_identity() {
         assert_eq!(
             collect(
                 std::io::Cursor::new(plain.clone()),
-                &vec!["identity"; 32].join(","),
+                &["identity"; 32].join(","),
                 4096
             )
             .await,

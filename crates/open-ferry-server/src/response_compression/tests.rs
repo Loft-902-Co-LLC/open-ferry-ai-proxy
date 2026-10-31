@@ -332,6 +332,13 @@ async fn codec_lifetime_and_working_output_are_bounded() {
 }
 struct TinyFrames {
     count: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+    data: Bytes,
+}
+impl Drop for TinyFrames {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
 }
 impl HttpBody for TinyFrames {
     type Data = Bytes;
@@ -345,43 +352,51 @@ impl HttpBody for TinyFrames {
             calls <= MAX_STAGING,
             "staging must stop reading at its memory cap"
         );
-        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"x")))))
+        Poll::Ready(Some(Ok(Frame::data(self.data.clone()))))
     }
 }
+const STAGING_INVARIANT: &str =
+    "staging coalesces at most 64 KiB plus one producer-owned frame; cancel releases source";
 #[tokio::test]
 async fn oversized_threshold_bounds_staging_including_one_byte_frames() {
-    let count = Arc::new(AtomicUsize::new(0));
-    let r = compress(
-        response(
-            Body::new(TinyFrames {
+    for codec in ["gzip", "zstd"] {
+        for chunk in [1, 127, CHUNK, MAX_STAGING, MAX_STAGING + 1] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let source = TinyFrames {
                 count: count.clone(),
-            }),
-            "text/plain",
-        ),
-        Some("gzip"),
-        1 << 30,
-    )
-    .await;
-    assert!(!r.headers().contains_key(header::CONTENT_ENCODING));
-    assert_eq!(count.load(Ordering::SeqCst), MAX_STAGING);
-    let mut body = r.into_body();
-    let staged = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    assert_eq!(
-        staged.len(),
-        MAX_STAGING,
-        "one coalesced buffer, not one allocation per frame"
-    );
-    assert_eq!(
-        body.frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_data()
-            .unwrap()
-            .len(),
-        1
-    );
-    drop(body);
+                drops: drops.clone(),
+                data: Bytes::from(vec![b'x'; chunk]),
+            };
+            let r = compress(
+                response(Body::new(source), "text/plain"),
+                Some(codec),
+                1 << 30,
+            )
+            .await;
+            assert!(
+                !r.headers().contains_key(header::CONTENT_ENCODING),
+                "{STAGING_INVARIANT}"
+            );
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                MAX_STAGING.div_ceil(chunk),
+                "{STAGING_INVARIANT}"
+            );
+            let mut body = r.into_body();
+            let staged = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(
+                staged.len() <= MAX_STAGING.max(chunk),
+                "{STAGING_INVARIANT}"
+            );
+            assert!(staged.iter().all(|byte| *byte == b'x'));
+            if chunk == 1 {
+                assert_eq!(staged.len(), MAX_STAGING, "{STAGING_INVARIANT}");
+            }
+            drop(body);
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "{STAGING_INVARIANT}");
+        }
+    }
 }
 struct PanickingBody {
     step: usize,
