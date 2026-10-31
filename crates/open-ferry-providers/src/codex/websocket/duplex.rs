@@ -226,7 +226,10 @@ struct Duplex {
     queued_creates: VecDeque<Value>,
     /// A steering message waiting for `pending` to empty.
     deferred: Option<Steer>,
+    /// A consumed client frame rejected before its write.
     consumed: Option<ExecError>,
+    /// Writer error and recoverability, held behind queued upstream reads.
+    write_failure: Option<(ExecError, bool)>,
     sending: Option<Sending>,
     /// Whether the client's frames are read.
     input_ready: bool,
@@ -294,6 +297,7 @@ pub(super) fn start(
         queued_creates: VecDeque::new(),
         deferred: None,
         consumed: None,
+        write_failure: None,
         sending: None,
         input_ready: false,
         opening: false,
@@ -465,6 +469,7 @@ impl Duplex {
             return;
         }
         self.done = true;
+        self.write_failure = None;
         self.sending = None;
         self.deferred = None;
         self.hold.invalidate("duplex_closed");
@@ -504,7 +509,12 @@ impl Duplex {
 
     /// Sends what may go now, while no send is under way.
     fn advance(&mut self) {
-        if !self.input_ready || self.done || self.sending.is_some() || self.consumed.is_some() {
+        if !self.input_ready
+            || self.done
+            || self.sending.is_some()
+            || self.consumed.is_some()
+            || self.write_failure.is_some()
+        {
             return;
         }
         if self.input.turn_is_stale() {
@@ -525,6 +535,7 @@ impl Duplex {
         while self.sending.is_none()
             && !self.done
             && self.consumed.is_none()
+            && self.write_failure.is_none()
             && self.ready_for_create()
         {
             let Some(create) = self.queued_creates.pop_front() else {
@@ -539,6 +550,7 @@ impl Duplex {
             && self.sending.is_none()
             && self.deferred.is_none()
             && self.consumed.is_none()
+            && self.write_failure.is_none()
             && !self.input.turn_is_stale();
         let sending = self.sending.is_some();
         let wake = tokio::select! {
@@ -553,11 +565,12 @@ impl Duplex {
                 if let Err(failure) = result {
                     let failure = failure.redacted(&self.secrets);
                     let error = errors::write_error(self.hold.conn().disconnect_code(), &failure);
-                    if errors::is_turn_loss(&failure) && error.status != 413 {
-                        self.transport_lost();
-                    } else {
-                        self.fail_connection(error);
+                    let lost = errors::is_turn_loss(&failure) && error.status != 413;
+                    if lost {
+                        self.hold.conn().lose_input();
                     }
+                    self.write_failure = Some((error, lost));
+                    self.hold.invalidate("send_error");
                 }
             }
             Wake::Read(read) => self.on_read(read),
@@ -882,7 +895,9 @@ impl Duplex {
         let payload = match read {
             Ok(payload) => payload,
             Err(failure) => {
-                let error = errors::error(&failure.clone().redacted(&self.secrets));
+                let lost = errors::is_turn_loss(&failure);
+                let read_error = errors::error(&failure.redacted(&self.secrets));
+                let (error, lost) = self.write_failure.take().unwrap_or((read_error, lost));
                 let known = self.business_rejection
                     && !self.response_active
                     && self.pending.is_empty()
@@ -891,7 +906,7 @@ impl Duplex {
                     && self.queued_creates.is_empty()
                     && self.deferred.is_none()
                     && self.consumed.is_none();
-                if errors::is_turn_loss(&failure) && error.status != 413 && !known {
+                if lost && error.status != 413 && !known {
                     self.transport_lost();
                 } else {
                     self.fail_connection(error);

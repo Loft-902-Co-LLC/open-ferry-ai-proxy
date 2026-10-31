@@ -1835,3 +1835,69 @@ async fn stale_input_error_keeps_running_turn_loss_correlation() {
     assert_eq!(events[1]["error"]["event_id"], "c2");
     assert_eq!(events[1]["error"]["code"], "upstream_websocket_not_sent");
 }
+
+#[tokio::test]
+async fn failed_writer_drains_buffered_output_before_reporting_loss() {
+    let (release, gate) = watch::channel(false);
+    let server = serve(move |mut peer| {
+        let mut gate = gate.clone();
+        async move {
+            peer.recv().await.unwrap();
+            peer.send(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+                .await;
+            let _ = gate.wait_for(|ready| *ready).await;
+            peer.send(r#"{"type":"response.output_text.delta","delta":"buffered"}"#)
+                .await;
+            peer.send(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#)
+                .await;
+        }
+    })
+    .await;
+    let (client, input) = Client::new(2);
+    let executor = steering();
+    let mut chunks = start(
+        &executor,
+        &server.url,
+        "writer-drain",
+        r#"{"model":"gpt-6-astra","input":[],"event_id":"c1"}"#,
+        duplex_options("writer-drain", input),
+    )
+    .await;
+    chunks.next().await.unwrap().unwrap();
+    let conn = executor
+        .websockets()
+        .get("writer-drain")
+        .unwrap()
+        .conn()
+        .unwrap();
+    let permit = conn.lock_send().await;
+    client.send(r#"{"type":"response.create","model":"gpt-6-astra","input":[],"event_id":"c2"}"#);
+    let mut next = Box::pin(chunks.next());
+    assert!(futures_util::poll!(next.as_mut()).is_pending());
+    release.send_replace(true);
+    within("EOF observed while writer waits", async {
+        while !conn.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(permit);
+    let delta = within("buffered output before loss", next)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        json(std::str::from_utf8(&delta).unwrap())["delta"],
+        "buffered"
+    );
+    let terminal = chunks.next().await.unwrap().unwrap();
+    assert_eq!(
+        json(std::str::from_utf8(&terminal).unwrap())["type"],
+        "response.completed"
+    );
+    let error = chunks.next().await.unwrap().unwrap_err();
+    let body: Value = serde_json::from_str(&error.message).unwrap();
+    assert_eq!(body["websocket_loss_events"].as_array().unwrap().len(), 1);
+    assert_eq!(body["websocket_loss_events"][0]["error"]["event_id"], "c2");
+    assert_eq!(server.record().messages.len(), 1);
+}
