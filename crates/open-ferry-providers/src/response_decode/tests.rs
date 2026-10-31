@@ -83,6 +83,22 @@ async fn invariant_codec_size_cut_cancel_family() {
                 assert_eq!(errors, 0, "valid frame {chain}/{size}/{cut}");
                 let (got, errors) = collect(std::io::Cursor::new(wire.clone()), label, 7).await;
                 assert!(got == plain || errors == 1, "{INVARIANT}");
+                let cancel_drops = Arc::new(AtomicUsize::new(0));
+                let canceled = tokio_util::io::StreamReader::new(stream::iter([
+                    Ok(Bytes::copy_from_slice(&wire[..cut])),
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "mock upstream cancellation",
+                    )),
+                ]));
+                let canceled = Observed {
+                    reader: canceled,
+                    reads: Arc::new(AtomicUsize::new(0)),
+                    drops: cancel_drops.clone(),
+                };
+                let (_, errors) = collect(canceled, label, bound).await;
+                assert_eq!(errors, 1, "{INVARIANT}: canceled {chain}/{size}/{cut}");
+                assert_eq!(cancel_drops.load(Ordering::SeqCst), 1, "{INVARIANT}");
                 let drops = Arc::new(AtomicUsize::new(0));
                 let reader = CancelReader {
                     data: std::io::Cursor::new(wire[..cut].to_vec()),
@@ -101,7 +117,9 @@ async fn invariant_codec_size_cut_cancel_family() {
             }
         }
     }
-    eprintln!("invariant family: {cases} boundary cases, each success/bound/cancel");
+    eprintln!(
+        "invariant family: {cases} boundary cases, each success/bound/source-cancel/drop-cancel"
+    );
 }
 struct CancelReader {
     data: std::io::Cursor<Vec<u8>>,
