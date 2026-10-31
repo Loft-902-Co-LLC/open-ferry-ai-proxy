@@ -70,6 +70,7 @@ const CLEANUP_WAIT: Duration = Duration::from_secs(3);
 
 /// A mock Codex on 127.0.0.1, each connection of which runs a script.
 struct Upstream {
+    listener: tokio::task::JoinHandle<()>,
     /// Its base URL.
     url: String,
     connections: Arc<AtomicUsize>,
@@ -77,6 +78,12 @@ struct Upstream {
     frames: Arc<AtomicUsize>,
     /// Whether each connection's script finished without failing.
     done: mpsc::UnboundedReceiver<bool>,
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        self.listener.abort();
+    }
 }
 
 impl Upstream {
@@ -92,7 +99,7 @@ impl Upstream {
         let frames = Arc::new(AtomicUsize::new(0));
         let (done_tx, done) = mpsc::unbounded_channel();
         let (count, counted) = (Arc::clone(&connections), Arc::clone(&frames));
-        tokio::spawn(async move {
+        let listener = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 count.fetch_add(1, Ordering::SeqCst);
                 let (script, frames, done) =
@@ -108,6 +115,7 @@ impl Upstream {
             }
         });
         Self {
+            listener,
             url,
             connections,
             frames,

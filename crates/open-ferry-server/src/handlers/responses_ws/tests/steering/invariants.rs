@@ -1,8 +1,6 @@
-// Round 1: bounded, real-router interleavings against local Codex mocks.
-// Green coverage includes early 429 versus accepted output, a terminal event,
-// queued next input and downstream disconnect, with steering on/off.
-// The ignored loss module stages known-failing acceptance cases for the next port.
-// Transport-loss epochs and interrupt/terminal races have NO green coverage yet.
+// Bounded real-router interleavings against local Codex mocks. The schedules
+// family runs all six-step permutations with steering on and off; loss cases
+// also prove exact correlation, recovery and successor ownership.
 
 use super::*;
 
@@ -11,6 +9,14 @@ mod loss;
 const ROUND1_INVARIANT: &str = "no accepted output replayed, each loss reported at most once, no interrupt applied after a terminal event, and the downstream socket open exactly when upstream keeps it open";
 
 async fn retry_proxy(config: &Config, first: &str, sibling: &str) -> String {
+    retry_proxy_server(config, first, sibling).await.0
+}
+
+async fn retry_proxy_server(
+    config: &Config,
+    first: &str,
+    sibling: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
     let registry = Arc::new(ModelRegistry::new());
     let manager = Arc::new(Manager::new(Settings::default(), registry.clone(), None));
     manager.register_executor(Arc::new(
@@ -34,8 +40,8 @@ async fn retry_proxy(config: &Config, first: &str, sibling: &str) -> String {
     let app = crate::router(AppState::new(server, manager, Arc::new(catalog)));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("ws://{addr}/v1/responses")
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("ws://{addr}/v1/responses"), task)
 }
 
 #[tokio::test]
@@ -122,3 +128,5 @@ async fn round1_invariant_family_early_429_output_terminal_queued_disconnect() {
         }
     }
 }
+
+mod schedules;
