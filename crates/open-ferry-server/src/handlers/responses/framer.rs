@@ -9,14 +9,19 @@
 //! Deviations from upstream:
 //! - The held-back event is read on from where the last chunk left it, by
 //!   an [`EventScan`], and whole events are written from where they lie, so
-//!   a stream costs time in step with its size. Upstream reads the held-back
-//!   event again, and copies what is left, for each chunk.
+//!   delimiter/validation scanning costs time in step with the stream's size.
+//!   String-aware boundary repair may still inspect a held event again. Upstream
+//!   also rescans delimiter/validation state and copies the tail for each chunk.
 //! - The held-back event may grow to at most [`MAX_EVENT_BYTES`]. Past it,
 //!   [`Framer::write_chunk`] drops it and fails with a 502, which ends the
 //!   stream. Upstream holds it back without limit.
 //!
 //! [`MAX_EVENT_BYTES`]: crate::sse_check::MAX_EVENT_BYTES
 
+#[path = "framing_recovery.rs"]
+mod recovery;
+
+use recovery::{consume_breaks, has_empty_event_data, needs_line_break, recover_json_frame};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -35,6 +40,11 @@ use crate::sse_check::{EventLimit, EventScan, Work, data_payload, too_large};
 pub(super) struct Framer {
     /// The event held back.
     pending: Vec<u8>,
+    /// A possible new frame after an empty data field, and a split field name.
+    next_frame_prefix: Vec<u8>,
+    next_field_suffix: Vec<u8>,
+    /// Only these inserted newlines may be removed to recover JSON.
+    synthetic_breaks: Vec<usize>,
     /// Where a blank line ending the held-back event may start: no sooner
     /// than three bytes before the end of the last chunk.
     search: usize,
@@ -56,6 +66,9 @@ pub(super) struct Framer {
     pub(super) is_codex_client: bool,
     /// How many data payloads have gone to the client.
     pub(super) data_frames: i64,
+    /// Recovered frames before the repair/filter sink, for the independent oracle.
+    #[cfg(test)]
+    frames: Vec<Vec<u8>>,
 }
 
 impl Framer {
@@ -89,7 +102,7 @@ impl Framer {
     /// How many bytes are held back.
     #[cfg(test)]
     pub(super) fn held(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.next_frame_prefix.len() + self.next_field_suffix.len()
     }
 
     /// Adds a chunk of the stream, writing the events it completes
@@ -103,6 +116,20 @@ impl Framer {
         if chunk.is_empty() || !self.terminal_event.is_empty() {
             return Ok(());
         }
+        let chunk = self.prepare_chunk(out, chunk);
+        if self.pending.len() + self.next_frame_prefix.len() + self.next_field_suffix.len()
+            > self.limit.0
+            && chunk.is_none()
+        {
+            self.reset();
+            self.next_frame_prefix.clear();
+            self.next_field_suffix.clear();
+            return Err(ErrorMessage::new(502, too_large(self.limit)));
+        }
+        let Some(chunk) = chunk else {
+            return Ok(());
+        };
+        let chunk = chunk.as_ref();
         if starts_new_data_frame(&self.scan, chunk) {
             let frame = self.take_pending();
             self.write_frame(out, &frame);
@@ -111,6 +138,7 @@ impl Framer {
             }
         }
         if needs_line_break(&self.pending, chunk) {
+            self.synthetic_breaks.push(self.pending.len());
             self.pending.push(b'\n');
         }
         self.pending.extend_from_slice(chunk);
@@ -120,6 +148,7 @@ impl Framer {
         let mut start = 0;
         while let Some(end) = frame_end(&pending, self.search.max(start), &mut self.work) {
             self.write_frame(out, pending.get(start..end).unwrap_or_default());
+            consume_breaks(&mut self.synthetic_breaks, end - start);
             start = end;
             if !self.terminal_event.is_empty() {
                 self.reset();
@@ -137,7 +166,10 @@ impl Framer {
             self.reset();
             return Ok(());
         }
-        if self.pending.is_empty() || !can_emit_without_delimiter(&self.scan) {
+        if self.pending.is_empty()
+            || has_empty_event_data(&self.pending, &self.scan)
+            || !can_emit_without_delimiter(&self.scan)
+        {
             if self.pending.len() > self.limit.0 {
                 self.reset();
                 return Err(ErrorMessage::new(502, too_large(self.limit)));
@@ -152,20 +184,29 @@ impl Framer {
     /// Writes what is held back when the stream ends, if it is a whole
     /// event, and drops it otherwise (`Flush`).
     pub(super) fn flush(&mut self, out: &mut BytesMut) {
+        self.flush_prefix(out);
         if self.pending.is_empty() || !self.terminal_event.is_empty() {
             return;
         }
-        if self.scan.is_blank() || !can_flush_without_delimiter(&self.scan) {
+        if self.scan.is_blank() {
             self.reset();
             return;
         }
         let frame = self.take_pending();
-        self.write_frame(out, &frame);
+        let mut scan = EventScan::default();
+        scan.advance(&frame);
+        if can_flush_without_delimiter(&scan) {
+            self.write_frame(out, &frame);
+        }
     }
 
     /// Takes what is held back.
     fn take_pending(&mut self) -> Vec<u8> {
         let pending = std::mem::take(&mut self.pending);
+        let pending = match recover_json_frame(&pending, &self.synthetic_breaks) {
+            Cow::Borrowed(_) => pending,
+            Cow::Owned(recovered) => recovered,
+        };
         self.reset();
         pending
     }
@@ -173,13 +214,17 @@ impl Framer {
     /// Drops what is held back.
     fn reset(&mut self) {
         self.pending.clear();
+        self.synthetic_breaks.clear();
         self.search = 0;
         self.scan = EventScan::default();
     }
 
     /// `writeFrame`.
     fn write_frame(&mut self, out: &mut BytesMut, frame: &[u8]) {
-        let frame = self.repair_frame(frame);
+        let recovered = recover_json_frame(frame, &self.synthetic_breaks);
+        #[cfg(test)]
+        self.frames.push(recovered.to_vec());
+        let frame = self.repair_frame(&recovered);
         write_sse_chunk(out, &frame);
     }
 
@@ -198,7 +243,7 @@ impl Framer {
             if self.is_codex_client {
                 return name == "codex.rate_limits";
             }
-            name.starts_with("codex.")
+            name.starts_with("codex.") || name == "response.metadata"
         };
         check(stream_event) || check(payload_type)
     }
@@ -217,13 +262,12 @@ impl Framer {
             self.data_frames += 1;
             return Cow::Borrowed(frame);
         }
-        if !go::json_valid(&payload) {
-            return Cow::Borrowed(frame);
-        }
-
         let payload_type = json::str_at(&payload, "type");
         if self.should_filter_private_event(&stream_event, &payload_type) {
             return Cow::Borrowed(&[]);
+        }
+        if !go::json_valid(&payload) {
+            return Cow::Borrowed(frame);
         }
 
         self.data_frames += 1;
@@ -515,28 +559,13 @@ fn event_name(frame: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a newline has to go between held-back text and a chunk that
-/// starts a field (`responsesSSENeedsLineBreak`).
-fn needs_line_break(pending: &[u8], chunk: &[u8]) -> bool {
-    if pending.is_empty() || chunk.is_empty() {
-        return false;
-    }
-    if pending.ends_with(b"\n") || pending.ends_with(b"\r") {
-        return false;
-    }
-    if chunk[0] == b'\n' || chunk[0] == b'\r' {
-        return false;
-    }
-    let start = chunk
-        .iter()
-        .position(|b| !matches!(b, b' ' | b'\t'))
-        .unwrap_or(chunk.len());
-    let trimmed = &chunk[start..];
-    !trimmed.is_empty()
-        && [&b"data:"[..], b"event:", b"id:", b"retry:", b":"]
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix))
-}
+#[cfg(test)]
+#[path = "framing_upstream.rs"]
+mod upstream;
+
+#[cfg(test)]
+#[path = "framing_tests.rs"]
+mod framing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -737,136 +766,6 @@ mod tests {
         assert_eq!(frame_len(b"a\n"), None);
     }
 
-    /// Upstream's `WriteChunk` and `Flush`, as this read them before it read
-    /// on from where it left off, to check against.
-    mod upstream {
-        use crate::sse_check::data_lines_valid;
-
-        use super::super::{BytesMut, Framer, go, needs_line_break};
-
-        pub(super) struct Upstream {
-            pub(super) framer: Framer,
-            pending: Vec<u8>,
-        }
-
-        impl Upstream {
-            pub(super) fn new(is_codex_client: bool) -> Self {
-                Self {
-                    framer: Framer::new(is_codex_client),
-                    pending: Vec::new(),
-                }
-            }
-
-            pub(super) fn write_chunk(&mut self, out: &mut BytesMut, chunk: &[u8]) {
-                let framer = &mut self.framer;
-                if chunk.is_empty() || !framer.terminal_event.is_empty() {
-                    return;
-                }
-                if starts_new_data_frame(&self.pending, chunk) {
-                    let frame = std::mem::take(&mut self.pending);
-                    framer.write_frame(out, &frame);
-                    if !framer.terminal_event.is_empty() {
-                        return;
-                    }
-                }
-                if needs_line_break(&self.pending, chunk) {
-                    self.pending.push(b'\n');
-                }
-                self.pending.extend_from_slice(chunk);
-                loop {
-                    let len = frame_len(&self.pending);
-                    if len == 0 {
-                        break;
-                    }
-                    let frame: Vec<u8> = self.pending.drain(..len).collect();
-                    framer.write_frame(out, &frame);
-                    if !framer.terminal_event.is_empty() {
-                        self.pending.clear();
-                        return;
-                    }
-                }
-                if go::trim_space(&self.pending).is_empty() {
-                    self.pending.clear();
-                    return;
-                }
-                if self.pending.is_empty() || !can_emit_without_delimiter(&self.pending) {
-                    return;
-                }
-                let frame = std::mem::take(&mut self.pending);
-                framer.write_frame(out, &frame);
-            }
-
-            pub(super) fn flush(&mut self, out: &mut BytesMut) {
-                if self.pending.is_empty() || !self.framer.terminal_event.is_empty() {
-                    return;
-                }
-                if go::trim_space(&self.pending).is_empty()
-                    || !can_flush_without_delimiter(&self.pending)
-                {
-                    self.pending.clear();
-                    return;
-                }
-                let frame = std::mem::take(&mut self.pending);
-                self.framer.write_frame(out, &frame);
-            }
-        }
-
-        fn frame_len(chunk: &[u8]) -> usize {
-            let find = |needle: &[u8]| chunk.windows(needle.len()).position(|w| w == needle);
-            match (find(b"\n\n"), find(b"\r\n\r\n")) {
-                (None, None) => 0,
-                (None, Some(crlf)) => crlf + 4,
-                (Some(lf), None) => lf + 2,
-                (Some(lf), Some(crlf)) if lf < crlf => lf + 2,
-                (Some(_), Some(crlf)) => crlf + 4,
-            }
-        }
-
-        fn needs_more_data(chunk: &[u8]) -> bool {
-            let trimmed = go::trim_space(chunk);
-            !trimmed.is_empty() && has_field(trimmed, b"event:") && !has_field(trimmed, b"data:")
-        }
-
-        fn has_field(chunk: &[u8], prefix: &[u8]) -> bool {
-            chunk
-                .split(|&b| b == b'\n')
-                .any(|line| go::trim_space(line).starts_with(prefix))
-        }
-
-        fn can_emit_without_delimiter(chunk: &[u8]) -> bool {
-            let trimmed = go::trim_space(chunk);
-            if trimmed.is_empty()
-                || needs_more_data(trimmed)
-                || !has_field(trimmed, b"event:")
-                || !has_field(trimmed, b"data:")
-            {
-                return false;
-            }
-            data_lines_valid(trimmed)
-        }
-
-        fn can_flush_without_delimiter(chunk: &[u8]) -> bool {
-            let trimmed = go::trim_space(chunk);
-            !trimmed.is_empty() && has_field(trimmed, b"data:") && data_lines_valid(trimmed)
-        }
-
-        fn starts_new_data_frame(pending: &[u8], chunk: &[u8]) -> bool {
-            let pending = go::trim_space(pending);
-            if pending.is_empty()
-                || has_field(pending, b"event:")
-                || !has_field(pending, b"data:")
-                || !data_lines_valid(pending)
-            {
-                return false;
-            }
-            let start = chunk
-                .iter()
-                .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-                .unwrap_or(chunk.len());
-            chunk[start..].starts_with(b"data:")
-        }
-    }
-
     /// A small, seeded generator, so a failure can be run again.
     struct Rng(u64);
 
@@ -883,83 +782,55 @@ mod tests {
         }
     }
 
-    // Against upstream's reading, which reads the held-back event again for
-    // each chunk, over streams cut at random.
+    // Independent pre-repair traces, not a second copy of production's sink.
+    // Random payload partitions exercise scanning without invoking the retained
+    // field-name/malformed-data differences listed in framing_tests.
     #[test]
     fn frames_as_upstream_does() {
-        let tokens: &[&[u8]] = &[
-            b"event: response.output_text.delta",
-            b"event: codex.rate_limits",
-            b"event: ping",
-            b"event:",
-            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}",
-            b"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}",
-            b"data: {\"type\":\"codex.rate_limits\"}",
-            b"data: {\"a\":",
-            b"data: 1}",
-            b"data: [DONE]",
-            b"data:",
-            b"da",
-            b"ta: {}",
-            b"{",
-            b"}",
-            b"x",
-            b": c",
-            b"id: 1",
-            b"\n",
-            b"\n",
-            b"\n",
-            b"\n\n",
-            b"\r\n",
-            b"\r\n\r\n",
-            b"\r",
-            b" ",
-            b"\t",
-            b"\xc2\xa0",
-            b"\xe3\x80\x80",
-            b"\xe3\x80",
-            b"\xff",
-        ];
-        let ends: &[&[u8]] = &[
-            b"event: response.completed",
-            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"output\":[]}}",
-            b"data: {\"type\":\"error\",\"error\":{\"message\":\"m\"}}",
+        let tokens = [
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"a雪\"}\n\n",
+            "event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\"}\r\n\r\n",
+            "data: {\"type\":\"response.metadata\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n",
+            "data: [DONE]\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+            "data: {\"type\":\"error\",\"error\":{\"message\":\"m\"}}\n\n",
         ];
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        for _ in 0..10_000 {
-            let mut stream = Vec::new();
-            for _ in 0..rng.below(40) {
-                let token = if rng.below(40) == 0 {
-                    ends[rng.below(ends.len())]
-                } else {
-                    tokens[rng.below(tokens.len())]
-                };
-                stream.extend_from_slice(token);
-            }
+        for case in 0..10_000 {
             let codex = rng.below(2) == 0;
             let mut upstream = upstream::Upstream::new(codex);
             let mut framer = Framer::new(codex);
-            let (mut want, mut got) = (BytesMut::new(), BytesMut::new());
-            let mut at = 0;
-            while at < stream.len() {
-                let end = (at + 1 + rng.below(12)).min(stream.len());
-                upstream.write_chunk(&mut want, &stream[at..end]);
-                framer.write_chunk(&mut got, &stream[at..end]).unwrap();
-                assert_eq!(got, want, "{:?} cut at {end}", go::quote_bytes(&stream));
-                at = end;
+            let mut got = BytesMut::new();
+            for _ in 0..1 + rng.below(40) {
+                let token = tokens[rng.below(tokens.len())];
+                let payload = token.find("data:").unwrap() + 5;
+                upstream.write_chunk(&token.as_bytes()[..payload]);
+                framer
+                    .write_chunk(&mut got, &token.as_bytes()[..payload])
+                    .unwrap();
+                assert_eq!(
+                    framer.frames, upstream.frames,
+                    "case={case} prefix={token:?}"
+                );
+                let mut at = payload;
+                while at < token.len() {
+                    let end = (at + 1 + rng.below(12)).min(token.len());
+                    let chunk = &token.as_bytes()[at..end];
+                    upstream.write_chunk(chunk);
+                    framer.write_chunk(&mut got, chunk).unwrap();
+                    assert_eq!(
+                        framer.frames, upstream.frames,
+                        "case={case} token={token:?} cut={end}"
+                    );
+                    assert_eq!(framer.terminal_event, upstream.terminal_event);
+                    at = end;
+                }
             }
-            upstream.flush(&mut want);
+            upstream.flush();
             framer.flush(&mut got);
-            assert_eq!(got, want, "{:?}", go::quote_bytes(&stream));
-            let upstream = upstream.framer;
-            assert_eq!(
-                (framer.terminal_event, framer.last_event, framer.data_frames),
-                (
-                    upstream.terminal_event,
-                    upstream.last_event,
-                    upstream.data_frames
-                ),
-            );
+            assert_eq!(framer.frames, upstream.frames, "case={case}");
+            assert_eq!(framer.terminal_event, upstream.terminal_event);
         }
     }
 

@@ -1885,3 +1885,129 @@ async fn self_update_mode_is_set() {
         assert_eq!(read(&dir), before, "a refused mode changed the file");
     }
 }
+
+// Compression settings use the same raw v8 edits and typed legacy saves as
+// existing settings; check the disk, reload snapshot and JSON mirror together.
+#[tokio::test]
+async fn compression_management_round_trips_raw_and_typed_saves() {
+    for raw in [
+        "port: 8317\n",
+        "config-version: 8\nserver: {port: 8317}\n",
+        "oauth: {providers: {codex: {websocket-compression: true}}}\n",
+    ] {
+        let (dir, api) = over(raw);
+        for (path, body) in [
+            (
+                "server/response-compression",
+                r#"{"enabled":false,"min-bytes":64}"#,
+            ),
+            (
+                "upstream/codex",
+                r#"{"websocket-compression":false,"upstream-request-compression":true,"upstream-request-compression-min-bytes":4096}"#,
+            ),
+        ] {
+            request(&api, Method::PATCH, &at(path), body, StatusCode::OK).await;
+        }
+        for debug in [true, false, true] {
+            // This legacy setter saves a typed Config, then reloads it.
+            request(
+                &api,
+                Method::PUT,
+                "/v0/management/debug",
+                &format!(r#"{{"value":{debug}}}"#),
+                StatusCode::OK,
+            )
+            .await;
+            let cfg = loaded(&api, &dir);
+            assert_eq!(cfg.response_compression.enabled, Some(false));
+            assert_eq!(cfg.response_compression.effective_min_bytes(), 64);
+            assert_eq!(cfg.codex.websocket_compression, Some(false));
+            assert!(cfg.codex.request_compression_enabled());
+            assert_eq!(cfg.codex.request_compression_min_bytes(), 4096);
+            let body = request(
+                &api,
+                Method::GET,
+                "/v0/management/config",
+                "",
+                StatusCode::OK,
+            )
+            .await;
+            let json: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                json["response-compression"],
+                json!({"enabled":false,"min-bytes":64})
+            );
+            assert_eq!(json["codex"]["websocket-compression"], false);
+            assert_eq!(json["codex"]["upstream-request-compression"], true);
+            assert_eq!(
+                json["codex"]["upstream-request-compression-min-bytes"],
+                4096
+            );
+            // Upstream's JSON mirror decodes back into canonical storage here.
+            let mirrored: open_ferry_core::config::ResponseCompressionConfig =
+                serde_json::from_value(json["response-compression"].clone()).unwrap();
+            assert_eq!(mirrored, cfg.response_compression);
+            let codex: open_ferry_core::config::CodexConfig =
+                serde_json::from_value(json["codex"].clone()).unwrap();
+            assert_eq!(codex, cfg.codex);
+            assert_eq!(
+                value_at(&dir, "server/response-compression/enabled"),
+                Some(AnyValue::Bool(false))
+            );
+            assert_eq!(
+                value_at(&dir, "upstream/codex/websocket-compression"),
+                Some(AnyValue::Bool(false))
+            );
+        }
+        for path in [
+            "server/response-compression",
+            "upstream/codex/websocket-compression",
+            "upstream/codex/upstream-request-compression",
+            "upstream/codex/upstream-request-compression-min-bytes",
+        ] {
+            request(&api, Method::DELETE, &at(path), "", StatusCode::OK).await;
+        }
+        request(
+            &api,
+            Method::PUT,
+            "/v0/management/debug",
+            r#"{"value":false}"#,
+            StatusCode::OK,
+        )
+        .await;
+        let cfg = loaded(&api, &dir);
+        assert!(cfg.response_compression.is_enabled());
+        assert!(cfg.codex.websocket_compression_enabled());
+        assert!(!cfg.codex.request_compression_enabled());
+        for key in [
+            "response-compression",
+            "websocket-compression",
+            "upstream-request-compression",
+        ] {
+            assert!(!read(&dir).contains(key));
+        }
+    }
+}
+
+#[tokio::test]
+async fn compression_raw_yaml_write_keeps_zero_negative_and_explicit_false() {
+    let (dir, api) = over("port: 8317\n");
+    for raw in [
+        "response-compression: {enabled: false, min-bytes: 0}\ncodex: {websocket-compression: false, upstream-request-compression: true, upstream-request-compression-min-bytes: -1}\n",
+        "config-version: 8\nserver: {response-compression: {enabled: false, min-bytes: -1}}\nupstream: {codex: {websocket-compression: false, upstream-request-compression: false, upstream-request-compression-min-bytes: 0}}\n",
+    ] {
+        request(
+            &api,
+            Method::PUT,
+            "/v0/management/config.yaml",
+            raw,
+            StatusCode::OK,
+        )
+        .await;
+        let cfg = loaded(&api, &dir);
+        assert_eq!(cfg.response_compression.enabled, Some(false));
+        assert_eq!(cfg.response_compression.effective_min_bytes(), 1024);
+        assert_eq!(cfg.codex.websocket_compression, Some(false));
+        assert_eq!(cfg.codex.request_compression_min_bytes(), 1024);
+    }
+}

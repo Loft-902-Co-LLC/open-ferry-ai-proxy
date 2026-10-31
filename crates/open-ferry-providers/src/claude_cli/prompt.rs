@@ -8,7 +8,9 @@
 //! message. Fields it has no use for, such as sampling settings and
 //! metadata, are dropped, with a debug line.
 //!
-//! One user turn goes as it is. A conversation of several goes as a
+//! Internal commentary markers become plain text in either path; blank
+//! marked commentary is dropped. One user turn otherwise goes as it is.
+//! A conversation of several goes as a
 //! transcript in one message: a note saying what follows, then each turn
 //! as a label (`[user]` or `[assistant]`) and its blocks (images and
 //! documents where they stood, earlier thinking left out), then an end
@@ -21,6 +23,7 @@
 //! its own, and empty text blocks are left out.
 
 use open_ferry_core::exec::ExecError;
+use open_ferry_translate::signature::is_empty_codex_commentary_message;
 use serde_json::{Map, Value, json};
 
 use crate::json::{int_at, str_at};
@@ -177,6 +180,7 @@ fn tools_error(what: &str) -> ExecError {
 /// empty text; the last must be the user's.
 fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
     let mut turns = Vec::with_capacity(messages.len());
+    let mut empty_last_user_turn = false;
     for message in messages {
         let role = str_at(message, "role");
         if role != "user" && role != "assistant" {
@@ -184,7 +188,16 @@ fn turns(messages: &[Value]) -> Result<Vec<(String, Vec<Value>)>, ExecError> {
                 "claude-cli: a message has the role {role:?}; only user and assistant are taken"
             )));
         }
-        turns.push((role, blocks(message.get("content"))));
+        let content = blocks(message.get("content"));
+        if content.is_empty() && is_empty_codex_commentary_message(message, true) {
+            empty_last_user_turn |= role == "user";
+            continue;
+        }
+        empty_last_user_turn = false;
+        turns.push((role, content));
+    }
+    if empty_last_user_turn && turns.last().is_none_or(|(role, _)| role != "user") {
+        return Err(invalid("claude-cli: the last user turn is empty"));
     }
     if turns.last().is_some_and(|(role, _)| role != "user") {
         return Err(invalid(
@@ -203,12 +216,18 @@ fn blocks(content: Option<&Value>) -> Vec<Value> {
         Some(Value::Array(blocks)) => blocks
             .iter()
             .filter(|block| !(str_at(block, "type") == "text" && str_at(block, "text").is_empty()))
-            .map(|block| {
+            .filter_map(|block| {
+                if str_at(block, "type") == "thinking"
+                    && str_at(block, "signature").trim() == "cpa:commentary:v1"
+                {
+                    let text = str_at(block, "thinking");
+                    return (!text.trim().is_empty()).then(|| text_block(&text));
+                }
                 let mut block = block.clone();
                 if let Some(block) = block.as_object_mut() {
                     block.remove("cache_control");
                 }
-                block
+                Some(block)
             })
             .collect(),
         _ => Vec::new(),
@@ -454,5 +473,131 @@ mod tests {
         ] {
             prepare(&json!({"messages": [user], "tool_choice": choice, "tools": []})).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod commentary_tests {
+    use super::*;
+
+    #[test]
+    fn r2_cli_single_turn_restores_commentary_without_a_marker() {
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"thinking","thinking":"Checking.","signature":" cpa:commentary:v1 "},
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"},
+            {"type":"thinking","thinking":" ","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"Continue."}]}]});
+        let prepared = prepare(&body).unwrap();
+        let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+        assert_eq!(
+            input["message"]["content"],
+            json!([
+            {"type":"text","text":"Checking."},{"type":"text","text":"Continue."}])
+        );
+        assert!(
+            !String::from_utf8(prepared.input)
+                .unwrap()
+                .contains("cpa:commentary:v1")
+        );
+        for text in ["", " "] {
+            let body = json!({"messages":[{"role":"user","content":[
+                {"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"}]}]});
+            assert_eq!(prepare(&body).unwrap_err().status, 400);
+        }
+    }
+
+    #[test]
+    fn r2_cli_transcript_restores_commentary_in_place() {
+        let body = json!({"messages":[{"role":"user","content":"First"},
+            {"role":"assistant","content":[
+                {"type":"text","text":"Before"},
+                {"type":"thinking","thinking":"Checking.","signature":"cpa:commentary:v1"},
+                {"type":"thinking","thinking":"private reason","signature":"opaque"},
+                {"type":"text","text":"Final"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]},
+            {"role":"user","content":"Next"}]});
+        let prepared = prepare(&body).unwrap();
+        let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+        assert_eq!(
+            input["message"]["content"],
+            json!([
+            {"type":"text","text":TRANSCRIPT_NOTE},
+            {"type":"text","text":"[user]"},{"type":"text","text":"First"},
+            {"type":"text","text":"[assistant]"},{"type":"text","text":"Before"},
+            {"type":"text","text":"Checking."},{"type":"text","text":"Final"},
+            {"type":"text","text":"[user]"},{"type":"text","text":"Next"},
+            {"type":"text","text":TRANSCRIPT_END}])
+        );
+        assert!(
+            !String::from_utf8(prepared.input)
+                .unwrap()
+                .contains("cpa:commentary:v1")
+        );
+    }
+}
+
+#[cfg(test)]
+mod empty_commentary_error_tests {
+    use super::*;
+
+    #[test]
+    fn r3_cli_reports_an_empty_last_user_turn_after_blank_commentary_removal() {
+        for text in ["", " "] {
+            for count in [1, 2] {
+                let mut messages = vec![
+                    json!({"role":"user","content":"First"}),
+                    json!({"role":"assistant","content":"Answer"}),
+                    json!({"role":"user","content":vec![json!({"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"});count]}),
+                ];
+                let error = prepare(&json!({"messages":messages})).unwrap_err();
+                assert_eq!(error.status, 400);
+                let error: Value = serde_json::from_str(&error.message).unwrap();
+                assert_eq!(error["error"]["type"], "invalid_request_error");
+                assert_eq!(
+                    error["error"]["message"],
+                    "claude-cli: the last user turn is empty"
+                );
+                // An omitted middle turn must not reject a later real user turn.
+                messages.push(json!({"role":"user","content":"Continue"}));
+                prepare(&json!({"messages":messages})).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod removed_commentary_turn_tests {
+    use super::*;
+
+    fn check_preserved_user_turn(blank_assistant: bool) {
+        for text in ["", " "] {
+            for count in [1, 2] {
+                let marker =
+                    json!({"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"});
+                let mut messages = vec![
+                    json!({"role":"user","content":"A"}),
+                    json!({"role":"user","content":vec![marker.clone();count]}),
+                ];
+                if blank_assistant {
+                    messages.push(json!({"role":"assistant","content":[marker]}));
+                }
+                let prepared = prepare(&json!({"messages":messages})).unwrap();
+                let input: Value = serde_json::from_slice(&prepared.input).unwrap();
+                assert_eq!(
+                    input["message"]["content"],
+                    json!([{"type":"text","text":"A"}])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r4_cli_preserves_user_before_removed_blank_user() {
+        check_preserved_user_turn(false);
+    }
+
+    #[test]
+    fn r4_cli_preserves_user_before_removed_blank_user_and_assistant() {
+        check_preserved_user_turn(true);
     }
 }

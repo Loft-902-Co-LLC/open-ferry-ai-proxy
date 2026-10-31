@@ -6,7 +6,7 @@
 //! Antigravity's Claude 5.5 returns a CAQS signature inside a second base64
 //! layer. The outer layer decodes to base64 text starting with `C`, which
 //! encodes to a leading `Q`. That text decodes to an envelope version 4
-//! protobuf whose channel block names channel 18, Google infrastructure
+//! protobuf whose channel block names a rotating channel ID, Google infrastructure
 //! (field 2 set to 2) and a `thinking` block, with the signature bytes in
 //! container field 5.
 //!
@@ -57,10 +57,8 @@ pub(super) fn inspect_unprefixed_antigravity_caqs(
         .map_err(|err| error!("invalid Antigravity CAQS inner encoding: {err}"))?;
     let info = inspect_claude_cais_payload(&decoded, true)
         .map_err(|err| error!("invalid Antigravity CAQS payload: {err}"))?;
-    // Only the observed Google thinking channel. Other versions and channels
-    // need their own capture and replay checks.
+    // Channel IDs rotate; the Google thinking envelope schema stays fixed.
     if info.envelope_version != 4
-        || info.channel_id != 18
         || info.infrastructure != Some(2)
         || info.block_kind != "thinking"
         || !info.signature_in_container

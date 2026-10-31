@@ -86,6 +86,8 @@ pub struct Config {
     pub max_request_body_bytes: i64,
     /// open-ferry's inbound resource limits, under `server` in v8.
     pub ingress_limits: IngressLimits,
+    /// Negotiated downstream HTTP compression; defaults are applied by its accessors.
+    pub response_compression: ResponseCompressionConfig,
     /// Client-facing compatibility behavior.
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
@@ -229,6 +231,7 @@ impl Default for Config {
         Self {
             max_request_body_bytes: 0,
             ingress_limits: IngressLimits::default(),
+            response_compression: ResponseCompressionConfig::default(),
             models: CatalogSources::default(),
             client: ClientConfig::default(),
             proxy_url: String::new(),
@@ -324,6 +327,7 @@ impl Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
+            .field("response_compression", &self.response_compression)
             .field("max_request_body_bytes", &self.max_request_body_bytes)
             .field("ingress_limits", &self.ingress_limits)
             .field("models", &self.models)
@@ -613,10 +617,55 @@ pub struct XaiConfig {
     pub inject_x_search: bool,
 }
 
+/// Negotiated downstream HTTP response compression (`server.response-compression`).
+/// Stored values stay as written so effective defaults never populate an unset key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.ResponseCompressionConfig",
+    rename_all = "kebab-case"
+)]
+pub struct ResponseCompressionConfig {
+    /// Unset enables compression; an explicit false disables it.
+    pub enabled: Option<bool>,
+    /// Minimum non-streaming response size; nonpositive values mean 1024 bytes.
+    pub min_bytes: i64,
+}
+
+impl ResponseCompressionConfig {
+    /// Whether negotiated downstream response compression is enabled (default true).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    /// Minimum non-streaming response size in bytes, already defaulted.
+    pub fn effective_min_bytes(&self) -> i64 {
+        if self.min_bytes <= 0 {
+            1024
+        } else {
+            self.min_bytes
+        }
+    }
+}
+
+impl Config {
+    /// Canonical downstream settings, also used for the management JSON mirror.
+    /// There is one storage location, so YAML load/reload cannot leave a stale mirror.
+    pub fn effective_response_compression(&self) -> &ResponseCompressionConfig {
+        &self.response_compression
+    }
+}
+
 /// Provider-wide Codex behavior.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename = "config.CodexConfig", rename_all = "kebab-case")]
 pub struct CodexConfig {
+    /// Upstream and downstream permessage-deflate; unset means enabled.
+    pub websocket_compression: Option<bool>,
+    /// Opt-in zstd request bodies for the verified ChatGPT Codex backend.
+    pub upstream_request_compression: bool,
+    /// Minimum eligible request size; nonpositive values mean 1024 bytes.
+    pub upstream_request_compression_min_bytes: i64,
     /// Holds back stream frames that precede generation so an overloaded
     /// upstream can be retried on another credential.
     pub stream_bootstrap_buffering: bool,
@@ -642,6 +691,15 @@ pub struct CodexConfig {
 impl fmt::Debug for CodexConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CodexConfig")
+            .field("websocket_compression", &self.websocket_compression)
+            .field(
+                "upstream_request_compression",
+                &self.upstream_request_compression,
+            )
+            .field(
+                "upstream_request_compression_min_bytes",
+                &self.upstream_request_compression_min_bytes,
+            )
             .field(
                 "stream_bootstrap_buffering",
                 &self.stream_bootstrap_buffering,
@@ -662,6 +720,25 @@ impl fmt::Debug for CodexConfig {
 }
 
 impl CodexConfig {
+    /// Whether upstream/downstream WebSocket compression is enabled (default true).
+    pub fn websocket_compression_enabled(&self) -> bool {
+        self.websocket_compression.unwrap_or(true)
+    }
+
+    /// Whether Codex HTTP request compression is enabled (default false).
+    pub fn request_compression_enabled(&self) -> bool {
+        self.upstream_request_compression
+    }
+
+    /// Minimum eligible request size in bytes, already defaulted.
+    pub fn request_compression_min_bytes(&self) -> i64 {
+        if self.upstream_request_compression_min_bytes <= 0 {
+            1024
+        } else {
+            self.upstream_request_compression_min_bytes
+        }
+    }
+
     /// The bootstrap hold limit; zero means no time limit. Accepts Go
     /// durations (`20s`, `500ms`) and whole seconds (`15`); anything else,
     /// and words such as `none` or `off`, mean zero.

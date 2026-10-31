@@ -304,12 +304,26 @@ pub fn apply(
         headers: &options.headers,
         tracked: target.tracked,
     };
-    apply_call(
+    let touched = apply_call(
         rules.get(),
         &call,
         || original(config, target, request, options),
         body,
-    )
+    );
+    notify_response_format(body, options);
+    touched
+}
+
+/// Reports the final field even when no rules matched or a filter removed it.
+fn notify_response_format(body: &Value, options: &Options) {
+    if let Some(callback) = &options.metadata.finalized_response_format {
+        callback(
+            body.get("response_format")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim(),
+        );
+    }
 }
 
 /// The rules a call reads.

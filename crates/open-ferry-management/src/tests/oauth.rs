@@ -36,6 +36,7 @@
 //! - The v8 contract's OAuth checks are ported here rather than with the
 //!   rest of `TestManagementV8IndependentContract`.
 
+mod session_proxy;
 mod siwc_bind;
 
 use std::net::SocketAddr;

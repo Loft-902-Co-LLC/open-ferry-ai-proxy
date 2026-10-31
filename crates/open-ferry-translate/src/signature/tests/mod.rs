@@ -25,6 +25,7 @@ mod kimi_validation;
 mod observed;
 mod provider_compatibility;
 mod signaturetest;
+mod vertex;
 
 pub(crate) use observed::*;
 

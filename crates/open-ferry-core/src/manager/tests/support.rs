@@ -686,6 +686,92 @@ pub(crate) async fn settle() {
     }
 }
 
+/// Seven bounded operations, with rejection, refresh failure and recovery in
+/// order. Other operations can observe each intermediate recovery state.
+pub(crate) fn recovery_step_orderings(steps: [&str; 7]) -> Vec<[&str; 7]> {
+    fn visit<'a>(steps: &mut [&'a str; 7], at: usize, out: &mut Vec<[&'a str; 7]>) {
+        if at == steps.len() {
+            out.push(*steps);
+            return;
+        }
+        for next in at..steps.len() {
+            steps.swap(at, next);
+            visit(steps, at + 1, out);
+            steps.swap(at, next);
+        }
+    }
+    let mut steps = steps;
+    let mut orders = Vec::with_capacity(5040);
+    visit(&mut steps, 0, &mut orders);
+    orders.retain(|order| {
+        let at = |step| order.iter().position(|value| *value == step).unwrap();
+        at("401") < at("invalid_grant") && at("invalid_grant") < at("relogin")
+    });
+    assert_eq!(orders.len(), 840);
+    orders
+}
+
+/// A second credential in the ordering families checks the independently held
+/// Codex partition while the first credential exercises policy/quota transitions.
+pub(crate) fn partition_hold(manager: &Manager) -> Timestamp {
+    let until = manager.now() + TimeDelta::hours(1);
+    let mut candidate = auth_with_metadata(
+        "partition-hold.json",
+        "codex",
+        serde_json::json!({
+            "type":"codex", "access_token":"dummy-outer", "refresh_token":"dummy-outer-refresh",
+            "expired":"2000-01-01T00:00:00Z", "use_siwc":false,
+            "siwc":{"access_token":"dummy-siwc", "refresh_token":"dummy-siwc-refresh", "expired":"2000-01-01T00:00:00Z"}
+        }),
+    );
+    candidate.status = crate::auth::Status::Active;
+    candidate.next_refresh_after = Some(until);
+    candidate.codex_refresh_failure = Some(crate::auth::CodexRefreshFailure {
+        partition: crate::auth::CodexCredentialPartition::Siwc,
+        error: ExecError::upstream(400, "invalid_grant"),
+    });
+    manager.register(candidate).unwrap();
+    until
+}
+
+pub(crate) fn rotate_outer_with_partition_hold(manager: &Manager) {
+    let base = manager.get("partition-hold.json").unwrap();
+    let mut updated = base.as_ref().clone();
+    updated.metadata.insert(
+        "access_token".into(),
+        serde_json::json!(format!("dummy-outer-{}", base.credential_version)),
+    );
+    updated.metadata.insert(
+        "refresh_token".into(),
+        serde_json::json!(format!("dummy-refresh-{}", base.credential_version)),
+    );
+    updated.codex_refresh_failure = None;
+    updated.next_refresh_after = Some(manager.now() + TimeDelta::seconds(30));
+    updated.codex_persist_intent = crate::auth::codex_refresh::CodexPersistIntent::Refresh(
+        crate::auth::codex_refresh::CredentialRefreshPatch::new(
+            &base.metadata,
+            &updated.metadata,
+            true,
+            false,
+        ),
+    );
+    manager
+        .update_refreshed(&base, base.registration_epoch, updated)
+        .unwrap();
+}
+
+pub(crate) fn assert_partition_hold(manager: &Manager, until: Timestamp) {
+    let live = manager.get("partition-hold.json").unwrap();
+    assert_eq!(live.next_refresh_after, Some(until));
+    assert_eq!(live.status, crate::auth::Status::Active);
+    assert_eq!(
+        live.codex_refresh_failure
+            .as_ref()
+            .map(|failure| failure.partition),
+        Some(crate::auth::CodexCredentialPartition::Siwc)
+    );
+}
+
 #[cfg(test)]
 mod smoke {
     use super::*;

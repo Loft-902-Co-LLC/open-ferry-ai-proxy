@@ -1029,11 +1029,11 @@ async fn active_partial_failure_backs_off_like_a_full_refresh_failure() {
 }
 
 #[tokio::test]
-async fn active_partial_invalid_grant_failures_back_off_longer_each_time() {
+async fn active_partial_invalid_grant_restarts_after_saved_rotation() {
     let (_dir, _store, manager, executor) =
         partial_setup(NOON10, true, true, false, true, 400, "invalid_grant");
-    for (failures, delay) in [(1, TimeDelta::seconds(60)), (2, TimeDelta::seconds(120))] {
-        if failures > 1 {
+    for attempt in 0..2 {
+        if attempt > 0 {
             // The executor's one permit went to the first refresh.
             executor.release.add_permits(1);
         }
@@ -1041,10 +1041,108 @@ async fn active_partial_invalid_grant_failures_back_off_longer_each_time() {
         assert!(manager.force_refresh("codex.json").await.is_err());
         let after = manager.now();
         let live = manager.get("codex.json").unwrap();
-        assert_eq!(refresh_failures(&manager, "codex.json"), failures);
-        assert_retry_in(&live, before, after, delay);
+        assert_eq!(refresh_failures(&manager, "codex.json"), 1);
+        assert_retry_in(&live, before, after, TimeDelta::seconds(60));
         assert_eq!(live.status, Status::Active);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r3_outer_rotations_restart_active_partition_failure_count() {
+    let h = Harness::new(Settings::default());
+    let executor = FakeExecutor::new("codex");
+    executor.set_refresh(|before| {
+        let mut after = before.clone();
+        after.metadata.insert(
+            "access_token".into(),
+            json!(format!("dummy-outer-{}", before.credential_version)),
+        );
+        after.metadata.insert(
+            "refresh_token".into(),
+            json!(format!("dummy-refresh-{}", before.credential_version)),
+        );
+        after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &before.metadata,
+            &after.metadata,
+            true,
+            false,
+        ));
+        after.codex_refresh_failure = Some(CodexRefreshFailure {
+            partition: crate::auth::CodexCredentialPartition::Siwc,
+            error: ExecError::upstream(400, "invalid_grant"),
+        });
+        Ok(after)
+    });
+    h.executor(&executor);
+    let mut auth = fixture();
+    auth.status = Status::Active;
+    auth.metadata["siwc"]["expired"] = json!((h.now() + TimeDelta::hours(1)).to_rfc3339());
+    h.add(auth, &[]);
+    for _ in 1..=2 {
+        let before = h.get("codex.json");
+        assert!(h.manager.force_refresh("codex.json").await.is_err());
+        let live = h.get("codex.json");
+        assert!(live.credential_version > before.credential_version);
+        assert_eq!(h.refresh_failures("codex.json"), 1);
+        assert_eq!(
+            live.next_refresh_after,
+            Some(h.now() + TimeDelta::seconds(60))
+        );
+        assert_eq!(live.status, Status::Active);
+        assert_eq!(
+            failed_partition(&live),
+            Some(crate::auth::CodexCredentialPartition::Siwc)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47r3_partial_failure_does_not_hold_the_other_partition_past_its_refresh_point() {
+    let h = Harness::new(Settings::default());
+    let executor = FakeExecutor::new("codex");
+    executor.set_lead(Some(Duration::from_secs(30)));
+    let clock = h.clock.clone();
+    executor.set_refresh(move |before| {
+        let mut after = before.clone();
+        after.metadata.insert(
+            "access_token".into(),
+            json!(format!("dummy-outer-{}", before.credential_version)),
+        );
+        after.metadata.insert(
+            "expired".into(),
+            json!((clock.now() + TimeDelta::seconds(90)).to_rfc3339()),
+        );
+        after.codex_persist_intent = CodexPersistIntent::Refresh(CredentialRefreshPatch::new(
+            &before.metadata,
+            &after.metadata,
+            true,
+            false,
+        ));
+        after.codex_refresh_failure = Some(CodexRefreshFailure {
+            partition: crate::auth::CodexCredentialPartition::Siwc,
+            error: ExecError::upstream(400, "invalid_grant"),
+        });
+        Ok(after)
+    });
+    h.executor(&executor);
+    let mut auth = fixture();
+    auth.status = Status::Active;
+    auth.metadata.remove("refresh_interval_seconds");
+    auth.metadata["siwc"]["expired"] = json!((h.now() + TimeDelta::hours(1)).to_rfc3339());
+    h.add(auth, &[]);
+    for _ in 0..2 {
+        assert!(h.manager.force_refresh("codex.json").await.is_err());
+        h.clock.advance(Duration::from_secs(60));
+    }
+    let live = h.get("codex.json");
+    assert_eq!(
+        live.outer_refresh_due_at(h.now(), Some(Duration::from_secs(30))),
+        Some(h.now())
+    );
+    assert!(
+        should_refresh(&live, Some(Duration::from_secs(30)), h.now()),
+        "healthy outer token must refresh now, before its 90s expiry"
+    );
 }
 
 #[tokio::test]

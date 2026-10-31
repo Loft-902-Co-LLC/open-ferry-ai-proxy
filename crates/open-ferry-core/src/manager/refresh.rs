@@ -502,7 +502,9 @@ pub(crate) fn clear_unauthorized_model_states(auth: &mut Auth, now: Timestamp) -
             err.http_status == 401
                 || equal_fold(&err.code, "unauthorized")
                 || is_unauthorized_error(ErrView::Auth(err))
-        }) || go_lower(&state.status_message).contains("unauthorized");
+                || super::classify::is_invalid_grant_result_error(err)
+        }) || go_lower(&state.status_message).contains("unauthorized")
+            || super::classify::is_invalid_grant_message(&state.status_message);
         if !unauthorized {
             continue;
         }
@@ -512,7 +514,9 @@ pub(crate) fn clear_unauthorized_model_states(auth: &mut Auth, now: Timestamp) -
                 || state.quota.next_recover_at.is_some_and(|t| t > now))
         {
             state.last_error = None;
-            if go_lower(&state.status_message).contains("unauthorized") {
+            if go_lower(&state.status_message).contains("unauthorized")
+                || super::classify::is_invalid_grant_message(&state.status_message)
+            {
                 state.status_message.clone_from(&state.quota.reason);
             }
             state.updated_at = Some(now);

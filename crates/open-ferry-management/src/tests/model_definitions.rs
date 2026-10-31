@@ -191,13 +191,13 @@ async fn channels_list_their_models() {
         (
             "codex",
             concat!(
-                r#"{"id":"gpt-5.5","object":"model","created":1776902400,"owned_by":"openai","#,
-                r#""type":"openai","display_name":"GPT 5.5","version":"gpt-5.5","#,
-                r#""description":"Frontier model for complex coding, research, and real-world work.","#,
+                r#"{"id":"gpt-6-astra","object":"model","created":1783616400,"owned_by":"openai","#,
+                r#""type":"openai","display_name":"GPT 6.0 Astra","version":"gpt-6.0","#,
+                r#""description":"GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.","#,
                 r#""context_length":272000,"max_completion_tokens":128000,"#,
                 r#""supported_parameters":["tools"],"supportedInputModalities":["text","image"],"#,
                 r#""supportedOutputModalities":["text"],"#,
-                r#""thinking":{"levels":["low","medium","high","xhigh"]}}"#,
+                r#""thinking":{"levels":["low","medium","high","xhigh","max"]}}"#,
             ),
         ),
     ] {
@@ -290,6 +290,7 @@ async fn xai_and_meta_channels_list_their_models() {
     assert_eq!(
         imagine,
         [
+            "grok-imagine-video-1.5-lite",
             "grok-imagine-image",
             "grok-imagine-image-quality",
             "grok-imagine-image-2.0",
@@ -412,6 +413,159 @@ async fn both_routes_answer_alike() {
         assert_eq!(
             (answer.status, answer.body.as_str()),
             (StatusCode::NOT_FOUND, "")
+        );
+    }
+}
+
+#[tokio::test]
+async fn both_manual_refresh_routes_report_success_error_and_skipped() {
+    use open_ferry_core::registry::{CatalogRuntime, CatalogStore};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let dir = super::scratch_dir();
+    let path = dir.path().join("models.json");
+    let mut root: Value =
+        serde_json::from_str(open_ferry_translate::models::embedded_catalog_json()).unwrap();
+    root["claude"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"id":"claude-manual-refresh"}));
+    let data = serde_json::to_vec(&root).unwrap();
+    let runtime = CatalogRuntime::new(Arc::new(CatalogStore::new()), Duration::from_secs(3600));
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    let output = changes.clone();
+    runtime.set_listener(Some(Arc::new(move |providers| {
+        output.lock().unwrap().push(providers);
+    })));
+    let mut config = super::keyed_config();
+    config.models.catalog = path.to_string_lossy().into_owned();
+    let mut api = Api::with(config, None);
+    api.state = api.state.clone().with_catalogs(runtime.clone());
+    api.router = crate::router(api.state.clone());
+    for route in [
+        "/v8/management/routing/model-definitions/refresh",
+        "/v8/management/models/refresh",
+    ] {
+        std::fs::write(&path, &data).unwrap();
+        let body = api.post(route, "").await.expect(StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["catalogs"]["catalog"]["refreshed"], true);
+        assert_eq!(body["catalogs"]["codex-catalog"]["skipped"], true);
+        assert_eq!(body["catalogs"]["devin-catalog"]["skipped"], true);
+        let definitions = api
+            .get("/v8/management/routing/model-definitions/claude")
+            .await
+            .expect(StatusCode::OK);
+        assert!(ids(&definitions).contains(&"claude-manual-refresh"));
+        std::fs::write(&path, b"invalid").unwrap();
+        let body = api.post(route, "").await.expect(StatusCode::BAD_GATEWAY);
+        assert_eq!(body["ok"], false);
+        assert!(body["catalogs"]["catalog"]["error"].is_string());
+        assert!(runtime.general().lookup("claude-manual-refresh").is_some());
+    }
+    assert_eq!(*changes.lock().unwrap(), [vec!["claude".to_owned()]]);
+    let mut config = (*api.state.config()).clone();
+    config.models.catalog = "https://example.test/no-fetch?token=private".into();
+    api.state.set_config(Arc::new(config.clone()));
+    let body = api
+        .post("/v8/management/models/refresh", "")
+        .await
+        .expect(StatusCode::OK);
+    assert_eq!(body["catalogs"]["catalog"]["skipped"], true);
+    assert!(!body.to_string().contains("private"));
+    config.models.catalog = "relative.json".into();
+    api.state.set_config(Arc::new(config));
+    let body = api
+        .post("/v8/management/models/refresh", "")
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+    assert_eq!(body["ok"], false);
+}
+
+#[tokio::test]
+async fn manual_refresh_post_does_not_shadow_provider_definitions_get() {
+    let api = Api::new();
+    api.registry.register_client(
+        "refresh-provider",
+        "refresh",
+        &[ModelInfo {
+            id: "refresh-model".into(),
+            ..ModelInfo::default()
+        }],
+    );
+    let body = api
+        .get("/v8/management/routing/model-definitions/refresh")
+        .await
+        .expect(StatusCode::OK);
+    assert_eq!(body["channel"], "refresh");
+    assert_eq!(ids(&body), ["refresh-model"]);
+}
+
+#[tokio::test]
+async fn provider_definitions_keep_the_first_clients_search_flag() {
+    let api = Api::new();
+    for (client, supports_web_search) in [("b", true), ("a", false)] {
+        api.registry.register_client(
+            client,
+            "x",
+            &[ModelInfo {
+                id: "shared".into(),
+                supports_web_search,
+                ..ModelInfo::default()
+            }],
+        );
+    }
+    assert!(
+        api.registry
+            .model_info("shared", "x")
+            .unwrap()
+            .supports_web_search
+    );
+    let body = api
+        .get("/v8/management/routing/model-definitions/X")
+        .await
+        .expect(StatusCode::OK);
+    assert_eq!(ids(&body), ["shared"]);
+    assert!(body["models"][0].get("supports_web_search").is_none());
+}
+
+#[tokio::test]
+async fn refresh_joins_each_failed_catalog_error() {
+    use open_ferry_core::registry::{CatalogRuntime, CatalogStore};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = super::scratch_dir();
+    let general = dir.path().join("models.json");
+    let codex = dir.path().join("codex.json");
+    std::fs::write(&general, b"invalid").unwrap();
+    std::fs::write(&codex, br#"{"models":[]}"#).unwrap();
+    let mut config = super::keyed_config();
+    config.models.catalog = general.to_string_lossy().into_owned();
+    config.models.codex_catalog = codex.to_string_lossy().into_owned();
+    let mut api = Api::with(config, None);
+    api.state = api.state.clone().with_catalogs(CatalogRuntime::new(
+        Arc::new(CatalogStore::new()),
+        Duration::from_secs(3600),
+    ));
+    api.router = crate::router(api.state.clone());
+    for path in [
+        "/v8/management/models/refresh",
+        "/v8/management/routing/model-definitions/refresh",
+    ] {
+        let body = api.post(path, "").await.expect(StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body["error"],
+            "no valid model catalog source\nno valid model catalog source"
+        );
+        assert_eq!(
+            body["catalogs"]["catalog"]["error"],
+            "no valid model catalog source"
+        );
+        assert_eq!(
+            body["catalogs"]["codex-catalog"]["error"],
+            "no valid model catalog source"
         );
     }
 }

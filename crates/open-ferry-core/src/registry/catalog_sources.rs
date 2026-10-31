@@ -48,6 +48,9 @@
 //!   Devin isn't ported. Home mode isn't ported, so the general catalog is
 //!   never turned off.
 
+mod on_demand;
+pub use on_demand::{CatalogRefreshResult, CatalogSourceStatus, RefreshCancellation};
+
 use std::fs::File;
 use std::io::Read as _;
 use std::path::Path;
@@ -201,7 +204,7 @@ impl CatalogRuntime {
         }
     }
 
-    /// Stops following the files, and has reads under way publish nothing.
+    /// Stops following the files, fencing reads begun under active updaters.
     /// The catalogs in use stay; a later start reads every source again.
     pub fn stop(&self) {
         let mut running = lock(&self.inner.running);
@@ -240,11 +243,14 @@ struct UpdaterState {
     /// Whether the source is being followed: configured, and not stopped
     /// since.
     active: bool,
-    /// Counts source changes and stops; a read publishes only for the
-    /// current one.
+    /// Counts source changes; a read publishes only for the current one.
     generation: u64,
+    /// The active source's lifetime, cancelled on source change or stop.
+    cancellation: RefreshCancellation,
     /// Stops the thread following the file when dropped.
     poller: Option<Sender<()>>,
+    request_seq: u64,
+    published_seq: u64,
 }
 
 impl Updater {
@@ -273,6 +279,8 @@ impl Updater {
             if state.active && state.source == source {
                 return;
             }
+            state.cancellation.cancel();
+            state.cancellation = RefreshCancellation::default();
             state.generation = state.generation.wrapping_add(1);
             state.source = source.to_owned();
             state.active = true;
@@ -322,40 +330,21 @@ impl Updater {
     /// Reads `source` and publishes it if `generation` is still current
     /// (upstream's `refresh`).
     fn refresh(&self, source: &str, generation: u64) {
-        let data = match (self.fetch)(source) {
-            Ok(data) => data,
-            Err(error) => {
-                if lock(&self.state).generation == generation {
-                    tracing::warn!(
-                        setting = %format_args!("models.{}", self.setting),
-                        error = %error,
-                        "model catalog refresh failed; keeping last valid catalog"
-                    );
-                }
-                return;
+        let seq = self.next_sequence();
+        let cancellation = lock(&self.state).cancellation.clone();
+        if let Err(error) = self.read_and_publish(source, generation, seq, &cancellation, None) {
+            let current =
+                lock(&self.state).generation == generation && !cancellation.is_cancelled();
+            if current {
+                error.warn(self.setting);
             }
-        };
-        let published = {
-            let state = lock(&self.state);
-            if state.generation != generation {
-                return;
-            }
-            (self.publish)(&data)
-        };
-        match published {
-            Ok(changed) => self.notifier.notify(changed),
-            Err(error) => tracing::warn!(
-                setting = %format_args!("models.{}", self.setting),
-                error = %error,
-                "model catalog rejected; keeping last valid catalog"
-            ),
         }
     }
 
-    /// Stops following the source; reads under way publish nothing.
+    /// Cancels the active source without changing its generation.
     fn stop(&self) {
         let mut state = lock(&self.state);
-        state.generation = state.generation.wrapping_add(1);
+        state.cancellation.cancel();
         state.active = false;
         state.poller = None;
     }

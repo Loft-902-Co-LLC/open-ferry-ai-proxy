@@ -380,7 +380,7 @@ async fn run(provider: &str, model: &str, format: &Format, case: Case) {
     );
 }
 
-fn executor(provider: &str, mock: &Mock) -> (Box<dyn ProviderExecutor>, Arc<Auth>) {
+pub(super) fn executor(provider: &str, mock: &Mock) -> (Box<dyn ProviderExecutor>, Arc<Auth>) {
     match provider {
         "gemini" => (
             Box::new(GeminiExecutor::new("direct")),
@@ -731,5 +731,337 @@ async fn vertex_interactions_content_and_usage(native: bool, stream: bool) {
         assert_eq!(event.total_tokens, 15);
         assert!(records.try_recv().is_err());
         assert_eq!(mock.last().path.contains("/interactions"), native);
+    }
+}
+
+// Accepted HTTP 200 without a terminal must retain usage without cooling or
+// replaying either credential, including with an explicit 502 retry rule.
+#[tokio::test]
+async fn accepted_truncation_is_one_attempt_without_cooldown_and_keeps_usage() {
+    use open_ferry_core::exec::Dispatcher;
+    use open_ferry_core::manager::{Manager, Settings};
+    use open_ferry_core::models::ModelInfo;
+    use open_ferry_core::registry::ModelRegistry;
+    for provider in PROVIDERS {
+        for format in [Format::OPENAI, Format::CLAUDE] {
+            let reply = Reply::sse(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":4,\"totalTokenCount\":15}}\n\n",
+            );
+            let mock = Mock::answering(move |seen| {
+                if seen.path == "/token" {
+                    Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+                } else {
+                    reply.clone()
+                }
+            })
+            .await;
+            let (exec, auth) = executor(provider, &mock);
+            let registry = Arc::new(ModelRegistry::new());
+            let manager = Manager::new(
+                Settings {
+                    request_retry: 2,
+                    ..Default::default()
+                },
+                registry.clone(),
+                None,
+            );
+            let provider_name = exec.id().to_owned();
+            manager.register_executor(Arc::from(exec));
+            for id in ["a", "b"] {
+                let mut candidate = (*auth).clone();
+                candidate.id = id.into();
+                candidate.metadata.insert("request_scoped_errors".into(), json!([{"status":502,"match":["terminal","finishReason"],"action":"continue-and-cooldown"}]));
+                registry.register_client(
+                    id,
+                    &provider_name,
+                    &[ModelInfo {
+                        id: "gemini-2.5-flash".into(),
+                        ..Default::default()
+                    }],
+                );
+                manager.register(candidate).unwrap();
+            }
+            let request = request(
+                "gemini-2.5-flash",
+                r#"{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"service_tier":"priority"}"#,
+            );
+            let mut options = stream_options(&format);
+            options.source_format = Format::GEMINI;
+            options.original_request = request.payload.clone();
+            let mut config = Config::default();
+            config.usage_statistics_enabled = true;
+            let usage = Usage::new(&config);
+            open_ferry_core::observe::usage::reconfigure(&usage, None, &config, true);
+            let (records, _subscription) = usage.observe();
+            let context = Arc::new(RequestContext::new(http::Method::POST, "/test".into()));
+            let tap = usage.tap(&context, &request, &options).unwrap();
+            options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
+            let result = manager
+                .execute_stream(std::slice::from_ref(&provider_name), request, options)
+                .await;
+            let mut response = result.unwrap();
+            let mut error = None;
+            while let Some(chunk) = response.chunks.next().await {
+                if let Err(failure) = chunk {
+                    assert!(error.replace(failure).is_none());
+                }
+            }
+            drop(response);
+            let error = error.expect("missing terminal must fail");
+            assert_eq!(error.http_status(), 502);
+            assert_eq!(error.failure_code(), Some("stream_truncated"));
+            assert!(error.stops_replay() && error.keeps_usage);
+            assert_eq!(
+                mock.requests()
+                    .iter()
+                    .filter(|r| r.path != "/token")
+                    .count(),
+                1
+            );
+            for id in ["a", "b"] {
+                let live = manager.get(id).unwrap();
+                assert!(
+                    !live.unavailable && live.model_states.is_empty(),
+                    "{provider}/{format:?}: cooled credential"
+                );
+            }
+            let record = records.try_recv().unwrap();
+            assert!(record.failed);
+            assert_eq!(record.status, 502);
+            assert_eq!(record.total_tokens, 15);
+            assert_eq!(record.tokens.input.total_tokens, 11);
+            assert_eq!(record.tokens.output.total_tokens, 4);
+            let queued: Vec<serde_json::Value> = usage
+                .pop_oldest(10)
+                .iter()
+                .map(|bytes| serde_json::from_slice(bytes).unwrap())
+                .filter(|record: &serde_json::Value| record.get("fail").is_some())
+                .collect();
+            assert_eq!(queued.len(), 1);
+            let record = &queued[0];
+            assert_eq!(record["service_tier"], "priority");
+            assert_eq!(record["effective_service_tier"], "priority");
+            assert_eq!(record["fail"]["code"], "stream_truncated");
+            assert!(records.try_recv().is_err());
+        }
+    }
+}
+
+// be929f07 provider handoff. Control lines must never start an interaction;
+// release each chunk independently and keep the upstream connection open.
+#[tokio::test]
+async fn vertex_generate_content_interactions_sse_framing() {
+    let mut failures = Vec::new();
+    for provider in ["vertex_api_key", "vertex_service_account"] {
+        for variant in [
+            "combined",
+            "split",
+            "whitespace",
+            "prefixed_done",
+            "duplicate_done",
+            "non_json",
+            "prefixed_non_json",
+        ] {
+            if let Err(panic) = AssertUnwindSafe(vertex_framing_case(provider, variant))
+                .catch_unwind()
+                .await
+            {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("non-string panic");
+                failures.push(format!("{provider}/{variant}: {message}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "independent framing cases failed: {failures:#?}"
+    );
+}
+
+async fn vertex_framing_case(provider: &str, variant: &str) {
+    use bytes::Bytes;
+    let (reply, sender) = Reply::controlled();
+    let mock = Mock::answering(move |seen| {
+        if seen.path == "/token" {
+            Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+        } else {
+            reply.clone()
+        }
+    })
+    .await;
+    let (exec, auth) = executor(provider, &mock);
+    let req = request("gemini-2.5-flash", r#"{"input":"hello"}"#);
+    let mut response = exec
+        .execute_stream(auth, req, stream_options(&Format::INTERACTIONS))
+        .await
+        .unwrap();
+    for control in [
+        ": keepalive\n",
+        "event: message\n",
+        "id: bridge-1\n",
+        "retry: 1000\n",
+        "  : keepalive\r\n",
+        "\n",
+    ] {
+        sender.send(Bytes::from_static(control.as_bytes())).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), response.chunks.next())
+                .await
+                .is_err(),
+            "{provider}/{variant}/{control}: control line produced output"
+        );
+    }
+    let mut output = String::new();
+    if matches!(variant, "non_json" | "prefixed_non_json") {
+        let line = if variant == "non_json" {
+            "not-json\n"
+        } else {
+            "  data: not-json \r\n"
+        };
+        sender.send(Bytes::from_static(line.as_bytes())).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !output.contains("event: interaction.status_update\n") {
+                output.push_str(
+                    std::str::from_utf8(&response.chunks.next().await.unwrap().unwrap()).unwrap(),
+                );
+            }
+        })
+        .await
+        .expect("non-control payload must initialize the interaction, as upstream does");
+        assert_eq!(output.matches("event: ").count(), 2);
+        assert!(!output.contains("step.start") && !output.contains("interaction.completed"));
+    }
+    let mut content = json!({"responseId":"framing", "candidates":[{"content":{"role":"model","parts":[
+        {"text":"bridge text"}, {"thought":true,"text":"bridge thought"},
+        {"functionCall":{"id":"call_weather","name":"weather","args":{"city":"Chicago"}}}
+    ]}, "finishReason":"STOP"}]});
+    let usage = json!({"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15});
+    if variant != "split" {
+        content["usageMetadata"] = usage.clone();
+    }
+    let prefix = if variant == "whitespace" {
+        "  data:  "
+    } else {
+        "data: "
+    };
+    sender
+        .send(Bytes::from(format!("{prefix}{content}\r\n\n")))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !output.contains("function_call") {
+            output.push_str(
+                std::str::from_utf8(&response.chunks.next().await.unwrap().unwrap()).unwrap(),
+            );
+        }
+    })
+    .await
+    .unwrap();
+    if variant == "split" {
+        assert!(!output.contains("interaction.completed"));
+        sender
+            .send(Bytes::from(format!(
+                "data: {}\n\n",
+                json!({"usageMetadata":usage})
+            )))
+            .unwrap();
+    }
+    let done = if variant == "prefixed_done" {
+        "  data: [DONE]\r\n\n"
+    } else {
+        "[DONE]\n"
+    };
+    sender.send(Bytes::from_static(done.as_bytes())).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !output.contains("[DONE]") {
+            output.push_str(
+                std::str::from_utf8(&response.chunks.next().await.unwrap().unwrap()).unwrap(),
+            );
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(output.matches("event: interaction.created\n").count(), 1);
+    assert_eq!(
+        output.matches("event: interaction.status_update\n").count(),
+        1
+    );
+    assert!(
+        output.contains("bridge text")
+            && output.contains("bridge thought")
+            && output.contains("call_weather"),
+        "{output}"
+    );
+    assert_eq!(
+        output.matches("event: interaction.completed\n").count(),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("\"total_tokens\":15"), "{output}");
+    assert_eq!(output.matches("[DONE]").count(), 1);
+    if variant == "duplicate_done" {
+        sender
+            .send(Bytes::from_static(b"data: [DONE]\n\n"))
+            .unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), response.chunks.next())
+            .await
+            .is_err(),
+        "duplicate completion or DONE"
+    );
+    assert!(
+        mock.requests()
+            .iter()
+            .filter(|r| r.path != "/token")
+            .all(|r| r.path.ends_with(":streamGenerateContent"))
+    );
+}
+
+#[tokio::test]
+async fn native_interactions_endpoint_scopes_vertex_signatures() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = vec![0xa5; 405];
+    bytes[..5].copy_from_slice(&[1, 0x8f, 0x3d, 0x6b, 0x5f]);
+    let signature = STANDARD.encode(bytes);
+    for provider in PROVIDERS {
+        let mock = Mock::answering(|seen| {
+            if seen.path == "/token" {
+                Reply::json(r#"{"access_token":"local-token","expires_in":3600}"#)
+            } else {
+                Reply::json(r#"{"id":"native","status":"completed","output":[]}"#)
+            }
+        })
+        .await;
+        let (mut exec, auth) = executor(provider, &mock);
+        if provider == "gemini" {
+            exec = Box::new(super::InteractionsExecutor::new("direct"));
+        }
+        let mut auth = (*auth).clone();
+        if provider == "gemini" {
+            auth.provider = "gemini-interactions".into();
+        }
+        auth.metadata.insert("interactions".into(), true.into());
+        let body = json!({"input":[
+            {"type":"thought","signature":signature,"summary":[{"type":"text","text":"reason"}]},
+            {"type":"text","text":"next"}
+        ]});
+        exec.execute(
+            Arc::new(auth),
+            request("gemini-2.5-flash", &body.to_string()),
+            stream_options(&Format::INTERACTIONS),
+        )
+        .await
+        .unwrap();
+        let sent = mock.last().json();
+        let parts = sent["input"].as_array().unwrap();
+        if provider == "gemini" {
+            assert_eq!(parts.len(), 1);
+        } else {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0]["signature"], signature);
+        }
     }
 }

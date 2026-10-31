@@ -684,7 +684,7 @@ async fn config_is_written_as_upstream_writes_it() {
     let answer = with_config(RICH).get("/v0/management/config").await;
     let want = format!(
         concat!(
-            r#"{{"models":{{"codex-catalog":"https://example.com/codex.json"}},"#,
+            r#"{{"response-compression":{{"min-bytes":0}},"models":{{"codex-catalog":"https://example.com/codex.json"}},"#,
             r#""max-request-body-bytes":0,"client":{{"codex":{{"optimize-multi-agent-v2":true,"enable-apply-patch":false,"web-search-result-cache":{{"enabled":false,"ttl":"","limit":0}}}}}},"#,
             r#""proxy-url":"socks5://127.0.0.1:1080","tls-handshake-timeout-seconds":0,"disable-image-generation":false,"#,
             r#""force-model-prefix":true,"request-log":true,"#,
@@ -705,7 +705,7 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""ws-auth":true,"gemini-api-key":{gemini},"#,
             r#""interactions-api-key":null,"codex-api-key":{codex},"xai-api-key":null,"#,
             r#""meta-api-key":null,"xai":{{"inject-x-search":false}},"#,
-            r#""codex":{{"stream-bootstrap-buffering":true,"#,
+            r#""codex":{{"upstream-request-compression":false,"stream-bootstrap-buffering":true,"#,
             r#""orphan-delegation-compatibility":false,"model-level-cooling":true,"#,
             r#""response-steering":false}},"codex-header-defaults":{{"beta-features":"x"}},"#,
             r#""claude":{{"model-level-cooling":true,"tool-search":false,"session-date-pin-days":7}},"claude-api-key":{claude},"claude-header-defaults":{{}},"#,
@@ -729,7 +729,7 @@ async fn config_is_written_as_upstream_writes_it() {
     answer.assert(StatusCode::OK, &want);
 
     let empty = concat!(
-        r#"{"models":{},"max-request-body-bytes":0,"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false,"web-search-result-cache":{"enabled":false,"ttl":"","limit":0}}},"#,
+        r#"{"response-compression":{"min-bytes":0},"models":{},"max-request-body-bytes":0,"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false,"web-search-result-cache":{"enabled":false,"ttl":"","limit":0}}},"#,
         r#""proxy-url":"","tls-handshake-timeout-seconds":0,"disable-image-generation":false,"force-model-prefix":false,"#,
         r#""request-log":false,"api-keys":null,"#,
         r#""passthrough-headers":false,"streaming":{},"trusted-proxies":null,"#,
@@ -744,7 +744,7 @@ async fn config_is_written_as_upstream_writes_it() {
         r#""ws-auth":true,"gemini-api-key":null,"interactions-api-key":null,"#,
         r#""codex-api-key":null,"xai-api-key":null,"meta-api-key":null,"#,
         r#""xai":{"inject-x-search":false},"#,
-        r#""codex":{"stream-bootstrap-buffering":false,"orphan-delegation-compatibility":false,"#,
+        r#""codex":{"upstream-request-compression":false,"stream-bootstrap-buffering":false,"orphan-delegation-compatibility":false,"#,
         r#""model-level-cooling":false,"response-steering":false},"#,
         r#""codex-header-defaults":{"beta-features":""},"claude":{"model-level-cooling":false,"tool-search":false,"session-date-pin-days":7},"#,
         r#""claude-api-key":null,"claude-header-defaults":{},"openai-compatibility":null,"vertex-api-key":null,"#,

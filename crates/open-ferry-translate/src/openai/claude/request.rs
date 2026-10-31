@@ -226,6 +226,10 @@ struct Messages {
 
 impl Messages {
     fn push(&mut self, message: &Value) {
+        // These targets restore commentary before per-message replay handling.
+        if crate::signature::is_empty_codex_commentary_message(message, false) {
+            return;
+        }
         let role = str_of(message.get("role"));
         let content = message.get("content");
         if role == "system" {
@@ -270,6 +274,12 @@ impl Messages {
         let mut relayed_images = Vec::new();
         for part in parts.iter() {
             match &*str_of(part.get("type")) {
+                "thinking" if str_of(part.get("signature")).trim() == "cpa:commentary:v1" => {
+                    let restored = json!({"type":"text","text":str_of(part.get("thinking"))});
+                    if let Some(item) = convert_content_part(&restored) {
+                        content.push(item);
+                    }
+                }
                 "thinking" => {
                     if role == "assistant" && self.maps_thinking(part) {
                         let text = thinking_text(part);

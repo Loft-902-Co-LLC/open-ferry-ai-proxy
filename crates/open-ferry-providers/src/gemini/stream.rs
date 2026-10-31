@@ -13,7 +13,8 @@
 //! From Gemini, each line has its running usage renamed unless it is the
 //! last chunk's (see [`super::sse`]), and only the JSON object on a line is
 //! translated; blank lines, event names and `[DONE]` are skipped. From
-//! Vertex AI, each line goes to the translator as it is. Either way, when
+//! Vertex AI, each line goes to the translator as it is, except the Interactions
+//! fallback receives normalized payloads and skips SSE control lines. When
 //! the stream ends, the translator finishes and a final `[DONE]` is
 //! translated. When the connection fails instead, the translator finishes
 //! and the read error follows, with no `[DONE]`, so the client gets no
@@ -147,6 +148,21 @@ impl State {
                 let payload = payload.to_vec();
                 self.send(&payload).await;
             }
+            Lines::Raw if self.setup.response_format == Format::INTERACTIONS => {
+                let trimmed = open_ferry_translate::go::trim_space(&line);
+                let payload = open_ferry_translate::go::trim_space(
+                    trimmed.strip_prefix(b"data:").unwrap_or(trimmed),
+                );
+                if payload.is_empty()
+                    || payload.starts_with(b":")
+                    || [b"event:".as_slice(), b"id:", b"retry:"]
+                        .iter()
+                        .any(|prefix| payload.starts_with(prefix))
+                {
+                    return;
+                }
+                self.send(payload).await;
+            }
             Lines::Raw => self.send(&line).await,
         }
         if self.translated_error.is_some()
@@ -249,8 +265,7 @@ impl State {
             || self.setup.response_format == Format::OPENAI)
             && !self.saw_finish_reason
         {
-            let error = ExecError::upstream(502, "upstream stream closed before finishReason")
-                .with_usage_kept();
+            let error = ExecError::stream_truncated("upstream stream closed before finishReason");
             self.reader.report(&error);
             self.pending.push_back(Err(error));
             return;

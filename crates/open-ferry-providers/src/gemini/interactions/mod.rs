@@ -266,7 +266,7 @@ pub(super) fn prepare_request(
         tracked: &[],
         translate: Some(&translate),
     };
-    sanitize_input_ids(&mut body);
+    sanitize_input_ids(&mut body, provider == "vertex");
     if stream {
         set_bool_if_different(&mut body, "stream", true);
     }

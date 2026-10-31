@@ -1,0 +1,246 @@
+// Ported from CLIProxyAPI internal/registry/catalog_sources.go
+// (refreshOnDemand, RefreshModelCatalogsWithPolicy) (v8.0.47, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! On-demand file catalog refresh and publication fencing.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use serde::Serialize;
+
+use super::*;
+
+/// Cancels publication of a refresh, including a file read already in progress.
+/// The last cancellation check starts publication. Cancelling never waits for
+/// parsing already in progress, and fences subsequent catalog publications.
+#[derive(Clone, Default)]
+pub struct RefreshCancellation(Arc<AtomicBool>);
+
+impl RefreshCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Default, Serialize)]
+pub struct CatalogSourceStatus {
+    pub source: String,
+    pub refreshed: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changed_providers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CatalogRefreshResult {
+    pub catalog: String,
+    pub codex_catalog: String,
+    pub devin_catalog: String,
+    pub sources: BTreeMap<String, String>,
+    pub catalogs: BTreeMap<String, CatalogSourceStatus>,
+    pub changed_providers: Vec<String>,
+}
+
+impl CatalogRefreshResult {
+    pub fn has_errors(&self) -> bool {
+        self.catalogs.values().any(|status| status.error.is_some())
+    }
+}
+
+impl CatalogRuntime {
+    /// Refreshes file sources immediately. Active updaters take precedence over
+    /// fallback settings; embedded, URL and unserved sources are skipped.
+    pub fn refresh(
+        &self,
+        fallback: &CatalogSources,
+        cancellation: &RefreshCancellation,
+    ) -> Result<CatalogRefreshResult, String> {
+        fallback.validate().map_err(|error| error.to_string())?;
+        // Snapshot sources and generations together with runtime configuration.
+        let running = lock(&self.inner.running);
+        let general = self.inner.general.request(&fallback.catalog);
+        let codex = self.inner.codex.request(&fallback.codex_catalog);
+        drop(running);
+        let general = self.inner.general.on_demand(general, cancellation);
+        let codex = self.inner.codex.on_demand(codex, cancellation);
+        let devin = CatalogSourceStatus {
+            source: display_source(&fallback.devin_catalog),
+            skipped: true,
+            ..CatalogSourceStatus::default()
+        };
+        let changed = merge_provider_names(
+            general.changed_providers.clone(),
+            codex.changed_providers.clone(),
+        );
+        let catalogs: BTreeMap<_, _> = [
+            ("catalog".to_owned(), general),
+            ("codex-catalog".to_owned(), codex),
+            ("devin-catalog".to_owned(), devin),
+        ]
+        .into();
+        Ok(CatalogRefreshResult {
+            catalog: catalogs["catalog"].source.clone(),
+            codex_catalog: catalogs["codex-catalog"].source.clone(),
+            devin_catalog: catalogs["devin-catalog"].source.clone(),
+            sources: catalogs
+                .iter()
+                .map(|(name, status)| (name.clone(), status.source.clone()))
+                .collect(),
+            catalogs,
+            changed_providers: changed,
+        })
+    }
+}
+
+fn display_source(source: &str) -> String {
+    if source.is_empty() {
+        "embed".to_owned()
+    } else if is_url_source(source) {
+        "URL (not fetched)".to_owned()
+    } else {
+        source.to_owned()
+    }
+}
+
+pub(super) struct Request {
+    source: String,
+    generation: u64,
+    seq: u64,
+    updater_cancellation: Option<RefreshCancellation>,
+}
+
+#[derive(Debug)]
+pub(super) enum RefreshError {
+    Fetch(String),
+    Rejected(String),
+    SourceChanged,
+    Cancelled,
+}
+
+impl RefreshError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Fetch(_) => "no valid model catalog source",
+            Self::Rejected(error) => error,
+            Self::SourceChanged => "model catalog source changed during refresh",
+            Self::Cancelled => "context canceled",
+        }
+    }
+
+    pub(super) fn warn(&self, setting: &str) {
+        match self {
+            Self::Fetch(error) => tracing::warn!(
+                setting = %format_args!("models.{setting}"),
+                error = %error,
+                "model catalog refresh failed; keeping last valid catalog"
+            ),
+            Self::Rejected(error) => tracing::warn!(
+                setting = %format_args!("models.{setting}"),
+                error = %error,
+                "model catalog rejected; keeping last valid catalog"
+            ),
+            Self::SourceChanged | Self::Cancelled => {}
+        }
+    }
+}
+
+impl Updater {
+    pub(super) fn next_sequence(&self) -> u64 {
+        let mut state = lock(&self.state);
+        state.request_seq += 1;
+        state.request_seq
+    }
+
+    pub(super) fn request(&self, fallback: &str) -> Request {
+        let mut state = lock(&self.state);
+        state.request_seq += 1;
+        Request {
+            source: if state.active {
+                state.source.clone()
+            } else {
+                fallback.to_owned()
+            },
+            generation: state.generation,
+            seq: state.request_seq,
+            updater_cancellation: state.active.then(|| state.cancellation.clone()),
+        }
+    }
+
+    pub(super) fn on_demand(
+        &self,
+        request: Request,
+        cancellation: &RefreshCancellation,
+    ) -> CatalogSourceStatus {
+        let mut status = CatalogSourceStatus {
+            source: display_source(&request.source),
+            ..CatalogSourceStatus::default()
+        };
+        if request.source.is_empty() || is_url_source(&request.source) {
+            status.skipped = true;
+            return status;
+        }
+        match self.read_and_publish(
+            &request.source,
+            request.generation,
+            request.seq,
+            cancellation,
+            request.updater_cancellation.as_ref(),
+        ) {
+            Ok(changed) => {
+                status.refreshed = true;
+                status.changed_providers = changed;
+            }
+            Err(error) => {
+                let cancelled = cancellation.is_cancelled()
+                    || request
+                        .updater_cancellation
+                        .as_ref()
+                        .is_some_and(RefreshCancellation::is_cancelled);
+                if !matches!(error, RefreshError::Fetch(_)) || !cancelled {
+                    error.warn(self.setting);
+                }
+                status.error = Some(error.message().to_owned());
+            }
+        }
+        status
+    }
+
+    pub(super) fn read_and_publish(
+        &self,
+        source: &str,
+        generation: u64,
+        seq: u64,
+        cancellation: &RefreshCancellation,
+        updater_cancellation: Option<&RefreshCancellation>,
+    ) -> Result<Vec<String>, RefreshError> {
+        if cancellation.is_cancelled() {
+            return Err(RefreshError::Cancelled);
+        }
+        let data = (self.fetch)(source).map_err(RefreshError::Fetch)?;
+        let mut state = lock(&self.state);
+        if state.generation != generation {
+            return Err(RefreshError::SourceChanged);
+        }
+        if cancellation.is_cancelled()
+            || updater_cancellation.is_some_and(RefreshCancellation::is_cancelled)
+        {
+            return Err(RefreshError::Cancelled);
+        }
+        if seq <= state.published_seq {
+            return Ok(Vec::new());
+        }
+        let changed = (self.publish)(&data).map_err(RefreshError::Rejected)?;
+        state.published_seq = seq;
+        drop(state);
+        self.notifier.notify(changed.clone());
+        Ok(changed)
+    }
+}

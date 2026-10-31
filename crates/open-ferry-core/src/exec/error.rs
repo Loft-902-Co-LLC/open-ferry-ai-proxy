@@ -8,7 +8,7 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use http::{HeaderMap, HeaderValue, header};
 use open_ferry_translate::registry::UnsupportedPartError;
@@ -128,6 +128,11 @@ pub struct ExecError {
     /// over: the failure's usage record keeps the counts the answer gave
     /// (upstream's `StreamUsageBuffer.PublishFailure` with what it observed).
     pub keeps_usage: bool,
+    /// An explicit provider classification; generic statuses never imply it.
+    pub failure_class: Option<super::FailureClass>,
+    /// Locally trusted monotonic recovery instant. Its presence continues to
+    /// suppress raw Retry-After headers after expiry; clones keep the instant.
+    pub trusted_retry_deadline: Option<Instant>,
 }
 
 impl ExecError {
@@ -146,12 +151,103 @@ impl ExecError {
             credential_scoped: false,
             request_scoped: false,
             keeps_usage: false,
+            failure_class: None,
+            trusted_retry_deadline: None,
         }
     }
 
     /// A provider's error: its status and body.
     pub fn upstream(status: u16, body: impl Into<String>) -> Self {
         Self::new(ErrorKind::Upstream, body).with_status(status)
+    }
+
+    /// Missing terminal frame after an accepted response. Public 502, retained
+    /// partial usage, no credential cooldown and no replay or failover.
+    pub fn stream_truncated(message: impl Into<String>) -> Self {
+        let mut error = Self::upstream(502, message).with_usage_kept();
+        error.failure_class = Some(super::FailureClass::StreamTruncated);
+        error
+    }
+
+    /// Stable structured failure code for credential/usage accounting.
+    pub fn failure_code(&self) -> Option<&'static str> {
+        self.failure_class
+            .filter(|class| {
+                !self.credential_scoped || *class != super::FailureClass::TransientCapacity
+            })
+            .map(super::FailureClass::code)
+    }
+
+    /// Whether retrying could duplicate an accepted generation.
+    pub fn stops_replay(&self) -> bool {
+        matches!(
+            self.failure_class,
+            Some(super::FailureClass::StreamTruncated | super::FailureClass::UpstreamWebsocketTurn)
+        )
+    }
+
+    /// Provider-vouched per-model capacity rejection, never inferred from a
+    /// generic 429. `None` uses the transient default; `Some(ZERO)` permits
+    /// immediate retry. Whole-credential scope always restores quota handling.
+    pub fn transient_capacity(message: impl Into<String>, hint: Option<Duration>) -> Self {
+        let mut error = Self::upstream(429, message);
+        error.failure_class = Some(super::FailureClass::TransientCapacity);
+        error.retry_after = hint;
+        error
+    }
+
+    /// Annotates a positive local wait once. Cloning or revisiting an error
+    /// must never restart its clock. Zero/absent hints remain unannotated.
+    pub fn with_trusted_retry_after(mut self, wait: Duration) -> Self {
+        if self.trusted_retry_deadline.is_none() && !wait.is_zero() {
+            self.trusted_retry_deadline = Instant::now().checked_add(wait);
+        }
+        self
+    }
+
+    /// Whether raw upstream Retry-After must be suppressed, even after expiry.
+    pub fn has_trusted_retry_deadline(&self) -> bool {
+        self.trusted_retry_deadline.is_some()
+            || matches!(
+                self.kind,
+                ErrorKind::AuthUnavailable | ErrorKind::ModelCooldown
+            ) && self.retry_after.is_some_and(|wait| !wait.is_zero())
+    }
+
+    /// Trusted deadlines suppress raw passthrough even after expiry. Model
+    /// cooldowns always own delivery; other native waits and capacity hints
+    /// own delivery only when positive.
+    pub fn has_retry_after_override(&self) -> bool {
+        self.has_trusted_retry_deadline()
+            || self.kind == ErrorKind::ModelCooldown
+            || self.failure_code() == Some("transient_rate_limit")
+                && self.retry_after.is_some_and(|wait| !wait.is_zero())
+    }
+
+    /// A live trusted deadline wins over the provider hint. After natural
+    /// expiry scheduling can consult that hint again, as upstream does;
+    /// header writers must still consult `has_retry_after_override`.
+    pub fn effective_retry_after(&self) -> Option<Duration> {
+        self.trusted_retry_deadline
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .filter(|remaining| !remaining.is_zero())
+            .or(self.retry_after)
+    }
+
+    /// Ends one turn after upstream loss. No client close, replay, credential
+    /// cooldown or configurable request-error rule may follow this error.
+    /// Group C can mark its correlated not-sent/continuation body the same way.
+    pub fn with_websocket_turn(mut self) -> Self {
+        self.failure_class = Some(super::FailureClass::UpstreamWebsocketTurn);
+        self.request_scoped = true;
+        self.ws_close = None;
+        self
+    }
+
+    /// A safe public error for an accepted turn lost with its upstream socket.
+    /// Transport causes stay out of the client body.
+    pub fn upstream_websocket_lost() -> Self {
+        Self::upstream(502, r#"{"error":{"message":"Upstream websocket disconnected. The turn was not replayed and its outcome may be unknown. Send a new response.create with full conversation input without previous_response_id.","type":"server_error","code":"upstream_websocket_lost"}}"#).with_websocket_turn()
     }
 
     /// No credential serves the model.
@@ -301,9 +397,19 @@ impl ExecError {
     /// trusts to set one (`SafeResponseHeaders`): a model cooldown, or every
     /// credential being unavailable for a while.
     pub fn retry_after_header(&self) -> Option<HeaderValue> {
+        if let Some(deadline) = self.trusted_retry_deadline {
+            let wait = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|wait| !wait.is_zero())?;
+            return Some(HeaderValue::from(ceil_seconds(wait).max(1)));
+        }
         match self.kind {
             ErrorKind::ModelCooldown => self.headers.get(header::RETRY_AFTER).cloned(),
             ErrorKind::AuthUnavailable => {
+                let wait = self.retry_after.filter(|wait| !wait.is_zero())?;
+                Some(HeaderValue::from(ceil_seconds(wait).max(1)))
+            }
+            ErrorKind::Upstream if self.failure_code() == Some("transient_rate_limit") => {
                 let wait = self.retry_after.filter(|wait| !wait.is_zero())?;
                 Some(HeaderValue::from(ceil_seconds(wait).max(1)))
             }
@@ -464,5 +570,6 @@ mod tests {
             .headers
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         assert!(upstream.retry_after_header().is_none());
+        assert!(!upstream.has_retry_after_override());
     }
 }

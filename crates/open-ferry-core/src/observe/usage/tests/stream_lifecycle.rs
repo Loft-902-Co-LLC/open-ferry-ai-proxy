@@ -549,3 +549,106 @@ fn truncated_streams_retain_usage_from_all_claude_upstream_protocols() {
         );
     }
 }
+
+#[test]
+fn p47_truncation_keeps_partial_usage_tier_and_classification() {
+    for provider in ["gemini", "vertex"] {
+        let h = Harness::new();
+        let driver = ClientCall::new("gemini-3.1-pro")
+            .stream()
+            .body(r#"{"service_tier":"priority"}"#)
+            .tap(&h);
+        driver.attempt(
+            AttemptKind::Stream,
+            provider,
+            "gemini-3.1-pro",
+            &auth("a", "0", provider),
+        );
+        driver.head(200, &[]);
+        driver.chunk("data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n");
+        driver.fail(&ExecError::stream_truncated("missing terminal frame"));
+        let record = h.record();
+        assert_eq!(int_at(&record, "/tokens/total_tokens"), 7);
+        assert_eq!(int_at(&record, "/fail/status_code"), 502);
+        assert_eq!(record["fail"]["code"], "stream_truncated");
+        assert_eq!(record["service_tier"], "priority");
+    }
+}
+
+#[tokio::test]
+async fn p47_cancellation_before_and_after_first_output_publishes_once() {
+    use futures_util::stream;
+    for after_first in [false, true] {
+        let h = Harness::new();
+        let driver = ClientCall::new("m").stream().tap(&h);
+        let observation = Arc::new(Observation::new(
+            driver.context.clone(),
+            vec![driver.tap.clone()],
+        ));
+        let report = CallReport::observing(Some(&observation));
+        driver.attempt(
+            AttemptKind::Stream,
+            "openai",
+            "m",
+            &auth("a", "0", "openai"),
+        );
+        driver.head(200, &[]);
+        let chunks = stream::iter(after_first.then(|| Ok(Bytes::from_static(b"first"))))
+            .chain(stream::pending())
+            .boxed();
+        let mut response = report
+            .stream(Ok(StreamResponse {
+                headers: HeaderMap::new(),
+                chunks,
+            }))
+            .unwrap();
+        if after_first {
+            assert!(response.chunks.next().await.unwrap().is_ok());
+        }
+        assert!(h.records().is_empty());
+        drop(response);
+        let record = h.record();
+        assert_eq!(int_at(&record, "/fail/status_code"), 499);
+        assert!(h.records().is_empty());
+    }
+}
+
+#[test]
+fn p47r2_only_truncation_adds_a_usage_failure_code() {
+    for error in [
+        ExecError::transient_capacity("dummy capacity", None),
+        ExecError::upstream_websocket_lost(),
+        ExecError::stream_truncated("dummy truncation"),
+    ] {
+        let h = Harness::new();
+        let driver = ClientCall::new("m").stream().tap(&h);
+        driver.attempt(AttemptKind::Stream, "codex", "m", &auth("a", "0", "codex"));
+        driver.fail(&error);
+        let record = h.record();
+        assert_eq!(
+            int_at(&record, "/fail/status_code"),
+            i64::from(error.http_status())
+        );
+        if error.failure_code() == Some("stream_truncated") {
+            assert_eq!(record["fail"]["code"], "stream_truncated");
+        } else {
+            assert!(record["fail"].get("code").is_none());
+        }
+    }
+}
+
+#[test]
+fn p47_cancellation_before_bootstrap_publishes_once() {
+    let h = Harness::new();
+    let driver = ClientCall::new("m").stream().tap(&h);
+    let observation = Arc::new(Observation::new(
+        driver.context.clone(),
+        vec![driver.tap.clone()],
+    ));
+    let report = CallReport::observing(Some(&observation));
+    driver.attempt(AttemptKind::Stream, "codex", "m", &auth("a", "0", "codex"));
+    drop(report);
+    let record = h.record();
+    assert_eq!(int_at(&record, "/fail/status_code"), 499);
+    assert!(h.records().is_empty());
+}

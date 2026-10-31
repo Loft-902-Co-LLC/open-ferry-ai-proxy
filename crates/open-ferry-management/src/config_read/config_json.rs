@@ -144,8 +144,16 @@ pub(super) fn config(config: &Config) -> Json {
     let tls = &config.tls;
     let quota = &config.quota_exceeded;
     let codex = &config.codex;
+    let compression = config.effective_response_compression();
     let models = &config.models;
     Fields::new()
+        .with(
+            "response-compression",
+            Fields::new()
+                .omit_nil("enabled", compression.enabled.map(Json::Bool))
+                .with("min-bytes", Json::Int(compression.min_bytes))
+                .done(),
+        )
         // registry.CatalogSources, with every field omitempty.
         .with(
             "models",
@@ -341,6 +349,18 @@ pub(super) fn config(config: &Config) -> Json {
         .with(
             "codex",
             Fields::new()
+                .omit_nil(
+                    "websocket-compression",
+                    codex.websocket_compression.map(Json::Bool),
+                )
+                .with(
+                    "upstream-request-compression",
+                    Json::Bool(codex.upstream_request_compression),
+                )
+                .omit_empty(
+                    "upstream-request-compression-min-bytes",
+                    Json::Int(codex.upstream_request_compression_min_bytes),
+                )
                 .with(
                     "stream-bootstrap-buffering",
                     Json::Bool(codex.stream_bootstrap_buffering),

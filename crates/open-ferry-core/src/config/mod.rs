@@ -85,6 +85,8 @@
 
 #[cfg(test)]
 mod claude_cli_tests;
+#[cfg(test)]
+mod compression_tests;
 mod decode;
 pub mod diff;
 mod duration;
@@ -134,9 +136,9 @@ pub use types::{
     Config, DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel,
     IngressLimits, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
     OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement,
-    RequestScopedErrorRule, RoutingConfig, RoutingQuota, RoutingStrategy, SelfUpdate,
-    SelfUpdateChannel, SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig,
-    VertexCompatKey, VertexCompatModel, XaiConfig,
+    RequestScopedErrorRule, ResponseCompressionConfig, RoutingConfig, RoutingQuota,
+    RoutingStrategy, SelfUpdate, SelfUpdateChannel, SelfUpdateMode, StreamingConfig,
+    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, ReadGuard, WatchError, WatchEvent, next_revision};

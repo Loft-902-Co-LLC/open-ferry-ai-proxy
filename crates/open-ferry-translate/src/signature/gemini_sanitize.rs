@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::{
     Action, BlockKind, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, Provider,
     decide_signature_compatibility, is_gemini_thought_signature_bypass,
-    signature_payload_without_provider_prefix,
+    is_gemini_vertex_bare_tink_signature, signature_payload_without_provider_prefix,
 };
 use crate::json::{self, bool_of, str_of};
 
@@ -32,7 +32,11 @@ const SERVER_TOOL_KEYS: [&str; 4] = ["toolCall", "tool_call", "toolResponse", "t
 /// A compatible signature is kept in its normalized form; a missing, unknown or
 /// foreign one becomes the bypass sentinel.
 pub fn gemini_replay_signature_or_bypass(raw: &str, block_kind: BlockKind) -> String {
-    let decision = decide_signature_compatibility(Provider::Gemini, raw, block_kind);
+    replay_signature_or_bypass(raw, block_kind, false)
+}
+
+fn replay_signature_or_bypass(raw: &str, block_kind: BlockKind, reject_bare_tink: bool) -> String {
+    let decision = sanitize_decision(raw, block_kind, reject_bare_tink);
     if decision.compatible && !decision.normalized_signature.is_empty() {
         return decision.normalized_signature;
     }
@@ -42,6 +46,28 @@ pub fn gemini_replay_signature_or_bypass(raw: &str, block_kind: BlockKind) -> St
         return decision.replacement_signature;
     }
     GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_owned()
+}
+
+fn sanitize_decision(raw: &str, block_kind: BlockKind, reject_bare_tink: bool) -> super::Decision {
+    let mut decision = decide_signature_compatibility(Provider::Gemini, raw, block_kind);
+    if reject_bare_tink && decision.compatible && is_gemini_vertex_bare_tink_signature(raw) {
+        decision.compatible = false;
+        decision.normalized_signature.clear();
+        decision.action = Action::ReplaceWithGeminiBypass;
+        decision.replacement_signature = GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_owned();
+        decision.reason =
+            "Vertex bare-Tink signature is not accepted by this Gemini endpoint".to_owned();
+    }
+    decision
+}
+
+/// Applies Gemini replay policy at an endpoint other than Vertex. Bare-Tink
+/// signatures are replaced on first calls and dropped on other model parts.
+pub fn sanitize_non_vertex_gemini_request_thought_signatures(
+    payload: &mut Value,
+    contents_path: &str,
+) -> bool {
+    sanitize_request(payload, contents_path, true)
 }
 
 /// `SanitizeGeminiRequestThoughtSignatures`: applies Gemini's replay policy to
@@ -61,6 +87,10 @@ pub fn sanitize_gemini_request_thought_signatures(
     payload: &mut Value,
     contents_path: &str,
 ) -> bool {
+    sanitize_request(payload, contents_path, false)
+}
+
+fn sanitize_request(payload: &mut Value, contents_path: &str, reject_bare_tink: bool) -> bool {
     let contents_path = match contents_path.trim() {
         "" => "contents",
         path => path,
@@ -76,7 +106,12 @@ pub fn sanitize_gemini_request_thought_signatures(
         };
         let mut first_function_call_seen = false;
         for part in parts {
-            changed |= sanitize_part(part, is_model_turn, &mut first_function_call_seen);
+            changed |= sanitize_part(
+                part,
+                is_model_turn,
+                &mut first_function_call_seen,
+                reject_bare_tink,
+            );
         }
     }
     changed
@@ -87,6 +122,7 @@ fn sanitize_part(
     part: &mut Value,
     is_model_turn: bool,
     first_function_call_seen: &mut bool,
+    reject_bare_tink: bool,
 ) -> bool {
     let signature = part_thought_signature(part).map(Cow::into_owned);
     if part.get("functionResponse").is_some() {
@@ -103,9 +139,10 @@ fn sanitize_part(
         *first_function_call_seen = has_function_call;
     }
     let replay = if is_first_function_call {
-        gemini_replay_signature_or_bypass(
+        replay_signature_or_bypass(
             signature.as_deref().unwrap_or_default(),
             BlockKind::GeminiFunctionCall,
+            reject_bare_tink,
         )
     } else {
         let Some(raw) = &signature else {
@@ -116,7 +153,7 @@ fn sanitize_part(
         } else {
             BlockKind::GeminiModelPart
         };
-        let decision = decide_signature_compatibility(Provider::Gemini, raw, block_kind);
+        let decision = sanitize_decision(raw, block_kind, reject_bare_tink);
         // A sentinel is only kept on a first call; sibling calls and text parts
         // drop it.
         if decision.action == Action::Preserve

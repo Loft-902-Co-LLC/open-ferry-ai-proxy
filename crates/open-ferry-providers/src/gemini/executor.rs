@@ -28,7 +28,7 @@ use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, Strea
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
-use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
+use open_ferry_translate::signature::sanitize_non_vertex_gemini_request_thought_signatures;
 use serde_json::Value;
 
 use super::stream::Lines;
@@ -106,7 +106,7 @@ impl GeminiExecutor {
         )?;
         set_string_if_different(&mut body, "model", base);
         cap_max_output_tokens(&mut body, base, self.models());
-        sanitize_gemini_request_thought_signatures(&mut body, "contents");
+        sanitize_non_vertex_gemini_request_thought_signatures(&mut body, "contents");
         turns::ensure_boundary_user(&mut body, "contents");
         json::delete(&mut body, "session_id");
         self.apply_payload_rules(request, options, stream, None, &mut body);
@@ -228,7 +228,7 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
-        prepare_count_body(&mut body, base);
+        prepare_count_body(&mut body, base, true);
         self.apply_payload_rules(request, options, false, None, &mut body);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;

@@ -26,6 +26,53 @@ fn finishes(chunks: &[Value]) -> bool {
 }
 
 #[test]
+fn stream_content_with_finish_reason() {
+    for (delta, reason, text, thought, expected) in [
+        (json!({"content":"ok"}), "stop", "ok", false, "STOP"),
+        (
+            json!({"reasoning_content":"thinking"}),
+            "length",
+            "thinking",
+            true,
+            "MAX_TOKENS",
+        ),
+    ] {
+        let line =
+            json!({"choices":[{"index":0,"delta":delta,"finish_reason":reason}]}).to_string();
+        let out = run_stream(&[
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
+            &line,
+        ]);
+        assert_eq!(out.len(), 2, "{out:?}");
+        let part = &out[0]["candidates"][0]["content"]["parts"][0];
+        assert_eq!(part["text"], text);
+        assert_eq!(
+            part.get("thought")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            thought
+        );
+        assert_eq!(out[1]["candidates"][0]["finishReason"], expected);
+        let body = json!({"choices":[{"message":delta,"finish_reason":reason}]}).to_string();
+        assert_eq!(non_stream(&body)["candidates"][0]["finishReason"], expected);
+    }
+}
+
+#[test]
+fn stream_content_and_tools_with_finish_reason() {
+    let out = run_stream(&[
+        r#"{"choices":[{"index":0,"delta":{"content":"ok","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+    ]);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0]["candidates"][0]["content"]["parts"][0]["text"], "ok");
+    assert_eq!(out[1]["candidates"][0]["finishReason"], "STOP");
+    let call = &out[1]["candidates"][0]["content"]["parts"][0]["functionCall"];
+    assert_eq!(call["id"], "call_1");
+    assert_eq!(call["name"], "lookup");
+    assert_eq!(call["args"], json!({"q":"x"}));
+}
+
+#[test]
 fn non_stream_preserves_tool_call_id() {
     let out = non_stream(
         r#"{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_chat_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]}}]}"#,

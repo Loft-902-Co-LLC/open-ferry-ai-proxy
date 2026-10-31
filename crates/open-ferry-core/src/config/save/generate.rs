@@ -35,6 +35,9 @@
 //!   a timestamp whose zone is 24 hours or more from UTC, can't be written
 //!   (the loader keeps neither); saving fails with an error naming the
 //!   rule. Upstream writes them.
+//! - The Codex request-compression threshold is generated even at zero so a
+//!   typed write can reset a previously positive threshold. Missing zero
+//!   defaults are still pruned by the merge. Upstream omits that reset.
 //! - open-ferry's `claude-cli` list follows `claude-api-key`. It is always
 //!   listed, so emptying it empties the file's list, and the merge doesn't
 //!   add an empty one to a file without it.
@@ -118,6 +121,7 @@ fn seq<T>(items: &[T], f: impl Fn(&T) -> Value) -> Value {
 /// `legacyConfig(cfg)`, as `yaml.Marshal` sees it.
 pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
     let codex = &cfg.codex;
+    let compression = cfg.effective_response_compression();
     let fields = Fields::default()
         // registry.CatalogSources.
         .put(
@@ -132,6 +136,13 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         .put(
             "max-request-body-bytes",
             Value::Int(cfg.max_request_body_bytes),
+        )
+        .put(
+            "response-compression",
+            Fields::default()
+                .pointer("enabled", compression.enabled.map(Value::Bool))
+                .put("min-bytes", Value::Int(compression.min_bytes))
+                .done(),
         )
         .put(
             "ingress-limits",
@@ -408,6 +419,19 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         .put(
             "codex",
             Fields::default()
+                .pointer(
+                    "websocket-compression",
+                    codex.websocket_compression.map(Value::Bool),
+                )
+                .put(
+                    "upstream-request-compression",
+                    Value::Bool(codex.upstream_request_compression),
+                )
+                // Include zero so a typed write can reset an existing threshold.
+                .put(
+                    "upstream-request-compression-min-bytes",
+                    Value::Int(codex.upstream_request_compression_min_bytes),
+                )
                 .put("disable-codex-cloaking", Value::Bool(false))
                 .put(
                     "stream-bootstrap-buffering",

@@ -26,14 +26,14 @@ fn codex_configuration_update_capability() {
     ];
     for (plan, capable) in tiers {
         let models = catalog.codex_models(plan);
-        for id in std::iter::once(&"gpt-5.5").chain(capable) {
+        for id in std::iter::once(&"gpt-5.6-luna").chain(capable) {
             let model = models
                 .iter()
                 .find(|model| model.id == *id)
                 .unwrap_or_else(|| panic!("{plan:?}: {id} is missing"));
             assert_eq!(
                 model.support_configuration_update,
-                *id != "gpt-5.5",
+                *id != "gpt-5.6-luna",
                 "{plan:?}: {id}"
             );
         }
@@ -295,6 +295,7 @@ fn xai_and_meta_models_come_from_their_sections() {
     assert_eq!(
         imagine,
         [
+            "grok-imagine-video-1.5-lite",
             "grok-imagine-image",
             "grok-imagine-image-quality",
             "grok-imagine-image-2.0",

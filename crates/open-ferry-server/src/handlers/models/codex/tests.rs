@@ -474,7 +474,7 @@ async fn multi_agent_follows_config_reloads() {
         );
         let body = get(&state, "/v1/models?client_version=cpa", None).await;
         let entries = entries(&body);
-        let want = if want { json!("v2") } else { Value::Null };
+        let want = json!("v2");
         assert_eq!(
             field(entry(&entries, MODEL_ID), "multi_agent_version"),
             &want,
@@ -492,7 +492,7 @@ fn multi_agent_v2_follows_config() {
         "openai-compatibility",
         &[model(MODEL_ID)],
     );
-    for (enabled, want) in [(false, Value::Null), (true, json!("v2"))] {
+    for (enabled, want) in [(false, json!("v2")), (true, json!("v2"))] {
         let state = state(&registry, codex_config(false, enabled));
         let entries = entries(&response(&state, ""));
         assert_eq!(
@@ -932,4 +932,60 @@ async fn claude_search_catalog_follows_switch_and_only_consults_evidence_when_on
     );
     let models = entries(&get(&state, "/v1/models?client_version=0.153.4", None).await);
     assert_ne!(entry(&models, id)["supports_search_tool"], true);
+}
+
+#[tokio::test]
+async fn gemini_prefixed_names_resolve_through_the_http_detail_route() {
+    use open_ferry_core::auth::Auth;
+    use open_ferry_core::registry::{RegistrationRules, StaticCatalog};
+    let catalog = StaticCatalog::from_json(
+        r#"{"gemini":[{
+        "id":"gemini-4-argon","name":"models/gemini-4-argon","type":"gemini",
+        "display_name":"Gemini 4 Argon","inputTokenLimit":1048576,"outputTokenLimit":65536
+    }]}"#,
+        "test",
+    )
+    .unwrap();
+    for force in [false, true] {
+        let registry = Arc::new(ModelRegistry::new());
+        registry.register_auth_with(
+            &Auth {
+                id: "gemini-prefix-test".into(),
+                provider: "gemini".into(),
+                prefix: "gcp".into(),
+                ..Auth::default()
+            },
+            &RegistrationRules {
+                force_model_prefix: force,
+                ..RegistrationRules::default()
+            },
+            &catalog,
+        );
+        let state = state(&registry, ServerConfig::default());
+        let list: Value = serde_json::from_str(&get(&state, "/v1beta/models", None).await).unwrap();
+        assert_eq!(
+            list["models"].as_array().unwrap().len(),
+            if force { 1 } else { 2 }
+        );
+        assert!(
+            list["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| { model["name"] == "models/gcp/gemini-4-argon" })
+        );
+        let detail: Value =
+            serde_json::from_str(&get(&state, "/v1beta/models/gcp/gemini-4-argon", None).await)
+                .unwrap();
+        assert_eq!(detail["name"], "models/gcp/gemini-4-argon");
+        assert_eq!(detail["displayName"], "Gemini 4 Argon");
+        assert_eq!(detail["inputTokenLimit"], 1048576);
+        assert_eq!(detail["outputTokenLimit"], 65536);
+        if !force {
+            let detail: Value =
+                serde_json::from_str(&get(&state, "/v1beta/models/gemini-4-argon", None).await)
+                    .unwrap();
+            assert_eq!(detail["name"], "models/gemini-4-argon");
+        }
+    }
 }

@@ -324,15 +324,21 @@ fn applies_max_context_length_override() {
         false,
         "",
     ));
-    for (slug, want) in [
-        ("deepseek-v4-flash", 1_048_576),
-        ("deepseek-v4-pro", 272_000),
-        ("gpt-5.5", 1_048_576),
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let default = templates.default_template();
+    for (slug, want, max) in [
+        ("deepseek-v4-flash", 1_048_576, 1_048_576),
+        (
+            "deepseek-v4-pro",
+            int_value(default, "context_window"),
+            int_value(default, "max_context_window"),
+        ),
+        ("gpt-5.5", 1_048_576, 1_048_576),
     ] {
         assert_eq!(int_value(&entries[slug], "context_window"), want, "{slug}");
         assert_eq!(
             int_value(&entries[slug], "max_context_window"),
-            want,
+            max,
             "{slug}"
         );
     }
@@ -585,7 +591,11 @@ fn unrelated_custom_provider_retains_fallback() {
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry["slug"], "my-unrelated-custom-model");
-    assert_eq!(entry["comp_hash"], "2911", "from the gpt-5.5 template");
+    let templates = CodexClientCatalog::embedded().unwrap();
+    assert_eq!(
+        entry["comp_hash"],
+        templates.default_template()["comp_hash"]
+    );
     assert_eq!(entry["supports_search_tool"], false);
     assert_eq!(entry["input_modalities"], json!(["text", "image"]));
     assert_eq!(entry["supports_image_detail_original"], true);
@@ -1005,13 +1015,11 @@ fn non_template_models_follow_the_catalog_by_display_name() {
         .iter()
         .map(|entry| (string_value(entry, "slug"), int_value(entry, "priority")))
         .collect();
-    // The catalog's own priorities come first; the rest follow the highest
-    // of them (43), 100 apart, by display name in lower case, then slug.
     assert_eq!(
         order,
         [
+            ("gpt-5.5", 1),
             ("gpt-6-astra", 2),
-            ("gpt-5.5", 13),
             ("Alpha", 143),
             ("alpha-model", 243),
             ("zeta-model", 343),
@@ -1159,5 +1167,60 @@ fn non_codex_and_synthesized_models_disable_codex_only_modes() {
             assert_eq!(entry["use_responses_lite"], false);
             assert_eq!(entry["supports_reasoning_effort_updates"], false);
         }
+    }
+}
+
+#[test]
+fn synthesized_model_inherits_current_template_version_when_opt_in_is_disabled() {
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let entries = by_slug(build_plain(&[model("custom-template-version")], false, ""));
+    assert_eq!(
+        entries["custom-template-version"]["multi_agent_version"],
+        templates.default_template()["multi_agent_version"]
+    );
+}
+
+#[test]
+fn synthesized_models_keep_default_template_tools_and_unclamped_agent_effort() {
+    let registry = ModelRegistry::new();
+    let constrained = ModelInfo {
+        thinking: thinking(&["low", "medium"]),
+        ..model("custom-limited-agent")
+    };
+    registry.register_client(
+        "custom",
+        "openai-compatible-custom",
+        std::slice::from_ref(&constrained),
+    );
+    let providers = |id: &str| registry.model_providers(id);
+    let templates = CodexClientCatalog::embedded().unwrap();
+    let template = templates.default_template();
+    for optimize in [false, true] {
+        let entries = build(
+            &registry,
+            std::slice::from_ref(&constrained),
+            Some(&providers),
+            optimize,
+            "0.153.4",
+        );
+        let entry = &entries[0];
+        assert_eq!(
+            entry["experimental_supported_tools"],
+            json!(["send_user_message_async", "clock"])
+        );
+        assert_eq!(
+            entry["experimental_supported_tools"],
+            template["experimental_supported_tools"]
+        );
+        assert_eq!(entry["multi_agent_reasoning_effort"], "xhigh");
+        assert_eq!(entry["node_repl_auto_review_required"], true);
+        assert_eq!(efforts(entry), ["low", "medium"]);
+        assert_eq!(entry["default_reasoning_level"], "medium");
+        assert_eq!(entry["tool_mode"], "direct");
+        assert_eq!(entry["use_responses_lite"], false);
+        assert_eq!(entry["supports_reasoning_effort_updates"], false);
+        assert_eq!(entry["supports_search_tool"], false);
+        assert_null(entry, "upgrade");
+        assert_null(entry, "availability_nux");
     }
 }

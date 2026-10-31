@@ -117,9 +117,9 @@ fn repair(mut node: Value, depth: usize) -> Option<Value> {
                     .expect("object")
                     .shift_remove(&name)
                     .expect("collected name");
-                (name, value)
+                Some((name, value))
             })
-            .collect();
+            .collect::<Option<_>>()?;
         if !bare.is_empty() {
             let (bare, promoted) = repair_properties(bare, depth)?;
             if let Some(props) = node.get_mut("properties").and_then(Value::as_object_mut) {
@@ -345,7 +345,14 @@ fn all_of(node: &mut Value, _: bool) {
                             .collect();
                         for name in required {
                             let name = str_of(Some(name)).into_owned();
-                            if !names.contains(&name) {
+                            let mut found = false;
+                            for existing in &names {
+                                if existing == &name {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
                                 names.push(name);
                             }
                         }
@@ -629,5 +636,20 @@ mod depth_tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod round3_tests {
+    use super::*;
+    #[test]
+    fn round3_truncated_projection_preserves_arguments() {
+        let mut literal = json!("x");
+        for _ in 0..65 {
+            literal = json!([literal]);
+        }
+        let schema =
+            json!({"type":"object","properties":{"value":{"type":"string","enum":literal}}});
+        assert!(!requires(&schema, "reason"));
     }
 }

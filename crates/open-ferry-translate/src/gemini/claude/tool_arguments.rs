@@ -15,8 +15,13 @@ use crate::common::tool_names::canonical_tool_name;
 use crate::json::{path, str_of};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
+mod call_analysis;
 mod reclean;
+mod schema_index;
+
+use call_analysis::CallAnalysis;
 
 fn tool_name(tool: &Value) -> String {
     let name = str_of(tool.get("name"));
@@ -55,7 +60,9 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
     if name.is_empty() {
         return None;
     }
-    let tools = request.get("tools")?.as_array()?;
+    let tools = request.get("tools")?;
+
+    let tools = tools.as_array()?;
     let exact: Vec<_> = tools.iter().filter(|t| tool_name(t) == name).collect();
     let candidates: Vec<_> = if exact.is_empty() {
         let names: BTreeSet<_> = tools
@@ -88,9 +95,11 @@ fn original_schema<'a>(request: &'a Value, name: &str) -> Option<Option<&'a Valu
         .then_some(first)
 }
 
-#[derive(Default, Clone)]
-struct Info<'a> {
-    properties: BTreeMap<String, Schemas<'a>>,
+type Info<'a> = SchemaInfo<Schemas<'a>>;
+
+#[derive(Default)]
+struct SchemaInfo<S> {
+    properties: BTreeMap<String, S>,
     required: BTreeSet<String>,
     allows: bool,
     forbids: bool,
@@ -98,13 +107,30 @@ struct Info<'a> {
     complex: bool,
     unsafe_complex: bool,
     object: bool,
-    branches: Vec<Info<'a>>,
+    branches: Vec<SchemaInfo<S>>,
 }
+impl Clone for Info<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            properties: self.properties.clone(),
+            required: self.required.clone(),
+            allows: self.allows,
+            forbids: self.forbids,
+            pattern: self.pattern,
+            complex: self.complex,
+            unsafe_complex: self.unsafe_complex,
+            object: self.object,
+            branches: self.branches.clone(),
+        }
+    }
+}
+
 impl<'a> Info<'a> {
     fn merge(&mut self, other: Self) {
         for (key, values) in other.properties {
+            let entry = self.properties.entry(key).or_default();
             for value in values.values {
-                unique(self.properties.entry(key.clone()).or_default(), value);
+                unique(entry, value);
             }
         }
         self.required.extend(other.required);
@@ -116,6 +142,9 @@ impl<'a> Info<'a> {
         self.unsafe_complex |= other.unsafe_complex;
         self.object |= other.object;
     }
+}
+
+impl<S> SchemaInfo<S> {
     fn dynamic(&self) -> bool {
         self.pattern || (self.allows && !self.forbids) || self.branches.iter().any(Self::dynamic)
     }
@@ -244,7 +273,7 @@ struct AnalysisMemo<T> {
     cache_hits: usize,
 }
 
-impl<T: Clone> AnalysisMemo<T> {
+impl<T: Clone + Default> AnalysisMemo<T> {
     fn resolve_with(
         &mut self,
         target: &Value,
@@ -268,6 +297,7 @@ impl<T: Clone> AnalysisMemo<T> {
             {
                 self.cache_hits += 1;
             }
+
             references
                 .followed
                 .extend(cached.references.followed.iter().cloned());
@@ -284,6 +314,7 @@ impl<T: Clone> AnalysisMemo<T> {
         // its followed refs are inactive. Cuts already active at entry depend
         // on the caller, so those results stay uncached. Cacheable walks restore
         // visited; items failures, which can leave refs active, are not cached.
+
         if cacheable(&info) && own.cut.is_disjoint(visited) {
             self.targets
                 .entry(identity)
@@ -614,7 +645,7 @@ fn items_memo<'a>(
     Some(result.values)
 }
 
-fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> bool {
+fn candidate_accepts<S>(infos: &[Arc<SchemaInfo<S>>], key: Option<&str>, current: &Value) -> bool {
     infos.len() > 1
         && infos.iter().any(|info| {
             if info.complex {
@@ -630,8 +661,9 @@ fn candidate_accepts(infos: &[Info<'_>], key: Option<&str>, current: &Value) -> 
         })
 }
 
-fn injected(schema: &Value, key: &str, top: bool) -> bool {
-    let info = analyze(schema, schema);
+fn injected(schema: &Value, key: &str, top: bool, analyses: &mut CallAnalysis) -> bool {
+    let analysis = analyses.resolve(&[schema], schema);
+    let info = &analysis.merged;
     if let Some(properties) = info.properties.get(key) {
         if gjson_array(schema.get("required")).any(|v| v == key) {
             return true;
@@ -655,7 +687,11 @@ fn injected(schema: &Value, key: &str, top: bool) -> bool {
     }
     ["anyOf", "oneOf"].iter().any(|k| {
         array(schema, k).any(|branch| {
-            analyze(branch, branch).properties.contains_key(key)
+            analyses
+                .resolve(&[branch], branch)
+                .merged
+                .properties
+                .contains_key(key)
                 && gjson_array(branch.get("required")).any(|v| v == key)
         })
     })
@@ -744,40 +780,26 @@ fn clean_value(
     root: &Value,
     top: bool,
     depth: usize,
+    analyses: &mut CallAnalysis,
 ) {
     if depth > 128 || originals.is_empty() {
         return;
     }
-    let infos: Vec<_> = originals.iter().map(|s| analyze(s, root)).collect();
-    let mut info = Info::default();
-    for item in &infos {
-        info.merge(item.clone());
-    }
+    let analysis = analyses.resolve(originals, root);
+    let infos = &analysis.infos;
+    let info = &analysis.merged;
     if info.unsafe_complex {
         return;
     }
     if let Some(values) = value.as_array_mut() {
-        let mut original_items = Schemas::default();
-        let mut translated_items = Schemas::default();
-        for schema in originals {
-            let Some(resolved) = items(schema, root, 0, &mut BTreeSet::new()) else {
-                return;
-            };
-            if resolved.is_empty() {
-                unique(&mut original_items, schema);
-            }
-            for item in resolved {
-                unique(&mut original_items, item);
-            }
-        }
-        for schema in translated {
-            let Some(resolved) = items(schema, schema, 0, &mut BTreeSet::new()) else {
-                return;
-            };
-            for item in resolved {
-                unique(&mut translated_items, item);
-            }
-        }
+        let Some(original_items) = analyses.items(originals, Some(root)) else {
+            return;
+        };
+        let Some(translated_items) = analyses.items(translated, None) else {
+            return;
+        };
+        let original_items: Vec<_> = original_items.iter().collect();
+        let translated_items: Vec<_> = translated_items.iter().collect();
         if !translated.is_empty() && translated_items.is_empty() {
             return;
         }
@@ -789,6 +811,7 @@ fn clean_value(
                 root,
                 false,
                 depth + 1,
+                analyses,
             );
         }
         return;
@@ -808,40 +831,40 @@ fn clean_value(
     {
         return;
     }
-    for (key, children) in &info.properties {
-        if info.parent_accepts(key, value) || candidate_accepts(&infos, Some(key), value) {
+    // A probe contains only its path. Do not copy/check every unrelated schema
+    // child on every probe, even when the analyses themselves are cached.
+    let keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    for key in keys {
+        let Some(children) = info.properties.get(&key) else {
+            continue;
+        };
+        if info.parent_accepts(&key, value) || candidate_accepts(infos, Some(&key), value) {
             continue;
         }
-        let mut translated_children = Schemas::default();
-        for schema in translated {
-            if let Some(children) = analyze(schema, schema).properties.get(key) {
-                for child in children {
-                    unique(&mut translated_children, child);
-                }
-            }
-        }
+        let translated_children = analyses.translated_children(translated, &key);
+        let translated_children: Vec<_> = translated_children.iter().collect();
         if !translated.is_empty() && translated_children.is_empty() {
             continue;
         }
-        if let Some(child) = value.get_mut(key) {
-            clean_value(
-                child,
-                children,
-                &translated_children,
-                root,
-                false,
-                depth + 1,
-            );
-        }
+        let children: Vec<_> = children.iter().collect();
+        clean_value(
+            value.get_mut(&key).unwrap(),
+            &children,
+            &translated_children,
+            root,
+            false,
+            depth + 1,
+            analyses,
+        );
     }
-    let dynamic = info.dynamic() || infos.iter().any(Info::dynamic);
+    let dynamic = info.dynamic() || infos.iter().any(|info| info.dynamic());
     for key in ["reason", "_"] {
         if value.get(key).is_none()
             || info.properties.contains_key(key)
             || info.required.contains(key)
             || dynamic
             || info.parent_accepts(key, value)
-            || candidate_accepts(&infos, None, value)
+            || candidate_accepts(infos, None, value)
             || (!translated.is_empty()
                 && originals
                     .iter()
@@ -851,7 +874,7 @@ fn clean_value(
         }
         if translated.is_empty()
             || translated.iter().any(|schema| {
-                injected(schema, key, top)
+                injected(schema, key, top, analyses)
                     || (top && info.forbids && reclean::requires(schema, key))
             })
         {
@@ -864,28 +887,118 @@ fn clean_value(
         && info.required.is_empty()
         && info.properties.is_empty()
         && !dynamic
-        && !candidate_accepts(&infos, None, value)
+        && !candidate_accepts(infos, None, value)
     {
         *value = json!({});
     }
 }
 
+// Owned once per streaming call: probes reuse both schemas and their analyses.
+// The unbounded whole-response path uses a fresh cache for its borrowed schemas.
+#[derive(Default)]
+pub(super) struct CallSchemas {
+    original: Option<Option<Box<Value>>>,
+    translated: Vec<Value>,
+    analyses: Mutex<CallAnalysis>,
+    indexed: Mutex<Option<schema_index::SchemaIndex>>,
+}
+
+impl CallSchemas {
+    pub(super) fn resolve(name: &str, original: &Value, sent: &Value) -> Self {
+        let mut result = Self {
+            original: original_schema(original, name).map(|s| s.map(|s| Box::new(s.clone()))),
+            translated: translated_schemas(sent, original, name)
+                .into_iter()
+                .cloned()
+                .collect(),
+            analyses: Mutex::default(),
+            indexed: Mutex::default(),
+        };
+        if let Some(Some(schema)) = result.original.as_ref() {
+            result.indexed = Mutex::new(Some(schema_index::SchemaIndex::new(
+                schema,
+                &result.translated,
+            )));
+        }
+        result
+    }
+    pub(super) fn parameterless(&self) -> bool {
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return index.parameterless();
+        }
+        matches!(self.original, Some(None))
+    }
+    pub(super) fn probe(
+        &self,
+        state: usize,
+        step: crate::common::vertex_partial_args::ProbeStep<'_>,
+    ) -> Option<(bool, usize)> {
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return Some(index.probe(state, step));
+        }
+        let is_index = matches!(step, crate::common::vertex_partial_args::ProbeStep::Index);
+        Some(match &self.original {
+            None => (false, 2),
+            Some(None) => match state {
+                1 => (!is_index, 1),
+                2 => (false, 2),
+                _ => {
+                    if is_index && !self.translated.is_empty() {
+                        (false, 2)
+                    } else {
+                        (!is_index, 1)
+                    }
+                }
+            },
+            Some(Some(_)) => unreachable!("declared schema has an index"),
+        })
+    }
+    pub(super) fn clean(&self, args: &Value) -> Value {
+        if let Some(index) = self.indexed.lock().expect("schema index").as_mut() {
+            return index.clean(args);
+        }
+        self.clean_reference(args)
+    }
+    fn clean_reference(&self, args: &Value) -> Value {
+        clean_resolved(
+            args,
+            self.original.as_ref().map(|s| s.as_deref()),
+            &self.translated.iter().collect::<Vec<_>>(),
+            &mut self.analyses.lock().expect("call analyses"),
+        )
+    }
+}
+
 pub(super) fn clean_arguments(args: &Value, name: &str, original: &Value, sent: &Value) -> Value {
     let translated = translated_schemas(sent, original, name);
+    clean_resolved(
+        args,
+        original_schema(original, name),
+        &translated,
+        &mut CallAnalysis::default(),
+    )
+}
+
+fn clean_resolved(
+    args: &Value,
+    original: Option<Option<&Value>>,
+    translated: &[&Value],
+    analyses: &mut CallAnalysis,
+) -> Value {
     if !args.is_object() && !translated.is_empty() {
-        return args.clone();
+        return Value::clone(args);
     }
-    let Some(schema) = original_schema(original, name) else {
-        return args.clone();
+    let Some(schema) = original else {
+        return Value::clone(args);
     };
     let Some(schema) = schema else {
         return json!({});
     };
     if !args.is_object() {
-        return args.clone();
+        return Value::clone(args);
     }
-    let mut args = args.clone();
-    clean_value(&mut args, &[schema], &translated, schema, true, 0);
+    let mut args = Value::clone(args);
+    clean_value(&mut args, &[schema], translated, schema, true, 0, analyses);
     args
 }
 
@@ -897,3 +1010,9 @@ mod analysis_memo_tests;
 
 #[cfg(test)]
 mod walk_memo_tests;
+
+#[cfg(test)]
+mod round6_tests;
+
+#[cfg(test)]
+mod round8_tests;

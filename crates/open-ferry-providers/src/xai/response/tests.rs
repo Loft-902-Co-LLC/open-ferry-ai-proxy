@@ -22,6 +22,7 @@ fn dispatcher(namespace: &str) -> NamespaceRefs {
             namespace: namespace.to_owned(),
             name: String::new(),
             is_dispatcher: true,
+            children: HashSet::new(),
         },
     )])
 }
@@ -262,6 +263,7 @@ fn flatten_mode_preserves_name_in_arguments_done() {
             namespace: "mcp__github".to_owned(),
             name: "create_repo".to_owned(),
             is_dispatcher: false,
+            children: HashSet::new(),
         },
     )]);
     let event = r#"{"type":"response.function_call_arguments.done","item_id":"item_1","output_index":0,"arguments":"{\"name\":\"my-awesome-repo\",\"private\":true}"}"#;
@@ -319,6 +321,7 @@ fn restore_preserves_malformed_payload() {
             namespace: "mcp__exa".to_owned(),
             name: "web_search_exa".to_owned(),
             is_dispatcher: false,
+            children: HashSet::new(),
         },
     )]);
     assert_eq!(
@@ -365,6 +368,7 @@ fn unwrap_dispatcher_arguments_refusals() {
             namespace: "mcp__app_0__inner".to_owned(),
             name: String::new(),
             is_dispatcher: true,
+            children: HashSet::new(),
         },
     );
     for arguments in [

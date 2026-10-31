@@ -48,11 +48,21 @@ fn models_overrides_and_normalization() {
 
 #[test]
 fn urls_and_official_hosts() {
+    assert_eq!(location(&Auth::default(), ""), "global");
+    for region in ["us", "eu", "europe-west4"] {
+        assert_eq!(
+            base_url("", "p", region),
+            format!(
+                "{}/v1/projects/p/locations/{region}/endpoints/openapi",
+                vertex_base_url(region)
+            )
+        );
+    }
     for (base, project, expected) in [
         (
             "",
             "p",
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/endpoints/openapi",
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
         ),
         (
             "https://example.test",
@@ -62,7 +72,7 @@ fn urls_and_official_hosts() {
         (
             "https://example.test/v1beta1",
             "p",
-            "https://example.test/v1beta1/projects/p/locations/us-central1/endpoints/openapi",
+            "https://example.test/v1beta1/projects/p/locations/global/endpoints/openapi",
         ),
         (
             "https://example.test/v1/projects/p/locations/l/publishers/google/models",

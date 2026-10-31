@@ -179,9 +179,16 @@ pub(super) struct Options {
 
 /// An xAI image request (upstream's `buildXAIImagesBaseRequest`).
 fn base_request(model: &str, prompt: &str, format: &str, options: &Options) -> Vec<u8> {
+    original_base_request(model, prompt, normalize_format(format), options)
+}
+
+/// The original request in xAI's shape, without inserting a response format.
+fn original_base_request(model: &str, prompt: &str, format: &str, options: &Options) -> Vec<u8> {
     let mut request = json::set_str(b"{}", "model", canonical_model(model));
     request = json::set_str(&request, "prompt", prompt.trim());
-    request = json::set_str(&request, "response_format", normalize_format(format));
+    if !format.trim().is_empty() {
+        request = json::set_str(&request, "response_format", normalize_format(format));
+    }
     if !options.aspect_ratio.is_empty() {
         request = json::set_str(&request, "aspect_ratio", &options.aspect_ratio);
     }
@@ -226,6 +233,17 @@ pub(super) fn generations_request(raw: &[u8], model: &str, format: &str) -> Vec<
     base_request(model, prompt.trim(), format, &options)
 }
 
+/// A generation's original, without the handler's aspect, resolution or
+/// format defaults (`buildXAIImagesGenerationsOriginalRequest`).
+pub(super) fn generations_original_request(raw: &[u8], model: &str) -> Vec<u8> {
+    original_base_request(
+        model,
+        &json::str_at(raw, "prompt"),
+        &json::str_at(raw, "response_format"),
+        &edit_options_from_json(raw),
+    )
+}
+
 /// The xAI request for an edit of `images` (upstream's
 /// `buildXAIImagesEditRequest`): one image as `image`, more as `images`.
 pub(super) fn edit_request(
@@ -235,7 +253,26 @@ pub(super) fn edit_request(
     format: &str,
     options: &Options,
 ) -> Vec<u8> {
-    let request = base_request(model, prompt, format, options);
+    append_edit_refs(base_request(model, prompt, format, options), images)
+}
+
+/// An edit's original, without inserting a response format
+/// (`buildXAIImagesEditOriginalRequest`).
+pub(super) fn edit_original_request(
+    model: &str,
+    prompt: &str,
+    images: &[String],
+    format: &str,
+    options: &Options,
+) -> Vec<u8> {
+    append_edit_refs(
+        original_base_request(model, prompt, format, options),
+        images,
+    )
+}
+
+/// Adds the same image references to prepared and original edit bodies.
+fn append_edit_refs(request: Vec<u8>, images: &[String]) -> Vec<u8> {
     let refs: Vec<Vec<u8>> = images
         .iter()
         .map(|image| image.trim())

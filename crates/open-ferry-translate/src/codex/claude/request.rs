@@ -310,6 +310,20 @@ impl<'a> InputBuilder<'a> {
                 if message.role != "assistant" {
                     return;
                 }
+                if str_of(part.get("signature")).trim() == "cpa:commentary:v1" {
+                    let text = str_of(part.get("thinking"));
+                    if !text.is_empty() {
+                        self.flush(message);
+                        let commentary = object([
+                            ("type", "message".into()),
+                            ("role", "assistant".into()),
+                            ("phase", "commentary".into()),
+                            ("content", json!([{"type":"output_text","text":text}])),
+                        ]);
+                        self.items.push(commentary);
+                    }
+                    return;
+                }
                 let Some(signature) = self.replay.encrypted_content(part.get("signature")) else {
                     return;
                 };

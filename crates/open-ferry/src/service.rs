@@ -1403,12 +1403,14 @@ impl Service {
         let config_writer = Arc::new(FileConfigWriter::new(config_path).with_gate(gate.clone()));
         let checked_config_path = config_writer.path().to_path_buf();
         let (read_sender, read_completions) = mpsc::unbounded_channel();
+        let catalogs = CatalogRuntime::global().clone();
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
             Arc::clone(&registry),
             management_password_from_env(),
         )
+        .with_catalogs(catalogs.clone())
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
         .with_config_writer(config_writer)
@@ -1468,7 +1470,7 @@ impl Service {
             config_applies: 0,
             #[cfg(test)]
             executor_registration_events: std::sync::Mutex::default(),
-            catalogs: CatalogRuntime::global().clone(),
+            catalogs,
             catalog_sender,
             catalog_changes,
             #[cfg(test)]
@@ -8945,6 +8947,72 @@ self-update:
         );
         assert_eq!(live.metadata["access_token"], "dummy-after");
         assert_eq!(std::fs::read(&path).unwrap(), current);
+    }
+
+    #[tokio::test]
+    async fn p47_delayed_persist_after_disable_survives_invalid_scan_and_reset() {
+        for provider in ["claude", "codex"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("delayed.json");
+            std::fs::write(&path, format!(r#"{{"type":"{provider}","access_token":"dummy-before","refresh_token":"dummy-refresh"}}"#)).unwrap();
+            let mut service = service(dir.path(), "");
+            service.handle_and_drain(added(&path), Path::new("")).await;
+            let stale = service.manager.list()[0].as_ref().clone();
+            service
+                .manager
+                .edit_at_epoch(&stale.id, stale.registration_epoch, |auth| {
+                    auth.disabled = true;
+                    auth.status = open_ferry_core::auth::Status::Disabled;
+                    auth.metadata
+                        .insert("disabled".into(), serde_json::json!(true));
+                    Ok::<_, ()>(true)
+                })
+                .unwrap()
+                .unwrap();
+            let saved = std::fs::read(&path).unwrap();
+            deliver_command(
+                &mut service,
+                SyncChange::Upsert(Box::new(stale.clone())),
+                next_revision(),
+            )
+            .await;
+            assert!(
+                service.manager.get(&stale.id).unwrap().disabled,
+                "delayed persisted snapshot undid disable"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            // The next scan cannot fall back to the discarded login payload.
+            std::fs::write(&path, b"{").unwrap();
+            service
+                .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+                .await;
+            let _reset = service.manager.reset_quota(&stale.id);
+            // Existing result-save paths can repair the file or refuse it.
+            // Neither outcome may undo the later disable.
+            let after_reset = std::fs::read(&path).unwrap();
+            if let Ok(record) = serde_json::from_slice::<serde_json::Value>(&after_reset) {
+                assert!(record["disabled"].as_bool() == Some(true));
+            } else {
+                assert_eq!(after_reset, b"{");
+            }
+            // Exercise the incomplete-file reload even if reset repaired it.
+            std::fs::write(&path, b"{").unwrap();
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
+            assert!(!service.dirty_reads.is_empty());
+            reload(&mut service, dir.path(), "force-model-prefix: true\n").await;
+            assert!(
+                service.manager.get(&stale.id).unwrap().disabled,
+                "reload must not republish the discarded login payload"
+            );
+            std::fs::write(&path, &saved).unwrap();
+            service
+                .handle_and_drain(changed(auth_file(&path)), Path::new(""))
+                .await;
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            service.manager.reset_quota(&stale.id).unwrap();
+            assert!(service.manager.get(&stale.id).unwrap().disabled);
+        }
     }
 
     #[tokio::test]

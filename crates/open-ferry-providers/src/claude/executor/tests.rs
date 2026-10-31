@@ -3067,3 +3067,232 @@ async fn paused_search_continuation_restores_finished_results_without_completing
         assert_eq!(blocks[2]["input"]["query"], "paused query");
     }
 }
+
+#[test]
+fn commentary_cleanup_ignores_model_family_gate() {
+    for model in ["claude-sonnet-5", "deepseek-v4", "unknown-model"] {
+        let mut body = json!({"messages":[{"role":"assistant","content":[
+            {"type":"thinking","thinking":"commentary","signature":"cpa:commentary:v1"},
+            {"type":"text","text":"final"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}]});
+        sanitize_for_upstream(&mut body, model);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type":"text","text":"commentary"},{"type":"text","text":"final"}])
+        );
+        assert!(!body.to_string().contains("cpa:commentary:v1"));
+    }
+    let mut body = json!({"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque"}]}]});
+    let before = body.clone();
+    sanitize_for_upstream(&mut body, "deepseek-v4");
+    assert_eq!(body, before);
+}
+
+async fn capture_forced_tools(
+    method: u8,
+    model: &str,
+    payload: Value,
+    rules: &str,
+    oauth: bool,
+) -> Value {
+    let mock = Mock::start(match method {
+        1 => Reply::sse(SSE),
+        2 => Reply::json(r#"{"input_tokens":17}"#),
+        _ => Reply::json(MESSAGE),
+    })
+    .await;
+    let executor = mock
+        .executor()
+        .with_config(Arc::new(Config::parse(rules).unwrap()));
+    let opts = options_with_original(Format::CLAUDE, &payload);
+    let request = Request {
+        model: model.into(),
+        payload: Bytes::from(payload.to_string()),
+    };
+    let auth = if oauth { oauth_auth() } else { api_key_auth() };
+    match method {
+        1 => {
+            let response = executor
+                .execute_stream(
+                    auth,
+                    request,
+                    Options {
+                        stream: true,
+                        ..opts
+                    },
+                )
+                .await
+                .unwrap();
+            for chunk in response.chunks.collect::<Vec<_>>().await {
+                chunk.unwrap();
+            }
+        }
+        2 => {
+            executor.count_tokens(auth, request, opts).await.unwrap();
+        }
+        _ => {
+            executor.execute(auth, request, opts).await.unwrap();
+        }
+    }
+    mock.last().json()
+}
+
+#[tokio::test]
+async fn claude_55_forced_tools_preserve_thinking_and_history_in_all_paths() {
+    for method in 0..3 {
+        for oauth in [false, true] {
+            for model in ["claude-opus-5-5", "claude-sonnet-5-5"] {
+                for choice in ["any", "tool"] {
+                    let mut payload = preserved_thinking_replay_payload("spoofed-body-model");
+                    payload["prompt_cache_options"] = json!({"mode":"explicit"});
+                    payload["tool_choice"] =
+                        json!({"type":choice,"name":"lookup","disable_parallel_tool_use":true});
+                    payload["tools"] = json!([{"name":"lookup","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}}]);
+                    payload["output_config"] = json!({"effort":"high","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}}}}});
+                    let body =
+                        capture_forced_tools(method, model, payload.clone(), "{}", oauth).await;
+                    assert_eq!(body["model"], model);
+                    assert_eq!(
+                        body["tool_choice"],
+                        json!({"type":"auto","disable_parallel_tool_use":true})
+                    );
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(body["output_config"], payload["output_config"]);
+                    assert_eq!(body["messages"], payload["messages"]);
+                    assert_eq!(body["tools"], payload["tools"]);
+                    assert_eq!(payload["tool_choice"]["type"], choice);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_55_forced_tools_use_routed_model_and_keep_payload_rules_final() {
+    for method in 0..3 {
+        let payload = json!({"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],
+            "tool_choice":{"type":"tool","name":"lookup"}});
+        for model in [
+            "claude-opus-5",
+            "claude-haiku-5-5",
+            "claude-opus-5-50",
+            "claude-opus-5-5-custom",
+        ] {
+            let body = capture_forced_tools(method, model, payload.clone(), "{}", false).await;
+            assert_eq!(body["tool_choice"], payload["tool_choice"], "{model}");
+        }
+        let mut payload = preserved_thinking_replay_payload("spoofed");
+        payload["tool_choice"] = json!({"type":"tool","name":"lookup"});
+        payload["output_config"] = json!({"effort":"high"});
+        for filter in [false, true] {
+            let rules = if filter {
+                r#"
+payload:
+  filter:
+    - models: [{name: claude-opus-5-5, protocol: claude, exist: [thinking], match: [{tool_choice.type: auto}]}]
+      params: [tool_choice, thinking, output_config.effort]
+"#
+            } else {
+                r#"
+payload:
+  override:
+    - models: [{name: claude-opus-5-5, protocol: claude, exist: [thinking], match: [{tool_choice.type: auto}]}]
+      params:
+        tool_choice: {type: tool, name: user_override}
+        observed_builtin: true
+"#
+            };
+            let body =
+                capture_forced_tools(method, "claude-opus-5-5", payload.clone(), rules, false)
+                    .await;
+            if filter {
+                assert!(body.get("tool_choice").is_none());
+                assert!(body.get("thinking").is_none());
+                assert!(body["output_config"].get("effort").is_none());
+            } else {
+                assert_eq!(
+                    body["tool_choice"],
+                    json!({"type":"tool","name":"user_override"})
+                );
+                assert_eq!(body["observed_builtin"], true);
+                assert_eq!(body["thinking"]["type"], "adaptive");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_55_forced_tools_normalize_openai_translations() {
+    for format in [Format::OPENAI, Format::OPENAI_RESPONSE] {
+        let mut payload = if format == Format::OPENAI {
+            json!({"messages":[{"role":"user","content":"weather"}],"reasoning_effort":"high",
+                "tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+                "tool_choice":{"type":"function","function":{"name":"lookup"}}})
+        } else {
+            json!({"input":"weather","reasoning":{"effort":"high"},
+                "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+                "tool_choice":{"type":"function","name":"lookup"}})
+        };
+        payload["parallel_tool_calls"] = false.into();
+        let request = Request {
+            model: "claude-sonnet-5-5".into(),
+            payload: Bytes::from(payload.to_string()),
+        };
+        let mock = Mock::start(Reply::sse(SSE)).await;
+        let executor = mock.executor();
+        let opts = options_with_original(format, &payload);
+        let prepared = executor
+            .prepare_messages(&api_key_auth(), &request, &opts, true, true, false)
+            .unwrap();
+        assert_eq!(
+            prepared.upstream["tool_choice"],
+            json!({"type":"auto","disable_parallel_tool_use":true})
+        );
+        assert_eq!(prepared.upstream["thinking"]["type"], "adaptive");
+    }
+}
+
+#[test]
+fn claude_55_forced_tools_leave_claude_cli_translation_unchanged() {
+    let payload = json!({"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"tool","name":"lookup"}});
+    let request = Request {
+        model: "claude-opus-5-5".into(),
+        payload: Bytes::from(payload.to_string()),
+    };
+    let provider = "claude-cli";
+    let auth = Auth {
+        provider: provider.into(),
+        ..Auth::default()
+    };
+    let body = translate_request_for_auth(
+        None,
+        &auth,
+        &request,
+        &options(Format::CLAUDE),
+        "claude-opus-5-5",
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!(body["tool_choice"], payload["tool_choice"], "{provider}");
+}
+
+#[test]
+fn r2_provider_empty_commentary_is_removed_before_replay() {
+    let plain = json!({"messages":[
+        {"role":"assistant","content":[{"type":"tool_use","id":"call_a","name":"lookup","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_a","content":"result"}]}]});
+    for model in ["claude-sonnet-5-5", "deepseek-v4"] {
+        let mut expected = plain.clone();
+        sanitize_for_upstream(&mut expected, model);
+        let mut marked = plain.clone();
+        marked["messages"].as_array_mut().unwrap().insert(
+            1,
+            json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":"","signature":"cpa:commentary:v1"}]}),
+        );
+        sanitize_for_upstream(&mut marked, model);
+        assert_eq!(marked, expected);
+    }
+}

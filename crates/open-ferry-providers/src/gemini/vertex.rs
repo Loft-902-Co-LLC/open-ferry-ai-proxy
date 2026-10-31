@@ -88,7 +88,7 @@ const API_VERSION: &str = "v1";
 /// Vertex AI's global endpoint, for API keys.
 const GLOBAL_BASE_URL: &str = "https://aiplatform.googleapis.com";
 /// The location of a service account that names none.
-const DEFAULT_LOCATION: &str = "us-central1";
+const DEFAULT_LOCATION: &str = "global";
 
 /// Calls Gemini models on Vertex AI with service accounts or API keys
 /// (upstream's `GeminiVertexExecutor`).
@@ -413,7 +413,7 @@ impl VertexExecutor {
             PROVIDER,
         )?;
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
-        prepare_count_body(&mut body, base);
+        prepare_count_body(&mut body, base, false);
         self.apply_payload_rules(request, options, false, None, &mut body);
         let url = self.url(&target, base, "countTokens");
         let headers = self.headers(auth, options, &target).await?;
@@ -520,7 +520,7 @@ fn service_account_target(metadata: &Map<String, Value>) -> Result<Target<'stati
 /// one for `global`.
 fn vertex_base_url(location: &str) -> String {
     match location.trim() {
-        "" => format!("https://{DEFAULT_LOCATION}-aiplatform.googleapis.com"),
+        "" => GLOBAL_BASE_URL.to_owned(),
         location if location.eq_ignore_ascii_case("global") => GLOBAL_BASE_URL.to_owned(),
         location if location.eq_ignore_ascii_case("us") || location.eq_ignore_ascii_case("eu") => {
             format!(

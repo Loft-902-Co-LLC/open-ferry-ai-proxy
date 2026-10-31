@@ -45,8 +45,9 @@ pub use claude::{
 };
 pub use claude_antigravity_validation::inspect_antigravity_claude_caqs_signature;
 pub use claude_messages_sanitize::{
-    ClaudeMessagesSanitizeOptions, SanitizeReport, sanitize_claude_messages_for_claude_upstream,
-    sanitize_claude_messages_signatures_for_model, sanitize_claude_messages_signatures_for_target,
+    ClaudeMessagesSanitizeOptions, SanitizeReport, is_empty_codex_commentary_message,
+    sanitize_claude_messages_for_claude_upstream, sanitize_claude_messages_signatures_for_model,
+    sanitize_claude_messages_signatures_for_target,
 };
 pub use claude_validation::{
     ClaudeCaisSignatureInfo, ClaudeSignatureTree, ClaudeValidationOptions,
@@ -59,13 +60,14 @@ pub use claude_validation::{
 };
 pub use gemini_sanitize::{
     gemini_replay_signature_or_bypass, sanitize_gemini_request_thought_signatures,
+    sanitize_non_vertex_gemini_request_thought_signatures,
 };
 pub use gemini_validation::{
     GEMINI_CONTEXT_ENGINEERING_BYPASS, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, GeminiEnvelope,
     GeminiThoughtSignatureInfo, GeminiValidationOptions, MAX_GEMINI_THOUGHT_SIGNATURE_LEN,
     inspect_gemini_thought_signature, is_gemini_thought_signature_bypass,
-    is_valid_gemini_thought_signature, validate_gemini_function_call_pairing,
-    validate_gemini_thought_signatures,
+    is_gemini_vertex_bare_tink_signature, is_valid_gemini_thought_signature,
+    validate_gemini_function_call_pairing, validate_gemini_thought_signatures,
 };
 pub use gpt_validation::{
     GptReasoningSignatureInfo, MAX_GPT_REASONING_SIGNATURE_LEN, inspect_gpt_reasoning_signature,
@@ -257,6 +259,7 @@ pub struct Decision {
 /// Base64 characters a self-describing envelope can start with. The first
 /// character is the first decoded byte shifted right by two:
 ///
+/// - `A`: `0x00..=0x03`, Vertex bare Tink (`0x01`)
 /// - `C`: `0x08..=0x0b`, Claude CAIS (`0x08`)
 /// - `E`: `0x10..=0x13`, Claude single-layer and Gemini field-2 (`0x12`)
 /// - `Q`: `0x40..=0x43`, Antigravity double-layer CAQS (`0x43`, an inner `C`)
@@ -264,7 +267,7 @@ pub struct Decision {
 /// - `g`: `0x80..=0x83`, GPT Fernet reasoning (`0x80`)
 ///
 /// Gemini's ASCII UUID payload is left out because it is never replay-safe.
-const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"CEQRg";
+const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"ACEQRg";
 
 /// Whether `sig` could be a self-describing provider envelope. `false` is
 /// conclusive; `true` only narrows the candidates.

@@ -178,6 +178,10 @@ fn convert_messages(
     // count.
     let mut pending_tool_use_ids: Vec<String> = Vec::new();
     for message in messages {
+        // These targets restore commentary before per-message replay handling.
+        if crate::signature::is_empty_codex_commentary_message(message, false) {
+            continue;
+        }
         let Some(Value::String(original_role)) = message.get("role") else {
             continue;
         };
@@ -267,6 +271,12 @@ fn convert_block(
             let text = str_of(block.get("text"));
             if !text.is_empty() {
                 parts.push(json!({ "text": text }));
+            }
+        }
+        "thinking" if str_of(block.get("signature")).trim() == "cpa:commentary:v1" => {
+            let text = str_of(block.get("thinking"));
+            if !text.is_empty() {
+                parts.push(json!({"text":text}));
             }
         }
         "thinking" if keep_thinking => {

@@ -813,6 +813,20 @@ impl Manager {
         Err(preferred(last, preferred_upstream).err)
     }
 
+    /// Trust only the error's positive hint, never a scheduler cooldown floor.
+    /// An existing deadline retains its identity, including after expiry.
+    /// Called after marking pre-output failures; neutral and accepted-stream
+    /// errors retain only the executor's own annotation, if any.
+    fn annotate_retry_deadline(&self, error: ExecError) -> ExecError {
+        if error.has_trusted_retry_deadline() {
+            return error;
+        }
+        match error.effective_retry_after().filter(|wait| !wait.is_zero()) {
+            Some(wait) => error.with_trusted_retry_after(wait),
+            None => error,
+        }
+    }
+
     /// Runs a streaming call over the providers, in rounds (upstream's
     /// `ExecuteStream`). A stream that failed before its first chunk comes
     /// back as a stream of that one error, with the provider's headers.
@@ -1058,20 +1072,21 @@ impl Manager {
                 let settings = self.settings();
                 let action = match_request_scoped_error_action(&auth, &err, &settings);
                 let view = ErrView::Exec(&err);
-                let credential_scope = match kind {
+                let (credential_scope, marked) = match kind {
                     CallKind::Execute => {
                         let result = failure_result(&attempt, &auth, &err, action, true);
-                        if is_responses_compact_availability_neutral_error(
+                        let neutral = is_responses_compact_availability_neutral_error(
                             &exec_opts,
                             view,
                             result.error.as_ref(),
-                        ) {
+                        );
+                        if neutral {
                             self.record_availability_neutral_result_async(&result).await;
                         } else {
                             self.mark_call_result_async(&result, attempt.session())
                                 .await;
                         }
-                        result.credential_scope
+                        (result.credential_scope, !neutral)
                     }
                     CallKind::CountTokens => {
                         // A count_tokens route the upstream lacks is recorded
@@ -1079,21 +1094,31 @@ impl Manager {
                         // messages.
                         let mut result = failure_result(&attempt, &auth, &err, action, false);
                         result.skip_quota_observation = true;
-                        if is_count_tokens_endpoint_not_found_error(view, &exec_req.model)
-                            && result
-                                .error
-                                .as_ref()
-                                .is_none_or(|e| e.code != CODE_FORCE_COOLDOWN)
-                        {
+                        let neutral =
+                            is_count_tokens_endpoint_not_found_error(view, &exec_req.model)
+                                && result
+                                    .error
+                                    .as_ref()
+                                    .is_none_or(|e| e.code != CODE_FORCE_COOLDOWN);
+                        if neutral {
                             self.record_availability_neutral_result_async(&result).await;
                         } else {
                             result.credential_scope = is_credential_scoped_error(view);
                             self.mark_call_result_async(&result, attempt.session())
                                 .await;
                         }
-                        result.credential_scope
+                        (result.credential_scope, !neutral)
                     }
                 };
+                let err = if marked {
+                    self.annotate_retry_deadline(err)
+                } else {
+                    err
+                };
+                if let Some(previous) = &mut upstream {
+                    previous.err = err.clone();
+                }
+                let view = ErrView::Exec(&err);
                 if let Some(action) = action {
                     if action.is_stop() {
                         return Err(Failure::stop(err));
@@ -1317,6 +1342,10 @@ impl Manager {
                     let result = failure_result(&attempt, &auth, &err, action, true);
                     self.mark_call_result_async(&result, attempt.session())
                         .await;
+                    let err = self.annotate_retry_deadline(err);
+                    if let Some(previous) = &mut upstream {
+                        previous.err = err.clone();
+                    }
                     if action.is_some_and(ScopedAction::is_stop) {
                         return Err(Failure::stop(err));
                     }
@@ -1383,6 +1412,10 @@ impl Manager {
                     result.response_headers = stream_failure_headers(&headers, &err);
                     self.mark_call_result_async(&result, attempt.session())
                         .await;
+                    let err = self.annotate_retry_deadline(err);
+                    if let Some(previous) = &mut upstream {
+                        previous.err = err.clone();
+                    }
                     if let Some(action) = action {
                         if action.is_stop() {
                             return Err(Failure::stop(err));

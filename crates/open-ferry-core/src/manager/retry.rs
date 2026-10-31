@@ -244,6 +244,36 @@ fn retry_allowed(selection: &Selection<'_>, query: &RetryQuery<'_>) -> bool {
         .any(|(auth, model)| retry_round_availability_for_auth(auth, &model, selection.now).0)
 }
 
+/// Live quota belongs to this model, or explicitly to the whole credential.
+fn has_live_quota(auth: &Auth, model: &str, now: Timestamp) -> bool {
+    let live = |quota: &crate::auth::QuotaState| {
+        quota.exceeded && quota.next_recover_at.is_none_or(|at| at > now)
+    };
+    if auth.quota.reason == "credential_quota" && live(&auth.quota) {
+        return true;
+    }
+    let model = canonical_model_key(model);
+    if model.is_empty() {
+        return live(&auth.quota);
+    }
+    auth.model_states
+        .iter()
+        .any(|(key, state)| canonical_model_key(key) == model && live(&state.quota))
+}
+
+fn transient_zero_wait(auth: &Auth, model: &str, now: Timestamp) -> bool {
+    if has_live_quota(auth, model, now) {
+        return false;
+    }
+    let key = canonical_model_key(model);
+    let error = auth
+        .model_states
+        .get(&key)
+        .map(|state| state.last_error.as_ref())
+        .unwrap_or(auth.last_error.as_ref());
+    error.is_some_and(|error| error.code == "transient_rate_limit")
+}
+
 /// The shortest wait until a credential could take another round, if any
 /// could (upstream's `closestCooldownWaitWithAttempted`). A credential the
 /// failed round tried after a 429 waits at least the quota floor, unless
@@ -272,7 +302,11 @@ pub(super) fn closest_cooldown_wait(
         }
         let next = next.filter(|_| !is_zero(next));
         let was_attempted = query.attempted.contains(&auth.id);
-        if !was_attempted || cooldown_disabled_for_auth(settings, auth) || status != 429 {
+        if !was_attempted
+            || cooldown_disabled_for_auth(settings, auth)
+            || status != 429
+            || transient_zero_wait(auth, &check_model, now)
+        {
             let Some(next) = next else {
                 return Some(Duration::ZERO);
             };

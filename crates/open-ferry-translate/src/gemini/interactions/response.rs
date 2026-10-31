@@ -73,10 +73,11 @@ fn first_non_blank<S: AsRef<str>>(values: impl IntoIterator<Item = S>) -> String
 }
 
 /// The Gemini usage of a response: `usageMetadata`, or else
-/// `usage_metadata`.
+/// `usage_metadata`, or the executor-filtered `cpaUsageMetadata`.
 fn gemini_usage(root: &Value) -> Option<&Value> {
     root.get("usageMetadata")
         .or_else(|| root.get("usage_metadata"))
+        .or_else(|| root.get("cpaUsageMetadata"))
 }
 
 /// `firstInteractionsGeminiUsage(...).Int()`: the first count `usage` has.
@@ -94,6 +95,8 @@ pub struct GeminiToInteractionsStream {
     finished: bool,
     completed: bool,
     done: bool,
+    /// Only the translated counts are kept, not the content frame.
+    pending_usage: Option<Value>,
     step_open: bool,
     step_type: &'static str,
     step_index: i64,
@@ -111,6 +114,7 @@ impl GeminiToInteractionsStream {
             finished: false,
             completed: false,
             done: false,
+            pending_usage: None,
             step_open: false,
             step_type: "",
             step_index: 0,
@@ -122,21 +126,23 @@ impl GeminiToInteractionsStream {
     pub fn translate(&mut self, chunk: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
         // Vertex passes raw SSE lines; AI Studio passes the JSON payload.
+        let chunk = go::trim_space(chunk);
         let chunk = go::trim_space(chunk.strip_prefix(b"data:").unwrap_or(chunk));
-        if chunk.is_empty() || chunk.starts_with(b"event:") {
+        if chunk.is_empty()
+            || chunk.starts_with(b":")
+            || chunk.starts_with(b"event:")
+            || chunk.starts_with(b"id:")
+            || chunk.starts_with(b"retry:")
+        {
             return out;
         }
         if chunk == b"[DONE]" {
             if !self.completed {
                 self.stop_step(&mut out);
-                self.complete(&mut out, None);
+                let usage = self.pending_usage.take();
+                self.complete(&mut out, usage);
             }
-            if !self.done {
-                let mut frame = String::new();
-                push_frame(&mut frame, "done", "[DONE]");
-                out.push(frame);
-                self.done = true;
-            }
+            self.push_done(&mut out);
             return out;
         }
         let root = parse_root(chunk);
@@ -171,13 +177,26 @@ impl GeminiToInteractionsStream {
         for part in each(gemini_schema::get(&root, "candidates.0.content.parts")) {
             self.push_part(&mut out, part);
         }
-        let has_finish = gemini_schema::get(&root, "candidates.0.finishReason").is_some();
+        let has_finish = gemini_schema::get(&root, "candidates.0.finishReason")
+            .is_some_and(|reason| !str_of(Some(reason)).trim().is_empty());
+        let frame_has_usage = has_stream_usage(&root);
+        if frame_has_usage {
+            let mut usage = Value::Object(Map::new());
+            if let Some(gemini) = gemini_usage(&root) {
+                stream_usage(&mut usage, gemini);
+            }
+            self.pending_usage = Some(usage);
+        }
         if has_finish && !self.finished {
             self.stop_step(&mut out);
             self.finished = true;
         }
-        if has_stream_usage(&root) && self.finished && !self.completed {
-            self.complete(&mut out, Some(&root));
+        // Earlier usage is only a DONE fallback: a later frame can carry
+        // the final counts. Complete on usage at or after the finish.
+        if frame_has_usage && self.finished && !self.completed {
+            let usage = self.pending_usage.take();
+            self.complete(&mut out, usage);
+            self.push_done(&mut out);
         }
         out
     }
@@ -324,13 +343,20 @@ impl GeminiToInteractionsStream {
         self.step_type = "";
     }
 
-    /// `appendInteractionsCompleted`, with the usage of `root` if given.
-    fn complete(&mut self, out: &mut Vec<String>, root: Option<&Value>) {
-        let now = Value::String(create_time(unix_nanos().div_euclid(1_000_000_000)));
-        let mut usage = Value::Object(Map::new());
-        if let Some(gemini) = root.and_then(gemini_usage) {
-            stream_usage(&mut usage, gemini);
+    /// `appendInteractionsDone`: the terminal sentinel, once.
+    fn push_done(&mut self, out: &mut Vec<String>) {
+        if !self.done {
+            let mut frame = String::new();
+            push_frame(&mut frame, "done", "[DONE]");
+            out.push(frame);
+            self.done = true;
         }
+    }
+
+    /// `appendInteractionsCompleted`, with translated usage if given.
+    fn complete(&mut self, out: &mut Vec<String>, usage: Option<Value>) {
+        let now = Value::String(create_time(unix_nanos().div_euclid(1_000_000_000)));
+        let usage = usage.unwrap_or_else(|| Value::Object(Map::new()));
         let completed = object([
             (
                 "interaction",

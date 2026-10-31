@@ -45,6 +45,84 @@ fn folded_call(q: &str) -> String {
     )
 }
 
+// TestXAIExecutorDeduplicatesToolsAcrossAdditionalTools (upstream 0c61b12c).
+#[tokio::test]
+async fn deduplicates_historical_tools_for_responses_and_codex_streams() {
+    for source in ["openai-response", "codex"] {
+        for stream in [false, true] {
+            for (description, parameter) in [
+                ("top declaration", "duration_ms"),
+                ("top declaration", "seconds"),
+                ("history declaration", "seconds"),
+            ] {
+                let mock = Mock::start(Reply::sse(concat!(
+                    "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"name\":\"clock__sleep\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.7\",\"output\":[{\"type\":\"function_call\",\"name\":\"clock__sleep\",\"call_id\":\"call_1\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+                ))).await;
+                let namespace = |description: &str, parameter: &str| {
+                    json!({
+                        "type": "namespace", "name": "clock", "tools": [{
+                            "type": "function", "name": "sleep", "description": description,
+                            "parameters": {"type": "object", "properties": {(parameter): {"type": "string"}}}
+                        }]
+                    })
+                };
+                let payload = json!({"model": "grok-4.7", "tools": [namespace("top declaration", "duration_ms")], "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": [namespace(description, parameter)]},
+                    {"role": "user", "content": "hello"}
+                ]}).to_string();
+                let opts = Options {
+                    stream,
+                    response_format: Format::OPENAI_RESPONSE,
+                    ..options(source)
+                };
+                if stream {
+                    let text = streamed(
+                        executor()
+                            .execute_stream(
+                                api_key_auth(&mock.url),
+                                request("grok-4.7", &payload),
+                                opts,
+                            )
+                            .await,
+                    )
+                    .await;
+                    assert!(text.contains(r#""namespace":"clock""#), "{text}");
+                    assert!(text.contains(r#""name":"sleep""#), "{text}");
+                } else {
+                    let response = executor()
+                        .execute(api_key_auth(&mock.url), request("grok-4.7", &payload), opts)
+                        .await
+                        .unwrap();
+                    let out = payload_json(&response);
+                    assert_eq!(out["output"][0]["name"], "sleep");
+                    assert_eq!(out["output"][0]["namespace"], "clock");
+                }
+                let body = mock.last().json();
+                assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+                assert_eq!(body["tools"][0]["description"], "top declaration");
+                assert!(
+                    body["tools"][0]["parameters"]["properties"]
+                        .get("duration_ms")
+                        .is_some()
+                );
+                assert!(
+                    body["tools"][0]["parameters"]["properties"]
+                        .get("seconds")
+                        .is_none()
+                );
+                assert!(
+                    !body["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["type"] == "additional_tools")
+                );
+            }
+        }
+    }
+}
+
 // TestXAIExecutorExecuteFoldsNamespacesWhenToolsExceed200.
 #[tokio::test]
 async fn execute_folds_namespaces_when_tools_exceed_200() {

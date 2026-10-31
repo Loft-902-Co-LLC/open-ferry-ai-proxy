@@ -69,6 +69,7 @@ mod tests;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::body::{Body, BodyDataStream};
@@ -148,7 +149,10 @@ pub(crate) async fn generations(
         return routed(&state, &client, &model, payload, stream).await;
     }
     if xai::is_registered_model(&state, &model) {
-        let request = xai::generations_request(&raw, &model, &format);
+        let request = XaiRequest {
+            payload: xai::generations_request(&raw, &model, &format),
+            original: xai::generations_original_request(&raw, &model),
+        };
         return xai_images(
             &state,
             &client,
@@ -215,7 +219,16 @@ async fn edits_from_json(state: &AppState, client: &ClientRequest, body: Body) -
             return invalid_request(400, "image is required");
         }
         let options = xai::edit_options_from_json(&raw);
-        let request = xai::edit_request(&model, &prompt, &images, &format, &options);
+        let request = XaiRequest {
+            payload: xai::edit_request(&model, &prompt, &images, &format, &options),
+            original: xai::edit_original_request(
+                &model,
+                &prompt,
+                &images,
+                &json::str_at(&raw, "response_format"),
+                &options,
+            ),
+        };
         return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let payload = compat_json_request(&raw, &model, stream);
@@ -252,7 +265,8 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
     if files.is_empty() {
         return invalid_request(400, "image is required");
     }
-    let format = response_format(&form_value(&form, "response_format"));
+    let raw_format = form_value(&form, "response_format");
+    let format = response_format(&raw_format);
     let stream = parse_bool(&form_value(&form, "stream"), false);
 
     // A Codex image tool model's base is never an xAI one.
@@ -266,7 +280,10 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
             quality: form_value(&form, "quality").trim().to_owned(),
             n: parse_int(&form_value(&form, "n"), 0),
         };
-        let request = xai::edit_request(&model, &prompt, &images, &format, &options);
+        let request = XaiRequest {
+            payload: xai::edit_request(&model, &prompt, &images, &format, &options),
+            original: xai::edit_original_request(&model, &prompt, &images, &raw_format, &options),
+        };
         return xai_images(state, client, request, &model, format, "image_edit", stream).await;
     }
     let (payload, content_type) = compat_form_request(&form, &model, stream);
@@ -578,13 +595,19 @@ async fn compat(
     collect(call, timing, format).await
 }
 
+/// An xAI body and its un-defaulted original for payload-rule presence checks.
+struct XaiRequest {
+    payload: Vec<u8>,
+    original: Vec<u8>,
+}
+
 /// An xAI image call, made without a stream, its answer written as the
 /// OpenAI images API's, or as `<prefix>.completed` events (upstream's
 /// `handleXAIImages`).
 async fn xai_images(
     state: &AppState,
     client: &ClientRequest,
-    request: Vec<u8>,
+    request: XaiRequest,
     requested_model: &str,
     format: String,
     prefix: &'static str,
@@ -592,25 +615,49 @@ async fn xai_images(
 ) -> Response {
     let timing = Timing::of(state);
     let model = xai::routing_model(state, requested_model);
-    let payload = Bytes::from(request);
-    let call = match Call::image(state, client, Format::OPENAI_IMAGE, &model, payload, false) {
+    let payload = Bytes::from(request.payload);
+    let mut call = match Call::image(state, client, Format::OPENAI_IMAGE, &model, payload, false) {
         Ok(call) => call,
         Err(error) => return openai_error_response(&error, timing.passthrough),
     };
+    call.options.original_request = Bytes::from(request.original);
     if stream {
         return stream_xai(call, timing, format, prefix).await;
     }
     collect(call, timing, format).await
 }
 
+/// The response format selected by the last provider attempt.
+struct ImageFormat(Arc<Mutex<String>>);
+
+impl ImageFormat {
+    fn install(call: &mut Call, format: String) -> Self {
+        let value = Arc::new(Mutex::new(xai::normalize_format(&format).to_owned()));
+        let output = value.clone();
+        call.options.metadata.finalized_response_format = Some(Arc::new(move |format| {
+            *output.lock().unwrap_or_else(PoisonError::into_inner) =
+                xai::normalize_format(format).to_owned();
+        }));
+        Self(value)
+    }
+
+    fn get(&self) -> String {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// Makes `call` and answers with its answer read as xAI's, in the OpenAI
 /// images API's shape, or a 502 when there are no images in it (upstream's
 /// `collectImagesWithModel`).
-async fn collect(call: Call, timing: Timing, format: String) -> Response {
+async fn collect(mut call: Call, timing: Timing, format: String) -> Response {
+    let format = ImageFormat::install(&mut call, format);
     keep_alive(timing.nonstream, call.execute(), move |result| {
         let result =
             result.and_then(
-                |reply| match xai::images_api_response(&reply.body, &format) {
+                |reply| match xai::images_api_response(&reply.body, &format.get()) {
                     Ok(body) => Ok((body, reply.headers)),
                     Err(text) => Err(ErrorMessage::new(502, text)),
                 },
@@ -665,21 +712,31 @@ fn raw_body(peeked: Peeked, keepalive: Option<Duration>, compat: bool) -> Body {
 
 /// Makes `call`, made without a stream, and writes its answer as
 /// `<prefix>.completed` events (upstream's `streamImagesWithModel`).
-async fn stream_xai(call: Call, timing: Timing, format: String, prefix: &'static str) -> Response {
+async fn stream_xai(
+    mut call: Call,
+    timing: Timing,
+    format: String,
+    prefix: &'static str,
+) -> Response {
+    let format = ImageFormat::install(&mut call, format);
     let mut waiting = timing
         .pre_ft
         .filter(|interval| !interval.is_zero())
         .map(ticker);
     match until_tick(&mut waiting, Box::pin(call.execute())).await {
         Waited::Done(Err(error)) => openai_error_response(&error, timing.passthrough),
-        Waited::Done(Ok(reply)) => match xai::completed_events(&reply.body, &format, prefix) {
-            Ok(events) => sse_response(&reply.headers, Body::from(events)),
-            Err(text) => openai_error_response(&ErrorMessage::new(502, text), timing.passthrough),
-        },
+        Waited::Done(Ok(reply)) => {
+            match xai::completed_events(&reply.body, &format.get(), prefix) {
+                Ok(events) => sse_response(&reply.headers, Body::from(events)),
+                Err(text) => {
+                    openai_error_response(&ErrorMessage::new(502, text), timing.passthrough)
+                }
+            }
+        }
         Waited::Due(rest) => {
             let late = async move {
                 let events = rest.await.and_then(|reply| {
-                    xai::completed_events(&reply.body, &format, prefix)
+                    xai::completed_events(&reply.body, &format.get(), prefix)
                         .map_err(|text| ErrorMessage::new(502, text))
                 });
                 match events {

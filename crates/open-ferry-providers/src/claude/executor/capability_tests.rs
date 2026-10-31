@@ -21,6 +21,121 @@ fn api_auth() -> Auth {
     auth
 }
 
+#[tokio::test]
+async fn r2_manager_transport_retry_keeps_forced_tools_normalized() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for stream in [false, true] {
+        for retries in [0, 1] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut bodies = Vec::new();
+                for attempt in 0..=retries {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let header_end = loop {
+                        let mut part = [0; 1024];
+                        let read = socket.read(&mut part).await.unwrap();
+                        assert!(read > 0);
+                        bytes.extend_from_slice(&part[..read]);
+                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                            break end + 4;
+                        }
+                        assert!(bytes.len() < 65536);
+                    };
+                    let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    assert!(length < 65536);
+                    while bytes.len() < header_end + length {
+                        let mut part = [0; 1024];
+                        let read = socket.read(&mut part).await.unwrap();
+                        assert!(read > 0);
+                        bytes.extend_from_slice(&part[..read]);
+                    }
+                    bodies.push(
+                        serde_json::from_slice::<Value>(&bytes[header_end..header_end + length])
+                            .unwrap(),
+                    );
+                    if attempt == 0 {
+                        // No HTTP response: the manager decides whether to retry.
+                        continue;
+                    }
+                    let (content_type, body) = if stream {
+                        ("text/event-stream", SSE)
+                    } else {
+                        ("application/json", MESSAGE)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+                bodies
+            });
+            let config = Config::parse(format!("request-retry: {retries}\nclaude-api-key: [{{api-key: {API_KEY}, models: [{{name: claude-sonnet-5-5}}]}}]\n")).unwrap();
+            let registry = Arc::new(ModelRegistry::new());
+            let manager = Manager::new(Settings::from(&config), registry.clone(), None);
+            let mut auth = api_auth();
+            auth.metadata.insert("disable_cooling".into(), json!(true));
+            registry.register_auth(&auth, &RegistrationRules::from(&config));
+            manager.register_executor(Arc::new(
+                ClaudeExecutor::new("direct")
+                    .with_base_url(url)
+                    .with_config(Arc::new(config)),
+            ));
+            manager.register(auth).unwrap();
+            let payload = Bytes::from(json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"weather"}],
+                "tools":[{"name":"lookup","input_schema":{"type":"object"}}],
+                "tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true}}).to_string());
+            let request = Request {
+                model: "claude-sonnet-5-5".into(),
+                payload,
+            };
+            let mut opts = options(Format::CLAUDE);
+            opts.stream = stream;
+            opts.metadata.pinned_auth_id = Some("configured-api".into());
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                if stream {
+                    let response = manager
+                        .execute_stream(&["claude".into()], request.clone(), opts)
+                        .await?;
+                    for chunk in response.chunks.collect::<Vec<_>>().await {
+                        chunk?;
+                    }
+                } else {
+                    manager
+                        .execute(&["claude".into()], request.clone(), opts)
+                        .await?;
+                }
+                Ok::<_, ExecError>(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(result.is_ok(), retries == 1);
+            let bodies = tokio::time::timeout(Duration::from_secs(10), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bodies.len(), retries + 1);
+            for body in bodies {
+                assert_eq!(
+                    body["tool_choice"],
+                    json!({"type":"auto","disable_parallel_tool_use":true})
+                );
+            }
+        }
+    }
+}
+
 fn manager(mock: &Mock, config: Config, oauth_last: bool) -> Manager {
     let registry = Arc::new(ModelRegistry::new());
     let manager = Manager::new(Settings::from(&config), registry.clone(), None);
@@ -279,5 +394,21 @@ async fn auto_route_capabilities_reach_streaming_and_token_counts() {
                 .unwrap();
         }
         assert_eq!(mock.last().json()["output_config"]["effort"], "high");
+    }
+}
+
+#[tokio::test]
+async fn claude_55_forced_tools_follow_the_registered_upstream_alias() {
+    for (upstream, alias, expected) in [
+        ("claude-sonnet-5-5", "fast", "auto"),
+        ("claude-sonnet-4-6", "claude-opus-5-5", "tool"),
+    ] {
+        let mock = Mock::start(Reply::sse(SSE)).await;
+        let config = Config::parse(format!("claude-api-key: [{{api-key: {API_KEY}, models: [{{name: {upstream}, alias: {alias}}}]}}]")).unwrap();
+        let manager = manager(&mock, config, false);
+        call(&manager, "configured-api", alias, json!({"model":alias,"messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"tool","name":"lookup"}}), Format::CLAUDE).await;
+        let body = mock.last().json();
+        assert_eq!(body["model"], upstream);
+        assert_eq!(body["tool_choice"]["type"], expected);
     }
 }

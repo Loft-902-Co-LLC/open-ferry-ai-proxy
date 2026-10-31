@@ -4432,3 +4432,204 @@ async fn a_pending_file_observation_keeps_the_cooldown_a_usage_read_recovered() 
     assert!(!blocked(&h, OPUS));
     assert!(!h.get(ID).model_states[OPUS].quota.exceeded);
 }
+
+#[tokio::test(start_paused = true)]
+async fn p47_capacity_hold_and_merge_fence_an_inflight_quota_recovery() {
+    let h = Harness::new(Settings::default());
+    h.add(auth(ID, "claude"), &[OPUS, ROUTE]);
+    h.manager
+        .mark_result(&quota_429(OPUS, opus_headers(), FIVE_DAYS));
+    let token = h.manager.quota_recovery_token(ID).unwrap();
+    let error = ExecError::transient_capacity("transient capacity", Some(2 * HOUR));
+    let mut capacity = other_failure(ROUTE, 429, 2 * HOUR);
+    capacity.error = Some(crate::manager::classify::result_error_from_error(
+        crate::manager::classify::ErrView::Exec(&error),
+    ));
+    h.manager.mark_result(&capacity);
+    h.clock.advance(Duration::from_secs(5));
+    merge_the_alias(&h);
+    let healthy = reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)]);
+    assert!(
+        h.manager
+            .apply_quota_usage_recovery(&token, &healthy)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!recover(&h, &healthy));
+    assert!(blocked(&h, OPUS));
+}
+
+#[tokio::test(start_paused = true)]
+async fn p47_hold_ordering_family_preserves_live_quota_and_cooldowns() {
+    const INVARIANT: &str = "live quota survives zero-hint capacity; non-quota cooldowns survive extend-only capacity; both survive relogin and refresh/recovery merges";
+    let orders = recovery_step_orderings([
+        "stale",
+        "relogin",
+        "refresh",
+        "merge",
+        "recovery",
+        "401",
+        "invalid_grant",
+    ]);
+    let orders: Vec<_> = orders
+        .into_iter()
+        .filter(|order| {
+            order.iter().position(|step| *step == "merge")
+                < order.iter().position(|step| *step == "recovery")
+        })
+        .collect();
+    assert_eq!(orders.len(), 420);
+    for quota in [false, true] {
+        for order in &orders {
+            let h = Harness::new(Settings::default());
+            let partition_deadline = partition_hold(&h.manager);
+            let executor = FakeExecutor::new("claude");
+            executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
+            executor.set_lead(Some(Duration::from_secs(60)));
+            h.manager.register_executor(executor.clone());
+            let mut refresh_deadline = None;
+            let mut initial = auth_with_metadata(
+                ID,
+                "claude",
+                serde_json::json!({"type":"claude", "access_token":"dummy-before", "refresh_token":"dummy-refresh"}),
+            );
+            // A refresh can carry explicit older healthy values, not just an
+            // empty map (which has an independent compatibility fallback).
+            for model in [OPUS, ROUTE] {
+                initial.model_states.insert(
+                    model.into(),
+                    crate::auth::ModelState {
+                        status: crate::auth::Status::Active,
+                        ..Default::default()
+                    },
+                );
+            }
+            initial.status = crate::auth::Status::Active;
+            let pre_hold_models = initial.model_states.clone();
+            h.add(initial, &[OPUS, ROUTE]);
+            let old_seq = h.manager.next_execution_seq();
+            let end = h.now() + TimeDelta::from_std(FIVE_DAYS).unwrap();
+            let mut held = if quota {
+                quota_429(OPUS, opus_headers(), FIVE_DAYS)
+            } else {
+                other_failure(OPUS, 503, FIVE_DAYS)
+            };
+            held.execution_seq = h.manager.next_execution_seq();
+            h.manager.mark_result(&held);
+            let mut alias_hold = other_failure(ROUTE, 503, 2 * HOUR);
+            alias_hold.execution_seq = h.manager.next_execution_seq();
+            h.manager.mark_result(&alias_hold);
+            for step in order {
+                match *step {
+                    "stale" => {
+                        let hint = if quota { Duration::ZERO } else { FIVE_DAYS };
+                        let error = ExecError::transient_capacity("transient capacity", Some(hint));
+                        let mut stale = other_failure(OPUS, 429, hint);
+                        stale.error = Some(crate::manager::classify::result_error_from_error(
+                            crate::manager::classify::ErrView::Exec(&error),
+                        ));
+                        stale.execution_seq = old_seq;
+                        let current = h.get(ID);
+                        stale.credential_version = current.credential_version;
+                        stale.registration_epoch = current.registration_epoch;
+                        h.manager.mark_result(&stale);
+                    }
+                    "401" => {
+                        let current = h.get(ID);
+                        let mut unauthorized = other_failure("", 401, Duration::ZERO);
+                        unauthorized.credential_version = current.credential_version;
+                        unauthorized.registration_epoch = current.registration_epoch;
+                        h.manager.mark_result(&unauthorized);
+                        assert_eq!(h.get(ID).status, crate::auth::Status::Error);
+                        refresh_deadline = refresh_deadline.max(Some(h.now()));
+                    }
+                    "invalid_grant" => {
+                        executor.set_refresh(|_| Err(ExecError::upstream(400, "invalid_grant")));
+                        assert!(h.manager.force_refresh(ID).await.is_err());
+                        assert!(
+                            h.get(ID)
+                                .last_error
+                                .as_ref()
+                                .is_some_and(|error| error.message.contains("invalid_grant"))
+                        );
+                        refresh_deadline = Some(h.now() + TimeDelta::seconds(60));
+                    }
+                    "relogin" => {
+                        let mut fresh = h.get(ID).as_ref().clone();
+                        fresh.model_states.clear();
+                        fresh
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-login"));
+                        h.manager
+                            .adopt_observed(&fresh, None, |_| {
+                                Ok(crate::auth::AdoptionRead::Record(fresh.clone()))
+                            })
+                            .unwrap();
+                        refresh_deadline = None;
+                    }
+                    "refresh" => {
+                        // Use the current version so a preceding relogin cannot
+                        // make this test pass through the older-version fence.
+                        let mut base = h.get(ID).as_ref().clone();
+                        base.model_states = pre_hold_models.clone();
+                        let mut refreshed = base.clone();
+                        refreshed
+                            .metadata
+                            .insert("access_token".into(), serde_json::json!("dummy-refreshed"));
+                        refreshed.metadata.insert(
+                            "expires_at".into(),
+                            serde_json::json!("2000-01-01T00:00:00Z"),
+                        );
+                        refreshed.next_refresh_after = None;
+                        h.manager
+                            .update_refreshed(&base, base.registration_epoch, refreshed)
+                            .unwrap();
+                        executor.set_refresh(|before| {
+                            let mut after = before.clone();
+                            after.metadata.insert(
+                                "access_token".into(),
+                                serde_json::json!("dummy-still-due"),
+                            );
+                            Ok(after)
+                        });
+                        h.manager.force_refresh(ID).await.unwrap();
+                        refresh_deadline = Some(h.now() + TimeDelta::seconds(30));
+                        rotate_outer_with_partition_hold(&h.manager);
+                    }
+                    "merge" => merge_the_alias(&h),
+                    "recovery" => {
+                        // Recover the original claim: never recreate the hold
+                        // whose survival this family is asserting.
+                        assert!(
+                            !recover(&h, &reading(h.now(), &[(UsageWindow::SevenDayOpus, 2.0)])),
+                            "{INVARIANT}: quota={quota}, {order:?}, recovery"
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                let live = h.get(ID);
+                assert_eq!(
+                    live.next_refresh_after, refresh_deadline,
+                    "refresh hold: quota={quota}, {order:?}, {step}"
+                );
+                assert_partition_hold(&h.manager, partition_deadline);
+                assert!(
+                    blocked(&h, OPUS)
+                        && live
+                            .model_states
+                            .get(OPUS)
+                            .and_then(|state| state.next_retry_after)
+                            .is_some_and(|next| next >= end),
+                    "{INVARIANT}: quota={quota}, {order:?}, after {step}"
+                );
+                if quota {
+                    assert!(
+                        live.model_states[OPUS].quota.exceeded,
+                        "{INVARIANT}: {order:?}"
+                    );
+                }
+                h.clock.advance(Duration::from_secs(1));
+            }
+        }
+    }
+}

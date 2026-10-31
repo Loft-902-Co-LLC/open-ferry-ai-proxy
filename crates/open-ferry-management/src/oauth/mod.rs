@@ -52,6 +52,9 @@ use crate::Route;
 use forwarder::Forwarders;
 use sessions::Store;
 
+#[cfg(test)]
+pub(crate) use flows::auth_url as start_handler;
+
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
@@ -125,6 +128,8 @@ struct Logins {
     tasks: JoinSet<()>,
     /// Whether the logins were shut down: no login starts after that.
     shut_down: bool,
+    /// Whether shutdown passed its grace and is aborting login owners.
+    aborting: bool,
 }
 
 /// What a test changes: where the providers' endpoints are, the ports the
@@ -189,6 +194,9 @@ pub(crate) struct Overrides {
     pub(crate) bind_shutdown_events: Option<BindShutdownEvents>,
     #[cfg(test)]
     pub(crate) bind_retry_records: Option<BindRetryRecords>,
+    /// Notified after a native login claims its save, before taking the file lock.
+    #[cfg(test)]
+    pub(crate) login_commit_claimed: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -251,6 +259,8 @@ impl Default for Overrides {
             bind_admission_times: None,
             #[cfg(test)]
             bind_worker_finished: None,
+            #[cfg(test)]
+            login_commit_claimed: None,
         }
     }
 }
@@ -288,6 +298,14 @@ impl Sessions {
         } else {
             Ok(())
         }
+    }
+
+    /// Serialize native save claims with the login-owner shutdown cutoff.
+    /// Existing logins may finish during the bind grace, but after it no new
+    /// claim can race the owner's decision to abort its gate-owned task.
+    fn claim_login_commit(&self, session: &str, provider: &str, registration: u64) -> bool {
+        let logins = self.logins();
+        !logins.aborting && self.store.claim_commit(session, provider, registration)
     }
 
     /// Serialize collector registration with the shutdown cutoff. Its guard
@@ -366,6 +384,9 @@ impl Sessions {
         if let Some(events) = self.overrides().bind_shutdown_events.clone() {
             events.lock().unwrap().push("shutdown passed idle");
         }
+        // Native logins can still finish during the grace. Close their save
+        // admission under the claim mutex before aborting any owner.
+        self.logins().aborting = true;
         tasks.shutdown().await;
     }
 
@@ -479,7 +500,10 @@ pub(crate) fn routes() -> Vec<Route> {
             get(flows::anthropic_auth_url),
         ),
         Route::key("/v0/management/codex-auth-url", get(flows::codex_auth_url)),
-        Route::key("/v8/management/oauth/auth-url", get(flows::auth_url)),
+        Route::key(
+            "/v8/management/oauth/auth-url",
+            get(flows::auth_url).post(flows::auth_url),
+        ),
         Route::key(
             "/v8/management/oauth/siwc/bind",
             axum::routing::post(flows::siwc_bind),

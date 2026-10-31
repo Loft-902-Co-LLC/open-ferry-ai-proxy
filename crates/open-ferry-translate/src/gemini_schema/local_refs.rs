@@ -22,16 +22,16 @@ pub(crate) fn inline_for_clean(schema: &Value, budget: &mut SchemaCopyBudget) ->
 }
 
 pub(crate) fn inline_for_projection(schema: &Value) -> Option<Value> {
-    // The projection has its own total allowance, including the source clone.
-    // Preflight before the shared inliner allocates, not after expansion.
-    let nodes = node_count(schema, 100_000, false);
-    if nodes > 100_000 {
+    const NODES: usize = 100_000;
+    const BYTES: usize = super::SCHEMA_COPY_BYTES_PER_REQUEST;
+    let nodes = node_count(schema, NODES, false);
+    if nodes > NODES {
         return None;
     }
-    let bytes = super::copy_bytes(schema, super::SCHEMA_COPY_BYTES_PER_REQUEST)?;
+    let bytes = super::copy_bytes(schema, BYTES)?;
     let mut budget = SchemaCopyBudget {
-        remaining: super::SCHEMA_COPY_BYTES_PER_REQUEST - bytes,
-        nodes: 100_000 - nodes,
+        remaining: BYTES - bytes,
+        nodes: NODES - nodes,
         path_work: usize::MAX,
     };
     let (value, truncated) = inline_with_depth(schema, 64, &mut budget);

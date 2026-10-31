@@ -500,3 +500,24 @@ fn only_user_media_is_refused_and_uploads_with_bytes_are_sent() {
         "{body}"
     );
 }
+
+#[test]
+fn commentary_whitespace_cannot_hide_an_unsupported_user_attachment() {
+    for convert in [
+        super::convert_claude_request_to_interactions,
+        super::convert_claude_request_to_interactions_with_compat,
+    ] {
+        for text in ["", " ", "visible commentary"] {
+            let mut request = json!({"messages":[{"role":"user","content":[
+                {"type":"thinking","thinking":text,"signature":"cpa:commentary:v1"},
+                {"type":"document","source":{"type":"file","file_id":"file_test"}}]}]});
+            let (out, error) = convert("test-model", &request, false);
+            assert_eq!(error.is_some(), text.trim().is_empty());
+            assert!(!out.to_string().contains("cpa:commentary:v1"));
+            request["messages"][0]["content"][0] = json!({"type":"text","text":text});
+            let (plain, plain_error) = convert("test-model", &request, false);
+            assert_eq!(out, plain);
+            assert_eq!(error, plain_error);
+        }
+    }
+}
