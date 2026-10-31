@@ -81,7 +81,7 @@ async fn invariant_codec_size_cut_cancel_family() {
                     "{INVARIANT}: {chain}/{size}/{cut}"
                 );
                 assert_eq!(errors, 0, "valid frame {chain}/{size}/{cut}");
-                let (got, errors) = collect(std::io::Cursor::new(wire.clone()), label, 7).await;
+                let (got, errors, _) = bound_mode(&wire, label, cut).await;
                 assert!(got == plain || errors == 1, "{INVARIANT}");
                 let cancel_drops = Arc::new(AtomicUsize::new(0));
                 let canceled = tokio_util::io::StreamReader::new(stream::iter([
@@ -391,16 +391,41 @@ async fn window_budget_invariant_family() {
     }
 }
 #[tokio::test]
-async fn brotli_window_budget_invariant_family() {
+async fn r2_brotli_large_window_refused() {
     for log in 10u8..=30 {
         // Large-window extension, followed by an empty last meta-block.
         let wire = vec![0x11, 0xc0 | log];
         let (got, errors) = collect(std::io::Cursor::new(wire), "br", 4096).await;
         assert!(got.is_empty(), "{INVARIANT}");
-        assert_eq!(
-            errors,
-            usize::from(log > 24),
-            "{INVARIANT}: brotli window log {log}"
-        );
+        assert_eq!(errors, 1, "{INVARIANT}: brotli window log {log}");
     }
+}
+
+mod r2;
+
+async fn bound_mode(wire: &[u8], label: &str, cut: usize) -> (Vec<u8>, usize, Vec<usize>) {
+    let chunks = [
+        Ok::<_, io::Error>(Bytes::copy_from_slice(&wire[..cut])),
+        Ok(Bytes::copy_from_slice(&wire[cut..])),
+    ];
+    let reader = tokio_util::io::StreamReader::new(stream::iter(chunks));
+    let mut headers = HeaderMap::new();
+    if !label.is_empty() {
+        headers.insert(header::CONTENT_ENCODING, label.parse().unwrap());
+    }
+    let mut decoder = Box::pin(decode_response_body(reader, &headers, 7));
+    let mut output = Vec::new();
+    let mut errors = 0;
+    let mut chunks = Vec::new();
+    while let Some(item) = decoder.next().await {
+        match item {
+            Ok(bytes) => {
+                chunks.push(bytes.len());
+                output.extend_from_slice(&bytes);
+            }
+            Err(_) => errors += 1,
+        }
+        assert!(output.len() <= 7, "{INVARIANT}");
+    }
+    (output, errors, chunks)
 }

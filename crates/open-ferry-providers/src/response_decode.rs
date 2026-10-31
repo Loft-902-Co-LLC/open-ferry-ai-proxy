@@ -1,8 +1,6 @@
 //! Lazy, synchronous-codec upstream decoding. Dropping the stream cancels and closes its source.
 //! Claude deliberately does not use this decoder.
-use async_compression::tokio::bufread::{
-    BrotliDecoder, DeflateDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder,
-};
+use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, ZlibDecoder, ZstdDecoder};
 use bytes::Bytes;
 use futures_util::{Stream, stream};
 use http::{HeaderMap, header};
@@ -16,7 +14,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 type Reader = Pin<Box<dyn AsyncRead + Send>>;
 const CHUNK: usize = 16 * 1024;
 const MAX_ZSTD_WINDOW_LOG: u32 = 23;
-const MAX_BROTLI_WINDOW_LOG: u8 = 24;
 /// Maximum number of non-identity codec layers (bounds decoder working memory).
 pub const MAX_ENCODING_LAYERS: usize = 8;
 
@@ -96,11 +93,7 @@ async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result
     for name in names.iter().rev() {
         reader = match name.as_str() {
             "" | "identity" => reader,
-            "gzip" => {
-                let mut decoder = GzipDecoder::new(BufReader::new(reader));
-                decoder.multiple_members(true);
-                Box::pin(decoder)
-            }
+            "gzip" => Box::pin(AsyncGzip::new(reader)),
             "zstd" => {
                 let mut decoder = ZstdDecoder::with_params(
                     BufReader::new(reader),
@@ -116,19 +109,11 @@ async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result
             "br" => {
                 let (head, replay) = prefix(reader, 1).await?;
                 reader = replay;
-                // The Brotli library also accepts the large-window extension. Inspect
-                // its WBITS before it can reserve a window larger than standard Brotli.
+                // Go's reader refuses the nonstandard large-window extension.
                 if head.first() == Some(&0x11) {
-                    let (head, replay) = prefix(reader, 2).await?;
-                    reader = replay;
-                    if head
-                        .get(1)
-                        .is_some_and(|byte| byte & 63 > MAX_BROTLI_WINDOW_LOG)
-                    {
-                        return Err(io::Error::other("brotli response window exceeds limit"));
-                    }
+                    return Err(io::Error::other("unsupported large-window brotli response"));
                 }
-                Box::pin(BrotliDecoder::new(BufReader::new(reader)))
+                Box::pin(CompleteBrotli::new(reader))
             }
             "deflate" => {
                 let (head, replay) = prefix(reader, 2).await?;
@@ -157,6 +142,134 @@ async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result
         reader,
         remaining: limit,
     }))
+}
+
+// flate2's resumable BufRead decoder consumes and verifies FHCRC as well as the
+// data trailer. WouldBlock bridges its synchronous input to the async source;
+// only one fixed-size input chunk is held, with no worker or blocking IO.
+struct GzipInput {
+    data: std::io::Cursor<Vec<u8>>,
+    eof: bool,
+}
+impl std::io::BufRead for GzipInput {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.data.position() == self.data.get_ref().len() as u64 && !self.eof {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        std::io::BufRead::fill_buf(&mut self.data)
+    }
+    fn consume(&mut self, amount: usize) {
+        std::io::BufRead::consume(&mut self.data, amount);
+    }
+}
+impl std::io::Read for GzipInput {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let input = std::io::BufRead::fill_buf(self)?;
+        let n = input.len().min(output.len());
+        output[..n].copy_from_slice(&input[..n]);
+        std::io::BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+struct AsyncGzip {
+    source: Reader,
+    decoder: flate2::bufread::MultiGzDecoder<GzipInput>,
+}
+impl AsyncGzip {
+    fn new(source: Reader) -> Self {
+        Self {
+            source,
+            decoder: flate2::bufread::MultiGzDecoder::new(GzipInput {
+                data: std::io::Cursor::new(Vec::new()),
+                eof: false,
+            }),
+        }
+    }
+}
+impl AsyncRead for AsyncGzip {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if output.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let mut decoded = [0; CHUNK];
+        let max = output.remaining().min(CHUNK);
+        loop {
+            match std::io::Read::read(&mut self.decoder, &mut decoded[..max]) {
+                Ok(n) => {
+                    output.put_slice(&decoded[..n]);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+            let mut input = [0; CHUNK];
+            let mut buf = ReadBuf::new(&mut input);
+            match self.source.as_mut().poll_read(cx, &mut buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {
+                    let input = self.decoder.get_mut();
+                    input.eof = buf.filled().is_empty();
+                    input.data = std::io::Cursor::new(buf.filled().to_vec());
+                }
+            }
+        }
+    }
+}
+// A Brotli member ends before its underlying HTTP body. Check both buffered
+// bytes and later input, so concatenated members and trailing garbage fail.
+struct CompleteBrotli {
+    decoder: Option<BrotliDecoder<BufReader<Reader>>>,
+    tail: Option<BufReader<Reader>>,
+}
+impl CompleteBrotli {
+    fn new(reader: Reader) -> Self {
+        Self {
+            decoder: Some(BrotliDecoder::new(BufReader::new(reader))),
+            tail: None,
+        }
+    }
+}
+impl AsyncRead for CompleteBrotli {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        output: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if output.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(decoder) = self.decoder.as_mut() {
+            let before = output.filled().len();
+            match Pin::new(decoder).poll_read(cx, output) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) if output.filled().len() > before => {
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Ok(())) => {}
+            }
+            self.tail = Some(self.decoder.take().expect("finished decoder").into_inner());
+        }
+        let mut byte = [0];
+        let mut tail = ReadBuf::new(&mut byte);
+        match Pin::new(self.tail.as_mut().expect("finished member source")).poll_read(cx, &mut tail)
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                if tail.filled().is_empty() {
+                    Poll::Ready(Ok(()))
+                } else {
+                    Poll::Ready(Err(io::Error::other("trailing data after brotli response")))
+                }
+            }
+        }
+    }
 }
 
 struct Limited {
