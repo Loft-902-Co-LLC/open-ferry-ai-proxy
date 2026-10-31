@@ -1093,3 +1093,45 @@ async fn zstd_working_charge_covers_decoder_drop_on_error() {
 async fn zstd_working_charge_covers_decoder_drop_on_unwind() {
     check_zstd_drop_charge("panic").await;
 }
+
+// Pair the transport's refusal mock with the real authentication middleware:
+// neither absent nor wrong credentials may poll an unfinished body.
+#[tokio::test]
+async fn rejected_credentials_leave_incomplete_bodies_unpolled() {
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let state = state(
+        ServerConfig {
+            api_keys: vec!["client-secret".into()],
+            ..ServerConfig::default()
+        },
+        FakeCatalog::new(),
+        &FakeDispatcher::new([]),
+    );
+    let router = crate::router(state.clone());
+    for credential in [None, Some("Bearer wrong")] {
+        for length in [None, Some("4"), Some("1000000")] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+            }));
+            let mut request = Request::post("/v1/chat/completions");
+            if let Some(credential) = credential {
+                request = request.header(header::AUTHORIZATION, credential);
+            }
+            if let Some(length) = length {
+                request = request.header(header::CONTENT_LENGTH, length);
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 401);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(state.ingress().reserved_body_bytes(), 0);
+        }
+    }
+}

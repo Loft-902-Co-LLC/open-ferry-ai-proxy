@@ -992,3 +992,77 @@ async fn ingress_recent_connection_progress_does_not_inherit_an_old_stream_deadl
     within(served.control.release()).await;
     within(served.server).await.unwrap().unwrap();
 }
+
+// Upstream 477605dc: rejecting before reading must reclaim the connection,
+// even with every upload deadline disabled. Hyper owns HTTP/1 body disposal.
+#[tokio::test]
+async fn ingress_incomplete_unauthenticated_bodies_reclaim_admission() {
+    use axum::response::IntoResponse;
+    let ingress = Ingress::new(
+        IngressConfig {
+            max_connections: Some(1),
+            header_timeout: None,
+            idle_timeout: None,
+            body_idle_timeout: None,
+            body_total_timeout: None,
+            ..limits()
+        },
+        1 << 20,
+    );
+    // Match production ordering: authentication runs before body admission.
+    let routes = ingress.wrap(Router::new()).layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            if request
+                .extensions()
+                .get::<open_ferry_server::ingress::IngressProbe>()
+                .is_some()
+            {
+                return next.run(request).await;
+            }
+            assert_ne!(
+                request
+                    .headers()
+                    .get("authorization")
+                    .map(|value| value.as_bytes()),
+                Some(b"Bearer accepted".as_slice())
+            );
+            StatusCode::UNAUTHORIZED.into_response()
+        },
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let control = ServeControl::new();
+    let server = tokio::spawn(run(listener, None, routes, &control));
+    let served = Served {
+        addr,
+        control,
+        gate: Gate::default(),
+        server,
+    };
+    for round in 0..32 {
+        for credential in ["", "Authorization: Bearer wrong\r\n"] {
+            for framing in [
+                "Content-Length: 4\r\n",
+                "Content-Length: 1000000\r\n",
+                "Transfer-Encoding: chunked\r\n",
+            ] {
+                let mut stream = connect(served.addr).await;
+                let request =
+                    format!("POST / HTTP/1.1\r\nHost: localhost\r\n{credential}{framing}\r\n1");
+                stream.write_all(request.as_bytes()).await.unwrap();
+                let response = read_response(&mut stream).await;
+                assert!(
+                    response.0.starts_with("http/1.1 401"),
+                    "{round}: {response:?}"
+                );
+                closed(&mut stream).await;
+                // No deadline advancement: response/EOF and admission are the
+                // synchronization seams; yields let the connection task drop.
+                settle().await;
+                assert_eq!(served.control.live_count(), 0, "round {round}");
+            }
+        }
+    }
+    served.control.stop();
+    within(served.server).await.unwrap().unwrap();
+}
