@@ -709,13 +709,15 @@ async fn compressed_request_log_bounds_expansion_and_zstd_window() {
         "28b52ffd0470b900007b226d6f64656c223a226770742d362e312d736f6c227d2a82afeb";
     let oversized_window: Vec<u8> = oversized_window
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     for (encoding, raw, reason) in [
         ("gzip", gzip, "over 65536 bytes"),
         ("zstd", zstd, "over 65536 bytes"),
-        ("zstd", oversized_window, "OMITTED"),
+        ("zstd", oversized_window, "Max: 8388608"),
     ] {
         for full in [false, true] {
             let harness = Harness::new(full);
