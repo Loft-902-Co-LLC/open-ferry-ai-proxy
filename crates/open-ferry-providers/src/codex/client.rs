@@ -416,3 +416,53 @@ mod tests {
         assert_eq!(keys, ["direct", "ftp://bad", "http://global.invalid:8080"]);
     }
 }
+
+#[cfg(test)]
+mod decoder_lifecycle_tests {
+    use super::*;
+    use futures_util::{FutureExt, Stream};
+    use std::{
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll},
+    };
+
+    struct Source {
+        polls: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl Stream for Source {
+        type Item = Result<bytes::Bytes, std::io::Error>;
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        }
+    }
+    impl Drop for Source {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn decoder_call_site_does_not_poll_until_read_and_drop_closes_source() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let source = Source {
+            polls: polls.clone(),
+            drops: drops.clone(),
+        };
+        let response =
+            reqwest::Response::from(http::Response::new(reqwest::Body::wrap_stream(source)));
+        let mut response = decode_response(response, 1024);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(response.chunk().now_or_never().is_none());
+        assert!(polls.load(Ordering::SeqCst) > 0);
+        drop(response);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
