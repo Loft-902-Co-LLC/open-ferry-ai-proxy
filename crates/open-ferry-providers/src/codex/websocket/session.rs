@@ -919,13 +919,13 @@ impl Session {
             && state.multi_agent == Some(conn)
     }
 
-    /// Lets `conn` go and closes it, if it is still the session's
-    /// connection (`invalidateUpstreamConn`).
     fn reader_disconnected(&self, conn: &Conn, reason: &str, failure: &Failure) {
         self.mark_terminal(conn.id, failure);
         self.invalidate(conn, reason, Some(failure));
     }
 
+    /// Detaches the connection and publishes its turn loss under one lock
+    /// (`invalidateUpstreamConnWithNotify`).
     pub(super) fn invalidate(&self, conn: &Conn, reason: &str, failure: Option<&Failure>) {
         let detached = {
             let mut state = self.state();
@@ -1430,14 +1430,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod round2_windows {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../open-ferry-server/src/handlers/responses_ws/tests/steering/invariants/contract.rs"
+    ));
     use super::*;
     use open_ferry_core::exec::WebsocketInput;
 
     #[test]
-    fn round2_loss_detach_and_publication_window() {
+    fn round2_invariant_family_loss_detach_and_publication_window() {
         let session = Arc::new(Session::new("round2-window", IDLE_TIMEOUT));
         let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
         session.set_conn(conn.clone());
+        assert!(
+            session.conn().is_some(),
+            "acquisition before loss keeps the current connection"
+        );
         let (_tx, rx) = mpsc::channel(1);
         let input = WebsocketInput::new(rx);
         conn.bind_input(Some(input.clone()));
@@ -1451,8 +1459,8 @@ mod round2_windows {
             let session = session.clone();
             let conn = conn.clone();
             std::thread::spawn(move || {
-                // These are the old read-loop's two operations. The fix
-                // moves publication into invalidate's existing state lock.
+                // Pause the production reader at loss publication while
+                // a continuation attempts the connection-acquisition window.
                 session.reader_disconnected(&conn, "upstream_disconnected", &Failure::eof());
             })
         };
@@ -1463,13 +1471,13 @@ mod round2_windows {
         worker.join().unwrap();
         assert!(
             acquisition_blocked,
-            "loss epoch became visible while connection acquisition remained unlocked"
+            "{ROUND1_INVARIANT}: loss epoch became visible while connection acquisition remained unlocked"
         );
         assert!(session.conn().is_none());
     }
 
     #[test]
-    fn round2_interrupt_terminal_snapshot_window() {
+    fn round2_invariant_family_interrupt_terminal_snapshot_window() {
         for during in [false, true] {
             let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
             conn.record_response(
@@ -1495,8 +1503,15 @@ mod round2_windows {
             });
             assert!(
                 terminal || !rejects,
-                "completion split the terminal membership and active-response decisions"
+                "{ROUND1_INVARIANT}: completion split the terminal membership and active-response decisions"
             );
+            if during {
+                completion();
+                assert!(
+                    conn.interrupt_snapshot("r1").0,
+                    "the post-permit snapshot must handle the completed ID"
+                );
+            }
         }
     }
     #[tokio::test]

@@ -416,4 +416,24 @@ mod loss_body_tests {
             assert_eq!(error.http_status(), expected, "payload={payload:?}");
         }
     }
+    #[tokio::test]
+    async fn round2_stale_duplex_frames_are_abandoned() {
+        for payload in [
+            br#"{"type":"response.create","previous_response_id":"r1"}"#.as_slice(),
+            br#"{"type":"response.steer"}"#.as_slice(),
+            b"bad JSON".as_slice(),
+        ] {
+            let (tx, rx) = mpsc::channel(1);
+            let input = WebsocketInput::new(rx);
+            tx.send(InputFrame::Stamped(Bytes::copy_from_slice(payload), 0))
+                .await
+                .unwrap();
+            input.lose();
+            let Some(InputFrame::Err(error)) = input.recv_duplex().await else {
+                panic!("stale operation accepted");
+            };
+            assert_eq!(error.http_status(), 502);
+            assert!(error.message.contains("upstream_websocket_not_sent"));
+        }
+    }
 }

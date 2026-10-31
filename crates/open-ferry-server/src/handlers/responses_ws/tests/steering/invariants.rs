@@ -6,7 +6,8 @@ use super::*;
 
 mod loss;
 
-const ROUND1_INVARIANT: &str = "no accepted output replayed, each loss reported at most once, no interrupt applied after a terminal event, and the downstream socket open exactly when upstream keeps it open";
+mod contract;
+use contract::ROUND1_INVARIANT;
 
 async fn retry_proxy(config: &Config, first: &str, sibling: &str) -> String {
     retry_proxy_server(config, first, sibling).await.0

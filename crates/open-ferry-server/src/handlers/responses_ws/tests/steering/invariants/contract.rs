@@ -1,0 +1,1 @@
+pub(crate) const ROUND1_INVARIANT: &str = "no accepted output replayed, each loss reported at most once, no interrupt applied after a terminal event, and the downstream socket open exactly when upstream keeps it open";

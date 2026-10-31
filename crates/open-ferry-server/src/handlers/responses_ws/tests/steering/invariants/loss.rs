@@ -474,3 +474,99 @@ async fn round2_accepted_steer_uses_event_parent() {
 async fn round1_loss_anonymous_operations_do_not_duplicate_turn_error() {
     operation_loss(true, false, true).await;
 }
+
+#[tokio::test]
+async fn round2_loss_duplex_queued_continuation_is_not_sent() {
+    let number = Arc::new(AtomicUsize::new(0));
+    let mut upstream = Upstream::start(move |mut peer| {
+        let index = number.fetch_add(1, Ordering::SeqCst);
+        async move {
+            peer.read().await.unwrap();
+            if index == 0 {
+                peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
+                assert_eq!(at(&peer.read().await.unwrap(), "/type"), "response.steer");
+                peer.write(r#"{"type":"response.steer.pending","steer":{"id":"s1","previous_response_id":"r1"}}"#).await;
+                assert_eq!(at(&peer.read().await.unwrap(), "/type"), "response.interrupt");
+            } else {
+                peer.write(r#"{"type":"response.created","response":{"id":"recovered"}}"#).await;
+                peer.write(r#"{"type":"response.completed","response":{"id":"recovered","output":[]}}"#).await;
+                peer.read().await;
+            }
+        }
+    }).await;
+    let sibling = unused_sibling().await;
+    let (url, task) = retry_proxy_server(&steering(true), &upstream.url, &sibling.url).await;
+    let mut ws = connect(&url, &[]).await;
+    send(&mut ws, &create("c1")).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.created");
+    send(
+        &mut ws,
+        r#"{"type":"response.steer","previous_response_id":"r1","event_id":"op1","input":[]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.steer.pending");
+    send(&mut ws, r#"{"type":"response.create","model":"round1-invariant-model","previous_response_id":"r1","event_id":"c2","input":[]}"#).await;
+    send(&mut ws, r#"{"type":"round2.queued.barrier"}"#).await;
+    // This error comes from the duplex business consumer, after it queued c2.
+    assert_eq!(
+        recv(&mut ws).await["error"]["message"],
+        "unsupported websocket request type: round2.queued.barrier"
+    );
+    send(
+        &mut ws,
+        r#"{"type":"response.interrupt","response_id":"r1"}"#,
+    )
+    .await;
+    expect_error(&mut ws, "upstream_websocket_lost", "c1").await;
+    expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+    expect_error(&mut ws, "upstream_websocket_not_sent", "c2").await;
+    send(&mut ws, &create("c3")).await;
+    expect_completion(&mut ws, "recovered").await;
+    assert_eq!(upstream.connections(), 2);
+    assert_eq!(upstream.frames(), 4);
+    assert_eq!(sibling.connections(), 0);
+    ws.close(None).await.unwrap();
+    upstream.finished().await;
+    upstream.finished().await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn round2_invariant_family_upstream_protocol_close_reaches_client_close() {
+    for duplex in [false, true] {
+        let mut upstream = Upstream::start(|mut peer| async move {
+            peer.read().await.unwrap();
+            peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+                .await;
+            peer.write(r#"{"type":"response.output_text.delta","delta":"once"}"#)
+                .await;
+            peer.read().await.unwrap();
+            peer.ws
+                .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: 1009.into(),
+                    reason: "message too big".into(),
+                }))
+                .await
+                .unwrap();
+        })
+        .await;
+        let sibling = unused_sibling().await;
+        let (url, task) = retry_proxy_server(&steering(duplex), &upstream.url, &sibling.url).await;
+        let mut ws = connect(&url, &[]).await;
+        send(&mut ws, &create("c1")).await;
+        assert_eq!(recv(&mut ws).await["type"], "response.created");
+        assert_eq!(recv(&mut ws).await["delta"], "once");
+        send(
+            &mut ws,
+            r#"{"type":"response.interrupt","response_id":"r1"}"#,
+        )
+        .await;
+        let (events, close) = crate::handlers::responses_ws::tests::rest(&mut ws).await;
+        assert!(events.is_empty(), "{ROUND1_INVARIANT}: {events:?}");
+        assert_eq!(close.map(|frame| frame.0), Some(1009), "{ROUND1_INVARIANT}");
+        assert_eq!(upstream.connections(), 1);
+        assert_eq!(sibling.connections(), 0);
+        upstream.finished().await;
+        task.abort();
+    }
+}
