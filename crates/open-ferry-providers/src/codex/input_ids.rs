@@ -25,6 +25,8 @@ const ID_LIMIT: usize = 64;
 const OCCUPIED: u8 = 1 << 0;
 /// The ID is in the input as it is.
 const PRESERVED: u8 = 1 << 1;
+const SEEN: u8 = 1 << 2;
+const DUPLICATE: u8 = 1 << 3;
 
 /// Normalizes the IDs of the body's `input` items, drops encrypted reasoning
 /// items whose IDs are too long, and shortens other long IDs
@@ -44,6 +46,10 @@ pub(crate) fn sanitize_input_item_ids(body: &mut Value) -> bool {
         };
         let id = normalize(item, original);
         let mut state = states.get(&id).copied().unwrap_or(0);
+        if state & SEEN != 0 {
+            state |= DUPLICATE;
+        }
+        state |= SEEN;
         if id == *original {
             state |= PRESERVED;
         }
@@ -71,23 +77,30 @@ pub(crate) fn sanitize_input_item_ids(body: &mut Value) -> bool {
         if let Some(Value::String(original)) = item.get("id") {
             let original = original.clone();
             let mut id = normalize(&item, &original);
-            if id != original && states.get(&id).is_some_and(|state| state & PRESERVED != 0) {
-                id = match collisions.get(&id) {
-                    Some(collision) => collision.clone(),
-                    None => {
-                        let mut attempt = 0;
-                        let collision = loop {
-                            let candidate = with_hash_suffix(&id, attempt);
-                            if !occupied(&states, &candidate) {
-                                break candidate;
-                            }
-                            attempt += 1;
-                        };
-                        *states.entry(collision.clone()).or_default() |= OCCUPIED;
-                        collisions.insert(id, collision.clone());
-                        collision
-                    }
-                };
+            if id != original
+                && states
+                    .get(&id)
+                    .is_some_and(|state| state & (PRESERVED | DUPLICATE) != 0)
+            {
+                let key = format!("{id}\0{original}");
+                if let Some(collision) = collisions.get(&key) {
+                    id = collision.clone();
+                } else if states.get(&id).is_none_or(|state| state & PRESERVED == 0) {
+                    collisions.insert(key, id.clone());
+                    *states.entry(id.clone()).or_default() |= PRESERVED;
+                } else {
+                    let mut attempt = 0;
+                    let collision = loop {
+                        let candidate = with_hash_suffix(&id, attempt);
+                        if !occupied(&states, &candidate) {
+                            break candidate;
+                        }
+                        attempt += 1;
+                    };
+                    *states.entry(collision.clone()).or_default() |= OCCUPIED | PRESERVED;
+                    collisions.insert(key, collision.clone());
+                    id = collision;
+                }
             }
             if rune_len(&id) > ID_LIMIT {
                 id = match shortened.get(&id) {
@@ -127,6 +140,12 @@ fn normalize(item: &Value, id: &str) -> String {
         "function_call" => "fc",
         "custom_tool_call" => "ctc",
         "custom_tool_call_output" => "ctco",
+        "tool_search_call" => {
+            if let Some(after) = id.strip_prefix("ts_").filter(|after| !after.is_empty()) {
+                return format!("tsc_{after}");
+            }
+            "tsc"
+        }
         _ => return id.to_owned(),
     };
     if id.is_empty() || id.starts_with(prefix) {
@@ -179,6 +198,32 @@ mod tests {
 
     fn id_at(value: &Value, index: usize) -> String {
         str_at(value, &format!("input.{index}.id"))
+    }
+
+    #[test]
+    fn tool_search_ids_preserve_distinct_originals_and_references() {
+        for originals in [
+            vec!["ts_a", "a", "ts_a"],
+            vec!["a", "ts_a", "a"],
+            vec!["tsc_a", "ts_a", "a", "ts_a"],
+        ] {
+            let input: Vec<_> = originals
+                .iter()
+                .map(|id| json!({"type":"tool_search_call", "id":id, "call_id":"call-search"}))
+                .collect();
+            let body = json!({"input":input}).to_string();
+            let got = sanitized(&body);
+            for (i, original) in originals.iter().enumerate() {
+                assert!(id_at(&got, i).starts_with("tsc_"));
+                assert_eq!(got["input"][i]["call_id"], "call-search");
+                for (j, other) in originals.iter().enumerate() {
+                    assert_eq!(id_at(&got, i) == id_at(&got, j), original == other);
+                }
+            }
+            assert_eq!(got, sanitized(&got.to_string()));
+        }
+        let got = sanitized(r#"{"input":[{"type":"tool_search_call","id":"ts_abc"}]}"#);
+        assert_eq!(id_at(&got, 0), "tsc_abc");
     }
 
     #[test]
