@@ -73,6 +73,7 @@ pub(super) struct ForwardOptions<'a> {
     /// ends with the socket (`duplexStream`).
     pub(super) duplex: bool,
     pub(super) websocket_owned: bool,
+    pub(super) is_codex_client: bool,
 }
 
 /// How a turn ended.
@@ -261,7 +262,7 @@ async fn forward_turn<S: Socket>(
             ticker.reset();
         }
 
-        for mut payload in payloads_from_chunk(&chunk) {
+        for mut payload in visible_payloads(&chunk, options.is_codex_client) {
             let event_type = str_at(&payload, "type");
             if event_type == "response.subscription_usage" {
                 continue;
@@ -604,6 +605,43 @@ pub(super) fn payloads_from_chunk(chunk: &[u8]) -> Vec<Vec<u8>> {
         return vec![trimmed.to_vec()];
     }
     Vec::new()
+}
+
+/// Keep the SSE event name attached until D's shared classifier has seen
+/// both it and the JSON type. Raw websocket JSON has no SSE event name.
+fn visible_payloads(chunk: &[u8], codex: bool) -> Vec<Vec<u8>> {
+    let classifier = crate::handlers::responses::framer::Framer::new(codex);
+    if json::valid(go::trim_space(chunk)) {
+        return payloads_from_chunk(chunk)
+            .into_iter()
+            .filter(|payload| !classifier.should_filter_private_event("", &str_at(payload, "type")))
+            .collect();
+    }
+    let mut output = Vec::new();
+    let mut frame = Vec::new();
+    let mut event = String::new();
+    for line in chunk
+        .split(|&byte| byte == b'\n')
+        .chain(std::iter::once(&b""[..]))
+    {
+        let line = go::trim_space(line);
+        if line.is_empty() {
+            for payload in payloads_from_chunk(&frame) {
+                if !classifier.should_filter_private_event(&event, &str_at(&payload, "type")) {
+                    output.push(payload);
+                }
+            }
+            frame.clear();
+            event.clear();
+        } else {
+            if let Some(name) = line.strip_prefix(b"event:") {
+                event = String::from_utf8_lossy(go::trim_space(name)).into_owned();
+            }
+            frame.extend_from_slice(line);
+            frame.push(b'\n');
+        }
+    }
+    output
 }
 
 /// The `error` event that tells the client of `error`

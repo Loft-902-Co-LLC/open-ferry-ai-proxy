@@ -45,6 +45,7 @@ async fn buffered_terminal_error_precedes_eof_for_standard_and_duplex() {
                         context: None,
                         duplex,
                         websocket_owned: duplex,
+                        is_codex_client: false,
                     },
                 )
                 .await;

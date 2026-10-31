@@ -535,6 +535,7 @@ impl<S: Socket> Session<S> {
                 context: self.log_context.as_deref(),
                 duplex,
                 websocket_owned: attempted == Upstream::Websocket,
+                is_codex_client: crate::handlers::responses::is_codex_client(&self.client.headers),
             },
         )
         .await;

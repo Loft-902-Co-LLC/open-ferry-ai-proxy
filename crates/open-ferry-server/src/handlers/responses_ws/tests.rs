@@ -1263,6 +1263,7 @@ async fn forward_items(
             context: None,
             duplex: false,
             websocket_owned: false,
+            is_codex_client: false,
         },
     )
     .await;
@@ -1421,6 +1422,7 @@ async fn forward_emits_periodic_pings() {
             context: None,
             duplex: false,
             websocket_owned: false,
+            is_codex_client: false,
         },
     )
     .await;
@@ -1452,6 +1454,7 @@ async fn forward_ping_write_failure_aborts_session() {
             context: None,
             duplex: false,
             websocket_owned: false,
+            is_codex_client: false,
         },
     )
     .await;
@@ -3670,3 +3673,4 @@ async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
     ws.close(None).await.unwrap();
 }
 
+mod metadata;

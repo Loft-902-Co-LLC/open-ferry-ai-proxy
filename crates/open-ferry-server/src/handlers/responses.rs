@@ -39,7 +39,7 @@
 //!   and otherwise the failure event that ends a stream. Upstream holds
 //!   both back without limit.
 
-mod framer;
+pub(crate) mod framer;
 pub(crate) mod stream_error;
 #[cfg(test)]
 mod tests;
@@ -341,7 +341,7 @@ fn prepend(first: Bytes, rest: Body) -> Body {
 /// Whether the request comes from an official Codex client, which gets
 /// `response.failed` rather than `error` for a failure
 /// (`isCodexResponsesClientRequest`).
-fn is_codex_client(headers: &HeaderMap) -> bool {
+pub(super) fn is_codex_client(headers: &HeaderMap) -> bool {
     let header = |name: &str| {
         headers
             .get(name)
