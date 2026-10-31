@@ -655,7 +655,7 @@ pub(super) fn error_payload(error: &ErrorMessage) -> Vec<u8> {
     };
     let body = openai_body(status, text, error.terminal_auth);
     let mut payload = format!(r#"{{"type":"error","status":{status}}}"#).into_bytes();
-    if let Some(headers) = headers_object(&error.addon) {
+    if let Some(headers) = headers_object(&error.response_headers(true)) {
         payload = json::set_raw(&payload, "headers", &headers);
     }
     if json::valid(body.as_bytes()) {

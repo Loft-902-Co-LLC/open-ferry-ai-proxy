@@ -3674,3 +3674,4 @@ async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
 }
 
 mod metadata;
+mod safe_headers;
