@@ -298,19 +298,29 @@ impl CodexExecutor {
         url: &str,
         headers: HeaderMap,
         body: &Value,
+        response_limit: usize,
         attempt: Attempt<'_>,
     ) -> Result<(reqwest::Response, Secrets), ExecError> {
-        self.send_bytes(auth, url, headers, Bytes::from(body.to_string()), attempt)
-            .await
+        self.send_bytes(
+            auth,
+            url,
+            headers,
+            Bytes::from(body.to_string()),
+            response_limit,
+            attempt,
+        )
+        .await
     }
 
-    /// [`Self::send`] for a body already written.
+    /// [`Self::send`] for a body already written. SSE uses `usize::MAX`
+    /// (u64::MAX on supported 64-bit targets); whole-body readers retain their limit.
     async fn send_bytes(
         &self,
         auth: &Auth,
         url: &str,
         headers: HeaderMap,
         body: Bytes,
+        response_limit: usize,
         attempt: Attempt<'_>,
     ) -> Result<(reqwest::Response, Secrets), ExecError> {
         refuse_control_characters(url)?;
@@ -368,7 +378,7 @@ impl CodexExecutor {
                 continue;
             }
             let limit = if response.status().is_success() {
-                MAX_LINE
+                response_limit
             } else {
                 MAX_ERROR_BODY
             };
@@ -394,6 +404,7 @@ impl CodexExecutor {
                 &url,
                 headers,
                 &prepared.body,
+                MAX_LINE,
                 Attempt::new(
                     options,
                     AttemptKind::Execute,
@@ -473,6 +484,7 @@ impl CodexExecutor {
                 &url,
                 headers,
                 &prepared.body,
+                usize::MAX,
                 Attempt::new(
                     options,
                     AttemptKind::Execute,
@@ -589,6 +601,7 @@ impl CodexExecutor {
                 &url,
                 headers,
                 &prepared.body,
+                usize::MAX,
                 Attempt::new(
                     &options,
                     AttemptKind::Stream,

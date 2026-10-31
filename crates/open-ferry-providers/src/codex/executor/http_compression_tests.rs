@@ -116,6 +116,7 @@ async fn rejected_compression_retries_once_with_identical_plain_body_and_credent
                     DESTINATION,
                     headers,
                     plain.clone(),
+                    usize::MAX,
                     Attempt::new(
                         &options,
                         AttemptKind::Execute,
@@ -362,4 +363,105 @@ fn content_encoding_alignment_preserves_opaque_chains() {
             expected
         );
     }
+}
+
+async fn long_sse_mock() -> (
+    CodexExecutor,
+    tokio::task::JoinHandle<Result<(), std::io::Error>>,
+) {
+    let mut encoder = async_compression::tokio::write::GzipEncoder::new(Vec::new());
+    let comment = format!(":{}\n\n", "x".repeat(65533));
+    for _ in 0..=MAX_LINE / comment.len() {
+        encoder.write_all(comment.as_bytes()).await.unwrap();
+    }
+    encoder.write_all(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_long\",\"status\":\"completed\",\"output\":[]}}\n\n").await.unwrap();
+    encoder.shutdown().await.unwrap();
+    let wire = encoder.into_inner();
+    let app = Router::new().fallback(move || {
+        let wire = wire.clone();
+        async move {
+            http::Response::builder()
+                .header("content-type", "text/event-stream")
+                .header("content-encoding", "gzip")
+                .body(Body::from(wire))
+                .unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let executor = CodexExecutor::new("direct")
+        .with_base_url(format!("http://{}", listener.local_addr().unwrap()));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    (executor, server)
+}
+
+#[tokio::test]
+async fn decoded_sse_above_whole_body_limit_passes() {
+    use futures_util::TryStreamExt;
+    let (executor, server) = long_sse_mock().await;
+    let request = Request {
+        model: "gpt-5".into(),
+        payload: Bytes::from_static(br#"{"model":"gpt-5","input":"hi"}"#),
+    };
+    let auth = oauth();
+    let response = executor
+        .execute_inner(&auth, &request, &Options::new(Format::CODEX))
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&response.payload).contains("resp_long"));
+    let mut options = Options::new(Format::CODEX);
+    options.stream = true;
+    let response = executor
+        .execute_stream_inner(&auth, request, options)
+        .await
+        .unwrap();
+    let chunks: Vec<Bytes> = response.chunks.try_collect().await.unwrap();
+    assert!(String::from_utf8_lossy(&chunks.concat()).contains("resp_long"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn oversized_whole_body_retains_limit_and_emits_one_error() {
+    let (executor, server) = long_sse_mock().await;
+    let auth = oauth();
+    let options = Options::new(Format::OPENAI_RESPONSE);
+    let body = json!({"input":"hi"});
+    let (mut response, _) = executor
+        .send(
+            &auth,
+            &format!("{}/responses/compact", executor.base_url),
+            HeaderMap::new(),
+            &body,
+            MAX_LINE,
+            Attempt::new(
+                &options,
+                AttemptKind::Execute,
+                "codex",
+                "gpt-5",
+                &Format::CODEX,
+                &auth,
+            ),
+        )
+        .await
+        .unwrap();
+    let mut errors = 0;
+    let mut bytes = 0;
+    while let Some(chunk) = response.chunk().await.transpose() {
+        match chunk {
+            Ok(chunk) => bytes += chunk.len(),
+            Err(_) => errors += 1,
+        }
+    }
+    assert_eq!(errors, 1);
+    assert!(bytes <= MAX_LINE);
+    assert!(response.chunk().await.unwrap().is_none());
+    let request = Request {
+        model: "gpt-5".into(),
+        payload: Bytes::from_static(br#"{"model":"gpt-5","input":"hi"}"#),
+    };
+    let error = executor
+        .execute_compact(&auth, &request, &options)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("limit"), "{}", error.message);
+    server.abort();
 }

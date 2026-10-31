@@ -994,6 +994,7 @@ impl CodexExecutor {
             &url,
             headers,
             body,
+            if stream { usize::MAX } else { MAX_LINE },
             Attempt::new(options, kind, "codex", model, &Format::OPENAI_IMAGE, auth),
         )
         .await
@@ -1066,6 +1067,7 @@ impl CodexExecutor {
             &url,
             headers,
             &body,
+            usize::MAX,
             Attempt::new(options, kind, "codex", &main, &Format::CODEX, auth),
         )
         .await
