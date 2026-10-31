@@ -117,7 +117,10 @@ async fn serves_health_and_turns_away_unknown_routes() {
         .unwrap();
     let (status, headers, _) = send(&app, options).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_HEADERS], "*");
+    assert_eq!(
+        headers[header::ACCESS_CONTROL_ALLOW_HEADERS],
+        "Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta"
+    );
 }
 
 #[tokio::test]
