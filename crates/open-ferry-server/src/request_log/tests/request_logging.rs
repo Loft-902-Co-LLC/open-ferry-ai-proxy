@@ -630,3 +630,108 @@ async fn claude_truncation_keeps_bounded_request_capture_and_secret_scrubbing() 
     assert!(request_body.len() < REQUEST_CAPTURE_LIMIT + 128);
     assert!(!request_body.contains("tail-after-capture"));
 }
+
+// Upstream ad8bdd3f: capture retains only raw wire bytes. Rendering is
+// separately bounded by core, and must still redact decoded secrets.
+#[tokio::test]
+async fn compressed_request_capture_is_raw_bounded_and_redacted() {
+    use std::io::Write;
+    let plain = br#"{"marker":"compressed-probe","api_key":"compressed-secret"}"#;
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(plain).unwrap();
+    let gzip = gzip.finish().unwrap();
+    let zstd = ruzstd::encoding::compress_to_vec(
+        plain.as_slice(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    for (encoding, encoded) in [("gzip", gzip), ("zstd", zstd)] {
+        for full in [false, true] {
+            for repeats in [1, REQUEST_CAPTURE_LIMIT / encoded.len() + 2] {
+                let raw = encoded.repeat(repeats);
+                let capture =
+                    DeferredCapture::with_limit(Some(raw.len() as u64), REQUEST_CAPTURE_LIMIT);
+                let tee = TeeBody {
+                    inner: Body::from(raw.clone()),
+                    capture: capture.clone(),
+                };
+                assert_eq!(tee.collect().await.unwrap().to_bytes().as_ref(), raw);
+                // DeferredCapture intentionally exposes only metadata outside
+                // core; the unchanged transport bytes and exact capture length
+                // guard against eager decode and unbounded capture here.
+                assert!(format!("{capture:?}").contains(&format!(
+                    "captured: {}",
+                    raw.len().min(REQUEST_CAPTURE_LIMIT)
+                )));
+                let harness = Harness::new(full);
+                let app = harness.app(Router::new().route(
+                    "/v1/responses",
+                    post(
+                        |Extension(context): Extension<Arc<RequestContext>>, _: Bytes| async move {
+                            context.set_client_key("compressed-secret");
+                            StatusCode::BAD_REQUEST
+                        },
+                    ),
+                ));
+                let request = Request::post("/v1/responses")
+                    .header("content-encoding", encoding)
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer header-secret")
+                    .body(Body::from(raw))
+                    .unwrap();
+                assert_eq!(send(&app, request).await.0, StatusCode::BAD_REQUEST);
+                let (_, log) = harness.only_log();
+                assert!(!log.contains("compressed-secret"));
+                assert!(!log.contains("header-secret"));
+                if repeats == 1 {
+                    assert!(log.contains("compressed-probe"), "{log}");
+                } else {
+                    assert!(log.contains("REQUEST BODY TRUNCATED"));
+                }
+                assert!(log.len() < 4 * REQUEST_CAPTURE_LIMIT);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn compressed_request_log_bounds_expansion_and_zstd_window() {
+    use std::io::Write;
+    let plain = vec![b'x'; 2 * REQUEST_CAPTURE_LIMIT];
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&plain).unwrap();
+    let gzip = gzip.finish().unwrap();
+    let zstd = ruzstd::encoding::compress_to_vec(
+        plain.as_slice(),
+        ruzstd::encoding::CompressionLevel::Fastest,
+    );
+    // Upstream's 16 MiB-window frame: the window is refused before decoding.
+    let oversized_window =
+        "28b52ffd0470b900007b226d6f64656c223a226770742d362e312d736f6c227d2a82afeb";
+    let oversized_window: Vec<u8> = oversized_window
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    for (encoding, raw, reason) in [
+        ("gzip", gzip, "over 65536 bytes"),
+        ("zstd", zstd, "over 65536 bytes"),
+        ("zstd", oversized_window, "OMITTED"),
+    ] {
+        for full in [false, true] {
+            let harness = Harness::new(full);
+            let app = harness.app(Router::new().route(
+                "/v1/responses",
+                post(|_: Bytes| async { StatusCode::BAD_REQUEST }),
+            ));
+            let request = Request::post("/v1/responses")
+                .header("content-encoding", encoding)
+                .body(Body::from(raw.clone()))
+                .unwrap();
+            send(&app, request).await;
+            let (_, log) = harness.only_log();
+            assert!(log.contains("ENCODED REQUEST BODY OMITTED"), "{log}");
+            assert!(log.contains(reason), "{log}");
+            assert!(log.len() < REQUEST_CAPTURE_LIMIT);
+        }
+    }
+}
