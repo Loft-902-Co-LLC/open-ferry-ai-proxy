@@ -43,6 +43,14 @@ pub(crate) const MAX_CREDENTIAL_WEIGHT: i64 = 1_000_000;
 pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ("max-request-body-bytes", "server.max-request-body-bytes"),
     (
+        "response-compression.enabled",
+        "server.response-compression.enabled",
+    ),
+    (
+        "response-compression.min-bytes",
+        "server.response-compression.min-bytes",
+    ),
+    (
         "ingress-limits.max-connections",
         "server.ingress-limits.max-connections",
     ),
@@ -315,6 +323,18 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ),
     ("xai.inject-x-search", "upstream.xai.inject-x-search"),
     (
+        "codex.websocket-compression",
+        "upstream.codex.websocket-compression",
+    ),
+    (
+        "codex.upstream-request-compression",
+        "upstream.codex.upstream-request-compression",
+    ),
+    (
+        "codex.upstream-request-compression-min-bytes",
+        "upstream.codex.upstream-request-compression-min-bytes",
+    ),
+    (
         "codex.disable-codex-cloaking",
         "upstream.codex.disable-codex-cloaking",
     ),
@@ -492,6 +512,18 @@ pub(crate) const V8_SHARED_PATHS: &[(&str, &str)] = &[
     (
         "oauth.providers.codex.response-steering",
         "upstream.codex.response-steering",
+    ),
+    (
+        "oauth.providers.codex.upstream-request-compression",
+        "upstream.codex.upstream-request-compression",
+    ),
+    (
+        "oauth.providers.codex.upstream-request-compression-min-bytes",
+        "upstream.codex.upstream-request-compression-min-bytes",
+    ),
+    (
+        "oauth.providers.codex.websocket-compression",
+        "upstream.codex.websocket-compression",
     ),
     (
         "oauth.providers.claude.model-level-cooling",
@@ -904,7 +936,7 @@ mod tests {
     fn paths_table_matches_upstream_shape() {
         // Upstream's, open-ferry's management.separate-address, and its
         // eight ingress-limit fields.
-        assert_eq!(V8_PATHS.len(), 124 + 1 + 8);
+        assert_eq!(V8_PATHS.len(), 129 + 1 + 8);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

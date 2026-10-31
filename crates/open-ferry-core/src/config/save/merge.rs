@@ -26,6 +26,8 @@
 //! upstream's `[]string` path is.
 //!
 //! Deviations from upstream:
+//! - Explicit false for response and WebSocket compression survives insertion
+//!   of a new parent mapping. Upstream's zero-value pruning loses those overrides.
 //! - Claude's pointer-backed `inject-diagnostics: false` is preserved when
 //!   newly inserted, including a new parent mapping, as an explicit override.
 //!   Upstream's default-pruning whitelist omits it.
@@ -461,6 +463,23 @@ fn is_known_default_value(path: &[String], node: &Node) -> bool {
         && ["session-date-pin-days", "inject-diagnostics"]
             .iter()
             .any(|key| find_map_key_index(node, key).is_some())
+    {
+        return false;
+    }
+    // These optional false overrides must survive insertion, including when
+    // their newly inserted parent mapping otherwise consists only of zeros.
+    if (matches!(path, [section, key] if section == "response-compression" && key == "enabled")
+        || matches!(path, [section, key] if section == "codex" && key == "websocket-compression"))
+        && node.kind == Kind::Scalar
+        && node.tag == BOOL_TAG
+    {
+        return false;
+    }
+    if node.kind == Kind::Mapping
+        && ((matches!(path, [section] if section == "response-compression")
+            && find_map_key_index(node, "enabled").is_some())
+            || (matches!(path, [section] if section == "codex")
+                && find_map_key_index(node, "websocket-compression").is_some()))
     {
         return false;
     }

@@ -241,6 +241,19 @@ fn canonical(doc: &Node, generated: Option<&Node>, migrate: bool) -> Result<Sema
     let Some(generated) = generated else {
         return semantic(&root);
     };
+    // Empty v8 structs have no leaves to flatten. Compare their defaults at
+    // the legacy path too, rather than retaining an extra empty v8 parent.
+    for &(old, current) in crate::config::layout::V8_STRUCT_PATHS {
+        if let Some(value) = tree::yaml_path(&root, current)
+            .filter(|node| node.kind == Kind::Mapping && node.content.is_empty())
+            .cloned()
+        {
+            if tree::yaml_path(&root, old).is_none() {
+                tree::set_yaml_path(&mut root, old, &value);
+            }
+            tree::delete_yaml_path(&mut root, current);
+        }
+    }
     if !migrate {
         merge::remove_legacy_auth_block(&mut root);
         merge::remove_removed_integration_keys(&mut root);

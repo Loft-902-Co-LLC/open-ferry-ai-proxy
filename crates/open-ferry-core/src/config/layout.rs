@@ -71,6 +71,7 @@ use super::{ConfigError, ConfigErrorKind};
 /// Legacy sections and their v8 paths, as `(legacy, v8)`, in upstream's
 /// field order (its `v8StructPaths`).
 pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
+    ("response-compression", "server.response-compression"),
     ("ingress-limits", "server.ingress-limits"),
     ("claude-code", "upstream.claude"),
     ("streaming", "requests.streaming"),
@@ -370,6 +371,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "host",
             "ingress-limits",
             "max-request-body-bytes",
+            "response-compression",
             "port",
             "tls",
             "trusted-proxies",
@@ -388,6 +390,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
         ],
     ),
     ("server.discovery.interfaces", &["exclude", "include"]),
+    ("server.response-compression", &["enabled", "min-bytes"]),
     ("server.tls", &["cert", "enable", "key"]),
     (
         "server.ingress-limits",
@@ -438,6 +441,9 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "model-level-cooling",
             "orphan-delegation-compatibility",
             "response-steering",
+            "upstream-request-compression",
+            "upstream-request-compression-min-bytes",
+            "websocket-compression",
             "stream-bootstrap-buffering",
             "stream-bootstrap-timeout",
         ],

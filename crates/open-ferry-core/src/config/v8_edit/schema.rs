@@ -176,6 +176,11 @@ static CONFIG_CODEX_WEB_SEARCH_RESULT_CACHE: Type = Type {
     ],
 };
 
+static CONFIG_RESPONSE_COMPRESSION_CONFIG: Type = Type {
+    name: "config.ResponseCompressionConfig",
+    fields: &[("enabled", Field::Leaf), ("min-bytes", Field::Leaf)],
+};
+
 static CONFIG_CODEX_CONFIG: Type = Type {
     name: "config.CodexConfig",
     fields: &[
@@ -184,6 +189,9 @@ static CONFIG_CODEX_CONFIG: Type = Type {
         ("model-level-cooling", Field::Leaf),
         ("orphan-delegation-compatibility", Field::Leaf),
         ("response-steering", Field::Leaf),
+        ("upstream-request-compression", Field::Leaf),
+        ("upstream-request-compression-min-bytes", Field::Leaf),
+        ("websocket-compression", Field::Leaf),
         ("signin-with-chatgpt-identifier", Field::Leaf),
         ("stream-bootstrap-buffering", Field::Leaf),
         ("stream-bootstrap-timeout", Field::Leaf),
@@ -620,6 +628,10 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("logging-to-file", Field::Leaf),
         ("logs-max-total-size-mb", Field::Leaf),
         ("max-request-body-bytes", Field::Leaf),
+        (
+            "response-compression",
+            Field::Struct(&CONFIG_RESPONSE_COMPRESSION_CONFIG),
+        ),
         ("max-retry-credentials", Field::Leaf),
         ("max-retry-interval", Field::Leaf),
         ("meta-api-key", Field::List(&CONFIG_CODEX_KEY)),
