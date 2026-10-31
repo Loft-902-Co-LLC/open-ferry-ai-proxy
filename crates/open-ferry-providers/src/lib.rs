@@ -35,6 +35,7 @@ mod observe_send;
 pub mod openai_compat;
 pub mod payload;
 mod redirect;
+pub mod response_decode;
 #[cfg(test)]
 mod secret_echo;
 mod thinking;

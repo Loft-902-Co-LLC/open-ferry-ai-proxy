@@ -60,6 +60,8 @@ impl From<&open_ferry_core::config::IngressLimits> for IngressConfig {
 /// Settings for the HTTP layer, from the config file.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
+    /// Negotiated API response compression, adopted on each config reload.
+    pub response_compression: open_ferry_core::config::ResponseCompressionConfig,
     /// open-ferry's own `server.ingress-limits` (top-level in legacy files).
     pub ingress: IngressConfig,
     /// The keys clients must present (`api-keys`). Keys are trimmed, and empty
@@ -109,6 +111,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            response_compression: Default::default(),
             ingress: IngressConfig::default(),
             api_keys: Vec::new(),
             force_model_prefix: false,
@@ -155,6 +158,7 @@ impl From<&Config> for ServerConfig {
                 .map(Duration::from_secs)
         };
         Self {
+            response_compression: config.effective_response_compression().clone(),
             ingress: IngressConfig::from(&config.ingress_limits),
             api_keys: config.api_keys.clone(),
             force_model_prefix: config.force_model_prefix,

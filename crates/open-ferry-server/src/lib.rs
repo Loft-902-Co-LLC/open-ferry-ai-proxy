@@ -53,6 +53,7 @@ mod json;
 mod query;
 mod request_context;
 mod request_log;
+mod response_compression;
 mod routing;
 mod sse_check;
 mod state;

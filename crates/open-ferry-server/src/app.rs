@@ -160,6 +160,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .merge(extra)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::response_compression::layer,
+        ))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(
