@@ -1771,8 +1771,9 @@ async fn loss_after_duplex_authorization_fences_the_consumed_create() {
         duplex_options("epoch-gap", input),
     )
     .await;
+    let created = chunks.next().await.unwrap().unwrap();
     assert_eq!(
-        json(&String::from_utf8(chunks.next().await.unwrap().unwrap().to_vec()).unwrap())["type"],
+        json(std::str::from_utf8(&created).unwrap())["type"],
         "response.created"
     );
     client.send(r#"{"type":"response.create","model":"gpt-6-astra","input":[],"event_id":"c2"}"#);
