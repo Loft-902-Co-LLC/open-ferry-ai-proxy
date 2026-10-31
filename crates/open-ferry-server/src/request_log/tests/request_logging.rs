@@ -704,9 +704,9 @@ async fn compressed_request_log_bounds_expansion_and_zstd_window() {
         plain.as_slice(),
         ruzstd::encoding::CompressionLevel::Fastest,
     );
-    // Upstream's 16 MiB-window frame: the window is refused before decoding.
-    let oversized_window =
-        "28b52ffd0470b900007b226d6f64656c223a226770742d362e312d736f6c227d2a82afeb";
+    // A valid raw-block frame with upstream's 16 MiB window. Omit its
+    // checksum so rejection cannot be caused by a stale checksum fixture.
+    let oversized_window = "28b52ffd0070b900007b226d6f64656c223a226770742d362e312d736f6c227d";
     let oversized_window: Vec<u8> = oversized_window
         .as_bytes()
         .as_chunks::<2>()
@@ -714,10 +714,16 @@ async fn compressed_request_log_bounds_expansion_and_zstd_window() {
         .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
+    // Prove the probe is decodable with a larger window. With production's
+    // 8 MiB cap removed, the omission assertion below must fail.
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(oversized_window.as_slice()).unwrap();
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+    assert_eq!(decoded, br#"{"model":"gpt-6.1-sol"}"#);
     for (encoding, raw, reason) in [
         ("gzip", gzip, "over 65536 bytes"),
         ("zstd", zstd, "over 65536 bytes"),
-        ("zstd", oversized_window, "Max: 8388608"),
+        ("zstd", oversized_window, "it couldn't be decoded"),
     ] {
         for full in [false, true] {
             let harness = Harness::new(full);
