@@ -98,6 +98,7 @@ use crate::codex::replay_cache::tests::valid_encrypted_content;
 use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get, str_at};
 
+mod compression;
 mod duplex;
 mod interrupts;
 mod observe;

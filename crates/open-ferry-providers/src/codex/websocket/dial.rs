@@ -28,9 +28,9 @@
 //! Deviations from upstream:
 //! - A SOCKS5 proxy, set or from the environment, is refused with a 502, as
 //!   `api-call` refuses it; upstream dials through it.
-//! - `permessage-deflate` isn't offered (upstream offers it but never
-//!   compresses what it sends), and a server that picks an extension anyway
-//!   is refused.
+//! - `permessage-deflate` isn't offered, and a server that selects an
+//!   extension is refused. Upstream negotiates deflate and defaults write
+//!   compression on. The setting is kept but has no wire effect here.
 //! - A message or frame may be at most 50 MiB, and the response head 64 KiB;
 //!   gorilla has no limits.
 //! - `CONNECT` says `User-Agent: open-ferry/<version>`, and a refused one's
