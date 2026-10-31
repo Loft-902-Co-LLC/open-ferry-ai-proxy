@@ -247,10 +247,13 @@ pub(super) async fn open(
         if error.failure_class == Some(open_ferry_core::exec::FailureClass::UpstreamWebsocketTurn)
             || ephemeral
             || !errors::should_retry(&error)
-            || options.downstream_websocket && requires_current
         {
             hold.release();
             return Err(error);
+        }
+        if options.downstream_websocket && requires_current {
+            hold.release();
+            return Err(ExecError::replay_required());
         }
         // Upstream retries a non-loss write once on a new socket.
         let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);

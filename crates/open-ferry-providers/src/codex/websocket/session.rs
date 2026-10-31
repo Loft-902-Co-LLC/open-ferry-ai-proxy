@@ -433,6 +433,7 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 struct ResponseIdentity {
     id: String,
     terminal: bool,
+    terminal_responses: HashSet<String>,
 }
 
 pub(crate) struct Conn {
@@ -447,7 +448,6 @@ pub(crate) struct Conn {
     disconnect: Mutex<Option<u16>>,
     /// The type of the last event read (`lastEventType`).
     last_event: Mutex<String>,
-    terminal_responses: Mutex<HashSet<String>>,
     response: Mutex<ResponseIdentity>,
     input: Mutex<Option<open_ferry_core::exec::WebsocketInput>>,
     loss_advanced: AtomicBool,
@@ -471,7 +471,6 @@ impl Conn {
             closing: watch::Sender::new(false),
             disconnect: Mutex::new(None),
             last_event: Mutex::new(String::new()),
-            terminal_responses: Mutex::new(HashSet::new()),
             response: Mutex::default(),
             input: Mutex::new(None),
             loss_advanced: AtomicBool::new(false),
@@ -506,10 +505,12 @@ impl Conn {
                 id = &response.id;
             }
             if !id.is_empty() {
+                let active_terminal = id == response.id;
                 if kind != "error" {
-                    lock(&self.terminal_responses).insert(id.to_owned());
+                    let id = id.to_owned();
+                    response.terminal_responses.insert(id);
                 }
-                if id == response.id {
+                if active_terminal {
                     response.terminal = true;
                 }
             }
@@ -520,10 +521,11 @@ impl Conn {
         self.interrupt_snapshot_with(target, || {})
     }
 
-    fn interrupt_snapshot_with(&self, target: &str, window: impl FnOnce()) -> (bool, bool) {
+    fn interrupt_snapshot_with(&self, target: &str, _window: impl FnOnce()) -> (bool, bool) {
         let response = lock(&self.response);
-        let terminal = lock(&self.terminal_responses).contains(target);
-        window();
+        let terminal = response.terminal_responses.contains(target);
+        #[cfg(test)]
+        _window();
         (
             terminal,
             response.terminal || (!response.id.is_empty() && response.id != target),
@@ -838,7 +840,9 @@ impl Session {
             return (token, rx);
         }
         if let Some(current) = state.conn.as_ref().filter(|current| current.id == conn) {
-            *lock(&current.response) = ResponseIdentity::default();
+            let mut response = lock(&current.response);
+            response.id.clear();
+            response.terminal = false;
         }
         let (done, _) = watch::channel(());
         state.active = Some(Active {
@@ -1437,14 +1441,34 @@ mod round2_windows {
     use super::*;
     use open_ferry_core::exec::WebsocketInput;
 
+    #[derive(Clone, Copy, Debug)]
+    enum AcquisitionPoint {
+        BeforeLoss,
+        AtPublication,
+        AfterDetach,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CompletionPoint {
+        BeforeSnapshot,
+        InsideSnapshot,
+        BeforePermitRecheck,
+    }
+
     #[test]
     fn round2_invariant_family_loss_detach_and_publication_window() {
         for writer in [false, true] {
-            loss_publication_window(writer);
+            for point in [
+                AcquisitionPoint::BeforeLoss,
+                AcquisitionPoint::AtPublication,
+                AcquisitionPoint::AfterDetach,
+            ] {
+                loss_publication_window(writer, point);
+            }
         }
     }
 
-    fn loss_publication_window(writer: bool) {
+    fn loss_publication_window(writer: bool, point: AcquisitionPoint) {
         let session = Arc::new(Session::new("round2-window", IDLE_TIMEOUT));
         let conn = Arc::new(Conn::new(
             Target::new("auth", "ws://example.test", "", "token"),
@@ -1452,13 +1476,11 @@ mod round2_windows {
             Arc::downgrade(&session),
         ));
         session.set_conn(conn.clone());
-        assert!(
-            session.conn().is_some(),
-            "acquisition before loss keeps the current connection"
-        );
         let (_tx, rx) = mpsc::channel(1);
         let input = WebsocketInput::new(rx);
         conn.bind_input(Some(input.clone()));
+        let before = matches!(point, AcquisitionPoint::BeforeLoss)
+            .then(|| (session.conn().unwrap(), input.clone().for_turn()));
         let (published_tx, published_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         *lock(&conn.loss_window) = Some(Box::new(move || {
@@ -1469,8 +1491,6 @@ mod round2_windows {
             let session = session.clone();
             let conn = conn.clone();
             std::thread::spawn(move || {
-                // Pause the production reader at loss publication while
-                // a continuation attempts the connection-acquisition window.
                 if writer {
                     let runtime = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -1488,19 +1508,31 @@ mod round2_windows {
         };
         published_rx.recv().unwrap();
         assert_eq!(input.epoch(), 1);
-        let acquisition_blocked = session.state.try_lock().is_err();
+        let blocked =
+            !matches!(point, AcquisitionPoint::AtPublication) || session.state.try_lock().is_err();
         resume_tx.send(()).unwrap();
         worker.join().unwrap();
         assert!(
-            acquisition_blocked,
-            "{ROUND1_INVARIANT}: loss epoch became visible while connection acquisition remained unlocked"
+            blocked,
+            "{ROUND1_INVARIANT}: writer={writer} point={point:?}: published loss exposed an unlocked acquisition"
         );
-        assert!(session.conn().is_none());
+        if let Some((old, turn)) = before {
+            assert!(old.is_closed());
+            assert!(turn.turn_is_stale());
+        }
+        assert!(
+            session.conn().is_none(),
+            "{ROUND1_INVARIANT}: acquisition after loss must find no connection"
+        );
     }
 
     #[test]
     fn round2_invariant_family_interrupt_terminal_snapshot_window() {
-        for during in [false, true] {
+        for point in [
+            CompletionPoint::BeforeSnapshot,
+            CompletionPoint::InsideSnapshot,
+            CompletionPoint::BeforePermitRecheck,
+        ] {
             let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
             conn.record_response(
                 &serde_json::json!({"response":{"id":"r1"}}),
@@ -1512,30 +1544,29 @@ mod round2_windows {
                     "response.completed",
                 )
             };
-            if !during {
+            if matches!(point, CompletionPoint::BeforeSnapshot) {
                 completion();
             }
             let (terminal, rejects) = conn.interrupt_snapshot_with("r1", || {
-                // If the snapshot released response identity, schedule
-                // completion at exactly that boundary, without a sleep.
                 let unlocked = conn.response.try_lock().is_ok();
-                if during && unlocked {
+                if matches!(point, CompletionPoint::InsideSnapshot) && unlocked {
                     completion();
                 }
             });
             assert!(
                 terminal || !rejects,
-                "{ROUND1_INVARIANT}: completion split the terminal membership and active-response decisions"
+                "{ROUND1_INVARIANT}: {point:?}: completion split the interrupt snapshot"
             );
-            if during {
+            if !matches!(point, CompletionPoint::BeforeSnapshot) {
                 completion();
-                assert!(
-                    conn.interrupt_snapshot("r1").0,
-                    "the post-permit snapshot must handle the completed ID"
-                );
             }
+            assert!(
+                conn.interrupt_snapshot("r1").0,
+                "{ROUND1_INVARIANT}: post-permit snapshot must handle terminal ID"
+            );
         }
     }
+
     #[tokio::test]
     async fn round2_send_turn_redacts_the_failed_write_again() {
         let mut secrets = Secrets::new();

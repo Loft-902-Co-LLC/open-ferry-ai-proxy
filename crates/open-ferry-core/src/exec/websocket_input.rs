@@ -144,11 +144,12 @@ impl WebsocketInput {
     /// A frame the handler reads after the upstream was lost.
     pub fn stale(payload: &[u8]) -> ExecError {
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
-        if value["type"] == "response.create"
-            && !value["previous_response_id"]
-                .as_str()
-                .is_some_and(|id| !id.trim().is_empty())
-        {
+        let requires_current = match value.get("previous_response_id") {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::String(id)) => !id.trim().is_empty(),
+            Some(_) => true,
+        };
+        if value["type"] == "response.create" && !requires_current {
             Self::not_sent(payload)
         } else {
             Self::continuation_lost(payload)
@@ -400,6 +401,30 @@ mod loss_body_tests {
                 409,
             ),
             (br#"{"type":"response.create","input":[]}"#.as_slice(), 502),
+            (
+                br#"{"type":"response.create","previous_response_id":0}"#.as_slice(),
+                409,
+            ),
+            (
+                br#"{"type":"response.create","previous_response_id":false}"#.as_slice(),
+                409,
+            ),
+            (
+                br#"{"type":"response.create","previous_response_id":{}}"#.as_slice(),
+                409,
+            ),
+            (
+                br#"{"type":"response.create","previous_response_id":[]}"#.as_slice(),
+                409,
+            ),
+            (
+                br#"{"type":"response.create","previous_response_id":null}"#.as_slice(),
+                502,
+            ),
+            (
+                br#"{"type":"response.create","previous_response_id":"  "}"#.as_slice(),
+                502,
+            ),
         ] {
             let (tx, rx) = mpsc::channel(1);
             let input = WebsocketInput::new(rx);

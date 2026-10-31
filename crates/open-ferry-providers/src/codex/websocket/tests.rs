@@ -2040,6 +2040,15 @@ async fn round2_non_loss_downstream_write_gets_one_redial() {
                 result.is_err(),
                 "continuation redialed a socket it must retain"
             );
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => unreachable!(),
+            };
+            assert_eq!(
+                error.ws_close,
+                Some(open_ferry_core::exec::WsClose::ReplayRequired)
+            );
+            assert!(error.request_scoped);
             assert_eq!(server.record().handshakes.len(), 0);
         } else {
             let response = result.expect("non-loss write should redial once");
