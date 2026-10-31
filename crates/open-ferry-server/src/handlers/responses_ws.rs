@@ -27,6 +27,10 @@
 //! its stream ends too.
 //!
 //! Deviations from upstream:
+//! - `responses-ws-no-permessage-deflate`: downstream extension offers are
+//!   declined; the upstream Codex handshake also offers none. Upstream
+//!   negotiates both paths with both no-context-takeover parameters. The
+//!   retained compression setting has no wire effect in this release.
 //! - The handshake is checked as gorilla checks it, then by axum, which is
 //!   stricter: an `Upgrade` or `Sec-WebSocket-Version` header must equal its
 //!   value rather than list it, and its other rejections answer 400. A

@@ -110,6 +110,16 @@ pub(super) async fn open(
     options: &Options,
 ) -> Result<Opened, ExecError> {
     crate::codex::siwc_request::ensure_credentials(auth, &options.headers)?;
+    // Keep reading E's setting, although this release's transport cannot
+    // negotiate deflate. Neither value changes the handshake or frames.
+    let compression_requested = executor
+        .shared_config()
+        .is_none_or(|config| config.codex.websocket_compression_enabled());
+    tracing::trace!(
+        compression_requested,
+        compression_negotiated = false,
+        "Codex websocket uses the uncompressed transport"
+    );
     let store = executor.websockets();
     let session_id = options
         .metadata
