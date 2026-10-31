@@ -3,7 +3,9 @@ use super::*;
 async fn r2_gzip_header_crc() {
     let wire: Vec<u8> = "1f8b08020000000000ff90c9cb48cdc9c9070086a6103605000000"
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|v| u8::from_str_radix(std::str::from_utf8(v).unwrap(), 16).unwrap())
         .collect();
     for label in ["gzip", ""] {

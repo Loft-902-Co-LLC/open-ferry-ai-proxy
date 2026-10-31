@@ -253,3 +253,82 @@ fn r2_accept_go_hex_qualities() {
         );
     }
 }
+#[tokio::test]
+async fn r2_fixed_wire_lengths() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let dispatcher = FakeDispatcher::new([Outcome::reply(r#"{"input_tokens":3}"#)]);
+    let app = crate::router_with(
+        state(
+            Default::default(),
+            FakeCatalog::new().serve("claude", &["claude"]),
+            &dispatcher,
+        ),
+        Router::new().route(
+            "/fixed-wire",
+            get(|| async { response("x".repeat(4096), "text/plain") }),
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    assert_ne!(address.port(), 8317);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+    });
+    for (method, path, payload, compressed) in [
+        (
+            "POST",
+            "/v1/messages/count_tokens",
+            r#"{"model":"claude"}"#,
+            false,
+        ),
+        ("GET", "/fixed-wire", "", true),
+    ] {
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        let split = wire.windows(4).position(|v| v == b"\r\n\r\n").unwrap();
+        let headers = std::str::from_utf8(&wire[..split])
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(headers.starts_with("http/1.1 200"));
+        assert!(!headers.contains("transfer-encoding:"), "{headers}");
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .expect("wire Content-Length")
+            .trim()
+            .parse()
+            .unwrap();
+        let body = &wire[split + 4..];
+        assert_eq!(length, body.len());
+        if compressed {
+            assert!(headers.contains("content-encoding: gzip"));
+            let mut plain = Vec::new();
+            flate2::read::MultiGzDecoder::new(body)
+                .read_to_end(&mut plain)
+                .unwrap();
+            assert_eq!(plain, vec![b'x'; 4096]);
+        } else {
+            assert!(!headers.contains("content-encoding:"));
+            assert_eq!(body, br#"{"input_tokens":3}"#);
+        }
+    }
+    stop.send(()).unwrap();
+    server.await.unwrap();
+}
