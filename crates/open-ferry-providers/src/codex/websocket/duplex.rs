@@ -114,6 +114,7 @@ struct Settings {
     /// Whether a native client sent the request, so the completed response
     /// is kept as Codex sent it.
     native: bool,
+    event_id: String,
     /// Whether the request renamed the collaboration namespace.
     optimize: bool,
     /// Whether the request already used the renamed namespace.
@@ -132,6 +133,7 @@ impl Settings {
     fn new(prepared: &Prepared, original: &Value) -> Self {
         Self {
             native: prepared.native,
+            event_id: str_at(original, "event_id"),
             optimize: prepared.optimize,
             conflict: prepared.conflict,
             turn: prepared.turn.clone(),
@@ -159,6 +161,9 @@ impl Settings {
 
 /// A steering message waiting for the explicit creates sent before it to
 /// start.
+#[derive(Clone)]
+struct Submission { parent: String, event_id: String, successor: String }
+
 struct Steer {
     message: String,
     parent: String,
@@ -193,10 +198,10 @@ struct Duplex {
     /// The explicit creates sent and not yet started.
     pending: VecDeque<Arc<Settings>>,
     /// The parents of steering messages sent and not yet answered.
-    unacknowledged: Vec<String>,
+    unacknowledged: Vec<Submission>,
     /// Accepted steering messages, by ID, with their parent, until a
     /// successor of the parent starts.
-    accepted: HashMap<String, String>,
+    accepted: HashMap<String, Submission>,
     response_id: String,
     response_settings: HashMap<String, Arc<Settings>>,
     response_order: VecDeque<String>,
@@ -350,6 +355,55 @@ impl Duplex {
         }
     }
 
+    /// Quiesce the single writer before enumerating owned operations.
+    fn transport_lost(&mut self) {
+        self.hold.conn().lose_input();
+        // Dropping this future stops the only writer. Pending already owns
+        // a possibly partial write, so it is never classified as not sent.
+        self.sending = None;
+        let loss = |id: &str| {
+            let body = serde_json::json!({"event_id": id}).to_string();
+            WebsocketInput::lost(body.as_bytes())
+        };
+        if self.first_response || self.response_active {
+            self.out.push_back(Err(loss(&self.current.event_id)));
+        }
+        for settings in &self.pending {
+            if !(self.first_response && Arc::ptr_eq(settings, &self.initial)) {
+                self.out.push_back(Err(loss(&settings.event_id)));
+            }
+        }
+        for target in &self.unacknowledged {
+            if !target.event_id.is_empty() { self.out.push_back(Err(loss(&target.event_id))); }
+        }
+        let mut accepted: Vec<_> = self.accepted.iter().collect();
+        accepted.sort_by_key(|(id, _)| *id);
+        for (_, target) in accepted {
+            if !target.event_id.is_empty() { self.out.push_back(Err(loss(&target.event_id))); }
+        }
+        for payload in &self.queued_creates {
+            self.out.push_back(Err(WebsocketInput::not_sent(payload.to_string().as_bytes())));
+        }
+        if let Some(steer) = &self.deferred {
+            self.out.push_back(Err(WebsocketInput::not_sent(steer.message.as_bytes())));
+        }
+        // One Result error terminates the handler producer. Once output was
+        // accepted, loss events travel as data so every owned operation is
+        // reported before EOF; before acceptance the scoped error prevents
+        // manager replay.
+        if !self.first_response {
+            for item in &mut self.out {
+                if let Err(error) = item {
+                    let mut event: Value = serde_json::from_str(&error.message).expect("loss JSON");
+                    event["type"] = "error".into();
+                    event["status"] = error.http_status().into();
+                    *item = Ok(Bytes::from(event.to_string()));
+                }
+            }
+        }
+        self.finish();
+    }
+
     /// Ends the duplex: the connection is closed and the session's next
     /// call may go. What is in `out` still goes to the client.
     fn finish(&mut self) {
@@ -391,7 +445,7 @@ impl Duplex {
             && self
                 .accepted
                 .values()
-                .all(|parent| *parent == self.waiting_parent)
+                .all(|target| !target.successor.is_empty() || target.parent == self.waiting_parent)
     }
 
     /// Sends what may go now, while no send is under way.
@@ -433,7 +487,7 @@ impl Duplex {
                 if let Err(failure) = result {
                     let failure = failure.redacted(&self.secrets);
                     let error = errors::write_error(self.hold.conn().disconnect_code(), &failure);
-                    self.fail_connection(error);
+                    if error.transport.is_some() { self.transport_lost(); } else { self.fail_connection(error); }
                 }
             }
             Wake::Read(read) => self.on_read(read),
@@ -475,7 +529,7 @@ impl Duplex {
                 self.fail_connection(error);
                 return;
             }
-            Some(InputFrame::Payload(payload)) => payload,
+            Some(InputFrame::Payload(payload) | InputFrame::Stamped(payload, _)) => payload,
         };
         if let Err(error) = self.live_check() {
             // A new socket may pick an enabled credential; this frame is
@@ -571,7 +625,11 @@ impl Duplex {
 
     fn send_steer(&mut self, steer: Steer) {
         let settings = self.response_settings.get(&steer.parent).cloned();
-        self.unacknowledged.push(steer.parent.clone());
+        self.unacknowledged.push(Submission {
+            parent: steer.parent.clone(),
+            event_id: str_at(&crate::codex::request::parse_object(steer.message.as_bytes()), "event_id"),
+            successor: String::new(),
+        });
         if let Some(settings) = settings {
             self.steering_settings.insert(steer.parent, settings);
         }
@@ -721,7 +779,7 @@ impl Duplex {
             Ok(payload) => payload,
             Err(failure) => {
                 let error = errors::error(&failure.redacted(&self.secrets));
-                self.fail_connection(error);
+                if error.transport.is_some() { self.transport_lost(); } else { self.fail_connection(error); }
                 return;
             }
         };
@@ -825,6 +883,8 @@ impl Duplex {
             event_type.as_str(),
             "response.completed" | "response.done" | "response.incomplete"
         ) {
+            let completed_id = str_at(&event, "response.id");
+            self.accepted.retain(|_, target| target.successor != completed_id);
             self.response_active = false;
             self.automatic_active = false;
             let mut completed = event;
@@ -870,7 +930,10 @@ impl Duplex {
             };
             self.current = Arc::clone(settings);
         }
-        self.accepted.retain(|_, target| *target != parent);
+        let successor = str_at(event, "response.id");
+        for target in self.accepted.values_mut().filter(|target| target.parent == parent && target.successor.is_empty()) {
+            target.successor.clone_from(&successor);
+        }
         self.waiting_parent.clear();
         self.automatic_active = automatic;
         if let Some(next) = self.pending.pop_front() {
@@ -903,8 +966,9 @@ impl Duplex {
         }
         match event_type {
             "response.steer.accepted" => {
-                self.consume_submission(&parent);
-                self.accepted.insert(id, parent);
+                if let Some(submission) = self.consume_submission(&parent) {
+                    self.accepted.insert(id, submission);
+                }
             }
             "response.steer.failed" => {
                 if self.accepted.remove(&id).is_none() {
@@ -922,20 +986,21 @@ impl Duplex {
     }
 
     /// Takes the first unanswered steering message for `parent`.
-    fn consume_submission(&mut self, parent: &str) {
+    fn consume_submission(&mut self, parent: &str) -> Option<Submission> {
         if let Some(index) = self
             .unacknowledged
             .iter()
-            .position(|target| target == parent || target.is_empty())
+            .position(|target| target.parent == parent || target.parent.is_empty())
         {
-            self.unacknowledged.remove(index);
+            return Some(self.unacknowledged.remove(index));
         }
+        None
     }
 
     /// Drops `parent`'s steering settings once no steering waits on it.
     fn release_steering_settings(&mut self, parent: &str) {
-        let waiting = self.unacknowledged.iter().any(|target| target == parent)
-            || self.accepted.values().any(|target| target == parent);
+        let waiting = self.unacknowledged.iter().any(|target| target.parent == parent)
+            || self.accepted.values().any(|target| target.parent == parent);
         if !waiting {
             self.steering_settings.remove(parent);
         }

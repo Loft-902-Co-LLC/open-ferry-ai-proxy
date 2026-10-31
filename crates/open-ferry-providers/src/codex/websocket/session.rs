@@ -428,6 +428,7 @@ pub(crate) struct Conn {
     /// The type of the last event read (`lastEventType`).
     last_event: Mutex<String>,
     terminal_responses: Mutex<HashSet<String>>,
+    input: Mutex<Option<open_ferry_core::exec::WebsocketInput>>,
 }
 
 impl Conn {
@@ -440,6 +441,7 @@ impl Conn {
             disconnect: Mutex::new(None),
             last_event: Mutex::new(String::new()),
             terminal_responses: Mutex::new(HashSet::new()),
+            input: Mutex::new(None),
         }
     }
 
@@ -447,6 +449,14 @@ impl Conn {
     #[cfg(test)]
     pub(crate) fn detached(target: Target) -> Arc<Self> {
         Arc::new(Self::new(target, None))
+    }
+
+    pub(crate) fn bind_input(&self, input: Option<open_ferry_core::exec::WebsocketInput>) {
+        *lock(&self.input) = input;
+    }
+
+    pub(crate) fn lose_input(&self) {
+        if let Some(input) = lock(&self.input).take() { input.lose(); }
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -1128,6 +1138,7 @@ async fn read_loop(
         }
     };
 
+    if errors::error(&failure).transport.is_some() { conn.lose_input(); }
     let failure = failure.redacted(&conn.target.secrets);
     // Remembered while the connection is still the session's, so a call
     // that becomes active on it from here on gets the failure at once.

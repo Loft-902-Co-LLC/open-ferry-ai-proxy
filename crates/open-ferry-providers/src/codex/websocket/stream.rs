@@ -106,6 +106,8 @@ pub(in crate::codex) async fn execute_stream(
         native: prepared.native,
         secrets,
         model_level_cooling: executor.model_level_cooling(),
+        original: request.payload,
+        downstream: options.downstream_websocket,
         items: OutputItems::default(),
         saw_output_delta: false,
         pending: VecDeque::new(),
@@ -159,6 +161,8 @@ impl Fault {
 /// The state of one streaming call.
 struct State {
     hold: Hold,
+    original: Bytes,
+    downstream: bool,
     turn: Turn,
     /// Whether a native client sent the request, so the completed response
     /// is kept as Codex sent it.
@@ -182,7 +186,12 @@ impl State {
             .hold
             .recv()
             .await
-            .map_err(|failure| Fault::Read(errors::error(&failure.redacted(&self.secrets))))?;
+            .map_err(|failure| {
+                let error = errors::error(&failure.redacted(&self.secrets));
+                Fault::Read(if self.downstream && error.transport.is_some() {
+                    open_ferry_core::exec::WebsocketInput::lost(&self.original)
+                } else { error })
+            })?;
         if payload.is_empty() {
             return Ok(None);
         }

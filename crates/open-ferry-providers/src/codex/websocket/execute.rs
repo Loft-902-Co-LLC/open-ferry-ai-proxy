@@ -178,6 +178,18 @@ pub(super) async fn open(
     };
     secrets.extend(conn.secrets());
 
+    if let Some(input) = &options.websocket_input {
+        let body = prepared.body.to_string();
+        if input.turn_is_stale() {
+            return Err(open_ferry_core::exec::WebsocketInput::not_sent(body.as_bytes()));
+        }
+        let continuation = crate::json::str_at(&prepared.body, "previous_response_id");
+        if input.epoch() > 0 && !continuation.is_empty() && headers.is_some() {
+            return Err(open_ferry_core::exec::WebsocketInput::continuation_lost(body.as_bytes()));
+        }
+        conn.bind_input(Some(input.clone()));
+        if conn.is_closed() { conn.lose_input(); }
+    }
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
     let sender = tap.clone();
     hold.observe(tap);
@@ -189,6 +201,11 @@ pub(super) async fn open(
         let failure = failure.redacted(&secrets);
         let error = errors::write_error(hold.conn().disconnect_code(), &failure);
         hold.invalidate("send_error");
+        if options.downstream_websocket && error.transport.is_some() {
+            hold.conn().lose_input();
+            hold.release();
+            return Err(open_ferry_core::exec::WebsocketInput::lost(prepared.body.to_string().as_bytes()));
+        }
         if ephemeral || !errors::should_retry(&error) {
             hold.release();
             return Err(error);

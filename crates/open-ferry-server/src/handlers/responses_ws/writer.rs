@@ -209,14 +209,15 @@ impl Drop for Reader {
 
 impl Reader {
     /// The next message, or `None` once the client is gone.
-    async fn next(&self) -> Option<Bytes> {
+    async fn next(&self) -> Option<Result<Bytes, open_ferry_core::exec::ExecError>> {
         let mut gone = self.gone.clone();
         tokio::select! {
             biased;
             _ = gone.wait_for(|gone| *gone) => None,
             frame = self.input.recv() => match frame {
-                Some(InputFrame::Payload(payload)) => Some(payload),
-                Some(InputFrame::Err(_)) | None => None,
+                Some(InputFrame::Payload(payload) | InputFrame::Stamped(payload, _)) => Some(Ok(payload)),
+                Some(InputFrame::Err(error)) => Some(Err(error)),
+                None => None,
             },
         }
     }
@@ -228,6 +229,7 @@ impl Reader {
 async fn read_input<R, S: Socket>(
     mut stream: R,
     input: mpsc::Sender<InputFrame>,
+    epochs: WebsocketInput,
     client_closed: Arc<AtomicBool>,
     gone: watch::Sender<bool>,
     interrupt: Interrupt<S>,
@@ -245,13 +247,14 @@ async fn read_input<R, S: Socket>(
             }
             Err(_) => break,
         };
+        let epoch = epochs.epoch();
         if json::valid(&payload) && crate::json::str_at(&payload, "type") == "response.interrupt" {
             if interrupt.handle(&payload).await.is_err() {
                 break;
             }
             continue;
         }
-        if input.send(InputFrame::Payload(payload)).await.is_err() {
+        if input.send(InputFrame::Stamped(payload, epoch)).await.is_err() {
             break;
         }
     }
@@ -312,9 +315,11 @@ impl<S: Socket> Conn<S> {
             sink: sink.clone(),
             local: local_state.clone(),
         };
+        let epochs = WebsocketInput::new(rx);
         let task = tokio::spawn(read_input(
             stream,
             input,
+            epochs.clone(),
             Arc::clone(&client_closed),
             gone,
             interrupt,
@@ -322,7 +327,7 @@ impl<S: Socket> Conn<S> {
         Self {
             writer: Some(Writer::Split(sink)),
             reader: Some(Reader {
-                input: WebsocketInput::new(rx),
+                input: epochs,
                 gone: gone_rx,
                 client_closed,
                 task,
@@ -385,7 +390,17 @@ impl<S: Socket> Conn<S> {
     pub(super) async fn read(&mut self) -> Option<Bytes> {
         let socket = match self.writer.as_mut()? {
             Writer::Whole(socket) => socket,
-            Writer::Split(_) => return self.reader.as_ref()?.next().await,
+            Writer::Split(_) => {
+                loop {
+                    match self.reader.as_ref()?.next().await? {
+                        Ok(payload) => return Some(payload),
+                        Err(error) => {
+                            let error = ErrorMessage::from_exec(error);
+                            if self.write(&super::forward::error_payload(&error)).await.is_err() { return None; }
+                        }
+                    }
+                }
+            },
         };
         loop {
             match socket.next().await? {

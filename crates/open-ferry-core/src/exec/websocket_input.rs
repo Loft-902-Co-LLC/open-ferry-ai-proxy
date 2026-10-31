@@ -20,6 +20,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::{Mutex, mpsc};
@@ -32,6 +33,8 @@ use crate::auth::Auth;
 pub enum InputFrame {
     /// A message, which whoever reads it owns and must not replay.
     Payload(Bytes),
+    /// A frame stamped immediately after the socket read, before enqueueing.
+    Stamped(Bytes, u64),
     /// A failure that ends the connection.
     Err(ExecError),
 }
@@ -50,6 +53,9 @@ pub type TurnAuthorizer = Arc<dyn Fn(&[u8]) -> Result<Option<Bytes>, ExecError> 
 #[derive(Clone)]
 pub struct WebsocketInput {
     rx: Arc<Mutex<mpsc::Receiver<InputFrame>>>,
+    epoch: Arc<AtomicU64>,
+    turn_epoch: Option<u64>,
+    received_epoch: Arc<AtomicU64>,
     auth_check: Option<AuthCheck>,
     turn_authorizer: Option<TurnAuthorizer>,
 }
@@ -59,6 +65,9 @@ impl WebsocketInput {
     pub fn new(rx: mpsc::Receiver<InputFrame>) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
+            epoch: Arc::default(),
+            turn_epoch: None,
+            received_epoch: Arc::default(),
             auth_check: None,
             turn_authorizer: None,
         }
@@ -105,10 +114,65 @@ impl WebsocketInput {
         )
     }
 
+    /// Current transport generation, shared with the socket reader.
+    pub fn epoch(&self) -> u64 { self.epoch.load(Ordering::Acquire) }
+
+    /// Advances once per lost connection, before delivering its failure.
+    pub fn lose(&self) { self.epoch.fetch_add(1, Ordering::AcqRel); }
+
+    /// Binds a handler-consumed frame across asynchronous dispatch and dialing.
+    pub fn for_turn(mut self) -> Self { self.turn_epoch = Some(self.received_epoch.load(Ordering::Acquire)); self }
+
+    pub fn turn_is_stale(&self) -> bool {
+        self.turn_epoch.is_some_and(|epoch| epoch != self.epoch())
+    }
+
+    /// A continuation cannot use a conversation lost with its transport.
+    pub fn continuation_lost(payload: &[u8]) -> ExecError {
+        let mut error = ExecError::upstream(409, r#"{"error":{"message":"Previous response is not available on this websocket; resend the full conversation input without previous_response_id","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}"#).with_websocket_turn();
+        Self::correlate(&mut error, payload);
+        error
+    }
+
+    pub fn not_sent(payload: &[u8]) -> ExecError {
+        let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
+        if value["type"] == "response.append" || value["type"] == "response.steer"
+            || value["previous_response_id"].as_str().is_some_and(|id| !id.trim().is_empty()) {
+            return Self::continuation_lost(payload);
+        }
+        let mut error = ExecError::upstream(502, r#"{"error":{"message":"Upstream websocket disconnected before this request was sent. Send a new response.create with full conversation input.","type":"server_error","code":"upstream_websocket_not_sent"}}"#).with_websocket_turn();
+        Self::correlate(&mut error, payload);
+        error
+    }
+
+    pub fn lost(payload: &[u8]) -> ExecError {
+        let mut error = ExecError::upstream_websocket_lost();
+        Self::correlate(&mut error, payload);
+        error
+    }
+
+    fn correlate(error: &mut ExecError, payload: &[u8]) {
+        let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
+        if let Some(id) = value["event_id"].as_str().filter(|id| !id.is_empty()) {
+            let mut body: serde_json::Value = serde_json::from_str(&error.message).expect("static loss body");
+            body["error"]["event_id"] = id.into();
+            error.message = body.to_string();
+        }
+    }
+
     /// The next frame, or `None` once the client's reader has stopped.
     /// Dropping the future before it finishes loses no frame.
     pub async fn recv(&self) -> Option<InputFrame> {
-        self.rx.lock().await.recv().await
+        match self.rx.lock().await.recv().await {
+            Some(InputFrame::Stamped(payload, epoch)) if epoch != self.epoch() => {
+                Some(InputFrame::Err(Self::not_sent(&payload)))
+            }
+            Some(InputFrame::Stamped(payload, epoch)) => {
+                self.received_epoch.store(epoch, Ordering::Release);
+                Some(InputFrame::Payload(payload))
+            },
+            frame => frame,
+        }
     }
 }
 

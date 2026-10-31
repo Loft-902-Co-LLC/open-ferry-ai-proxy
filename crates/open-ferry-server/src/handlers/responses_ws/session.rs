@@ -393,13 +393,7 @@ impl<S: Socket> Session<S> {
             self.pinned.clone()
         };
         let selected: Arc<Mutex<Vec<String>>> = Arc::default();
-        let input = self
-            .state
-            .settings()
-            .config
-            .codex_response_steering
-            .then(|| self.conn.input())
-            .flatten();
+        let input = self.conn.input().map(|input| input.for_turn());
         let mut execution_client = self.client.clone();
         execution_client.context = None;
         let started = match Call::new(
@@ -511,7 +505,7 @@ impl<S: Socket> Session<S> {
             preserve_output = lite && codex;
             // Only a Codex credential on its upstream WebSocket steers; any
             // other turn of the session ends as usual.
-            duplex = input.is_some() && attempted == Upstream::Websocket && codex;
+            duplex = self.state.settings().config.codex_response_steering && input.is_some() && attempted == Upstream::Websocket && codex;
         }
         if !selection_observed {
             attempted = Upstream::Http;
