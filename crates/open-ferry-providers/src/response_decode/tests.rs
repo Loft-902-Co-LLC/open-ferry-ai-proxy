@@ -243,3 +243,84 @@ async fn reverse_multiple_header_values_and_preallocation_window_limit() {
         (vec![], 1)
     );
 }
+struct Observed<R> {
+    reader: R,
+    reads: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+impl<R> Drop for Observed<R> {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl<R: AsyncRead + Unpin> AsyncRead for Observed<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Pin::new(&mut self.reader).poll_read(cx, out)
+    }
+}
+#[tokio::test]
+async fn lazy_setup_eof_error_and_close_release_source_once() {
+    for (label, valid) in [
+        ("", true),
+        ("gzip", true),
+        ("zstd", true),
+        ("gzip", false),
+        ("zstd", false),
+        ("unknown", false),
+    ] {
+        let wire = if valid && !label.is_empty() {
+            encode(label, b"hello").await
+        } else {
+            b"hello".to_vec()
+        };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let source = Observed {
+            reader: std::io::Cursor::new(wire),
+            reads: reads.clone(),
+            drops: drops.clone(),
+        };
+        let mut headers = HeaderMap::new();
+        if !label.is_empty() {
+            headers.insert(header::CONTENT_ENCODING, label.parse().unwrap());
+        }
+        let mut decoder = Box::pin(decode_response_body(source, &headers, 1024));
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "construction must not read"
+        );
+        let mut errors = 0;
+        while let Some(item) = decoder.next().await {
+            if item.is_err() {
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, usize::from(!valid));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "EOF/error releases source even while stream is held"
+        );
+        assert!(decoder.next().await.is_none());
+        drop(decoder);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+#[tokio::test]
+async fn source_errors_are_forwarded_once() {
+    let source = tokio_util::io::StreamReader::new(stream::iter([Err::<Bytes, _>(
+        io::Error::new(io::ErrorKind::ConnectionReset, "mock upstream reset"),
+    )]));
+    let mut decoder = Box::pin(decode_response_body(source, &HeaderMap::new(), 1024));
+    assert_eq!(
+        decoder.next().await.unwrap().unwrap_err().kind(),
+        io::ErrorKind::ConnectionReset
+    );
+    assert!(decoder.next().await.is_none());
+}

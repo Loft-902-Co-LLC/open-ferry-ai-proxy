@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 
 type Reader = Pin<Box<dyn AsyncRead + Send>>;
 const CHUNK: usize = 16 * 1024;
+const MAX_ZSTD_WINDOW_LOG: u32 = 23;
 /// Maximum number of declared codec layers (bounds decoder working memory).
 pub const MAX_ENCODING_LAYERS: usize = 8;
 
@@ -70,6 +71,7 @@ async fn prefix(mut reader: Reader, count: usize) -> io::Result<(Vec<u8>, Reader
 async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result<Reader> {
     let mut names: Vec<String> = encoding
         .split(',')
+        .take(MAX_ENCODING_LAYERS + 1)
         .map(|v| v.trim().to_ascii_lowercase())
         .collect();
     if encoding.is_empty() {
@@ -99,7 +101,11 @@ async fn prepare(mut reader: Reader, encoding: &str, limit: usize) -> io::Result
             "zstd" => {
                 let mut decoder = ZstdDecoder::with_params(
                     BufReader::new(reader),
-                    &[async_compression::codecs::zstd::params::DParameter::window_log_max(23)],
+                    &[
+                        async_compression::codecs::zstd::params::DParameter::window_log_max(
+                            MAX_ZSTD_WINDOW_LOG,
+                        ),
+                    ],
                 );
                 decoder.multiple_members(true);
                 Box::pin(decoder)
