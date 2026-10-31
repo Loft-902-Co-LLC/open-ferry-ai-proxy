@@ -786,13 +786,13 @@ fn is_complete_tool_call_requires_string_fields() {
 
 /// A socket that keeps what is sent to it and has nothing to read.
 #[derive(Clone, Default)]
-struct FakeSocket {
+pub(super) struct FakeSocket {
     sent: Arc<Mutex<Vec<Message>>>,
     fail_ping: bool,
 }
 
 impl FakeSocket {
-    fn sent(&self) -> Vec<Message> {
+    pub(super) fn sent(&self) -> Vec<Message> {
         self.sent
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

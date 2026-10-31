@@ -623,4 +623,63 @@ mod interrupt_claim_tests {
         );
         assert!(frames.send_replace(None).is_none(), "one answer per claim");
     }
+    #[tokio::test]
+    async fn p47_interrupt_claimed_during_chunk_poll_is_consumed_before_terminal() {
+        use super::super::forward::{ForwardOptions, forward};
+        use super::super::repair::ServerToolCaches;
+        use super::super::tests::FakeSocket;
+        use futures_util::StreamExt;
+        let socket = FakeSocket::default();
+        let observed = socket.clone();
+        let mut conn = Conn::new(socket);
+        let (frames, _) = watch::channel(None);
+        conn.local = Some(frames.clone());
+        conn.local_state.lock().unwrap().frames = Some(frames);
+        let local = conn.local_state.clone();
+        let mut emitted = false;
+        let items = futures_util::stream::poll_fn(move |_| {
+            if emitted {
+                return std::task::Poll::Ready(None);
+            }
+            emitted = true;
+            let state = local.lock().unwrap();
+            assert!(state.claim(
+                Some(state.generation),
+                &Bytes::from_static(br#"{"type":"response.interrupt","response_id":"r1"}"#)
+            ));
+            std::task::Poll::Ready(Some(Ok(Bytes::from_static(
+                br#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#,
+            ))))
+        })
+        .boxed();
+        let caches = ServerToolCaches::default();
+        forward(
+            &mut conn,
+            items,
+            ForwardOptions {
+                caches: &caches,
+                principal: crate::auth::Principal::ANONYMOUS,
+                session_key: "claimed",
+                preserve_completion_output: false,
+                turn: None,
+                suppress_error: &|_| false,
+                keepalive: None,
+                context: None,
+                duplex: false,
+                websocket_owned: false,
+                is_codex_client: false,
+            },
+        )
+        .await;
+        let messages = observed.sent();
+        assert_eq!(messages.len(), 1, "each claimed interrupt gets one answer");
+        let Message::Text(payload) = &messages[0] else {
+            panic!("missing answer")
+        };
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            payload["type"], "response.incomplete",
+            "claimed HTTP interrupt was answered too late"
+        );
+    }
 }

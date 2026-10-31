@@ -183,16 +183,7 @@ async fn forward_turn<S: Socket>(
                     if conn.write(&error_payload(&ErrorMessage::new(400, "no active response to interrupt"))).await.is_err() { return Forwarded::Closed; }
                     continue;
                 }
-                conn.stop_claims();
-                // Like upstream, the HTTP path cannot match response IDs:
-                // a late interrupt arriving during this turn cancels it.
-                let response_id = str_at(&payload, "response_id").trim().to_owned();
-                let output = completed_output_from_payload(b"{\"response\":{\"output\":[]}}", &outputs);
-                let mut event = br#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}"#.to_vec();
-                event = json::set_str(&event, "response.id", &response_id);
-                event = json::set_raw(&event, "response.output", &output);
-                if conn.write(&event).await.is_err() { return Forwarded::Closed; }
-                return Forwarded::Completed { output, response_id, pending_call_ids: pending.into_iter().collect() };
+                return complete_local_interrupt(conn, &payload, &outputs, pending).await;
             }
             () = tick(ticker.as_mut()) => {
                 if conn.ping().await.is_err() {
@@ -258,6 +249,22 @@ async fn forward_turn<S: Socket>(
             }
             Some(Ok(chunk)) => chunk,
         };
+        if let Some(payload) = conn.take_claimed() {
+            if turn_ended {
+                if conn
+                    .write(&error_payload(&ErrorMessage::new(
+                        400,
+                        "no active response to interrupt",
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return Forwarded::Closed;
+                }
+            } else {
+                return complete_local_interrupt(conn, &payload, &outputs, pending).await;
+            }
+        }
         if let Some(ticker) = ticker.as_mut() {
             ticker.reset();
         }
@@ -328,6 +335,29 @@ async fn forward_turn<S: Socket>(
                 return Forwarded::Closed;
             }
         }
+    }
+}
+
+/// Local HTTP cancellation consumes a claimed frame before more output.
+async fn complete_local_interrupt<S: Socket>(
+    conn: &mut Conn<S>,
+    payload: &[u8],
+    outputs: &OutputItems,
+    pending: BTreeSet<String>,
+) -> Forwarded {
+    conn.stop_claims();
+    let response_id = str_at(payload, "response_id").trim().to_owned();
+    let output = completed_output_from_payload(br#"{"response":{"output":[]}}"#, outputs);
+    let mut event = br#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}"#.to_vec();
+    event = json::set_str(&event, "response.id", &response_id);
+    event = json::set_raw(&event, "response.output", &output);
+    if conn.write(&event).await.is_err() {
+        return Forwarded::Closed;
+    }
+    Forwarded::Completed {
+        output,
+        response_id,
+        pending_call_ids: pending.into_iter().collect(),
     }
 }
 
