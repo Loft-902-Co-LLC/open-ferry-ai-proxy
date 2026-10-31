@@ -1439,8 +1439,18 @@ mod round2_windows {
 
     #[test]
     fn round2_invariant_family_loss_detach_and_publication_window() {
+        for writer in [false, true] {
+            loss_publication_window(writer);
+        }
+    }
+
+    fn loss_publication_window(writer: bool) {
         let session = Arc::new(Session::new("round2-window", IDLE_TIMEOUT));
-        let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
+        let conn = Arc::new(Conn::new(
+            Target::new("auth", "ws://example.test", "", "token"),
+            None,
+            Arc::downgrade(&session),
+        ));
         session.set_conn(conn.clone());
         assert!(
             session.conn().is_some(),
@@ -1461,7 +1471,19 @@ mod round2_windows {
             std::thread::spawn(move || {
                 // Pause the production reader at loss publication while
                 // a continuation attempts the connection-acquisition window.
-                session.reader_disconnected(&conn, "upstream_disconnected", &Failure::eof());
+                if writer {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    assert!(
+                        runtime
+                            .block_on(conn.send_turn("{}".into(), None, b"{}"))
+                            .is_err()
+                    );
+                } else {
+                    session.reader_disconnected(&conn, "upstream_disconnected", &Failure::eof());
+                }
             })
         };
         published_rx.recv().unwrap();

@@ -45,8 +45,12 @@ async fn loss_while_waiting_for_writer_is_not_sent() {
     let sending = {
         let conn = conn.clone();
         tokio::spawn(async move {
-            conn.send_turn("{}".into(), Some(&turn), br#"{"event_id":"queued"}"#)
-                .await
+            conn.send_turn(
+                "{}".into(),
+                Some(&turn),
+                br#"{"type":"response.create","input":[],"event_id":"queued"}"#,
+            )
+            .await
         })
     };
     input.lose();

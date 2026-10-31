@@ -370,7 +370,11 @@ impl Duplex {
 
     /// Quiesce the single writer before enumerating owned operations.
     fn transport_lost(&mut self) {
-        self.hold.conn().lose_input();
+        self.hold.session().invalidate(
+            self.hold.conn(),
+            "upstream_disconnected",
+            Some(&Failure::closed()),
+        );
         // Dropping this future stops the only writer. Pending already owns
         // a possibly partial write, so it is never classified as not sent.
         self.sending = None;
@@ -568,7 +572,11 @@ impl Duplex {
                     let error = errors::write_error(self.hold.conn().disconnect_code(), &failure);
                     let lost = errors::is_turn_loss(&failure) && error.status != 413;
                     if lost {
-                        self.hold.conn().lose_input();
+                        self.hold.session().invalidate(
+                            self.hold.conn(),
+                            "send_error",
+                            Some(&failure),
+                        );
                     }
                     self.write_failure = Some((error, lost));
                     self.hold.invalidate("send_error");
