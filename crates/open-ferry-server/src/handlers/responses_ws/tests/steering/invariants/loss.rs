@@ -1,7 +1,6 @@
 // Local-router acceptance cases for upstream f73e66ac.
-// These local real-router cases intentionally assert the upstream contract rather
-// than accepting today's closing behavior. They include queued-input fencing,
-// but not a loss after the handler's epoch check, failed writes or late interrupts.
+// These real-router cases assert exact correlation and recovery. Core/provider
+// tests cover the handler-dispatch and writer-lock epoch gaps and failed writes.
 
 use super::*;
 
@@ -195,7 +194,7 @@ async fn round1_loss_idle_eof_duplex() {
     idle_loss(true).await;
 }
 
-async fn operation_loss(append: bool, accepted_steer: bool) {
+async fn operation_loss(append: bool, accepted_steer: bool, anonymous: bool) {
     let count = Arc::new(AtomicUsize::new(0));
     let mut upstream = Upstream::start(move |mut peer| {
         let index = count.fetch_add(1, Ordering::SeqCst);
@@ -204,7 +203,7 @@ async fn operation_loss(append: bool, accepted_steer: bool) {
             if index == 0 {
                 peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
                 let operation = peer.read().await.unwrap();
-                assert_eq!(at(&operation, "/event_id"), "op1");
+                assert_eq!(at(&operation, "/event_id"), if anonymous { "" } else { "op1" });
                 if accepted_steer {
                     peer.write(r#"{"type":"response.steer.accepted","steer":{"id":"st1","previous_response_id":"r1"}}"#).await;
                 }
@@ -232,7 +231,7 @@ async fn operation_loss(append: bool, accepted_steer: bool) {
     send(
         &mut ws,
         &json!({"type":kind, "previous_response_id":"r1",
-        "input":[], "event_id":"op1"})
+        "input":[], "event_id":if anonymous { "" } else { "op1" }})
         .to_string(),
     )
     .await;
@@ -244,7 +243,9 @@ async fn operation_loss(append: bool, accepted_steer: bool) {
         );
     }
     expect_error(&mut ws, "upstream_websocket_lost", "c1").await;
-    expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+    if !anonymous {
+        expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+    }
     send(&mut ws, &create("c3")).await;
     expect_completion(&mut ws, "recovered").await; // Any duplicate loss frame fails here.
     assert_eq!(upstream.connections(), 2, "{ROUND1_INVARIANT}");
@@ -257,17 +258,17 @@ async fn operation_loss(append: bool, accepted_steer: bool) {
 
 #[tokio::test]
 async fn round1_loss_unacknowledged_steer() {
-    operation_loss(false, false).await;
+    operation_loss(false, false, false).await;
 }
 
 #[tokio::test]
 async fn round1_loss_accepted_steer() {
-    operation_loss(false, true).await;
+    operation_loss(false, true, false).await;
 }
 
 #[tokio::test]
 async fn round1_loss_append() {
-    operation_loss(true, false).await;
+    operation_loss(true, false, false).await;
 }
 
 async fn queued_loss(continuation: bool) {
@@ -406,7 +407,8 @@ async fn round1_loss_between_turns_does_not_inherit_event_id() {
 
 #[tokio::test]
 async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
-    for completed in [false, true] {
+    for terminal in ["", "response.completed", "response.failed", "error"] {
+        let completed = !terminal.is_empty();
         let mut upstream = Upstream::start(move |mut peer| async move {
             peer.read().await.unwrap();
             peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
@@ -415,7 +417,7 @@ async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
             peer.write(r#"{"type":"response.incomplete","response":{"id":"r1","output":[]}}"#).await;
             peer.write(r#"{"type":"response.created","response":{"id":"r2","previous_response_id":"r1"}}"#).await;
             if completed {
-                peer.write(r#"{"type":"response.completed","response":{"id":"r2","output":[]}}"#).await;
+                peer.write(&json!({"type":terminal,"status":500,"response":{"id":"r2","output":[],"error":{"type":"server_error","message":"failed"}},"error":{"type":"server_error","message":"failed"}}).to_string()).await;
             }
         }).await;
         let sibling = unused_sibling().await;
@@ -436,7 +438,7 @@ async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
             assert_eq!(recv(&mut ws).await["type"], kind);
         }
         if completed {
-            assert_eq!(recv(&mut ws).await["type"], "response.completed");
+            assert_eq!(recv(&mut ws).await["type"], terminal);
         } else {
             expect_error(&mut ws, "upstream_websocket_lost", "c1").await;
             expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
@@ -452,4 +454,9 @@ async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
         assert_eq!(sibling.connections(), 0, "{ROUND1_INVARIANT}");
         ws.close(None).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn round1_loss_anonymous_operations_do_not_duplicate_turn_error() {
+    operation_loss(true, false, true).await;
 }

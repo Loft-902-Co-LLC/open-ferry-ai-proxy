@@ -35,7 +35,7 @@ pub enum InputFrame {
     Payload(Bytes),
     /// A frame stamped immediately after the socket read, before enqueueing.
     Stamped(Bytes, u64),
-    /// A failure that ends the connection.
+    /// A reader failure or scoped rejection of a stale queued turn.
     Err(ExecError),
 }
 
@@ -144,14 +144,13 @@ impl WebsocketInput {
     pub fn not_sent(payload: &[u8]) -> ExecError {
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
         if value["type"] == "response.append"
-            || value["type"] == "response.steer"
             || value["previous_response_id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
         {
             return Self::continuation_lost(payload);
         }
-        let mut error = ExecError::upstream(502, r#"{"error":{"message":"Upstream websocket disconnected before this request was sent. Send a new response.create with full conversation input.","type":"server_error","code":"upstream_websocket_not_sent"}}"#).with_websocket_turn();
+        let mut error = ExecError::upstream(502, r#"{"error":{"message":"Operation was not sent because the upstream websocket was lost. Send a new response.create with full conversation input.","type":"invalid_request_error","code":"upstream_websocket_not_sent"}}"#).with_websocket_turn();
         Self::correlate(&mut error, payload);
         error
     }
@@ -341,5 +340,30 @@ mod epoch_tests {
         .unwrap();
         assert!(matches!(input.recv().await, Some(InputFrame::Payload(_))));
         assert!(!input.for_turn().turn_is_stale());
+    }
+}
+
+#[cfg(test)]
+mod loss_body_tests {
+    use super::*;
+
+    #[test]
+    fn not_sent_matches_upstream_body_and_continuation_shape() {
+        let error = WebsocketInput::not_sent(b"{}");
+        assert_eq!(error.http_status(), 502);
+        assert_eq!(
+            error.message,
+            r#"{"error":{"message":"Operation was not sent because the upstream websocket was lost. Send a new response.create with full conversation input.","type":"invalid_request_error","code":"upstream_websocket_not_sent"}}"#
+        );
+        assert_eq!(
+            WebsocketInput::not_sent(br#"{"type":"response.steer"}"#).http_status(),
+            502
+        );
+        for body in [
+            br#"{"type":"response.append"}"#.as_slice(),
+            br#"{"previous_response_id":"r1"}"#.as_slice(),
+        ] {
+            assert_eq!(WebsocketInput::not_sent(body).http_status(), 409);
+        }
     }
 }

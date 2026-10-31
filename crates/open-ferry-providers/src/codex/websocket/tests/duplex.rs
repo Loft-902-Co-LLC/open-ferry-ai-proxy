@@ -1739,3 +1739,99 @@ async fn r2_deferred_steer_rechecks_frontend_access_before_sending() {
     assert_eq!(checks.load(Ordering::SeqCst), 2);
     assert_eq!(messages(&server).len(), 2);
 }
+
+#[tokio::test]
+async fn loss_after_duplex_authorization_fences_the_consumed_create() {
+    let server = serve(|mut peer| async move {
+        peer.recv().await.unwrap();
+        peer.send(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+            .await;
+        if peer.recv().await.is_some() {
+            peer.send(r#"{"type":"response.created","response":{"id":"wrongly-sent"}}"#)
+                .await;
+            peer.send(
+                r#"{"type":"response.completed","response":{"id":"wrongly-sent","output":[]}}"#,
+            )
+            .await;
+        }
+    })
+    .await;
+    let (client, input) = Client::new(2);
+    let loss = input.clone();
+    let input = input.for_turn().with_turn_authorizer(Arc::new(move |_| {
+        loss.lose();
+        Ok(None)
+    }));
+    let executor = steering();
+    let mut chunks = start(
+        &executor,
+        &server.url,
+        "epoch-gap",
+        r#"{"model":"gpt-6-astra","input":[],"event_id":"c1"}"#,
+        duplex_options("epoch-gap", input),
+    )
+    .await;
+    assert_eq!(
+        json(&String::from_utf8(chunks.next().await.unwrap().unwrap().to_vec()).unwrap())["type"],
+        "response.created"
+    );
+    client.send(r#"{"type":"response.create","model":"gpt-6-astra","input":[],"event_id":"c2"}"#);
+    let error = within("consumed create fenced", chunks.next())
+        .await
+        .unwrap()
+        .unwrap_err();
+    let body: Value = serde_json::from_str(&error.message).unwrap();
+    assert_eq!(body["websocket_loss_events"][0]["error"]["event_id"], "c1");
+    assert_eq!(body["websocket_loss_events"][1]["error"]["event_id"], "c2");
+    assert_eq!(
+        body["websocket_loss_events"][1]["error"]["code"],
+        "upstream_websocket_not_sent"
+    );
+    assert!(chunks.next().await.is_none());
+    assert!(
+        executor
+            .websockets()
+            .get("epoch-gap")
+            .unwrap()
+            .conn()
+            .is_none()
+    );
+    assert_eq!(server.record().messages.len(), 1);
+}
+
+#[tokio::test]
+async fn stale_input_error_keeps_running_turn_loss_correlation() {
+    let server = serve(|mut peer| async move {
+        peer.recv().await.unwrap();
+        peer.send(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+            .await;
+        peer.hold().await;
+    })
+    .await;
+    let (client, input) = Client::new(2);
+    let executor = steering();
+    let mut chunks = start(
+        &executor,
+        &server.url,
+        "stale-input",
+        r#"{"model":"gpt-6-astra","input":[],"event_id":"c1"}"#,
+        duplex_options("stale-input", input),
+    )
+    .await;
+    chunks.next().await.unwrap().unwrap();
+    client.frame(InputFrame::Err(WebsocketInput::not_sent(
+        br#"{"event_id":"c2"}"#,
+    )));
+    let error = within("stale frame and active turn reported", chunks.next())
+        .await
+        .unwrap()
+        .unwrap_err();
+    let body: Value = serde_json::from_str(&error.message).unwrap();
+    let events = body["websocket_loss_events"]
+        .as_array()
+        .expect("one bounded batch");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["error"]["event_id"], "c1");
+    assert_eq!(events[1]["error"]["event_id"], "c2");
+    assert_eq!(events[1]["error"]["code"], "upstream_websocket_not_sent");
+}

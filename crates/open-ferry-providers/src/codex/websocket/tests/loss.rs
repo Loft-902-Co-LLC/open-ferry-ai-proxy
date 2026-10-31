@@ -72,3 +72,27 @@ fn only_concrete_transport_loss_recovers_a_turn() {
         );
     }
 }
+
+#[tokio::test]
+async fn late_input_binding_does_not_advance_an_already_reported_loss() {
+    let conn = Conn::detached(Target::new(
+        "auth",
+        "ws://example.test/responses",
+        "",
+        "token",
+    ));
+    let (_tx, rx) = mpsc::channel(1);
+    let input = WebsocketInput::new(rx);
+    conn.bind_input(Some(input.clone()));
+    conn.lose_input();
+    assert_eq!(input.epoch(), 1);
+    // An open/reuse path can have passed its epoch check just before the
+    // reader reports loss, then publish the same input before noticing EOF.
+    conn.bind_input(Some(input.clone()));
+    conn.lose_input();
+    assert_eq!(
+        input.epoch(),
+        1,
+        "one transport loss advances one shared epoch"
+    );
+}

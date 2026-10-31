@@ -82,7 +82,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -448,6 +448,7 @@ pub(crate) struct Conn {
     terminal_responses: Mutex<HashSet<String>>,
     response: Mutex<ResponseIdentity>,
     input: Mutex<Option<open_ferry_core::exec::WebsocketInput>>,
+    loss_advanced: AtomicBool,
 }
 
 impl Conn {
@@ -462,6 +463,7 @@ impl Conn {
             terminal_responses: Mutex::new(HashSet::new()),
             response: Mutex::default(),
             input: Mutex::new(None),
+            loss_advanced: AtomicBool::new(false),
         }
     }
 
@@ -509,7 +511,9 @@ impl Conn {
     }
 
     pub(crate) fn lose_input(&self) {
-        if let Some(input) = lock(&self.input).take() {
+        if let Some(input) = lock(&self.input).take()
+            && !self.loss_advanced.swap(true, Ordering::AcqRel)
+        {
             input.lose();
         }
     }
@@ -1222,6 +1226,7 @@ async fn read_loop(
     // that becomes active on it from here on gets the failure at once.
     if let Some(session) = session.upgrade() {
         session.mark_terminal(conn.id, &failure);
+        session.invalidate(&conn, reason, Some(&failure));
     }
     // Closed first: no send starts after this, so a call that becomes
     // active on the connection from here on fails to send, and one active

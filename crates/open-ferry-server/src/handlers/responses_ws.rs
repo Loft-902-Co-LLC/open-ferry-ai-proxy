@@ -21,7 +21,8 @@
 //! all the time, and a Codex turn on its upstream WebSocket keeps that
 //! connection for the rest of the socket: the client's later messages,
 //! `response.steer` among them, go to it while a response runs, and the
-//! socket closes with it. Other turns go as they do with the setting off.
+//! socket survives transport loss without replaying interrupted turns. Other
+//! turns go as they do with the setting off.
 //! As upstream, a Codex turn that falls back to HTTP closes the socket when
 //! its stream ends too.
 //!
