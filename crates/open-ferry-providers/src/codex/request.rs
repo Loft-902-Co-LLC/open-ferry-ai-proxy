@@ -1136,3 +1136,92 @@ mod web_search_history_tests {
         }
     }
 }
+
+/// Compress only finalized OAuth Codex JSON at the trusted HTTPS destination.
+pub(super) async fn compress_request(
+    config: Option<&open_ferry_core::config::Config>,
+    auth: &Auth,
+    destination: &str,
+    headers: &HeaderMap,
+    body: &bytes::Bytes,
+) -> Option<bytes::Bytes> {
+    let config = config?;
+    if !config.codex.request_compression_enabled()
+        || (body.len() as u128) < config.codex.request_compression_min_bytes() as u128
+        || uses_api_key(auth, headers)
+        || auth.use_siwc_for_request(headers)
+    {
+        return None;
+    }
+    let url = url::Url::parse(destination).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("chatgpt.com")
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !url.path().starts_with("/backend-api/codex/")
+    {
+        return None;
+    }
+    use tokio::io::AsyncWriteExt;
+    let mut encoder = async_compression::tokio::write::ZstdEncoder::new(Vec::new());
+    encoder.write_all(body).await.ok()?;
+    encoder.shutdown().await.ok()?;
+    let compressed = encoder.into_inner();
+    (compressed.len() < body.len()).then(|| bytes::Bytes::from(compressed))
+}
+
+/// Match declared encoding to replayable JSON/multipart and recognizable frames.
+pub(super) fn align_content_encoding(headers: &mut HeaderMap, body: &[u8]) {
+    let plain = open_ferry_translate::go::trim_space(body);
+    let multipart = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| h.trim().to_ascii_lowercase().starts_with("multipart/"));
+    if matches!(plain.first(), Some(b'{' | b'[')) || (multipart && plain.starts_with(b"--")) {
+        headers.remove(http::header::CONTENT_ENCODING);
+        return;
+    }
+    let encodings: Vec<_> = headers
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .flat_map(|h| h.split(','))
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if encodings
+        .iter()
+        .filter(|h| !h.eq_ignore_ascii_case("identity"))
+        .count()
+        > 1
+    {
+        return;
+    }
+    let encoding = if body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        Some("zstd")
+    } else if body.starts_with(&[0x1f, 0x8b]) {
+        Some("gzip")
+    } else {
+        None
+    };
+    if let Some(encoding) = encoding {
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static(encoding),
+        );
+    } else if encodings.iter().any(|h| h.eq_ignore_ascii_case("zstd")) {
+        headers.remove(http::header::CONTENT_ENCODING);
+        let remaining: Vec<_> = encodings
+            .iter()
+            .filter(|h| !h.eq_ignore_ascii_case("zstd"))
+            .cloned()
+            .collect();
+        if let Ok(value) = http::HeaderValue::from_str(&remaining.join(", "))
+            && !remaining.is_empty()
+        {
+            headers.insert(http::header::CONTENT_ENCODING, value);
+        }
+    }
+}

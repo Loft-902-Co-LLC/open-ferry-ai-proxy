@@ -239,6 +239,35 @@ pub(crate) fn error_chain(error: &dyn StdError) -> String {
     text
 }
 
+/// Marks responses whose physical chunks are observed before decoding.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoded;
+
+/// Installs F1's lazy bounded decoder without reading the response body.
+pub(crate) fn decode_response(response: reqwest::Response, limit: usize) -> reqwest::Response {
+    use futures_util::{StreamExt, TryStreamExt};
+    let response: http::Response<reqwest::Body> = response.into();
+    let (mut parts, body) = response.into_parts();
+    let tap = parts.extensions.get::<BodyTap>().cloned();
+    let source = reqwest::Response::from(http::Response::new(body))
+        .bytes_stream()
+        .inspect_ok(move |chunk| {
+            if let Some(tap) = &tap {
+                tap.chunk(chunk);
+            }
+        })
+        .map_err(std::io::Error::other);
+    let reader = tokio_util::io::StreamReader::new(source);
+    let decoded = crate::response_decode::decode_response_body(reader, &parts.headers, limit);
+    parts.headers.remove(http::header::CONTENT_ENCODING);
+    parts.headers.remove(http::header::CONTENT_LENGTH);
+    parts.extensions.insert(Decoded);
+    reqwest::Response::from(http::Response::from_parts(
+        parts,
+        reqwest::Body::wrap_stream(decoded.boxed()),
+    ))
+}
+
 /// Why a body couldn't be read.
 #[derive(Debug)]
 pub(crate) enum ReadError {
@@ -287,7 +316,9 @@ async fn read_whole(
 ) -> Result<Vec<u8>, ReadError> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(ReadError::Http)? {
-        if let Some(tap) = tap {
+        if response.extensions().get::<Decoded>().is_none()
+            && let Some(tap) = tap
+        {
             tap.chunk(&chunk);
         }
         if body.len().saturating_add(chunk.len()) > limit {
@@ -305,7 +336,9 @@ pub(crate) async fn read_body_prefix(
     mut response: reqwest::Response,
     limit: usize,
 ) -> (Vec<u8>, Option<reqwest::Error>) {
-    let tap = BodyTap::of(&response);
+    let tap = (response.extensions().get::<Decoded>().is_none())
+        .then(|| BodyTap::of(&response))
+        .flatten();
     let mut body = Vec::new();
     loop {
         match response.chunk().await {

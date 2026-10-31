@@ -314,33 +314,67 @@ impl CodexExecutor {
         attempt: Attempt<'_>,
     ) -> Result<(reqwest::Response, Secrets), ExecError> {
         refuse_control_characters(url)?;
+        let mut headers = headers;
+        let wire =
+            super::request::compress_request(self.config.as_deref(), auth, url, &headers, &body)
+                .await;
+        headers.remove(http::header::CONTENT_LENGTH);
+        super::request::align_content_encoding(&mut headers, &body);
+        if wire.is_some() {
+            headers.insert(
+                http::header::CONTENT_ENCODING,
+                http::HeaderValue::from_static("zstd"),
+            );
+        }
+        headers
+            .entry(http::header::ACCEPT_ENCODING)
+            .or_insert(http::HeaderValue::from_static("gzip, deflate, br, zstd"));
         let secrets = observe_send::secrets(url, &headers, &self.proxy_for(auth), auth);
-        let tap = attempt.observation.map(|observation| {
-            observe_send::announce(
-                observation,
-                &attempt.request(&Method::POST, url, &headers, &body, &secrets),
-            )
-        });
-        let mut response = self
-            .clients
-            .get(&auth.proxy_url)
-            .post(url)
-            .headers(headers)
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                let error = error.without_url();
-                crate::transport::classify(
-                    &error,
-                    ExecError::new(
-                        ErrorKind::Upstream,
-                        secrets.text(error_chain(&error), Policy::Client),
-                    ),
+        let client = self.clients.get(&auth.proxy_url);
+        let compressed = wire.is_some();
+        let mut wire = wire.unwrap_or_else(|| body.clone());
+        for retry in [false, true] {
+            let tap = attempt.observation.map(|observation| {
+                observe_send::announce(
+                    observation,
+                    &attempt.request(&Method::POST, url, &headers, &wire, &secrets),
                 )
-            })?;
-        observe_send::response(tap, &mut response);
-        Ok((response, secrets))
+            });
+            #[cfg(any(test, feature = "test-support"))]
+            let destination = self.http_mock_url.as_deref().unwrap_or(url);
+            #[cfg(not(any(test, feature = "test-support")))]
+            let destination = url;
+            let mut response = client
+                .post(destination)
+                .headers(headers.clone())
+                .body(wire.clone())
+                .send()
+                .await
+                .map_err(|error| {
+                    let error = error.without_url();
+                    crate::transport::classify(
+                        &error,
+                        ExecError::new(
+                            ErrorKind::Upstream,
+                            secrets.text(error_chain(&error), Policy::Client),
+                        ),
+                    )
+                })?;
+            observe_send::response(tap, &mut response);
+            if !retry && compressed && matches!(response.status().as_u16(), 400 | 415) {
+                drop(response);
+                headers.remove(http::header::CONTENT_ENCODING);
+                wire = body.clone();
+                continue;
+            }
+            let limit = if response.status().is_success() {
+                MAX_LINE
+            } else {
+                MAX_ERROR_BODY
+            };
+            return Ok((super::client::decode_response(response, limit), secrets));
+        }
+        unreachable!("the second response is always returned")
     }
 
     /// `Execute` for `responses/compact` (`executeCompact`).
@@ -814,3 +848,6 @@ pub(crate) mod bootstrap_tests;
 mod manager_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod http_compression_tests;

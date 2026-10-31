@@ -124,6 +124,7 @@ pub(crate) struct LineReader {
     pub(crate) body_context: crate::transport::ResponseBody,
     /// What sees the body as it is read, when the call's taps do.
     tap: Option<BodyTap>,
+    decoded: bool,
     buffer: Vec<u8>,
     /// Where the unread data starts.
     start: usize,
@@ -134,12 +135,17 @@ pub(crate) struct LineReader {
 
 impl LineReader {
     pub(crate) fn new(response: reqwest::Response) -> Self {
+        let decoded = response
+            .extensions()
+            .get::<super::client::Decoded>()
+            .is_some();
         let tap = BodyTap::of(&response);
         let body_context = crate::transport::ResponseBody::new(&response);
         Self {
             response,
             body_context,
             tap,
+            decoded,
             buffer: Vec::new(),
             start: 0,
             scanned: 0,
@@ -196,7 +202,9 @@ impl LineReader {
             }
             match self.response.chunk().await {
                 Ok(Some(chunk)) => {
-                    if let Some(tap) = &self.tap {
+                    if !self.decoded
+                        && let Some(tap) = &self.tap
+                    {
                         tap.chunk(&chunk);
                     }
                     self.buffer.extend_from_slice(&chunk);

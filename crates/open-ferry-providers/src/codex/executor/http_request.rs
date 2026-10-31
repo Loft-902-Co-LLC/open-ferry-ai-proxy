@@ -134,6 +134,7 @@ impl CodexExecutor {
             format: &Format::CODEX,
             auth,
         };
+        super::super::request::align_content_encoding(&mut headers, &body);
         let secrets = observe_send::secrets(&url, &headers, &self.proxy_for(auth), auth);
         let tap = attempt.observation.map(|observation| {
             observe_send::announce(
