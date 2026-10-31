@@ -86,6 +86,8 @@ pub(super) enum Forwarded {
         response_id: String,
         pending_call_ids: Vec<String>,
     },
+    /// The upstream was lost; keep its pin without committing this turn.
+    Lost,
     /// The turn failed with an error the client wasn't told of.
     Suppressed(ErrorMessage),
     /// The connection closed or is closing.
@@ -233,11 +235,7 @@ async fn forward_turn<S: Socket>(
                     } else if conn.write(&error_payload(&error)).await.is_err() {
                         return Forwarded::Closed;
                     }
-                    return Forwarded::Completed {
-                        output: completed_output,
-                        response_id: completed_id,
-                        pending_call_ids: pending.into_iter().collect(),
-                    };
+                    return Forwarded::Lost;
                 }
                 if (options.suppress_error)(&error) {
                     return Forwarded::Suppressed(error);
@@ -637,41 +635,15 @@ pub(super) fn payloads_from_chunk(chunk: &[u8]) -> Vec<Vec<u8>> {
     Vec::new()
 }
 
-/// Keep the SSE event name attached until D's shared classifier has seen
-/// both it and the JSON type. Raw websocket JSON has no SSE event name.
+/// Upstream's WebSocket rule checks the payload type, not the SSE name.
 fn visible_payloads(chunk: &[u8], codex: bool) -> Vec<Vec<u8>> {
-    let classifier = crate::handlers::responses::framer::Framer::new(codex);
-    if json::valid(go::trim_space(chunk)) {
-        return payloads_from_chunk(chunk)
-            .into_iter()
-            .filter(|payload| !classifier.should_filter_private_event("", &str_at(payload, "type")))
-            .collect();
-    }
-    let mut output = Vec::new();
-    let mut frame = Vec::new();
-    let mut event = String::new();
-    for line in chunk
-        .split(|&byte| byte == b'\n')
-        .chain(std::iter::once(&b""[..]))
-    {
-        let line = go::trim_space(line);
-        if line.is_empty() {
-            for payload in payloads_from_chunk(&frame) {
-                if !classifier.should_filter_private_event(&event, &str_at(&payload, "type")) {
-                    output.push(payload);
-                }
-            }
-            frame.clear();
-            event.clear();
-        } else {
-            if let Some(name) = line.strip_prefix(b"event:") {
-                event = String::from_utf8_lossy(go::trim_space(name)).into_owned();
-            }
-            frame.extend_from_slice(line);
-            frame.push(b'\n');
-        }
-    }
-    output
+    payloads_from_chunk(chunk)
+        .into_iter()
+        .filter(|payload| {
+            let kind = str_at(payload, "type");
+            kind != "response.subscription_usage" && (codex || kind != "response.metadata")
+        })
+        .collect()
 }
 
 /// The `error` event that tells the client of `error`

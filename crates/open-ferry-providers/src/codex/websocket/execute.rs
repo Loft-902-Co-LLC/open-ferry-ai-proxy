@@ -167,7 +167,7 @@ pub(super) async fn open(
 
     if let Some(input) = &options.websocket_input {
         if input.turn_is_stale() {
-            return Err(open_ferry_core::exec::WebsocketInput::not_sent(
+            return Err(open_ferry_core::exec::WebsocketInput::stale(
                 &options.original_request,
             ));
         }
@@ -200,7 +200,7 @@ pub(super) async fn open(
 
     if let Some(input) = &options.websocket_input {
         if input.turn_is_stale() {
-            return Err(open_ferry_core::exec::WebsocketInput::not_sent(
+            return Err(open_ferry_core::exec::WebsocketInput::stale(
                 &options.original_request,
             ));
         }
@@ -216,36 +216,43 @@ pub(super) async fn open(
         .turn
         .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
     observe_send::request_sent(sender.as_ref());
-    if options.downstream_websocket {
-        if let Err(error) = hold
-            .conn()
+    let send_error = if options.downstream_websocket {
+        hold.conn()
             .send_turn(
                 prepared.message.clone(),
                 options.websocket_input.as_ref(),
                 &options.original_request,
             )
             .await
-        {
-            hold.invalidate("send_error");
-            hold.release();
-            return Err(error);
-        }
-    } else if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
-        let failure = failure.redacted(&secrets);
-        let error = errors::write_error(hold.conn().disconnect_code(), &failure);
+            .err()
+    } else {
+        hold.conn()
+            .send(prepared.message.clone())
+            .await
+            .err()
+            .map(|failure| {
+                let failure = failure.redacted(&secrets);
+                errors::write_error(hold.conn().disconnect_code(), &failure)
+            })
+    };
+    if let Some(error) = send_error {
         hold.invalidate("send_error");
-        if options.downstream_websocket && error.transport.is_some() {
-            hold.conn().lose_input();
-            hold.release();
-            return Err(open_ferry_core::exec::WebsocketInput::lost(
-                prepared.body.to_string().as_bytes(),
-            ));
-        }
-        if ephemeral || !errors::should_retry(&error) {
+        let requires_current = !crate::json::str_at(&prepared.body, "previous_response_id")
+            .trim()
+            .is_empty()
+            || crate::json::str_at(
+                &crate::codex::request::parse_object(&options.original_request),
+                "type",
+            ) == "response.append";
+        if error.failure_class == Some(open_ferry_core::exec::FailureClass::UpstreamWebsocketTurn)
+            || ephemeral
+            || !errors::should_retry(&error)
+            || options.downstream_websocket && requires_current
+        {
             hold.release();
             return Err(error);
         }
-        // Once more, on a new connection for the same session.
+        // Upstream retries a non-loss write once on a new socket.
         let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
         let (conn, retry_headers) = match session
             .ensure_conn_with_reuse(target, &reuse_target, connect)
@@ -258,14 +265,30 @@ pub(super) async fn open(
             }
         };
         secrets.extend(conn.secrets());
+        conn.bind_input(options.websocket_input.clone());
         hold.switch(conn);
         prepared
             .turn
             .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
         observe_send::request_sent(sender.as_ref());
-        if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
-            let failure = failure.redacted(&secrets);
-            let error = errors::write_error(hold.conn().disconnect_code(), &failure);
+        let retried = if options.downstream_websocket {
+            hold.conn()
+                .send_turn(
+                    prepared.message.clone(),
+                    options.websocket_input.as_ref(),
+                    &options.original_request,
+                )
+                .await
+        } else {
+            hold.conn()
+                .send(prepared.message.clone())
+                .await
+                .map_err(|failure| {
+                    let failure = failure.redacted(&secrets);
+                    errors::write_error(hold.conn().disconnect_code(), &failure)
+                })
+        };
+        if let Err(error) = retried {
             hold.invalidate("send_error");
             hold.release();
             return Err(error);

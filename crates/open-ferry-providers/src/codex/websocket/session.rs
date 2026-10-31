@@ -183,7 +183,8 @@ impl Store {
             if let Some((_, failure)) = state.terminal.as_ref().filter(|(id, _)| *id == conn.id) {
                 return Err(errors::error(failure));
             }
-            if lock(&conn.terminal_responses).contains(&response_id) {
+            let (already_terminal, rejects) = conn.interrupt_snapshot(&response_id);
+            if already_terminal {
                 tracing::debug!(outcome = "already_terminal", "codex websockets: interrupt");
                 return Ok(true);
             }
@@ -194,7 +195,7 @@ impl Store {
             {
                 return Ok(false);
             }
-            if conn.rejects_interrupt(&response_id) {
+            if rejects {
                 return Err(open_ferry_core::exec::ExecError::upstream(
                     400,
                     "response.interrupt does not target the active upstream response",
@@ -209,8 +210,7 @@ impl Store {
         }
         // Authorization may change while another write holds the permit.
         let mut sink = conn.sink.lock().await;
-        // Unlike upstream, refresh the turn snapshot after the permit too:
-        // its reader may have delivered completion while the write waited.
+        // Completion may arrive while the write waits for its permit.
         {
             let state = session.state();
             if !state
@@ -223,7 +223,8 @@ impl Store {
             if let Some((_, failure)) = state.terminal.as_ref().filter(|(id, _)| *id == conn.id) {
                 return Err(errors::error(failure));
             }
-            if lock(&conn.terminal_responses).contains(&response_id) {
+            let (already_terminal, rejects) = conn.interrupt_snapshot(&response_id);
+            if already_terminal {
                 tracing::debug!(outcome = "already_terminal", "codex websockets: interrupt");
                 return Ok(true);
             }
@@ -234,7 +235,7 @@ impl Store {
             {
                 return Ok(false);
             }
-            if conn.rejects_interrupt(&response_id) {
+            if rejects {
                 return Err(open_ferry_core::exec::ExecError::upstream(
                     400,
                     "response.interrupt does not target the active upstream response",
@@ -437,6 +438,7 @@ struct ResponseIdentity {
 pub(crate) struct Conn {
     id: u64,
     target: Target,
+    session: Weak<Session>,
     /// The sending half, `None` once the connection is let go.
     sink: tokio::sync::Mutex<Option<SplitSink<WsStream, Message>>>,
     /// Set when the connection is closed.
@@ -449,13 +451,22 @@ pub(crate) struct Conn {
     response: Mutex<ResponseIdentity>,
     input: Mutex<Option<open_ferry_core::exec::WebsocketInput>>,
     loss_advanced: AtomicBool,
+    #[cfg(test)]
+    loss_window: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    send_failure: Mutex<Option<Failure>>,
 }
 
 impl Conn {
-    fn new(target: Target, sink: Option<SplitSink<WsStream, Message>>) -> Self {
+    fn new(
+        target: Target,
+        sink: Option<SplitSink<WsStream, Message>>,
+        session: Weak<Session>,
+    ) -> Self {
         Self {
             id: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             target,
+            session,
             sink: tokio::sync::Mutex::new(sink),
             closing: watch::Sender::new(false),
             disconnect: Mutex::new(None),
@@ -464,13 +475,17 @@ impl Conn {
             response: Mutex::default(),
             input: Mutex::new(None),
             loss_advanced: AtomicBool::new(false),
+            #[cfg(test)]
+            loss_window: Mutex::new(None),
+            #[cfg(test)]
+            send_failure: Mutex::new(None),
         }
     }
 
     /// A connection without a socket, for tests of the bookkeeping.
     #[cfg(test)]
     pub(crate) fn detached(target: Target) -> Arc<Self> {
-        Arc::new(Self::new(target, None))
+        Arc::new(Self::new(target, None, Weak::new()))
     }
 
     fn record_response(&self, event: &serde_json::Value, kind: &str) {
@@ -501,9 +516,18 @@ impl Conn {
         }
     }
 
-    fn rejects_interrupt(&self, target: &str) -> bool {
+    fn interrupt_snapshot(&self, target: &str) -> (bool, bool) {
+        self.interrupt_snapshot_with(target, || {})
+    }
+
+    fn interrupt_snapshot_with(&self, target: &str, window: impl FnOnce()) -> (bool, bool) {
         let response = lock(&self.response);
-        response.terminal || (!response.id.is_empty() && response.id != target)
+        let terminal = lock(&self.terminal_responses).contains(target);
+        window();
+        (
+            terminal,
+            response.terminal || (!response.id.is_empty() && response.id != target),
+        )
     }
 
     pub(crate) fn bind_input(&self, input: Option<open_ferry_core::exec::WebsocketInput>) {
@@ -515,7 +539,16 @@ impl Conn {
             && !self.loss_advanced.swap(true, Ordering::AcqRel)
         {
             input.lose();
+            #[cfg(test)]
+            if let Some(window) = lock(&self.loss_window).take() {
+                window();
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_send(&self, failure: Failure) {
+        *lock(&self.send_failure) = Some(failure);
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -551,12 +584,17 @@ impl Conn {
     ) -> Result<(), open_ferry_core::exec::ExecError> {
         let mut sink = self.sink.lock().await;
         if input.is_some_and(|input| input.turn_is_stale()) {
-            return Err(open_ferry_core::exec::WebsocketInput::not_sent(original));
+            return Err(open_ferry_core::exec::WebsocketInput::stale(original));
         }
         self.send_locked(&mut sink, text).await.map_err(|failure| {
+            let failure = failure.redacted(&self.target.secrets);
             let error = errors::write_error(self.disconnect_code(), &failure);
             if errors::is_turn_loss(&failure) && error.status != 413 {
-                self.lose_input();
+                if let Some(session) = self.session.upgrade() {
+                    session.invalidate(self, "send_error", Some(&failure));
+                } else {
+                    self.lose_input();
+                }
                 open_ferry_core::exec::WebsocketInput::lost(original)
             } else {
                 error
@@ -569,6 +607,10 @@ impl Conn {
         sink: &mut Option<SplitSink<WsStream, Message>>,
         text: String,
     ) -> Result<(), Failure> {
+        #[cfg(test)]
+        if let Some(failure) = lock(&self.send_failure).take() {
+            return Err(failure);
+        }
         let mut closing = self.closing.subscribe();
         let Some(sink) = sink.as_mut() else {
             return Err(Failure::closed());
@@ -879,6 +921,11 @@ impl Session {
 
     /// Lets `conn` go and closes it, if it is still the session's
     /// connection (`invalidateUpstreamConn`).
+    fn reader_disconnected(&self, conn: &Conn, reason: &str, failure: &Failure) {
+        self.mark_terminal(conn.id, failure);
+        self.invalidate(conn, reason, Some(failure));
+    }
+
     pub(super) fn invalidate(&self, conn: &Conn, reason: &str, failure: Option<&Failure>) {
         let detached = {
             let mut state = self.state();
@@ -888,7 +935,11 @@ impl Session {
                 .is_some_and(|current| current.id == conn.id)
             {
                 state.multi_agent = None;
-                state.conn.take()
+                let detached = state.conn.take();
+                if failure.is_some_and(errors::is_turn_loss) {
+                    conn.lose_input();
+                }
+                detached
             } else {
                 None
             }
@@ -1063,7 +1114,7 @@ impl Session {
             dialed = dial() => dialed?,
         };
         let (sink, stream) = stream.split();
-        let conn = Arc::new(Conn::new(target, Some(sink)));
+        let conn = Arc::new(Conn::new(target, Some(sink), Arc::downgrade(self)));
         {
             let mut state = self.state();
             if state.closed {
@@ -1218,15 +1269,11 @@ async fn read_loop(
         }
     };
 
-    if errors::is_turn_loss(&failure) {
-        conn.lose_input();
-    }
     let failure = failure.redacted(&conn.target.secrets);
     // Remembered while the connection is still the session's, so a call
     // that becomes active on it from here on gets the failure at once.
     if let Some(session) = session.upgrade() {
-        session.mark_terminal(conn.id, &failure);
-        session.invalidate(&conn, reason, Some(&failure));
+        session.reader_disconnected(&conn, reason, &failure);
     }
     // Closed first: no send starts after this, so a call that becomes
     // active on the connection from here on fails to send, and one active
@@ -1379,4 +1426,94 @@ impl Drop for Hold {
 /// Locks a mutex, poisoned or not.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod round2_windows {
+    use super::*;
+    use open_ferry_core::exec::WebsocketInput;
+
+    #[test]
+    fn round2_loss_detach_and_publication_window() {
+        let session = Arc::new(Session::new("round2-window", IDLE_TIMEOUT));
+        let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
+        session.set_conn(conn.clone());
+        let (_tx, rx) = mpsc::channel(1);
+        let input = WebsocketInput::new(rx);
+        conn.bind_input(Some(input.clone()));
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *lock(&conn.loss_window) = Some(Box::new(move || {
+            published_tx.send(()).unwrap();
+            resume_rx.recv().unwrap();
+        }));
+        let worker = {
+            let session = session.clone();
+            let conn = conn.clone();
+            std::thread::spawn(move || {
+                // These are the old read-loop's two operations. The fix
+                // moves publication into invalidate's existing state lock.
+                session.reader_disconnected(&conn, "upstream_disconnected", &Failure::eof());
+            })
+        };
+        published_rx.recv().unwrap();
+        assert_eq!(input.epoch(), 1);
+        let acquisition_blocked = session.state.try_lock().is_err();
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(
+            acquisition_blocked,
+            "loss epoch became visible while connection acquisition remained unlocked"
+        );
+        assert!(session.conn().is_none());
+    }
+
+    #[test]
+    fn round2_interrupt_terminal_snapshot_window() {
+        for during in [false, true] {
+            let conn = Conn::detached(Target::new("auth", "ws://example.test", "", "token"));
+            conn.record_response(
+                &serde_json::json!({"response":{"id":"r1"}}),
+                "response.created",
+            );
+            let completion = || {
+                conn.record_response(
+                    &serde_json::json!({"response":{"id":"r1"}}),
+                    "response.completed",
+                )
+            };
+            if !during {
+                completion();
+            }
+            let (terminal, rejects) = conn.interrupt_snapshot_with("r1", || {
+                // If the snapshot released response identity, schedule
+                // completion at exactly that boundary, without a sleep.
+                let unlocked = conn.response.try_lock().is_ok();
+                if during && unlocked {
+                    completion();
+                }
+            });
+            assert!(
+                terminal || !rejects,
+                "completion split the terminal membership and active-response decisions"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn round2_send_turn_redacts_the_failed_write_again() {
+        let mut secrets = Secrets::new();
+        secrets.add("fake-secret-token");
+        let conn = Conn::detached(
+            Target::new("auth", "ws://example.test", "", "token").with_secrets(&secrets),
+        );
+        conn.fail_next_send(Failure::Other {
+            message: "failed fake-secret-token".into(),
+            transient: true,
+        });
+        let error = conn.send_turn("{}".into(), None, b"{}").await.unwrap_err();
+        assert!(
+            !error.message.contains("fake-secret-token"),
+            "write error was not redacted"
+        );
+    }
 }

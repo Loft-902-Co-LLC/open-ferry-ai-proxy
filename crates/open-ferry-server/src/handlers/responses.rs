@@ -39,7 +39,7 @@
 //!   and otherwise the failure event that ends a stream. Upstream holds
 //!   both back without limit.
 
-pub(crate) mod framer;
+mod framer;
 pub(crate) mod stream_error;
 #[cfg(test)]
 mod tests;

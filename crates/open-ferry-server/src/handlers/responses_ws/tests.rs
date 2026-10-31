@@ -3675,3 +3675,56 @@ async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
 
 mod metadata;
 mod safe_headers;
+
+#[tokio::test]
+async fn round2_lost_turn_does_not_commit_tool_cache() {
+    let item = sse(
+        r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"lost-call","name":"lost-tool","arguments":"{}"}}"#,
+    );
+    let (url, dispatcher, state) = serve_keys(
+        FakeCatalog::new().serve("round2-model", &["codex"]),
+        vec![
+            Outcome::via(
+                &["codex-auth"],
+                Outcome::Stream(
+                    HeaderMap::new(),
+                    vec![
+                        Ok(Bytes::from(item)),
+                        Err(ExecError::upstream_websocket_lost()),
+                    ],
+                ),
+            ),
+            completes("recovered", "[]"),
+        ],
+        &["sk-test"],
+    )
+    .await;
+    dispatcher.websocket(support_for("codex", true));
+    let mut ws = connect(&url, &[("session-id", "round2-lost-cache")]).await;
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"round2-model","input":[]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.output_item.done");
+    assert_eq!(
+        recv(&mut ws).await["error"]["code"],
+        "upstream_websocket_lost"
+    );
+    // A next turn's completion fences session processing after the loss.
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"round2-model","input":[]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    assert!(
+        state
+            .tool_caches()
+            .lock(state.principal_tags().of("sk-test"))
+            .calls
+            .get("round2-lost-cache", "lost-call")
+            .is_none()
+    );
+    ws.close(None).await.unwrap();
+}

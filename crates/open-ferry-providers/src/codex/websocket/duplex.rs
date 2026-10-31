@@ -146,6 +146,7 @@ impl Settings {
     /// The settings kept for a response: not the request itself.
     fn snapshot(&self) -> Self {
         Self {
+            event_id: String::new(),
             original_instructions: None,
             ..self.clone()
         }
@@ -557,7 +558,7 @@ impl Duplex {
             biased;
             result = sent(&mut self.sending), if sending => Wake::Sent(result),
             read = self.hold.recv() => Wake::Read(read),
-            frame = self.input.recv(), if can_read_input => Wake::Input(frame),
+            frame = self.input.recv_duplex(), if can_read_input => Wake::Input(frame),
         };
         match wake {
             Wake::Sent(result) => {
@@ -1121,9 +1122,18 @@ impl Duplex {
         }
         match event_type {
             "response.steer.accepted" => {
-                if let Some(submission) = self.consume_submission(&parent) {
-                    self.accepted.insert(id, submission);
-                }
+                let event_id = self
+                    .consume_submission(&parent)
+                    .map(|submission| submission.event_id)
+                    .unwrap_or_default();
+                self.accepted.insert(
+                    id,
+                    Submission {
+                        parent,
+                        event_id,
+                        successor: String::new(),
+                    },
+                );
             }
             "response.steer.failed" => {
                 if self.accepted.remove(&id).is_none() {

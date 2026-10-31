@@ -141,15 +141,22 @@ impl WebsocketInput {
         error
     }
 
-    pub fn not_sent(payload: &[u8]) -> ExecError {
+    /// A frame the handler reads after the upstream was lost.
+    pub fn stale(payload: &[u8]) -> ExecError {
         let value: serde_json::Value = serde_json::from_slice(payload).unwrap_or_default();
-        if value["type"] == "response.append"
-            || value["previous_response_id"]
+        if value["type"] == "response.create"
+            && !value["previous_response_id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
         {
-            return Self::continuation_lost(payload);
+            Self::not_sent(payload)
+        } else {
+            Self::continuation_lost(payload)
         }
+    }
+
+    /// An operation already consumed by the duplex but never sent.
+    pub fn not_sent(payload: &[u8]) -> ExecError {
         let mut error = ExecError::upstream(502, r#"{"error":{"message":"Operation was not sent because the upstream websocket was lost. Send a new response.create with full conversation input.","type":"invalid_request_error","code":"upstream_websocket_not_sent"}}"#).with_websocket_turn();
         Self::correlate(&mut error, payload);
         error
@@ -174,9 +181,22 @@ impl WebsocketInput {
     /// The next frame, or `None` once the client's reader has stopped.
     /// Dropping the future before it finishes loses no frame.
     pub async fn recv(&self) -> Option<InputFrame> {
+        self.recv_with_loss(false).await
+    }
+
+    /// Reads an operation owned by a duplex turn.
+    pub async fn recv_duplex(&self) -> Option<InputFrame> {
+        self.recv_with_loss(true).await
+    }
+
+    async fn recv_with_loss(&self, abandoned: bool) -> Option<InputFrame> {
         match self.rx.lock().await.recv().await {
             Some(InputFrame::Stamped(payload, epoch)) if epoch != self.epoch() => {
-                Some(InputFrame::Err(Self::not_sent(&payload)))
+                Some(InputFrame::Err(if abandoned {
+                    Self::not_sent(&payload)
+                } else {
+                    Self::stale(&payload)
+                }))
             }
             Some(InputFrame::Stamped(payload, epoch)) => {
                 self.received_epoch.store(epoch, Ordering::Release);
@@ -348,7 +368,7 @@ mod loss_body_tests {
     use super::*;
 
     #[test]
-    fn not_sent_matches_upstream_body_and_continuation_shape() {
+    fn round2_abandoned_operations_are_not_sent_even_for_continuations() {
         let error = WebsocketInput::not_sent(b"{}");
         assert_eq!(error.http_status(), 502);
         assert_eq!(
@@ -363,7 +383,37 @@ mod loss_body_tests {
             br#"{"type":"response.append"}"#.as_slice(),
             br#"{"previous_response_id":"r1"}"#.as_slice(),
         ] {
-            assert_eq!(WebsocketInput::not_sent(body).http_status(), 409);
+            assert_eq!(WebsocketInput::not_sent(body).http_status(), 502);
+        }
+    }
+    #[tokio::test]
+    async fn round2_stale_handler_frames_require_full_create() {
+        for (payload, expected) in [
+            (
+                br#"{"type":"response.steer","event_id":"stale"}"#.as_slice(),
+                409,
+            ),
+            (b"bad JSON".as_slice(), 409),
+            (br#"{"type":"response.append"}"#.as_slice(), 409),
+            (
+                br#"{"type":"response.create","previous_response_id":"r1"}"#.as_slice(),
+                409,
+            ),
+            (br#"{"type":"response.create","input":[]}"#.as_slice(), 502),
+        ] {
+            let (tx, rx) = mpsc::channel(1);
+            let input = WebsocketInput::new(rx);
+            tx.send(InputFrame::Stamped(
+                Bytes::copy_from_slice(payload),
+                input.epoch(),
+            ))
+            .await
+            .unwrap();
+            input.lose();
+            let Some(InputFrame::Err(error)) = input.recv().await else {
+                panic!("stale frame accepted");
+            };
+            assert_eq!(error.http_status(), expected, "payload={payload:?}");
         }
     }
 }

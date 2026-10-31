@@ -2003,3 +2003,50 @@ fn websocket_search_history_tool_precedes_image_generation() {
 }
 
 mod loss;
+
+#[tokio::test]
+async fn round2_non_loss_downstream_write_gets_one_redial() {
+    for continuation in [false, true] {
+        let server = Server::once(&[COMPLETED]).await;
+        let executor = executor();
+        let auth = auth(&server.url);
+        let session = executor.websockets().get_or_create("round2-write").unwrap();
+        let url = request::websocket_url(&format!("{}/responses", server.url)).unwrap();
+        let stale = Conn::detached(Target::new(
+            &auth.id,
+            &url,
+            &executor.proxy_for(&auth),
+            "sk-test",
+        ));
+        stale.fail_next_send(Failure::Other {
+            message: "transient write failure".into(),
+            transient: true,
+        });
+        session.set_conn(stale.clone());
+        let payload = if continuation {
+            r#"{"model":"gpt-5-codex","previous_response_id":"r1","input":[]}"#
+        } else {
+            HELLO
+        };
+        let result = super::execute_stream(
+            &executor,
+            &auth,
+            request("gpt-5-codex", payload),
+            ws_options("round2-write"),
+        )
+        .await;
+        if continuation {
+            assert!(
+                result.is_err(),
+                "continuation redialed a socket it must retain"
+            );
+            assert_eq!(server.record().handshakes.len(), 0);
+        } else {
+            let response = result.expect("non-loss write should redial once");
+            let (_, error) = collect(response).await;
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(server.record().handshakes.len(), 1);
+        }
+        executor.close_execution_session("round2-write");
+    }
+}

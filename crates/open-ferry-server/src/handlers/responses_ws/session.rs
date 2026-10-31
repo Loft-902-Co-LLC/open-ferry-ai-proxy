@@ -542,6 +542,17 @@ impl<S: Socket> Session<S> {
 
         let (output, response_id, pending_call_ids) = match forwarded {
             Forwarded::Closed => return ControlFlow::Break(()),
+            Forwarded::Lost => {
+                if (attempted == Upstream::Websocket || self.upstream == Upstream::Websocket)
+                    && !last_attempted.is_empty()
+                {
+                    self.upstream = Upstream::Websocket;
+                    last_attempted.clone_into(&mut self.upstream_ws_auth);
+                    self.remember_pinned(&target, &last_attempted);
+                    self.passthrough_model = model_name;
+                }
+                return ControlFlow::Continue(());
+            }
             Forwarded::Suppressed(error) => {
                 if pinned_attempted && should_release_pinned(&error) {
                     self.forget_pinned();

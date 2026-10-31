@@ -405,11 +405,9 @@ async fn round1_loss_between_turns_does_not_inherit_event_id() {
     between_turns_loss(false).await;
 }
 
-#[tokio::test]
-async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
-    for terminal in ["", "response.completed", "response.failed", "error"] {
-        let completed = !terminal.is_empty();
-        let mut upstream = Upstream::start(move |mut peer| async move {
+async fn successor_loss_case(terminal: &'static str, parent: bool) {
+    let completed = !terminal.is_empty();
+    let mut upstream = Upstream::start(move |mut peer| async move {
             peer.read().await.unwrap();
             peer.write(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
             peer.read().await.unwrap();
@@ -420,40 +418,56 @@ async fn round1_loss_accepted_steer_owned_through_successor_terminal() {
                 peer.write(&json!({"type":terminal,"status":500,"response":{"id":"r2","output":[],"error":{"type":"server_error","message":"failed"}},"error":{"type":"server_error","message":"failed"}}).to_string()).await;
             }
         }).await;
-        let sibling = unused_sibling().await;
-        let url = retry_proxy(&steering(true), &upstream.url, &sibling.url).await;
-        let mut ws = connect(&url, &[]).await;
-        send(&mut ws, &create("c1")).await;
-        assert_eq!(recv(&mut ws).await["type"], "response.created");
-        send(
-            &mut ws,
-            r#"{"type":"response.steer","previous_response_id":"r1","event_id":"op1","input":[]}"#,
-        )
-        .await;
-        for kind in [
-            "response.steer.accepted",
-            "response.incomplete",
-            "response.created",
-        ] {
-            assert_eq!(recv(&mut ws).await["type"], kind);
-        }
-        if completed {
-            assert_eq!(recv(&mut ws).await["type"], terminal);
+    let sibling = unused_sibling().await;
+    let url = retry_proxy(&steering(true), &upstream.url, &sibling.url).await;
+    let mut ws = connect(&url, &[]).await;
+    send(&mut ws, &create("c1")).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.created");
+    send(
+        &mut ws,
+        &if parent {
+            json!({"type":"response.steer","previous_response_id":"r1","event_id":"op1","input":[]})
         } else {
-            expect_error(&mut ws, "upstream_websocket_lost", "c1").await;
-            expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+            json!({"type":"response.steer","event_id":"op1","input":[]})
         }
-        upstream.finished().await;
-        send(
-            &mut ws,
-            r#"{"type":"response.create","previous_response_id":"r2","event_id":"c2","input":[]}"#,
-        )
-        .await;
-        expect_error(&mut ws, "previous_response_not_found", "c2").await;
-        assert_eq!(upstream.connections(), 1, "{ROUND1_INVARIANT}");
-        assert_eq!(sibling.connections(), 0, "{ROUND1_INVARIANT}");
-        ws.close(None).await.unwrap();
+        .to_string(),
+    )
+    .await;
+    for kind in [
+        "response.steer.accepted",
+        "response.incomplete",
+        "response.created",
+    ] {
+        assert_eq!(recv(&mut ws).await["type"], kind);
     }
+    if completed {
+        assert_eq!(recv(&mut ws).await["type"], terminal);
+    } else {
+        expect_error(&mut ws, "upstream_websocket_lost", "").await;
+        expect_error(&mut ws, "upstream_websocket_lost", "op1").await;
+    }
+    upstream.finished().await;
+    send(
+        &mut ws,
+        r#"{"type":"response.create","previous_response_id":"r2","event_id":"c2","input":[]}"#,
+    )
+    .await;
+    expect_error(&mut ws, "previous_response_not_found", "c2").await;
+    assert_eq!(upstream.connections(), 1, "{ROUND1_INVARIANT}");
+    assert_eq!(sibling.connections(), 0, "{ROUND1_INVARIANT}");
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn round2_loss_successor_is_not_correlated_to_ended_create() {
+    for terminal in ["", "response.completed", "response.failed", "error"] {
+        successor_loss_case(terminal, true).await;
+    }
+}
+
+#[tokio::test]
+async fn round2_accepted_steer_uses_event_parent() {
+    successor_loss_case("response.completed", false).await;
 }
 
 #[tokio::test]

@@ -37,7 +37,7 @@ use crate::sse_check::{EventLimit, EventScan, Work, data_payload, too_large};
 
 /// Where a Responses stream is (`responsesSSEFramer`).
 #[derive(Debug, Default)]
-pub(crate) struct Framer {
+pub(super) struct Framer {
     /// The event held back.
     pending: Vec<u8>,
     /// A possible new frame after an empty data field, and a split field name.
@@ -74,7 +74,7 @@ pub(crate) struct Framer {
 impl Framer {
     /// A framer for a Codex client, which gets `response.failed` for a
     /// failure, or another client, which gets `error`.
-    pub(crate) fn new(is_codex_client: bool) -> Self {
+    pub(super) fn new(is_codex_client: bool) -> Self {
         Self {
             failure_event: if is_codex_client {
                 "response.failed"
@@ -231,11 +231,7 @@ impl Framer {
     /// Whether an event is private to the provider
     /// (`shouldFilterPrivateEvent`). Codex clients keep Codex events, all
     /// but `codex.rate_limits`.
-    pub(crate) fn should_filter_private_event(
-        &self,
-        stream_event: &str,
-        payload_type: &str,
-    ) -> bool {
+    fn should_filter_private_event(&self, stream_event: &str, payload_type: &str) -> bool {
         let check = |name: &str| {
             let name = name.trim();
             if name.is_empty() || is_error_event(name) {
