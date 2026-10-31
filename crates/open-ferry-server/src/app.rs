@@ -214,6 +214,7 @@ async fn not_found() -> Response {
 /// Adds CORS headers to every response, and answers `OPTIONS` with 204
 /// (`corsMiddleware`).
 async fn cors(request: Request, next: Next) -> Response {
+    let allowed = cors_allow_headers(&request);
     let mut response = if request.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -221,6 +222,59 @@ async fn cors(request: Request, next: Next) -> Response {
     };
     set_cors_headers(response.headers_mut());
     response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_HEADERS, allowed);
+    response
+}
+
+/// Explicit API headers followed by the preflight's custom headers, in Go's
+/// canonical spelling and first-seen order (upstream corsAllowHeadersValue).
+fn cors_allow_headers(request: &Request) -> HeaderValue {
+    let mut allowed: Vec<String> = [
+        "Authorization",
+        "Content-Type",
+        "X-Api-Key",
+        "X-Goog-Api-Key",
+        "Anthropic-Version",
+        "Anthropic-Beta",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if request.method() == Method::OPTIONS
+        && let Some(value) = request
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        && let Ok(value) = value.to_str()
+    {
+        for name in value
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let canonical = if http::HeaderName::from_bytes(name.as_bytes()).is_ok() {
+                name.split('-')
+                    .map(|word| {
+                        let mut word = word.to_ascii_lowercase().into_bytes();
+                        if let Some(first) = word.first_mut() {
+                            first.make_ascii_uppercase();
+                        }
+                        String::from_utf8(word).expect("ASCII header name")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("-")
+            } else {
+                name.to_owned()
+            };
+            if !allowed
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&canonical))
+            {
+                allowed.push(canonical);
+            }
+        }
+    }
+    HeaderValue::from_str(&allowed.join(", ")).expect("request header value")
 }
 
 pub(crate) fn set_cors_headers(headers: &mut HeaderMap) {
@@ -230,7 +284,10 @@ pub(crate) fn set_cors_headers(headers: &mut HeaderMap) {
             header::ACCESS_CONTROL_ALLOW_METHODS,
             "GET, POST, PUT, PATCH, DELETE, OPTIONS",
         ),
-        (header::ACCESS_CONTROL_ALLOW_HEADERS, "*"),
+        (
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            "Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta",
+        ),
         (header::ACCESS_CONTROL_EXPOSE_HEADERS, CORS_EXPOSED_HEADERS),
     ] {
         headers.insert(name, HeaderValue::from_static(value));
@@ -278,6 +335,63 @@ mod tests {
     use super::*;
 
     mod body_limits;
+
+    #[tokio::test]
+    async fn cors_preflights_match_upstream_on_both_listeners() {
+        use crate::testing::{FakeCatalog, FakeDispatcher, state};
+        use tower::ServiceExt;
+        let state = state(
+            crate::config::ServerConfig::default(),
+            FakeCatalog::new(),
+            &FakeDispatcher::new([]),
+        );
+        let base = "Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta";
+        for app in [
+            router(state.clone()),
+            router_without_proxy(state.clone(), Router::new()),
+        ] {
+            for path in [
+                "/v1/models",
+                "/v1/chat/completions",
+                "/v1/messages",
+                "/v0/management/config",
+            ] {
+                for (requested, suffix) in [
+                    ("", ""),
+                    ("authorization", ""),
+                    ("authorization,content-type", ""),
+                    ("x-api-key,x-goog-api-key", ""),
+                    ("x-api-key,anthropic-version,anthropic-beta", ""),
+                    (
+                        "authorization, x-custom-sdk-header",
+                        ", X-Custom-Sdk-Header",
+                    ),
+                    ("*, AUTHORIZATION, x-TEST, X-test, ,", ", *, X-Test"),
+                ] {
+                    let request = Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri(path)
+                        .header(header::ORIGIN, "https://browser.example")
+                        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested)
+                        .body(axum::body::Body::empty())
+                        .unwrap();
+                    let response = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+                    assert_eq!(
+                        response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+                        format!("{base}{suffix}")
+                    );
+                    assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+                    assert!(
+                        !response
+                            .headers()
+                            .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                    );
+                }
+            }
+        }
+    }
 
     // Not upstream's: upstream's TestConfigV8ETagExposedForCORS runs the
     // management API through the server; here the management API is served
