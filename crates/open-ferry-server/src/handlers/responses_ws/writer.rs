@@ -96,7 +96,26 @@ pub(super) struct LocalTurn(Arc<Mutex<LocalState>>, u64);
 struct LocalState {
     generation: u64,
     active: bool,
+    websocket_owned: bool,
     frames: Option<watch::Sender<Option<Bytes>>>,
+}
+
+impl LocalState {
+    fn claim(&self, generation: Option<u64>, payload: &Bytes) -> bool {
+        if !self.active || self.websocket_owned || generation != Some(self.generation) {
+            return false;
+        }
+        self.frames.as_ref().is_some_and(|frames| {
+            frames.send_if_modified(|frame| {
+                if frame.is_some() {
+                    false
+                } else {
+                    *frame = Some(payload.clone());
+                    true
+                }
+            })
+        })
+    }
 }
 
 impl Drop for LocalTurn {
@@ -151,17 +170,7 @@ impl<S: Socket> Interrupt<S> {
             }
             Ok(false) => {
                 let state = self.local.lock().unwrap_or_else(PoisonError::into_inner);
-                if state.active && generation == Some(state.generation) {
-                    if let Some(frames) = &state.frames {
-                        frames.send_if_modified(|frame| {
-                            if frame.is_some() {
-                                false
-                            } else {
-                                *frame = Some(payload.clone());
-                                true
-                            }
-                        });
-                    }
+                if state.claim(generation, payload) {
                     tracing::debug!(outcome = "local_http", "responses websocket: interrupt");
                     return Ok(());
                 }
@@ -342,7 +351,7 @@ impl<S: Socket> Conn<S> {
         }
     }
 
-    pub(super) fn begin_turn(&self) -> LocalTurn {
+    pub(super) fn begin_turn(&self, websocket_owned: bool) -> LocalTurn {
         let mut state = self
             .local_state
             .lock()
@@ -352,17 +361,39 @@ impl<S: Socket> Conn<S> {
         }
         state.generation += 1;
         state.active = true;
+        state.websocket_owned = websocket_owned;
         LocalTurn(self.local_state.clone(), state.generation)
     }
 
+    pub(super) fn stop_claims(&self) {
+        self.local_state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .active = false;
+    }
+
+    pub(super) fn reactivate_claims(&self) {
+        self.local_state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .active = true;
+    }
+
+    pub(super) fn take_claimed(&self) -> Option<Bytes> {
+        self.local
+            .as_ref()
+            .and_then(|frames| frames.send_replace(None))
+    }
+
     pub(super) fn local_interrupt(&self) -> impl Future<Output = Bytes> + Send + 'static {
-        let local = self.local.as_ref().map(watch::Sender::subscribe);
+        let local = self.local.clone();
         async move {
-            let Some(mut local) = local else {
+            let Some(local) = local else {
                 return std::future::pending().await;
             };
-            let _ = local.wait_for(|payload| payload.is_some()).await;
-            local.borrow().clone().unwrap_or_default()
+            let mut receiver = local.subscribe();
+            let _ = receiver.wait_for(|payload| payload.is_some()).await;
+            local.send_replace(None).unwrap_or_default()
         }
     }
 
@@ -556,4 +587,40 @@ pub(super) fn truncate_close_reason(reason: &str, max_bytes: usize) -> String {
         end = start + c.len_utf8();
     }
     reason[..end].to_owned()
+}
+
+#[cfg(test)]
+mod interrupt_claim_tests {
+    use super::*;
+
+    #[test]
+    fn p47_interrupt_claims_are_bounded_owned_and_retained_after_terminal() {
+        let (frames, _) = watch::channel(None);
+        let mut state = LocalState {
+            generation: 7,
+            active: true,
+            websocket_owned: true,
+            frames: Some(frames.clone()),
+        };
+        let first = Bytes::from_static(b"first");
+        assert!(
+            !state.claim(Some(7), &first),
+            "websocket loss must never become local HTTP cancellation"
+        );
+        state.websocket_owned = false;
+        assert!(!state.claim(Some(6), &first), "stale generation");
+        assert!(state.claim(Some(7), &first));
+        assert!(
+            !state.claim(Some(7), &Bytes::from_static(b"second")),
+            "full queue must reject"
+        );
+        state.active = false;
+        assert!(!state.claim(Some(7), &first), "terminal claims must reject");
+        assert_eq!(
+            frames.send_replace(None),
+            Some(first),
+            "the already-claimed frame must still be answered"
+        );
+        assert!(frames.send_replace(None).is_none(), "one answer per claim");
+    }
 }

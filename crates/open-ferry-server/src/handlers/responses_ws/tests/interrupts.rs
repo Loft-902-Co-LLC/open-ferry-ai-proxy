@@ -367,3 +367,42 @@ async fn interrupt_validation_and_executor_errors_preserve_upstream_texts() {
         assert_eq!(recv(&mut ws).await["response"]["id"], "next");
     }
 }
+
+#[tokio::test]
+async fn p47_interrupt_after_terminal_payload_before_stream_eof_is_rejected() {
+    for terminal in [
+        r#"{"type":"response.completed","response":{"id":"a","output":[]}}"#,
+        r#"{"type":"response.failed","response":{"id":"a","error":{"message":"failed"}}}"#,
+    ] {
+        let (tx, chunks) = channel_stream();
+        let url = serve_controlled(Controlled {
+            fake: FakeDispatcher::new(Vec::new()),
+            dial: None,
+            lookup: None,
+            streams: Mutex::new([chunks].into()),
+        })
+        .await;
+        let mut ws = connect(&url, &[]).await;
+        send(&mut ws, CREATE).await;
+        tx.send(Ok(Bytes::from(sse(
+            r#"{"type":"response.created","response":{"id":"a"}}"#,
+        ))))
+        .unwrap();
+        assert_eq!(recv(&mut ws).await["type"], "response.created");
+        tx.send(Ok(Bytes::from(sse(terminal)))).unwrap();
+        let expected = parse(terminal.as_bytes());
+        assert_eq!(recv(&mut ws).await["type"], expected["type"]);
+        send(
+            &mut ws,
+            r#"{"type":"response.interrupt","response_id":"a"}"#,
+        )
+        .await;
+        assert_eq!(
+            recv(&mut ws).await["status"],
+            400,
+            "terminal payload reopened local cancellation"
+        );
+        drop(tx);
+        ws.close(None).await.unwrap();
+    }
+}

@@ -194,6 +194,12 @@ impl Store {
             {
                 return Ok(false);
             }
+            if conn.rejects_interrupt(&response_id) {
+                return Err(open_ferry_core::exec::ExecError::upstream(
+                    400,
+                    "response.interrupt does not target the active upstream response",
+                ));
+            }
         }
         if !enabled {
             return Err(open_ferry_core::exec::ExecError::upstream(
@@ -227,6 +233,12 @@ impl Store {
                 .is_some_and(|active| active.conn == conn.id)
             {
                 return Ok(false);
+            }
+            if conn.rejects_interrupt(&response_id) {
+                return Err(open_ferry_core::exec::ExecError::upstream(
+                    400,
+                    "response.interrupt does not target the active upstream response",
+                ));
             }
         }
         if auth_check(&conn.target.auth_id).is_none() {
@@ -416,6 +428,12 @@ impl Read {
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// A connection to Codex.
+#[derive(Default)]
+struct ResponseIdentity {
+    id: String,
+    terminal: bool,
+}
+
 pub(crate) struct Conn {
     id: u64,
     target: Target,
@@ -428,6 +446,7 @@ pub(crate) struct Conn {
     /// The type of the last event read (`lastEventType`).
     last_event: Mutex<String>,
     terminal_responses: Mutex<HashSet<String>>,
+    response: Mutex<ResponseIdentity>,
     input: Mutex<Option<open_ferry_core::exec::WebsocketInput>>,
 }
 
@@ -441,6 +460,7 @@ impl Conn {
             disconnect: Mutex::new(None),
             last_event: Mutex::new(String::new()),
             terminal_responses: Mutex::new(HashSet::new()),
+            response: Mutex::default(),
             input: Mutex::new(None),
         }
     }
@@ -449,6 +469,39 @@ impl Conn {
     #[cfg(test)]
     pub(crate) fn detached(target: Target) -> Arc<Self> {
         Arc::new(Self::new(target, None))
+    }
+
+    fn record_response(&self, event: &serde_json::Value, kind: &str) {
+        let mut response = lock(&self.response);
+        let mut id = event
+            .pointer("/response/id")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default();
+        if kind == "response.created" && !id.is_empty() {
+            response.id = id.to_owned();
+            response.terminal = false;
+        } else if is_terminal_event(kind) {
+            let failure = matches!(kind, "error" | "response.failed");
+            if failure && id.is_empty() {
+                id = event["response_id"].as_str().unwrap_or_default();
+            }
+            if failure && id.is_empty() {
+                id = &response.id;
+            }
+            if !id.is_empty() {
+                if kind != "error" {
+                    lock(&self.terminal_responses).insert(id.to_owned());
+                }
+                if id == response.id {
+                    response.terminal = true;
+                }
+            }
+        }
+    }
+
+    fn rejects_interrupt(&self, target: &str) -> bool {
+        let response = lock(&self.response);
+        response.terminal || (!response.id.is_empty() && response.id != target)
     }
 
     pub(crate) fn bind_input(&self, input: Option<open_ferry_core::exec::WebsocketInput>) {
@@ -737,6 +790,9 @@ impl Session {
         if let Some((_, failure)) = state.terminal.as_ref().filter(|(ended, _)| *ended == conn) {
             let _ = tx.try_send(Read::new(conn, Err(failure.clone())));
             return (token, rx);
+        }
+        if let Some(current) = state.conn.as_ref().filter(|current| current.id == conn) {
+            *lock(&current.response) = ResponseIdentity::default();
         }
         let (done, _) = watch::channel(());
         state.active = Some(Active {
@@ -1138,14 +1194,8 @@ async fn read_loop(
             && let Ok(Typed { kind: Some(kind) }) = serde_json::from_str::<Typed<'_>>(&payload)
         {
             conn.set_last_event(&kind);
-            if is_terminal_event(&kind)
-                && kind != "error"
-                && let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload)
-                && let Some(id) = event.pointer("/response/id").and_then(|id| id.as_str())
-                && !id.is_empty()
-            {
-                // Recorded before delivery, even if the call just released its hold.
-                lock(&conn.terminal_responses).insert(id.to_owned());
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
+                conn.record_response(&event, &kind);
             }
         }
         let Some((_, tx, mut done)) = session

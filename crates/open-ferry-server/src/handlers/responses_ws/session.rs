@@ -534,6 +534,7 @@ impl<S: Socket> Session<S> {
                 keepalive,
                 context: self.log_context.as_deref(),
                 duplex,
+                websocket_owned: attempted == Upstream::Websocket,
             },
         )
         .await;

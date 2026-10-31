@@ -72,6 +72,7 @@ pub(super) struct ForwardOptions<'a> {
     /// Whether the call's credential holds a Codex duplex stream, which
     /// ends with the socket (`duplexStream`).
     pub(super) duplex: bool,
+    pub(super) websocket_owned: bool,
 }
 
 /// How a turn ended.
@@ -134,10 +135,33 @@ impl OutputItems {
 /// ends the turn (`forwardResponsesWebsocket`).
 pub(super) async fn forward<S: Socket>(
     conn: &mut Conn<S>,
+    items: HandlerStream,
+    options: ForwardOptions<'_>,
+) -> Forwarded {
+    let _local_turn = conn.begin_turn(options.websocket_owned);
+    let result = forward_turn(conn, items, options).await;
+    conn.stop_claims();
+    if conn.take_claimed().is_some()
+        && !matches!(result, Forwarded::Closed)
+        && conn
+            .write(&error_payload(&ErrorMessage::new(
+                400,
+                "no active response to interrupt",
+            )))
+            .await
+            .is_err()
+    {
+        return Forwarded::Closed;
+    }
+    result
+}
+
+async fn forward_turn<S: Socket>(
+    conn: &mut Conn<S>,
     mut items: HandlerStream,
     mut options: ForwardOptions<'_>,
 ) -> Forwarded {
-    let _local_turn = conn.begin_turn();
+    let mut turn_ended = false;
     let mut completed = false;
     let mut response_started = false;
     let mut completed_output = b"[]".to_vec();
@@ -152,7 +176,13 @@ pub(super) async fn forward<S: Socket>(
 
     loop {
         let next = tokio::select! {
+            biased;
             payload = conn.local_interrupt() => {
+                if turn_ended {
+                    if conn.write(&error_payload(&ErrorMessage::new(400, "no active response to interrupt"))).await.is_err() { return Forwarded::Closed; }
+                    continue;
+                }
+                conn.stop_claims();
                 // Like upstream, the HTTP path cannot match response IDs:
                 // a late interrupt arriving during this turn cancels it.
                 let response_id = str_at(&payload, "response_id").trim().to_owned();
@@ -239,6 +269,8 @@ pub(super) async fn forward<S: Socket>(
             if event_type == "response.created" {
                 response_started = true;
                 completed = false;
+                turn_ended = false;
+                conn.reactivate_claims();
                 outputs = OutputItems::default();
                 pending.clear();
             }
@@ -277,6 +309,15 @@ pub(super) async fn forward<S: Socket>(
                 str_at(&payload, "response.id")
                     .trim()
                     .clone_into(&mut completed_id);
+            }
+            if is_completion_event(&event_type)
+                || matches!(
+                    event_type.as_str(),
+                    "response.incomplete" | "response.failed" | "error"
+                )
+            {
+                turn_ended = true;
+                conn.stop_claims();
             }
             if conn.write(&payload).await.is_err() {
                 tracing::debug!(

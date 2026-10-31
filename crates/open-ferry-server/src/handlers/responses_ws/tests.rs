@@ -1262,6 +1262,7 @@ async fn forward_items(
             keepalive: None,
             context: None,
             duplex: false,
+            websocket_owned: false,
         },
     )
     .await;
@@ -1419,6 +1420,7 @@ async fn forward_emits_periodic_pings() {
             keepalive: Some(Duration::from_secs(10)),
             context: None,
             duplex: false,
+            websocket_owned: false,
         },
     )
     .await;
@@ -1449,6 +1451,7 @@ async fn forward_ping_write_failure_aborts_session() {
             keepalive: Some(Duration::from_millis(10)),
             context: None,
             duplex: false,
+            websocket_owned: false,
         },
     )
     .await;
@@ -3666,3 +3669,4 @@ async fn r2_safe_mode_reload_refuses_open_socket_turns_and_recovers() {
     assert_eq!(recv(&mut ws).await["type"], "response.completed");
     ws.close(None).await.unwrap();
 }
+

@@ -457,3 +457,114 @@ async fn codex_replacement_after_reload_dials_the_new_global_proxy() {
     assert_eq!(p2.connects().len(), 1);
     next.close_execution_session("proxy-reload");
 }
+
+#[tokio::test]
+async fn p47_interrupt_rejects_unknown_and_terminal_identity_before_teardown() {
+    for frame in [
+        r#"{"type":"response.output_text.delta","delta":"live"}"#,
+        r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#,
+        r#"{"type":"response.failed","response":{"id":"r1","error":{"message":"failed"}}}"#,
+        r#"{"type":"error","response_id":"r1","status":400,"error":{"message":"failed"}}"#,
+        r#"{"type":"error","status":400,"error":{"message":"failed"}}"#,
+    ] {
+        let server = Server::start(move |_| {
+            Answer::accept(move |mut peer| async move {
+                peer.recv().await.unwrap();
+                peer.send(r#"{"type":"response.created","response":{"id":"r1"}}"#)
+                    .await;
+                peer.send(frame).await;
+                peer.hold().await;
+            })
+        })
+        .await;
+        let executor = executor();
+        let mut response = executor
+            .execute_stream(
+                Arc::new(auth(&server.url)),
+                request("gpt-5-codex", HELLO),
+                ws_options("identity"),
+            )
+            .await
+            .unwrap();
+        response.chunks.next().await.unwrap().unwrap();
+        let conn = executor
+            .websockets()
+            .get("identity")
+            .unwrap()
+            .conn()
+            .unwrap();
+        let kind = json(frame)["type"].as_str().unwrap().to_owned();
+        within("reader identity update", async {
+            while conn.last_event() != kind {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let error = executor
+            .interrupt_execution_session(
+                "identity",
+                br#"{"type":"response.interrupt","response_id":"unknown"}"#,
+                Arc::new(|_| Some(Arc::new(Auth::default()))),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message, "response.interrupt does not target the active upstream response",
+            "{frame}"
+        );
+        assert_eq!(
+            server.record().messages.len(),
+            1,
+            "unknown interrupt reached upstream"
+        );
+        drop(response);
+    }
+}
+
+#[tokio::test]
+async fn p47_interrupt_queued_failure_does_not_end_running_response() {
+    let server = Server::start(|_| Answer::accept(|mut peer| async move {
+        peer.recv().await.unwrap();
+        peer.send(r#"{"type":"response.created","response":{"id":"r1"}}"#).await;
+        peer.send(r#"{"type":"response.failed","response":{"id":"queued","error":{"message":"rejected"}}}"#).await;
+        assert_eq!(json(&peer.recv().await.unwrap())["response_id"], "r1");
+        peer.send(r#"{"type":"response.completed","response":{"id":"r1","output":[]}}"#).await;
+        peer.hold().await;
+    })).await;
+    let executor = executor();
+    let mut response = executor
+        .execute_stream(
+            Arc::new(auth(&server.url)),
+            request("gpt-5-codex", HELLO),
+            ws_options("queued-error"),
+        )
+        .await
+        .unwrap();
+    response.chunks.next().await.unwrap().unwrap();
+    let conn = executor
+        .websockets()
+        .get("queued-error")
+        .unwrap()
+        .conn()
+        .unwrap();
+    within("queued rejection read", async {
+        while conn.last_event() != "response.failed" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        executor
+            .interrupt_execution_session(
+                "queued-error",
+                br#"{"type":"response.interrupt","response_id":"r1"}"#,
+                Arc::new(|_| Some(Arc::new(Auth::default())))
+            )
+            .await
+            .unwrap()
+    );
+    server
+        .wait_for("interrupt forwarded", |record| record.messages.len() == 2)
+        .await;
+    drop(response);
+}
