@@ -101,7 +101,7 @@ use crate::codex::request::{
     set_bool_if_different, set_string_if_different,
 };
 use crate::codex::stream::{LineReader, MAX_LINE};
-use crate::codex::terminal::{OutputItems, StatusError, status_error_with_cooling};
+use crate::codex::terminal::{OutputItems, StatusError, status_error_with_headers};
 use crate::codex::thinking;
 use crate::images;
 use crate::json::{self, delete, eq_fold, get, int_at, int_of, set, str_at};
@@ -1079,6 +1079,7 @@ impl CodexExecutor {
         status: u16,
         secrets: &Secrets,
     ) -> ExecError {
+        let error_headers = response.headers().clone();
         let tap = BodyTap::of(&response);
         let body_context = crate::transport::ResponseBody::new(&response);
         let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
@@ -1098,7 +1099,7 @@ impl CodexExecutor {
         }
         tracing::debug!(status, "codex: image request error");
         let body = secrets.bytes(&body, Policy::Client);
-        status_error_with_cooling(status, &body, self.model_level_cooling()).into()
+        status_error_with_headers(status, &error_headers, &body, self.model_level_cooling()).into()
     }
 }
 

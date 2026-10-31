@@ -58,6 +58,8 @@ pub(crate) struct StatusError {
     pub(crate) credential_scoped: bool,
     /// Whether it's this request's fault, not the credential's.
     pub(crate) request_scoped: bool,
+    pub(crate) transient_capacity: bool,
+    pub(crate) headers: http::HeaderMap,
 }
 
 impl StatusError {
@@ -75,6 +77,8 @@ impl StatusError {
             retry_after: None,
             credential_scoped: false,
             request_scoped: false,
+            transient_capacity: false,
+            headers: http::HeaderMap::new(),
         }
     }
 
@@ -90,7 +94,12 @@ impl StatusError {
 
 impl From<StatusError> for ExecError {
     fn from(error: StatusError) -> Self {
-        let mut exec = ExecError::upstream(error.status, error.text());
+        let mut exec = if error.transient_capacity {
+            ExecError::transient_capacity(error.text(), error.retry_after)
+        } else {
+            ExecError::upstream(error.status, error.text())
+        };
+        exec.headers = error.headers;
         exec.retry_after = error.retry_after;
         exec.credential_scoped = error.credential_scoped;
         exec.request_scoped = error.request_scoped;
@@ -163,7 +172,7 @@ pub(crate) fn status_error_at(
 ) -> StatusError {
     let parsed = parse(body);
     let usage_limit = !body.is_empty() && is_usage_limit(&parsed);
-    let status = if usage_limit || is_model_capacity(body, &parsed) {
+    let status = if usage_limit || is_transient_capacity(body, &parsed) {
         429
     } else {
         status
@@ -178,8 +187,81 @@ pub(crate) fn status_error_at(
     StatusError {
         retry_after: parse_retry_after(status, &message, &parsed, now),
         credential_scoped: usage_limit && !model_level_cooling,
+        transient_capacity: !usage_limit
+            && status == 429
+            && is_transient_capacity(body, &parse(body)),
         ..StatusError::new(status, message)
     }
+}
+
+/// HTTP errors retain headers; quota reset hints take precedence over Retry-After.
+pub(crate) fn status_error_with_headers(
+    status: u16,
+    headers: &http::HeaderMap,
+    body: &[u8],
+    model_level_cooling: bool,
+) -> StatusError {
+    let now = SystemTime::now();
+    let mut error = status_error_at(status, body, model_level_cooling, now);
+    error.headers = headers.clone();
+    if error.status == 429 && error.retry_after.is_none() {
+        error.retry_after = retry_header(headers, now);
+    }
+    error
+}
+
+fn retry_header(headers: &http::HeaderMap, now: SystemTime) -> Option<Duration> {
+    let raw = headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let max = Duration::from_nanos(i64::MAX as u64);
+    if let Ok(seconds) = raw.parse::<i64>()
+        && seconds >= 0
+    {
+        return Some(Duration::from_secs(seconds as u64).min(max));
+    }
+    let deadline = [
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %e %H:%M:%S %Y",
+    ]
+    .iter()
+    .find_map(|format| chrono::NaiveDateTime::parse_from_str(raw, format).ok())?
+    .and_utc();
+    let deadline: SystemTime = deadline.into();
+    Some(deadline.duration_since(now).unwrap_or_default().min(max))
+}
+
+fn is_transient_capacity(body: &[u8], parsed: &Value) -> bool {
+    let paths = ["error.code", "code", "body.error.code"];
+    let codes: Vec<_> = paths
+        .iter()
+        .map(|p| lower_trim(&str_at(parsed, p)))
+        .collect();
+    if let Some(code) = codes.iter().find(|c| !c.is_empty())
+        && ![
+            "turn_rate_limit_exceeded",
+            "model_at_capacity",
+            "model_is_at_capacity",
+        ]
+        .contains(&code.as_str())
+    {
+        return false;
+    }
+    if is_model_capacity(body, parsed)
+        || codes.iter().any(|code| code == "turn_rate_limit_exceeded")
+    {
+        return true;
+    }
+    codes.iter().all(String::is_empty)
+        && ["error.type", "type", "body.error.type"]
+            .iter()
+            .any(|p| eq_fold(str_at(parsed, p).trim(), "rate_limit_error"))
+        && ["error.message", "message", "body.error.message"]
+            .iter()
+            .any(|p| lower_trim(&str_at(parsed, p)).contains("at capacity"))
 }
 
 /// A body with the failure's code and type, when it is one Codex clients
@@ -274,7 +356,7 @@ fn is_model_capacity(body: &[u8], parsed: &Value) -> bool {
 /// Whether the body says the credential's usage quota ran out
 /// (`isCodexUsageLimitError`). A per-minute rate limit doesn't count.
 pub(crate) fn is_usage_limit(parsed: &Value) -> bool {
-    ["error.type", "type"]
+    ["error.type", "type", "body.error.type"]
         .iter()
         .any(|path| eq_fold(str_at(parsed, path).trim(), "usage_limit_reached"))
 }
@@ -301,7 +383,11 @@ pub(crate) fn parse_retry_after(
     if status != 429 || body.is_empty() {
         return None;
     }
-    let quotas = [get(parsed, "error"), Some(parsed)];
+    let quotas = [
+        get(parsed, "error"),
+        Some(parsed),
+        get(parsed, "body.error"),
+    ];
     for quota in quotas.into_iter().flatten() {
         if !eq_fold(str_at(quota, "type").trim(), "usage_limit_reached") {
             continue;
@@ -445,7 +531,7 @@ fn is_context_length(body: &Value) -> bool {
 fn stream_error_should_handle(body: &Value, raw: &[u8]) -> bool {
     is_context_length(body)
         || is_usage_limit(body)
-        || is_model_capacity(raw, body)
+        || is_transient_capacity(raw, body)
         || classification(400, raw, body)
             .is_some_and(|(code, _)| code == "thinking_signature_invalid")
 }
@@ -675,7 +761,7 @@ pub(crate) fn bootstrap_overload_error(body: &[u8]) -> StatusError {
 /// says to retry. Only these fail a held-back stream over.
 pub(crate) fn is_overload_bootstrap_failure(body: &[u8]) -> bool {
     let parsed = parse(body);
-    if is_model_capacity(body, &parsed) {
+    if is_transient_capacity(body, &parsed) {
         return true;
     }
     let error_type = lower_trim(&str_at(&parsed, "error.type"));
@@ -1260,6 +1346,18 @@ mod tests {
         // The scope flags carry over, as upstream's error interfaces report
         // them: a usage limit is the credential's, a broken stream the
         // request's.
+        for body in [
+            json!({"body":{"error":{"type":"usage_limit_reached","code":"turn_rate_limit_exceeded","resets_in_seconds":3600}}}),
+            json!({"type":"usage_limit_reached","code":"turn_rate_limit_exceeded","resets_in_seconds":3600}),
+        ] {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("retry-after", "30".parse().unwrap());
+            let error: ExecError =
+                status_error_with_headers(429, &headers, body.to_string().as_bytes(), false).into();
+            assert_eq!(error.retry_after, Some(Duration::from_secs(3600)));
+            assert!(error.credential_scoped);
+            assert_eq!(error.failure_class, None);
+        }
         let body = br#"{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}"#;
         let error = ExecError::from(status_error(403, body));
         assert_eq!(error.status, 429);
@@ -1360,5 +1458,80 @@ mod tests {
         let error = terminal_stream_error(&event).expect("usage limit response.failed");
         assert_eq!(error.status, 429);
         assert!(error.retry_after.is_some());
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    #[test]
+    fn turn_capacity_layouts_and_precedence() {
+        for body in [
+            json!({"error":{"code":"turn_rate_limit_exceeded"}}),
+            json!({"code":"turn_rate_limit_exceeded"}),
+            json!({"body":{"error":{"code":"turn_rate_limit_exceeded"}}}),
+            json!({"error":{"type":"rate_limit_error","message":"Service is at capacity"}}),
+            json!({"body":{"error":{"type":"rate_limit_error","message":"Service is at capacity"}}}),
+            json!({"error":{"message":"model is at capacity"}}),
+        ] {
+            for hint in [None, Some("0"), Some("8")] {
+                let mut headers = http::HeaderMap::new();
+                if let Some(hint) = hint {
+                    headers.insert("retry-after", hint.parse().unwrap());
+                }
+                let error: ExecError =
+                    status_error_with_headers(503, &headers, body.to_string().as_bytes(), false)
+                        .into();
+                assert_eq!(error.status, 429);
+                assert_eq!(
+                    error.failure_class,
+                    Some(open_ferry_core::exec::FailureClass::TransientCapacity)
+                );
+                assert!(!error.credential_scoped);
+                assert_eq!(
+                    error.retry_after,
+                    hint.map(|h| Duration::from_secs(h.parse().unwrap()))
+                );
+                assert_eq!(error.headers, headers);
+                assert_eq!(serde_json::from_str::<Value>(&error.message).unwrap(), body);
+            }
+        }
+        for body in [
+            json!({"error":{"code":"rate_limit_exceeded","message":"model is at capacity"}}),
+            json!({"error":{"code":"other"},"code":"turn_rate_limit_exceeded"}),
+            json!({"code":"other","body":{"error":{"code":"turn_rate_limit_exceeded"}}}),
+        ] {
+            let error: ExecError = status_error(429, body.to_string().as_bytes()).into();
+            assert_eq!(error.failure_class, None);
+        }
+        let body = br#"{"error":{"type":"usage_limit_reached","resets_in_seconds":30,"code":"turn_rate_limit_exceeded"}}"#;
+        let mut headers = http::HeaderMap::new();
+        headers.insert("retry-after", "8".parse().unwrap());
+        let error: ExecError = status_error_with_headers(429, &headers, body, false).into();
+        assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
+        assert!(error.credential_scoped);
+        assert_eq!(error.failure_class, None);
+    }
+    #[test]
+    fn retry_header_dates_and_bounds() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (raw, wait) in [
+            ("0", Some(Duration::ZERO)),
+            ("-1", None),
+            (
+                "9223372036854775807",
+                Some(Duration::from_nanos(i64::MAX as u64)),
+            ),
+            (
+                "Tue, 14 Nov 2023 22:13:28 GMT",
+                Some(Duration::from_secs(8)),
+            ),
+            ("Mon, 13 Nov 2023 22:13:20 GMT", Some(Duration::ZERO)),
+            ("bad", None),
+        ] {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("retry-after", raw.parse().unwrap());
+            assert_eq!(retry_header(&headers, now), wait, "{raw}");
+        }
     }
 }

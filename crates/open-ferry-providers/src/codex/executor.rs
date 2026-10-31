@@ -100,7 +100,7 @@ use super::stream::{self, Bootstrap, Clock, MAX_LINE, SseReader, StreamSetup, is
 use super::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
-    status_error_with_cooling, terminal_failure,
+    status_error_with_headers, terminal_failure,
 };
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
@@ -371,14 +371,19 @@ impl CodexExecutor {
             )
             .await?;
         let status = response.status().as_u16();
+        let error_headers = response.headers().clone();
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: compact request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = secrets.bytes(&body, Policy::Client);
-            return Err(
-                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
-            );
+            return Err(status_error_with_headers(
+                status,
+                &error_headers,
+                &body,
+                self.model_level_cooling(),
+            )
+            .into());
         }
         let response_headers = response.headers().clone();
         let body_context = crate::transport::ResponseBody::new(&response);
@@ -445,14 +450,19 @@ impl CodexExecutor {
             )
             .await?;
         let status = response.status().as_u16();
+        let error_headers = response.headers().clone();
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = secrets.bytes(&body, Policy::Client);
-            return Err(
-                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
-            );
+            return Err(status_error_with_headers(
+                status,
+                &error_headers,
+                &body,
+                self.model_level_cooling(),
+            )
+            .into());
         }
         let response_headers = response.headers().clone();
 
@@ -556,6 +566,7 @@ impl CodexExecutor {
             )
             .await?;
         let status = response.status().as_u16();
+        let error_headers = response.headers().clone();
         if !(200..300).contains(&status) {
             let tap = BodyTap::of(&response);
             let body_context = crate::transport::ResponseBody::new(&response);
@@ -571,9 +582,13 @@ impl CodexExecutor {
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = secrets.bytes(&body, Policy::Client);
-            return Err(
-                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
-            );
+            return Err(status_error_with_headers(
+                status,
+                &error_headers,
+                &body,
+                self.model_level_cooling(),
+            )
+            .into());
         }
         let response_headers = response.headers().clone();
 
