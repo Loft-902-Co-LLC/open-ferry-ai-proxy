@@ -190,6 +190,10 @@ pub fn router_without_proxy(state: AppState, routes: Router) -> Router {
     let ingress = state.ingress().clone();
     let router = routes
         .fallback(not_found)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::response_compression::layer,
+        ))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(

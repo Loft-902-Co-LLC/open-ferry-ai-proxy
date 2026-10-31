@@ -1,4 +1,4 @@
-//! Negotiated response compression, with bounded staging and event-by-event flushing.
+//! Negotiated response compression with commit-time decisions and per-frame flushing.
 use crate::AppState;
 use axum::{
     body::Body,
@@ -18,8 +18,6 @@ use std::{
 };
 
 const CHUNK: usize = 16 * 1024;
-// A configuration threshold must not allow an unbounded staging buffer.
-const MAX_STAGING: usize = 64 * 1024;
 const ZSTD_WINDOW_LOG: u32 = 20;
 
 pub(crate) async fn layer(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -37,7 +35,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
         .headers()
         .get_all(header::ACCEPT_ENCODING)
         .iter()
-        .map(|v| v.to_str().unwrap_or_default())
+        .map(|v| String::from_utf8_lossy(v.as_bytes()))
         .collect::<Vec<_>>()
         .join(",");
     let (encoding, identity) = negotiate(&accept);
@@ -61,10 +59,7 @@ fn negotiate(header: &str) -> (Option<&'static str>, bool) {
             if let Some((key, value)) = param.split_once('=')
                 && key.trim().eq_ignore_ascii_case("q")
             {
-                q = value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
+                q = open_ferry_translate::go::parse_float_checked(value.trim())
                     .filter(|q| (0.0..=1.0).contains(q))
                     .unwrap_or(0.0);
             }
@@ -120,9 +115,28 @@ fn nonempty(headers: &HeaderMap, name: header::HeaderName) -> bool {
         .is_some_and(|value| !value.as_bytes().is_empty())
 }
 
+/// Each frame of these responses is an upstream writer flush. In particular,
+/// non-SSE streams must decide on their first frame, without threshold staging.
+#[derive(Clone, Copy)]
+pub(crate) struct FlushFrames;
+
+type Frames = Vec<Result<Frame<Bytes>, axum::Error>>;
+
+fn prepend(frames: Frames, body: Body) -> Body {
+    if frames.is_empty() {
+        return body;
+    }
+    Body::new(http_body_util::StreamBody::new(
+        futures_util::stream::iter(frames).chain(body.into_stream()),
+    ))
+}
+
 async fn compress(response: Response, encoding: Option<&'static str>, min: usize) -> Response {
     let (mut parts, mut body) = response.into_parts();
     vary(&mut parts.headers);
+    let fixed = body.size_hint().exact().is_some();
+    let flushed = parts.extensions.get::<FlushFrames>().is_some();
+    let mut peeked = std::collections::VecDeque::new();
     if encoding.is_some()
         && !nonempty(&parts.headers, header::CONTENT_TYPE)
         && !nonempty(&parts.headers, header::CONTENT_ENCODING)
@@ -139,9 +153,7 @@ async fn compress(response: Response, encoding: Option<&'static str>, min: usize
                 HeaderValue::from_static(open_ferry_core::multipart::detect_content_type(data)),
             );
         }
-        body = Body::new(http_body_util::StreamBody::new(
-            futures_util::stream::iter([first]).chain(body.into_stream()),
-        ));
+        peeked.push_back(first);
     }
     let media = parts
         .headers
@@ -158,59 +170,161 @@ async fn compress(response: Response, encoding: Option<&'static str>, min: usize
         || (media.starts_with("application/") && media.ends_with("+json"))
         || media == "application/javascript"
         || media == "image/svg+xml";
+    let streaming = media == "text/event-stream";
+    let candidate = encoding.filter(|_| {
+        compressible
+            && parts.status.as_u16() >= 200
+            && !matches!(parts.status.as_u16(), 204 | 206 | 304)
+            && !nonempty(&parts.headers, header::CONTENT_ENCODING)
+    });
     let known_small = parts
         .headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .is_some_and(|n| n < min);
-    let streaming = media == "text/event-stream";
-    let Some(encoding) = encoding.filter(|_| {
-        compressible
-            && parts.status.as_u16() >= 200
-            && !matches!(parts.status.as_u16(), 204 | 206 | 304)
-            && !nonempty(&parts.headers, header::CONTENT_ENCODING)
-            && (streaming || !known_small)
-    }) else {
-        return Response::from_parts(parts, body);
-    };
+    let selected = candidate.filter(|_| streaming || !known_small);
+    if candidate.is_some() && fixed && !streaming && !flushed {
+        return complete(
+            parts,
+            prepend(peeked.into_iter().collect(), body),
+            selected,
+            min,
+        )
+        .await;
+    }
+    if selected.is_none() {
+        return Response::from_parts(parts, prepend(peeked.into_iter().collect(), body));
+    }
     let mut staged = Vec::new();
     let mut buffered = bytes::BytesMut::new();
     let mut size = 0usize;
-    // SSE commits immediately. For ordinary unknown-length bodies, stage only up to
-    // the threshold; keep source Bytes intact instead of copying a large input frame.
-    while !streaming && size < min.min(MAX_STAGING) {
-        match body.frame().await {
+    let mut ended = false;
+    // A flush forces a decision after this frame, even below min. Ordinary
+    // buffered writers retain data only until the configured threshold or EOF.
+    while !streaming && size < min {
+        let next = match peeked.pop_front() {
+            Some(frame) => Some(frame),
+            None => body.frame().await,
+        };
+        match next {
             Some(Ok(frame)) => match frame.into_data() {
                 Ok(data) => {
                     size = size.saturating_add(data.len());
-                    if data.len() <= MAX_STAGING - buffered.len() {
+                    if size < min && !flushed {
                         buffered.extend_from_slice(&data);
                     } else {
+                        if !buffered.is_empty() {
+                            staged.push(Ok(Frame::data(buffered.split().freeze())));
+                        }
                         staged.push(Ok(Frame::data(data)));
                     }
                 }
                 Err(trailer) => {
+                    if !buffered.is_empty() {
+                        staged.push(Ok(Frame::data(buffered.split().freeze())));
+                    }
                     staged.push(Ok(trailer));
+                    ended = true;
                     break;
                 }
             },
-            Some(Err(e)) => {
-                staged.push(Err(e));
+            Some(Err(error)) => {
+                staged.push(Err(error));
                 break;
             }
-            None => break,
+            None => {
+                ended = true;
+                break;
+            }
+        }
+        if body.is_end_stream() && peeked.is_empty() {
+            ended = true;
+            break;
+        }
+        if flushed {
+            break;
         }
     }
     if !buffered.is_empty() {
-        staged.insert(0, Ok(Frame::data(buffered.freeze())));
+        staged.push(Ok(Frame::data(buffered.freeze())));
     }
-    let source = Body::new(http_body_util::StreamBody::new(
-        futures_util::stream::iter(staged).chain(body.into_stream()),
-    ));
-    if !streaming && size < min {
+    staged.extend(peeked);
+    let source = prepend(staged, body);
+    if ended && !flushed {
+        return complete(parts, source, selected, min).await;
+    }
+    encoded(parts, source, selected.filter(|_| streaming || size >= min))
+}
+
+async fn complete(
+    mut parts: http::response::Parts,
+    source: Body,
+    encoding: Option<&'static str>,
+    min: usize,
+) -> Response {
+    let collected = match source.collect().await {
+        Ok(collected) => collected,
+        Err(error) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(
+                parts,
+                Body::from_stream(futures_util::stream::once(
+                    async move { Err::<Bytes, _>(error) },
+                )),
+            );
+        }
+    };
+    let trailers = collected.trailers().cloned();
+    let bytes = collected.to_bytes();
+    let encoding = encoding.filter(|_| bytes.len() >= min);
+    if let Some(trailers) = trailers {
+        let body = Body::new(
+            http_body_util::Full::new(bytes)
+                .with_trailers(async move { Some(Ok::<_, std::convert::Infallible>(trailers)) }),
+        );
+        return encoded(parts, body, encoding);
+    }
+    let wire = if let Some(encoding) = encoding {
+        let Ok(mut encoder) = Encoder::new(encoding) else {
+            return fixed_response(parts, bytes);
+        };
+        let mut wire = Vec::new();
+        for chunk in bytes.chunks(CHUNK) {
+            match encoder.chunk(chunk) {
+                Ok(chunk) => wire.extend_from_slice(&chunk),
+                Err(_) => return fixed_response(parts, bytes),
+            }
+        }
+        match encoder.finish() {
+            Ok(tail) => wire.extend_from_slice(&tail),
+            Err(_) => return fixed_response(parts, bytes),
+        }
+        parts
+            .headers
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+        Bytes::from(wire)
+    } else {
+        bytes
+    };
+    fixed_response(parts, wire)
+}
+
+fn fixed_response(mut parts: http::response::Parts, bytes: Bytes) -> Response {
+    parts
+        .headers
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+    Response::from_parts(parts, Body::from(bytes))
+}
+
+fn encoded(
+    mut parts: http::response::Parts,
+    source: Body,
+    encoding: Option<&'static str>,
+) -> Response {
+    let Some(encoding) = encoding else {
         return Response::from_parts(parts, source);
-    }
+    };
     let Ok(encoder) = Encoder::new(encoding) else {
         return Response::from_parts(parts, source);
     };

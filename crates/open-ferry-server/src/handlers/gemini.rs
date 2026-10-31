@@ -423,6 +423,9 @@ fn unknown_action(path: &[u8]) -> Response {
 /// a response from its first bytes.
 fn raw_response(upstream: &HeaderMap, sniffed: Option<&'static str>, body: Body) -> Response {
     let mut response = Response::new(body);
+    response
+        .extensions_mut()
+        .insert(crate::response_compression::FlushFrames);
     let headers = response.headers_mut();
     write_upstream_headers(headers, upstream);
     if let Some(content_type) = sniffed

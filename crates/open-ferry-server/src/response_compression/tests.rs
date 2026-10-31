@@ -81,10 +81,7 @@ async fn thresholds_exclusions_headers_and_codecs() {
                 size >= 1024
             );
             assert_eq!(r.headers()[header::VARY], "Origin, ACCEPT-ENCODING");
-            assert_eq!(
-                r.headers().contains_key(header::CONTENT_LENGTH),
-                size < 1024
-            );
+            assert!(r.headers().contains_key(header::CONTENT_LENGTH));
             assert_eq!(decode(r).await, original.as_bytes());
         }
         for media in [
@@ -349,18 +346,17 @@ impl HttpBody for TinyFrames {
     ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
         let calls = self.count.fetch_add(1, Ordering::SeqCst);
         assert!(
-            calls <= MAX_STAGING,
-            "staging must stop reading at its memory cap"
+            calls <= 1,
+            "a flush decides without consuming the next frame"
         );
         Poll::Ready(Some(Ok(Frame::data(self.data.clone()))))
     }
 }
-const STAGING_INVARIANT: &str =
-    "staging coalesces at most 64 KiB plus one producer-owned frame; cancel releases source";
+const FLUSH_INVARIANT: &str = "first flush decides encoding; cancellation releases source";
 #[tokio::test]
-async fn oversized_threshold_bounds_staging_including_one_byte_frames() {
+async fn flushed_frames_decide_without_staging_family() {
     for codec in ["gzip", "zstd"] {
-        for chunk in [1, 127, CHUNK, MAX_STAGING, MAX_STAGING + 1] {
+        for chunk in [1, 127, CHUNK, 65536, 65537] {
             let count = Arc::new(AtomicUsize::new(0));
             let drops = Arc::new(AtomicUsize::new(0));
             let source = TinyFrames {
@@ -368,33 +364,21 @@ async fn oversized_threshold_bounds_staging_including_one_byte_frames() {
                 drops: drops.clone(),
                 data: Bytes::from(vec![b'x'; chunk]),
             };
-            let r = compress(
-                response(Body::new(source), "text/plain"),
-                Some(codec),
-                1 << 30,
-            )
-            .await;
+            let mut response = response(Body::new(source), "text/plain");
+            response.extensions_mut().insert(FlushFrames);
+            let r = compress(response, Some(codec), 1 << 30).await;
             assert!(
                 !r.headers().contains_key(header::CONTENT_ENCODING),
-                "{STAGING_INVARIANT}"
+                "{FLUSH_INVARIANT}"
             );
-            assert_eq!(
-                count.load(Ordering::SeqCst),
-                MAX_STAGING.div_ceil(chunk),
-                "{STAGING_INVARIANT}"
-            );
+            assert_eq!(count.load(Ordering::SeqCst), 1, "{FLUSH_INVARIANT}");
             let mut body = r.into_body();
-            let staged = body.frame().await.unwrap().unwrap().into_data().unwrap();
-            assert!(
-                staged.len() <= MAX_STAGING.max(chunk),
-                "{STAGING_INVARIANT}"
+            assert_eq!(
+                body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                vec![b'x'; chunk]
             );
-            assert!(staged.iter().all(|byte| *byte == b'x'));
-            if chunk == 1 {
-                assert_eq!(staged.len(), MAX_STAGING, "{STAGING_INVARIANT}");
-            }
             drop(body);
-            assert_eq!(drops.load(Ordering::SeqCst), 1, "{STAGING_INVARIANT}");
+            assert_eq!(drops.load(Ordering::SeqCst), 1, "{FLUSH_INVARIANT}");
         }
     }
 }
@@ -512,3 +496,5 @@ async fn empty_type_and_encoding_headers_match_absent_values() {
     );
     assert_eq!(decode(r).await, vec![b'x'; 1024]);
 }
+
+mod r2;

@@ -282,6 +282,9 @@ where
 /// don't clash, then `body`.
 pub(crate) fn sse_response(upstream: &HeaderMap, body: Body) -> Response {
     let mut response = Response::new(body);
+    response
+        .extensions_mut()
+        .insert(crate::response_compression::FlushFrames);
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -372,6 +375,9 @@ where
         }
     });
     let mut response = Response::new(Body::from_stream(body));
+    response
+        .extensions_mut()
+        .insert(crate::response_compression::FlushFrames);
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
