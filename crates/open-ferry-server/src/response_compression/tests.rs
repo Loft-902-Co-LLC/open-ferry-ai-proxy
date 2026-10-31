@@ -277,3 +277,223 @@ async fn untyped_response_uses_go_content_sniffing() {
         assert_eq!(decode(r).await, plain);
     }
 }
+#[tokio::test]
+async fn codec_lifetime_and_working_output_are_bounded() {
+    for codec in ["gzip", "zstd"] {
+        for fail in [false, true] {
+            let source_drops = Arc::new(AtomicUsize::new(0));
+            let encoder = Encoder::new(codec).unwrap();
+            let lifetime = Arc::downgrade(&encoder.lifetime);
+            let mut body = CompressedBody {
+                source: Some(Body::new(Tracked {
+                    drops: source_drops.clone(),
+                    step: 0,
+                    fail,
+                })),
+                encoder: Some(encoder),
+                pending: Bytes::new(),
+                trailer: None,
+                done: false,
+                panic: None,
+            };
+            while let Some(frame) = body.frame().await {
+                if let Ok(frame) = frame
+                    && let Some(data) = frame.data_ref()
+                {
+                    assert!(data.len() <= CHUNK + 1024);
+                }
+            }
+            assert!(
+                lifetime.upgrade().is_none(),
+                "encoder dropped while finished body is still held"
+            );
+            assert_eq!(source_drops.load(Ordering::SeqCst), 1);
+            assert!(body.encoder.is_none() && body.source.is_none() && body.pending.is_empty());
+            assert!(
+                body.frame().await.is_none(),
+                "writes/polls after finish cannot emit plaintext"
+            );
+        }
+        let mut encoder = Encoder::new(codec).unwrap();
+        // Incompressible input cannot grow the output allocation with stream length.
+        let mut seed = 42u32;
+        for _ in 0..64 {
+            let input: Vec<u8> = (0..CHUNK)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect();
+            assert!(encoder.chunk(&input).unwrap().len() <= CHUNK + 1024);
+        }
+    }
+}
+struct TinyFrames {
+    count: Arc<AtomicUsize>,
+}
+impl HttpBody for TinyFrames {
+    type Data = Bytes;
+    type Error = io::Error;
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        let calls = self.count.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            calls <= MAX_STAGING,
+            "staging must stop reading at its memory cap"
+        );
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"x")))))
+    }
+}
+#[tokio::test]
+async fn oversized_threshold_bounds_staging_including_one_byte_frames() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let r = compress(
+        response(
+            Body::new(TinyFrames {
+                count: count.clone(),
+            }),
+            "text/plain",
+        ),
+        Some("gzip"),
+        1 << 30,
+    )
+    .await;
+    assert!(!r.headers().contains_key(header::CONTENT_ENCODING));
+    assert_eq!(count.load(Ordering::SeqCst), MAX_STAGING);
+    let mut body = r.into_body();
+    let staged = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(
+        staged.len(),
+        MAX_STAGING,
+        "one coalesced buffer, not one allocation per frame"
+    );
+    assert_eq!(
+        body.frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(body);
+}
+struct PanickingBody {
+    step: usize,
+    drops: Arc<AtomicUsize>,
+}
+impl Drop for PanickingBody {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl HttpBody for PanickingBody {
+    type Data = Bytes;
+    type Error = io::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
+        self.step += 1;
+        if self.step == 1 {
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+                b"data: first\n\n",
+            )))))
+        } else {
+            panic!("mock committed stream panic")
+        }
+    }
+}
+#[tokio::test]
+async fn committed_panic_finishes_codec_then_resumes_and_releases_writer() {
+    use futures_util::FutureExt;
+    for codec in ["gzip", "zstd"] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let encoder = Encoder::new(codec).unwrap();
+        let lifetime = Arc::downgrade(&encoder.lifetime);
+        let mut body = CompressedBody {
+            source: Some(Body::new(PanickingBody {
+                step: 0,
+                drops: drops.clone(),
+            })),
+            encoder: Some(encoder),
+            pending: Bytes::new(),
+            trailer: None,
+            done: false,
+            panic: None,
+        };
+        let mut wire = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap()
+            .to_vec();
+        wire.extend_from_slice(&body.frame().await.unwrap().unwrap().into_data().unwrap());
+        assert!(lifetime.upgrade().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let mut r = response(wire, "text/event-stream");
+        r.headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static(codec));
+        assert_eq!(decode(r).await, b"data: first\n\n");
+        assert!(
+            std::panic::AssertUnwindSafe(body.frame())
+                .catch_unwind()
+                .await
+                .is_err()
+        );
+        assert!(body.frame().await.is_none());
+    }
+}
+#[tokio::test]
+async fn uncommitted_handler_panic_recovers_without_compressed_data() {
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+    let app = crate::router_with(
+        state(
+            crate::ServerConfig::default(),
+            FakeCatalog::new(),
+            &FakeDispatcher::new([]),
+        ),
+        Router::new().route(
+            "/panic-test",
+            get(|| async {
+                panic!("mock uncommitted panic");
+                #[allow(unreachable_code)]
+                Response::new(Body::empty())
+            }),
+        ),
+    );
+    let r = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/panic-test")
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!r.headers().contains_key(header::CONTENT_ENCODING));
+}
+#[tokio::test]
+async fn empty_type_and_encoding_headers_match_absent_values() {
+    let mut r = Response::new(Body::from("x".repeat(1024)));
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(""));
+    r.headers_mut()
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static(""));
+    let r = compress(r, Some("gzip"), 1024).await;
+    assert_eq!(r.headers()[header::CONTENT_ENCODING], "gzip");
+    assert_eq!(
+        r.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(decode(r).await, vec![b'x'; 1024]);
+}

@@ -8,14 +8,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-zstd = { version = "0.14.3", default-features = false }
-http-body-util = "0.1.5"
 axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.12.1"
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 http = "1.5.0"
 http-body = "1.1.0"
+http-body-util = "0.1.5"
 open-ferry-core.workspace = true
 open-ferry-translate.workspace = true
 regex = "1.13.1"
@@ -26,9 +25,9 @@ tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros"] }
 tower-http = { version = "0.7.1", features = ["catch-panic"] }
 tracing = "0.1.44"
 uuid = { version = "1.27.0", features = ["v7"] }
+zstd = { version = "0.14.3", default-features = false, features = ["vendored"] }
 
 [dev-dependencies]
-http-body-util = "0.1.5"
 open-ferry-providers = { workspace = true, features = ["test-support"] }
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.30.0"

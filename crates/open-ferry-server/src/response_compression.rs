@@ -114,12 +114,18 @@ fn vary(headers: &mut HeaderMap) {
     }
 }
 
+fn nonempty(headers: &HeaderMap, name: header::HeaderName) -> bool {
+    headers
+        .get(name)
+        .is_some_and(|value| !value.as_bytes().is_empty())
+}
+
 async fn compress(response: Response, encoding: Option<&'static str>, min: usize) -> Response {
     let (mut parts, mut body) = response.into_parts();
     vary(&mut parts.headers);
     if encoding.is_some()
-        && !parts.headers.contains_key(header::CONTENT_TYPE)
-        && !parts.headers.contains_key(header::CONTENT_ENCODING)
+        && !nonempty(&parts.headers, header::CONTENT_TYPE)
+        && !nonempty(&parts.headers, header::CONTENT_ENCODING)
         && parts.status.as_u16() >= 200
         && !matches!(parts.status.as_u16(), 204 | 206 | 304)
     {
@@ -164,33 +170,41 @@ async fn compress(response: Response, encoding: Option<&'static str>, min: usize
         compressible
             && parts.status.as_u16() >= 200
             && !matches!(parts.status.as_u16(), 204 | 206 | 304)
-            && !parts.headers.contains_key(header::CONTENT_ENCODING)
+            && !nonempty(&parts.headers, header::CONTENT_ENCODING)
             && (streaming || !known_small)
     }) else {
         return Response::from_parts(parts, body);
     };
     let mut staged = Vec::new();
+    let mut buffered = bytes::BytesMut::new();
     let mut size = 0usize;
     // SSE commits immediately. For ordinary unknown-length bodies, stage only up to
     // the threshold; keep source Bytes intact instead of copying a large input frame.
     while !streaming && size < min.min(MAX_STAGING) {
         match body.frame().await {
-            Some(Ok(frame)) => {
-                if let Some(data) = frame.data_ref() {
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(data) => {
                     size = size.saturating_add(data.len());
+                    if data.len() <= MAX_STAGING - buffered.len() {
+                        buffered.extend_from_slice(&data);
+                    } else {
+                        staged.push(Ok(Frame::data(data)));
+                    }
                 }
-                let trailers = frame.is_trailers();
-                staged.push(Ok(frame));
-                if trailers {
+                Err(trailer) => {
+                    staged.push(Ok(trailer));
                     break;
                 }
-            }
+            },
             Some(Err(e)) => {
                 staged.push(Err(e));
                 break;
             }
             None => break,
         }
+    }
+    if !buffered.is_empty() {
+        staged.insert(0, Ok(Frame::data(buffered.freeze())));
     }
     let source = Body::new(http_body_util::StreamBody::new(
         futures_util::stream::iter(staged).chain(body.into_stream()),
@@ -213,35 +227,47 @@ async fn compress(response: Response, encoding: Option<&'static str>, min: usize
             pending: Bytes::new(),
             trailer: None,
             done: false,
+            panic: None,
         }),
     )
 }
 use futures_util::StreamExt;
 
-enum Encoder {
-    Gzip(flate2::write::GzEncoder<Vec<u8>>),
+enum Codec {
+    Gzip(Box<flate2::write::GzEncoder<Vec<u8>>>),
     Zstd(zstd::stream::write::Encoder<'static, Vec<u8>>),
+}
+struct Encoder {
+    codec: Codec,
+    #[cfg(test)]
+    lifetime: std::sync::Arc<()>,
 }
 impl Encoder {
     fn new(name: &str) -> io::Result<Self> {
-        if name == "gzip" {
-            return Ok(Self::Gzip(flate2::write::GzEncoder::new(
+        let codec = if name == "gzip" {
+            Codec::Gzip(Box::new(flate2::write::GzEncoder::new(
                 Vec::new(),
                 flate2::Compression::default(),
-            )));
-        }
-        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1)?;
-        encoder.window_log(ZSTD_WINDOW_LOG)?;
-        Ok(Self::Zstd(encoder))
+            )))
+        } else {
+            let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1)?;
+            encoder.window_log(ZSTD_WINDOW_LOG)?;
+            Codec::Zstd(encoder)
+        };
+        Ok(Self {
+            codec,
+            #[cfg(test)]
+            lifetime: std::sync::Arc::new(()),
+        })
     }
     fn chunk(&mut self, input: &[u8]) -> io::Result<Bytes> {
-        match self {
-            Self::Gzip(e) => {
+        match &mut self.codec {
+            Codec::Gzip(e) => {
                 e.write_all(input)?;
                 e.flush()?;
                 Ok(Bytes::from(std::mem::take(e.get_mut())))
             }
-            Self::Zstd(e) => {
+            Codec::Zstd(e) => {
                 e.write_all(input)?;
                 e.flush()?;
                 Ok(Bytes::from(std::mem::take(e.get_mut())))
@@ -249,9 +275,9 @@ impl Encoder {
         }
     }
     fn finish(self) -> io::Result<Bytes> {
-        match self {
-            Self::Gzip(e) => e.finish().map(Bytes::from),
-            Self::Zstd(e) => e.finish().map(Bytes::from),
+        match self.codec {
+            Codec::Gzip(e) => (*e).finish().map(Bytes::from),
+            Codec::Zstd(e) => e.finish().map(Bytes::from),
         }
     }
 }
@@ -261,6 +287,7 @@ struct CompressedBody {
     pending: Bytes,
     trailer: Option<Frame<Bytes>>,
     done: bool,
+    panic: Option<Box<dyn std::any::Any + Send>>,
 }
 impl HttpBody for CompressedBody {
     type Data = Bytes;
@@ -270,6 +297,9 @@ impl HttpBody for CompressedBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, io::Error>>> {
         if self.done {
+            if let Some(panic) = self.panic.take() {
+                std::panic::resume_unwind(panic);
+            }
             return Poll::Ready(self.trailer.take().map(Ok));
         }
         loop {
@@ -284,7 +314,18 @@ impl HttpBody for CompressedBody {
                     }
                 }
             }
-            match Pin::new(self.source.as_mut().expect("active source")).poll_frame(cx) {
+            // Finish a committed compressed frame before resuming a handler body's panic.
+            let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Pin::new(self.source.as_mut().expect("active source")).poll_frame(cx)
+            }));
+            let polled = match polled {
+                Ok(polled) => polled,
+                Err(panic) => {
+                    self.panic = Some(panic);
+                    break;
+                }
+            };
+            match polled {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
                     Ok(data) => self.pending = data,
@@ -314,6 +355,7 @@ impl CompressedBody {
         self.pending = Bytes::new();
         self.trailer = None;
         self.done = true;
+        self.panic = None;
     }
 }
 #[cfg(test)]
