@@ -14,7 +14,7 @@ futures-util = "0.3.34"
 reqwest = { version = "0.13.5", default-features = false }
 serde_json.workspace = true
 # A process's CPU time and resident memory, on Linux, macOS and Windows alike.
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.0", default-features = false, features = ["system"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 
 [dev-dependencies]
